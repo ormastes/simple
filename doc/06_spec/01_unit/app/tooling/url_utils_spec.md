@@ -1,29 +1,6 @@
 # Url Utils Specification
 
-> 1. expect url encode
-
-<!-- sdn-diagram:id=url_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=url_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-url_utils_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=url_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering URL Utilities, URL Encoding, URL Decoding, Character Codes, Hex Conversion, URL Parsing, URL Building, Query String, URL Validation, URL Operations, Integer Parsing, Unreserved Characters, Round-trip.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,16 +19,18 @@ url_utils_spec
 
 #### encodes simple string
 
-1. expect url encode
+- encodes simple string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes simple string")
 expect url_encode("hello") == "hello"
 ```
 
@@ -59,16 +38,18 @@ expect url_encode("hello") == "hello"
 
 #### encodes space
 
-1. expect result contains
+- encodes space
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes space")
 val result = url_encode("hello world")
 expect result.contains("%20")
 ```
@@ -77,16 +58,18 @@ expect result.contains("%20")
 
 #### encodes special chars
 
-1. expect result contains
+- encodes special chars
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes special chars")
 val result = url_encode("a+b")
 expect result.contains("%")
 ```
@@ -97,16 +80,18 @@ expect result.contains("%")
 
 #### decodes simple string
 
-1. expect url decode
+- decodes simple string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes simple string")
 expect url_decode("hello") == "hello"
 ```
 
@@ -114,16 +99,18 @@ expect url_decode("hello") == "hello"
 
 #### decodes percent-encoded space
 
-1. expect url decode
+- decodes percent-encoded space
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes percent-encoded space")
 expect url_decode("hello%20world") == "hello world"
 ```
 
@@ -131,16 +118,18 @@ expect url_decode("hello%20world") == "hello world"
 
 #### decodes plus as space
 
-1. expect url decode
+- decodes plus as space
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes plus as space")
 expect url_decode("hello+world") == "hello world"
 ```
 
@@ -148,13 +137,18 @@ expect url_decode("hello+world") == "hello world"
 
 #### round-trip encode/decode
 
+- round-trip encode/decode
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("round-trip encode/decode")
 val original = "hello world"
 val encoded = url_encode(original)
 val decoded = url_decode(encoded)
@@ -167,19 +161,18 @@ expect decoded == original
 
 #### gets char code for letters
 
-1. expect char code
-2. expect char code
-3. expect char code
-4. expect char code
+- gets char code for letters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets char code for letters")
 expect char_code("A") == 65
 expect char_code("a") == 97
 expect char_code("Z") == 90
@@ -190,17 +183,18 @@ expect char_code("z") == 122
 
 #### gets char code for digits
 
-1. expect char code
-2. expect char code
+- gets char code for digits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets char code for digits")
 expect char_code("0") == 48
 expect char_code("9") == 57
 ```
@@ -209,18 +203,18 @@ expect char_code("9") == 57
 
 #### converts from char code
 
-1. expect from char code
-2. expect from char code
-3. expect from char code
+- converts from char code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts from char code")
 expect from_char_code(65) == "A"
 expect from_char_code(97) == "a"
 expect from_char_code(48) == "0"
@@ -230,13 +224,18 @@ expect from_char_code(48) == "0"
 
 #### round-trip char code
 
+- round-trip char code
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("round-trip char code")
 val code = char_code("A")
 val ch = from_char_code(code)
 expect ch == "A"
@@ -248,18 +247,18 @@ expect ch == "A"
 
 #### converts to hex
 
-1. expect to hex
-2. expect to hex
-3. expect to hex
+- converts to hex
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to hex")
 expect to_hex(0) == "00"
 expect to_hex(15) == "0F"
 expect to_hex(255) == "FF"
@@ -269,19 +268,18 @@ expect to_hex(255) == "FF"
 
 #### converts hex digit
 
-1. expect hex digit
-2. expect hex digit
-3. expect hex digit
-4. expect hex digit
+- converts hex digit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts hex digit")
 expect hex_digit(0) == "0"
 expect hex_digit(9) == "9"
 expect hex_digit(10) == "A"
@@ -292,13 +290,18 @@ expect hex_digit(15) == "F"
 
 #### parses valid hex
 
+- parses valid hex
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses valid hex")
 match from_hex("00"):
     case Some(n): expect n == 0
     case nil: expect false
@@ -311,13 +314,18 @@ match from_hex("FF"):
 
 #### returns nil for invalid hex
 
+- returns nil for invalid hex
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for invalid hex")
 match from_hex("GG"):
     case Some(_): expect false
     case nil: expect true
@@ -327,13 +335,18 @@ match from_hex("GG"):
 
 #### parses hex digit value
 
+- parses hex digit value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hex digit value")
 match hex_digit_value("0"):
     case Some(n): expect n == 0
     case nil: expect false
@@ -351,13 +364,18 @@ match hex_digit_value("f"):
 
 #### parses simple URL
 
+- parses simple URL
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses simple URL")
 match parse_url("http://example.com"):
     case Some(url):
         expect url.scheme == "http"
@@ -370,13 +388,18 @@ match parse_url("http://example.com"):
 
 #### parses URL with path
 
+- parses URL with path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses URL with path")
 match parse_url("https://example.com/path/to/resource"):
     case Some(url):
         expect url.scheme == "https"
@@ -389,13 +412,18 @@ match parse_url("https://example.com/path/to/resource"):
 
 #### parses URL with port
 
+- parses URL with port
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses URL with port")
 match parse_url("http://example.com:8080/"):
     case Some(url):
         expect url.host == "example.com"
@@ -409,13 +437,18 @@ match parse_url("http://example.com:8080/"):
 
 #### parses URL with query
 
+- parses URL with query
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses URL with query")
 match parse_url("http://example.com/path?key=value"):
     case Some(url):
         expect url.path == "/path"
@@ -427,13 +460,18 @@ match parse_url("http://example.com/path?key=value"):
 
 #### parses URL with fragment
 
+- parses URL with fragment
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses URL with fragment")
 match parse_url("http://example.com/page#section"):
     case Some(url):
         expect url.path == "/page"
@@ -445,13 +483,18 @@ match parse_url("http://example.com/page#section"):
 
 #### parses URL with username
 
+- parses URL with username
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses URL with username")
 match parse_url("http://user@example.com/"):
     case Some(url):
         expect url.username == "user"
@@ -463,13 +506,18 @@ match parse_url("http://user@example.com/"):
 
 #### parses URL with credentials
 
+- parses URL with credentials
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses URL with credentials")
 match parse_url("ftp://user:pass@example.com/"):
     case Some(url):
         expect url.username == "user"
@@ -482,13 +530,18 @@ match parse_url("ftp://user:pass@example.com/"):
 
 #### parses complete URL
 
+- parses complete URL
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses complete URL")
 match parse_url("https://user:pass@example.com:443/path?key=val#frag"):
     case Some(url):
         expect url.scheme == "https"
@@ -508,13 +561,18 @@ match parse_url("https://user:pass@example.com:443/path?key=val#frag"):
 
 #### returns nil for invalid URL
 
+- returns nil for invalid URL
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for invalid URL")
 match parse_url("not-a-url"):
     case Some(_): expect false
     case nil: expect true
@@ -526,13 +584,18 @@ match parse_url("not-a-url"):
 
 #### builds simple URL
 
+- builds simple URL
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds simple URL")
 val url = Url(
     scheme: "http",
     username: "",
@@ -551,17 +614,18 @@ expect result == "http://example.com/"
 
 #### builds URL with port
 
-1. port: Some
-2. expect result contains
+- builds URL with port
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds URL with port")
 val url = Url(
     scheme: "http",
     username: "",
@@ -580,17 +644,18 @@ expect result.contains(":8080")
 
 #### omits default port
 
-1. port: Some
-2. expect not result contains
+- omits default port
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("omits default port")
 val url = Url(
     scheme: "http",
     username: "",
@@ -609,16 +674,18 @@ expect not result.contains(":80")
 
 #### builds URL with query
 
-1. expect result contains
+- builds URL with query
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds URL with query")
 val url = Url(
     scheme: "https",
     username: "",
@@ -637,19 +704,18 @@ expect result.contains("?q=test")
 
 #### checks default port
 
-1. expect is default port
-2. expect is default port
-3. expect is default port
-4. expect not is default port
+- checks default port
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks default port")
 expect is_default_port("http", 80)
 expect is_default_port("https", 443)
 expect is_default_port("ftp", 21)
@@ -662,16 +728,18 @@ expect not is_default_port("http", 8080)
 
 #### parses simple query
 
-1. expect params len
+- parses simple query
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses simple query")
 val params = parse_query_string("key=value")
 expect params.len() == 1
 expect params[0].0 == "key"
@@ -682,16 +750,18 @@ expect params[0].1 == "value"
 
 #### parses multiple params
 
-1. expect params len
+- parses multiple params
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses multiple params")
 val params = parse_query_string("a=1&b=2&c=3")
 expect params.len() == 3
 expect params[0].0 == "a"
@@ -703,16 +773,18 @@ expect params[2].0 == "c"
 
 #### parses empty value
 
-1. expect params len
+- parses empty value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses empty value")
 val params = parse_query_string("key=")
 expect params.len() == 1
 expect params[0].0 == "key"
@@ -723,16 +795,18 @@ expect params[0].1 == ""
 
 #### parses no value
 
-1. expect params len
+- parses no value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses no value")
 val params = parse_query_string("flag")
 expect params.len() == 1
 expect params[0].0 == "flag"
@@ -743,16 +817,18 @@ expect params[0].1 == ""
 
 #### parses empty string
 
-1. expect params len
+- parses empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses empty string")
 val params = parse_query_string("")
 expect params.len() == 0
 ```
@@ -761,13 +837,18 @@ expect params.len() == 0
 
 #### builds simple query
 
+- builds simple query
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds simple query")
 val params = [("key", "value")]
 val result = build_query_string(params)
 expect result == "key=value"
@@ -777,19 +858,18 @@ expect result == "key=value"
 
 #### builds multiple params
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
-4. expect result contains
+- builds multiple params
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds multiple params")
 val params = [("a", "1"), ("b", "2"), ("c", "3")]
 val result = build_query_string(params)
 expect result.contains("a=1")
@@ -802,16 +882,18 @@ expect result.contains("&")
 
 #### builds with encoding
 
-1. expect result contains
+- builds with encoding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds with encoding")
 val params = [("key", "hello world")]
 val result = build_query_string(params)
 expect result.contains("%20")
@@ -821,24 +903,7 @@ expect result.contains("%20")
 
 #### adds param to empty query
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = add_query_param(query="", key="key", value="value")
-expect result == "key=value"
-```
-
-</details>
-
-#### adds param to existing query
-
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- adds param to empty query
 
 
 <details>
@@ -848,6 +913,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds param to empty query")
+val result = add_query_param(query="", key="key", value="value")
+expect result == "key=value"
+```
+
+</details>
+
+#### adds param to existing query
+
+- adds param to existing query
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("adds param to existing query")
 val result = add_query_param(query="a=1", key="b", value="2")
 expect result.contains("a=1")
 expect result.contains("b=2")
@@ -860,18 +947,18 @@ expect result.contains("&")
 
 #### validates valid URLs
 
-1. expect is valid url
-2. expect is valid url
-3. expect is valid url
+- validates valid URLs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates valid URLs")
 expect is_valid_url("http://example.com")
 expect is_valid_url("https://example.com/path")
 expect is_valid_url("ftp://files.example.com")
@@ -881,18 +968,18 @@ expect is_valid_url("ftp://files.example.com")
 
 #### rejects invalid URLs
 
-1. expect not is valid url
-2. expect not is valid url
-3. expect not is valid url
+- rejects invalid URLs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid URLs")
 expect not is_valid_url("example.com")
 expect not is_valid_url("/path/to/file")
 expect not is_valid_url("http:example.com")
@@ -902,19 +989,18 @@ expect not is_valid_url("http:example.com")
 
 #### checks absolute URL
 
-1. expect is absolute url
-2. expect is absolute url
-3. expect not is absolute url
-4. expect not is absolute url
+- checks absolute URL
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks absolute URL")
 expect is_absolute_url("http://example.com")
 expect is_absolute_url("https://example.com/path")
 expect not is_absolute_url("/path/to/file")
@@ -925,18 +1011,18 @@ expect not is_absolute_url("relative/path")
 
 #### checks relative URL
 
-1. expect is relative url
-2. expect is relative url
-3. expect not is relative url
+- checks relative URL
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks relative URL")
 expect is_relative_url("/path/to/file")
 expect is_relative_url("relative/path")
 expect not is_relative_url("http://example.com")
@@ -948,13 +1034,18 @@ expect not is_relative_url("http://example.com")
 
 #### gets base URL
 
+- gets base URL
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets base URL")
 val url = Url(
     scheme: "https",
     username: "",
@@ -973,17 +1064,18 @@ expect base == "https://example.com"
 
 #### gets base URL with port
 
-1. port: Some
-2. expect base contains
+- gets base URL with port
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets base URL with port")
 val url = Url(
     scheme: "http",
     username: "",
@@ -1002,13 +1094,18 @@ expect base.contains(":8080")
 
 #### gets full path
 
+- gets full path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets full path")
 val url = Url(
     scheme: "https",
     username: "",
@@ -1027,13 +1124,18 @@ expect full_path == "/path?key=value#section"
 
 #### joins absolute URL
 
+- joins absolute URL
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("joins absolute URL")
 val result = join_url(base="http://example.com", rel="https://other.com/path")
 expect result == "https://other.com/path"
 ```
@@ -1042,13 +1144,18 @@ expect result == "https://other.com/path"
 
 #### joins relative URL with slash
 
+- joins relative URL with slash
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("joins relative URL with slash")
 val result = join_url(base="http://example.com/", rel="/path")
 expect result == "http://example.com/path"
 ```
@@ -1057,13 +1164,18 @@ expect result == "http://example.com/path"
 
 #### joins relative URL without slash
 
+- joins relative URL without slash
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("joins relative URL without slash")
 val result = join_url(base="http://example.com", rel="path")
 expect result == "http://example.com/path"
 ```
@@ -1072,16 +1184,18 @@ expect result == "http://example.com/path"
 
 #### joins both slashes
 
-1. expect not result contains
+- joins both slashes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("joins both slashes")
 val result = join_url(base="http://example.com/", rel="/path")
 expect not result.contains("//path")
 ```
@@ -1092,13 +1206,18 @@ expect not result.contains("//path")
 
 #### parses valid int
 
+- parses valid int
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses valid int")
 match parse_int("123"):
     case Some(n): expect n == 123
     case nil: expect false
@@ -1108,13 +1227,18 @@ match parse_int("123"):
 
 #### parses zero
 
+- parses zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses zero")
 match parse_int("0"):
     case Some(n): expect n == 0
     case nil: expect false
@@ -1124,13 +1248,18 @@ match parse_int("0"):
 
 #### returns nil for invalid
 
+- returns nil for invalid
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for invalid")
 match parse_int("abc"):
     case Some(_): expect false
     case nil: expect true
@@ -1140,13 +1269,18 @@ match parse_int("abc"):
 
 #### returns nil for empty
 
+- returns nil for empty
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for empty")
 match parse_int(""):
     case Some(_): expect false
     case nil: expect true
@@ -1158,19 +1292,18 @@ match parse_int(""):
 
 #### checks alphanumeric
 
-1. expect is unreserved
-2. expect is unreserved
-3. expect is unreserved
-4. expect is unreserved
+- checks alphanumeric
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks alphanumeric")
 expect is_unreserved("A")
 expect is_unreserved("z")
 expect is_unreserved("0")
@@ -1181,19 +1314,18 @@ expect is_unreserved("9")
 
 #### checks special allowed chars
 
-1. expect is unreserved
-2. expect is unreserved
-3. expect is unreserved
-4. expect is unreserved
+- checks special allowed chars
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks special allowed chars")
 expect is_unreserved("-")
 expect is_unreserved(".")
 expect is_unreserved("_")
@@ -1204,18 +1336,18 @@ expect is_unreserved("~")
 
 #### checks reserved chars
 
-1. expect not is unreserved
-2. expect not is unreserved
-3. expect not is unreserved
+- checks reserved chars
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks reserved chars")
 expect not is_unreserved("!")
 expect not is_unreserved("@")
 expect not is_unreserved(" ")
@@ -1227,22 +1359,18 @@ expect not is_unreserved(" ")
 
 #### parse and build URL
 
-1. expect rebuilt contains
-2. expect rebuilt contains
-3. expect rebuilt contains
-4. expect rebuilt contains
-5. expect rebuilt contains
-6. expect rebuilt contains
-7. expect rebuilt contains
+- parse and build URL
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parse and build URL")
 val original = "https://user:pass@example.com:8080/path?key=val#frag"
 match parse_url(original):
     case Some(url):
@@ -1261,18 +1389,18 @@ match parse_url(original):
 
 #### parse and build query string
 
-1. expect rebuilt contains
-2. expect rebuilt contains
-3. expect rebuilt contains
+- parse and build query string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parse and build query string")
 val original = "a=1&b=2&c=3"
 val params = parse_query_string(original)
 val rebuilt = build_query_string(params)
@@ -1290,12 +1418,12 @@ expect rebuilt.contains("c=3")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/url_utils_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering URL Utilities, URL Encoding, URL Decoding, Character Codes, Hex Conversion, URL Parsing, URL Building, Query String, URL Validation, URL Operations, Integer Parsing, Unreserved Characters, Round-trip.
 - URL Utilities
 - URL Encoding
 - URL Decoding
@@ -1322,3 +1450,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1e8bae4204f6114c9c5fefae27943ad4ada8234f63f6e6dfb623c2ea664a0f28`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1e8bae4204f6114c9c5fefae27943ad4ada8234f63f6e6dfb623c2ea664a0f28`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1e8bae4204f6114c9c5fefae27943ad4ada8234f63f6e6dfb623c2ea664a0f28`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/url_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/url_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/url_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/url_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/url_utils_spec.spl:369:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'encodes simple string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/url_utils_spec.spl:374:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'encodes space' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/url_utils_spec.spl:380:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'encodes special chars' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

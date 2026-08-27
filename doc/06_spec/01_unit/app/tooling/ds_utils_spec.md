@@ -1,29 +1,6 @@
 # Ds Utils Specification
 
-> 1. expect stack is empty
-
-<!-- sdn-diagram:id=ds_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ds_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ds_utils_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ds_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Data Structure Utilities, Stack, Queue, Deque, Helper Functions, Complex Scenarios.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,17 +19,18 @@ ds_utils_spec -> std
 
 #### creates empty stack
 
-1. expect stack is empty
-2. expect stack size
+- creates empty stack
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates empty stack")
 val stack: Stack = Stack.create()
 expect stack.is_empty()
 expect stack.size() == 0
@@ -62,21 +40,18 @@ expect stack.size() == 0
 
 #### pushes items
 
-1. var stack: Stack = Stack create
-2. stack push
-3. stack push
-4. stack push
-5. expect stack size
-6. expect not stack is empty
+- pushes items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pushes items")
 var stack: Stack = Stack.create()
 stack.push(1)
 stack.push(2)
@@ -89,20 +64,18 @@ expect not stack.is_empty()
 
 #### pops items in LIFO order
 
-1. var stack: Stack = Stack create
-2. stack push
-3. stack push
-4. stack push
-5. expect stack size
+- pops items in LIFO order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pops items in LIFO order")
 var stack: Stack = Stack.create()
 stack.push(1)
 stack.push(2)
@@ -118,16 +91,18 @@ expect stack.size() == 1
 
 #### returns nil when popping empty stack
 
-1. var stack: Stack = Stack create
+- returns nil when popping empty stack
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil when popping empty stack")
 var stack: Stack = Stack.create()
 val result = stack.pop()
 expect result == nil
@@ -137,19 +112,18 @@ expect result == nil
 
 #### peeks without removing
 
-1. var stack: Stack = Stack create
-2. stack push
-3. stack push
-4. expect stack size
+- peeks without removing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("peeks without removing")
 var stack: Stack = Stack.create()
 stack.push(1)
 stack.push(2)
@@ -162,21 +136,18 @@ expect stack.size() == 2
 
 #### clears all items
 
-1. var stack: Stack = Stack create
-2. stack push
-3. stack push
-4. stack clear
-5. expect stack is empty
-6. expect stack size
+- clears all items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("clears all items")
 var stack: Stack = Stack.create()
 stack.push(1)
 stack.push(2)
@@ -189,20 +160,18 @@ expect stack.size() == 0
 
 #### converts to list
 
-1. var stack: Stack = Stack create
-2. stack push
-3. stack push
-4. stack push
-5. expect list len
+- converts to list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to list")
 var stack: Stack = Stack.create()
 stack.push(1)
 stack.push(2)
@@ -219,17 +188,18 @@ expect list[2] == 3
 
 #### creates empty queue
 
-1. expect queue is empty
-2. expect queue size
+- creates empty queue
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates empty queue")
 val queue: Queue = Queue.create()
 expect queue.is_empty()
 expect queue.size() == 0
@@ -239,21 +209,18 @@ expect queue.size() == 0
 
 #### enqueues items
 
-1. var queue: Queue = Queue create
-2. queue enqueue
-3. queue enqueue
-4. queue enqueue
-5. expect queue size
-6. expect not queue is empty
+- enqueues items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enqueues items")
 var queue: Queue = Queue.create()
 queue.enqueue(1)
 queue.enqueue(2)
@@ -266,20 +233,18 @@ expect not queue.is_empty()
 
 #### dequeues items in FIFO order
 
-1. var queue: Queue = Queue create
-2. queue enqueue
-3. queue enqueue
-4. queue enqueue
-5. expect queue size
+- dequeues items in FIFO order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dequeues items in FIFO order")
 var queue: Queue = Queue.create()
 queue.enqueue(1)
 queue.enqueue(2)
@@ -295,16 +260,18 @@ expect queue.size() == 1
 
 #### returns nil when dequeuing empty queue
 
-1. var queue: Queue = Queue create
+- returns nil when dequeuing empty queue
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil when dequeuing empty queue")
 var queue: Queue = Queue.create()
 val result = queue.dequeue()
 expect result == nil
@@ -314,19 +281,18 @@ expect result == nil
 
 #### peeks without removing
 
-1. var queue: Queue = Queue create
-2. queue enqueue
-3. queue enqueue
-4. expect queue size
+- peeks without removing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("peeks without removing")
 var queue: Queue = Queue.create()
 queue.enqueue(1)
 queue.enqueue(2)
@@ -339,21 +305,18 @@ expect queue.size() == 2
 
 #### clears all items
 
-1. var queue: Queue = Queue create
-2. queue enqueue
-3. queue enqueue
-4. queue clear
-5. expect queue is empty
-6. expect queue size
+- clears all items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("clears all items")
 var queue: Queue = Queue.create()
 queue.enqueue(1)
 queue.enqueue(2)
@@ -368,17 +331,18 @@ expect queue.size() == 0
 
 #### creates empty deque
 
-1. expect deque is empty
-2. expect deque size
+- creates empty deque
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates empty deque")
 val deque: Deque = Deque.create()
 expect deque.is_empty()
 expect deque.size() == 0
@@ -388,20 +352,18 @@ expect deque.size() == 0
 
 #### pushes to front
 
-1. var deque: Deque = Deque create
-2. deque push front
-3. deque push front
-4. deque push front
-5. expect deque size
+- pushes to front
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pushes to front")
 var deque: Deque = Deque.create()
 deque.push_front(1)
 deque.push_front(2)
@@ -415,20 +377,18 @@ expect result == 3
 
 #### pushes to back
 
-1. var deque: Deque = Deque create
-2. deque push back
-3. deque push back
-4. deque push back
-5. expect deque size
+- pushes to back
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pushes to back")
 var deque: Deque = Deque.create()
 deque.push_back(1)
 deque.push_back(2)
@@ -442,20 +402,18 @@ expect result == 3
 
 #### pops from front
 
-1. var deque: Deque = Deque create
-2. deque push back
-3. deque push back
-4. deque push back
-5. expect deque size
+- pops from front
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pops from front")
 var deque: Deque = Deque.create()
 deque.push_back(1)
 deque.push_back(2)
@@ -469,20 +427,18 @@ expect deque.size() == 2
 
 #### pops from back
 
-1. var deque: Deque = Deque create
-2. deque push back
-3. deque push back
-4. deque push back
-5. expect deque size
+- pops from back
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pops from back")
 var deque: Deque = Deque.create()
 deque.push_back(1)
 deque.push_back(2)
@@ -496,16 +452,18 @@ expect deque.size() == 2
 
 #### returns nil when popping empty deque
 
-1. var deque: Deque = Deque create
+- returns nil when popping empty deque
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil when popping empty deque")
 var deque: Deque = Deque.create()
 val result = deque.pop_front()
 expect result == nil
@@ -517,20 +475,18 @@ expect result == nil
 
 #### clears all items
 
-1. var deque: Deque = Deque create
-2. deque push back
-3. deque push back
-4. deque clear
-5. expect deque is empty
+- clears all items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("clears all items")
 var deque: Deque = Deque.create()
 deque.push_back(1)
 deque.push_back(2)
@@ -544,17 +500,18 @@ expect deque.is_empty()
 
 #### creates stack from list
 
-1. var stack = stack from list
-2. expect stack size
+- creates stack from list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates stack from list")
 var stack = stack_from_list([1, 2, 3])
 expect stack.size() == 3
 val result = stack.peek()
@@ -565,16 +522,18 @@ expect result == 3
 
 #### creates queue from list
 
-1. expect queue size
+- creates queue from list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates queue from list")
 val queue = queue_from_list([1, 2, 3])
 expect queue.size() == 3
 val result = queue.peek()
@@ -585,17 +544,18 @@ expect result == 1
 
 #### creates deque from list
 
-1. var deque = deque from list
-2. expect deque size
+- creates deque from list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates deque from list")
 var deque = deque_from_list([1, 2, 3])
 expect deque.size() == 3
 ```
@@ -604,16 +564,18 @@ expect deque.size() == 3
 
 #### gets element from stack by index
 
-1. var stack = stack from list
+- gets element from stack by index
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets element from stack by index")
 var stack = stack_from_list([1, 2, 3])
 val result = stack_get(stack, 0)
 expect result == 3
@@ -625,16 +587,18 @@ expect result == 1
 
 #### returns nil for out of bounds stack access
 
-1. var stack = stack from list
+- returns nil for out of bounds stack access
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for out of bounds stack access")
 var stack = stack_from_list([1, 2, 3])
 val result = stack_get(stack, 10)
 expect result == nil
@@ -644,13 +608,18 @@ expect result == nil
 
 #### gets element from queue by index
 
+- gets element from queue by index
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets element from queue by index")
 val queue = queue_from_list([1, 2, 3])
 val result = queue_get(queue, 0)
 expect result == 1
@@ -662,13 +631,18 @@ expect result == 3
 
 #### returns nil for out of bounds queue access
 
+- returns nil for out of bounds queue access
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for out of bounds queue access")
 val queue = queue_from_list([1, 2, 3])
 val result = queue_get(queue, 10)
 expect result == nil
@@ -678,16 +652,18 @@ expect result == nil
 
 #### reverses stack
 
-1. var stack = stack from list
+- reverses stack
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reverses stack")
 var stack = stack_from_list([1, 2, 3])
 val reversed = reverse_stack(stack)
 val result = reversed.peek()
@@ -698,16 +674,18 @@ expect result == 1
 
 #### merges queues
 
-1. expect merged size
+- merges queues
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("merges queues")
 val q1 = queue_from_list([1, 2])
 val q2 = queue_from_list([3, 4])
 val merged = merge_queues(q1=q1, q2=q2)
@@ -720,22 +698,18 @@ expect merged.size() == 4
 
 #### handles multiple stack operations
 
-1. var stack: Stack = Stack create
-2. stack push
-3. stack push
-4. stack pop
-5. stack push
-6. stack push
-7. expect stack size
+- handles multiple stack operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles multiple stack operations")
 var stack: Stack = Stack.create()
 stack.push(1)
 stack.push(2)
@@ -751,22 +725,18 @@ expect result == 4
 
 #### handles multiple queue operations
 
-1. var queue: Queue = Queue create
-2. queue enqueue
-3. queue enqueue
-4. queue dequeue
-5. queue enqueue
-6. queue enqueue
-7. expect queue size
+- handles multiple queue operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles multiple queue operations")
 var queue: Queue = Queue.create()
 queue.enqueue(1)
 queue.enqueue(2)
@@ -782,21 +752,18 @@ expect result == 2
 
 #### handles mixed deque operations
 
-1. var deque: Deque = Deque create
-2. deque push back
-3. deque push front
-4. deque push back
-5. deque pop front
-6. expect deque size
+- handles mixed deque operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles mixed deque operations")
 var deque: Deque = Deque.create()
 deque.push_back(1)
 deque.push_front(2)
@@ -814,12 +781,12 @@ expect deque.size() == 2
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/ds_utils_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Data Structure Utilities, Stack, Queue, Deque, Helper Functions, Complex Scenarios.
 - Data Structure Utilities
 - Stack
 - Queue
@@ -839,3 +806,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2e5404081e07ff9f1a3cb3d64a83f6a8ea1c4ea40e1f4f6e766a611e2feab0dc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2e5404081e07ff9f1a3cb3d64a83f6a8ea1c4ea40e1f4f6e766a611e2feab0dc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2e5404081e07ff9f1a3cb3d64a83f6a8ea1c4ea40e1f4f6e766a611e2feab0dc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/ds_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/ds_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/ds_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/ds_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/ds_utils_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty stack' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/ds_utils_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pushes items' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/ds_utils_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pops items in LIFO order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

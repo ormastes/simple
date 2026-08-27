@@ -1,29 +1,6 @@
-# mcp_debug_state_spec
+# Mcp Debug State Specification
 
-> Tests for debug_state.spl real in-memory state management. Validates breakpoints, watches, frame navigation, execution control, source reading, and terminate/cleanup.
-
-<!-- sdn-diagram:id=mcp_debug_state_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mcp_debug_state_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mcp_debug_state_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mcp_debug_state_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering breakpoint management, breakpoint info JSON format, execution control, frame navigation, watch expressions, source file reading, expression evaluation, terminate and cleanup, debug stubs delegation to debug_state.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,26 +9,7 @@ mcp_debug_state_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# mcp_debug_state_spec
-
-Tests for debug_state.spl real in-memory state management. Validates breakpoints, watches, frame navigation, execution control, source reading, and terminate/cleanup.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #DBG-001 to #DBG-008 |
-| Category | Tooling |
-| Difficulty | 2/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-Tests for debug_state.spl real in-memory state management.
-Validates breakpoints, watches, frame navigation, execution control,
-source reading, and terminate/cleanup.
+# Mcp Debug State Specification
 
 ## Scenarios
 
@@ -59,13 +17,23 @@ source reading, and terminate/cleanup.
 
 #### breakpoint entry has required fields
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- breakpoint entry has required fields
+   - Expected: fields.len() equals `9`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("breakpoint entry has required fields")
 val fields = ["id", "file", "line", "condition", "hit_condition", "log_message", "is_temporary", "enabled", "function_name"]
 expect(fields.len()).to_equal(9)
 ```
@@ -74,13 +42,20 @@ expect(fields.len()).to_equal(9)
 
 #### add_breakpoint returns incrementing IDs
 
+- add_breakpoint returns incrementing IDs
+   - Expected: second_id equals `first_id + 1`
+   - Expected: third_id equals `second_id + 1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_breakpoint returns incrementing IDs")
 val first_id = 1
 val second_id = 2
 val third_id = 3
@@ -92,13 +67,19 @@ expect(third_id).to_equal(second_id + 1)
 
 #### add_breakpoint_rich includes condition
 
+- add_breakpoint_rich includes condition
+   - Expected: has_condition is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_breakpoint_rich includes condition")
 val condition = "x > 10"
 val has_condition = condition != ""
 expect(has_condition).to_equal(true)
@@ -108,13 +89,20 @@ expect(has_condition).to_equal(true)
 
 #### add_breakpoint_rich handles temporary flag
 
+- add_breakpoint_rich handles temporary flag
+   - Expected: tmp_true is true
+   - Expected: tmp_false is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_breakpoint_rich handles temporary flag")
 val is_temporary_1 = 1
 val is_temporary_0 = 0
 val tmp_true = is_temporary_1 != 0
@@ -127,13 +115,19 @@ expect(tmp_false).to_equal(false)
 
 #### add_function_breakpoint sets function_name
 
+- add_function_breakpoint sets function_name
+   - Expected: has_func is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_function_breakpoint sets function_name")
 val func_name = "query_main"
 val has_func = func_name != ""
 expect(has_func).to_equal(true)
@@ -143,13 +137,19 @@ expect(has_func).to_equal(true)
 
 #### add_function_breakpoint sets line to -1
 
+- add_function_breakpoint sets line to -1
+   - Expected: line equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_function_breakpoint sets line to -1")
 val line = -1
 expect(line).to_equal(-1)
 ```
@@ -158,13 +158,19 @@ expect(line).to_equal(-1)
 
 #### remove_breakpoint filters by file and line
 
+- remove_breakpoint filters by file and line
+   - Expected: keep is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("remove_breakpoint filters by file and line")
 val bp_file = "test.spl"
 val bp_line = 10
 # Filter: keep bps where file != bp_file or line != bp_line
@@ -178,13 +184,20 @@ expect(keep).to_equal(true)
 
 #### set_breakpoint_enabled toggles enabled flag
 
+- set_breakpoint_enabled toggles enabled flag
+   - Expected: en_true is true
+   - Expected: en_false is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("set_breakpoint_enabled toggles enabled flag")
 val enabled_1 = 1
 val enabled_0 = 0
 val en_true = enabled_1 != 0
@@ -199,13 +212,18 @@ expect(en_false).to_equal(false)
 
 #### get_breakpoint_info returns JSON object
 
+- get_breakpoint_info returns JSON object
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_breakpoint_info returns JSON object")
 var r = "{"
 r = r + "\"id\": 1"
 r = r + ", \"file\": \"test.spl\""
@@ -220,13 +238,19 @@ expect(r).to_contain("\"file\": \"test.spl\"")
 
 #### get_breakpoint_info returns empty for unknown id
 
+- get_breakpoint_info returns empty for unknown id
+   - Expected: result equals `{}`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_breakpoint_info returns empty for unknown id")
 val result = "{}"
 expect(result).to_equal("{}")
 ```
@@ -235,13 +259,18 @@ expect(result).to_equal("{}")
 
 #### list_breakpoints returns JSON array
 
+- list_breakpoints returns JSON array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("list_breakpoints returns JSON array")
 var r = "["
 r = r + "{\"id\": 1, \"file\": \"a.spl\", \"line\": 5, \"enabled\": true, \"function_name\": \"\"}"
 r = r + "]"
@@ -253,13 +282,19 @@ expect(r).to_end_with("]")
 
 #### list_breakpoints empty returns empty array
 
+- list_breakpoints empty returns empty array
+   - Expected: result equals `[]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("list_breakpoints empty returns empty array")
 val result = "[]"
 expect(result).to_equal("[]")
 ```
@@ -268,13 +303,18 @@ expect(result).to_equal("[]")
 
 #### JSON uses string concatenation to avoid escape issues
 
+- JSON uses string concatenation to avoid escape issues
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("JSON uses string concatenation to avoid escape issues")
 # In Simple, }} inside strings produces }, so we use concatenation
 var r = "{"
 r = r + "\"key\": \"value\""
@@ -288,13 +328,19 @@ expect(r).to_contain("\"key\"")
 
 #### continue_exec resets step mode to 0
 
+- continue_exec resets step mode to 0
+   - Expected: step_mode equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("continue_exec resets step mode to 0")
 val step_mode = 0
 expect(step_mode).to_equal(0)
 ```
@@ -303,13 +349,21 @@ expect(step_mode).to_equal(0)
 
 #### set_step_mode stores mode value
 
+- set_step_mode stores mode value
+   - Expected: mode_over equals `1`
+   - Expected: mode_in equals `2`
+   - Expected: mode_out equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("set_step_mode stores mode value")
 val mode_over = 1
 val mode_in = 2
 val mode_out = 3
@@ -322,13 +376,19 @@ expect(mode_out).to_equal(3)
 
 #### pause_exec is a no-op stub
 
+- pause_exec is a no-op stub
+   - Expected: paused is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("pause_exec is a no-op stub")
 val paused = true
 expect(paused).to_equal(true)
 ```
@@ -339,13 +399,19 @@ expect(paused).to_equal(true)
 
 #### select_frame stores frame index
 
+- select_frame stores frame index
+   - Expected: frame_index equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("select_frame stores frame index")
 val frame_index = 3
 expect(frame_index).to_equal(3)
 ```
@@ -354,13 +420,19 @@ expect(frame_index).to_equal(3)
 
 #### select_frame returns 0 on success
 
+- select_frame returns 0 on success
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("select_frame returns 0 on success")
 val result = 0
 expect(result).to_equal(0)
 ```
@@ -369,13 +441,19 @@ expect(result).to_equal(0)
 
 #### get_selected_frame returns stored index
 
+- get_selected_frame returns stored index
+   - Expected: selected equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_selected_frame returns stored index")
 val selected = 3
 expect(selected).to_equal(3)
 ```
@@ -384,13 +462,19 @@ expect(selected).to_equal(3)
 
 #### frame_locals returns empty stub
 
+- frame_locals returns empty stub
+   - Expected: locals equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("frame_locals returns empty stub")
 val locals = ""
 expect(locals).to_equal("")
 ```
@@ -401,13 +485,19 @@ expect(locals).to_equal("")
 
 #### add_watch appends to list
 
+- add_watch appends to list
+   - Expected: watches.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_watch appends to list")
 val watches = ["x", "y", "x + y"]
 expect(watches.len()).to_equal(3)
 ```
@@ -416,13 +506,19 @@ expect(watches.len()).to_equal(3)
 
 #### add_watch returns new length
 
+- add_watch returns new length
+   - Expected: length_after equals `length_before + 1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("add_watch returns new length")
 val length_before = 2
 val length_after = 3
 expect(length_after).to_equal(length_before + 1)
@@ -432,13 +528,19 @@ expect(length_after).to_equal(length_before + 1)
 
 #### remove_watch filters out matching expression
 
+- remove_watch filters out matching expression
+   - Expected: kept.len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("remove_watch filters out matching expression")
 val watches = ["x", "y", "z"]
 # Remove "y" -> keep ["x", "z"]
 var kept: [text] = []
@@ -454,13 +556,18 @@ expect(kept).to_contain("z")
 
 #### list_watches returns JSON array
 
+- list_watches returns JSON array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("list_watches returns JSON array")
 var r = "["
 r = r + "\"x\""
 r = r + ", \"y\""
@@ -474,13 +581,19 @@ expect(r).to_contain("\"y\"")
 
 #### list_watches empty returns empty array
 
+- list_watches empty returns empty array
+   - Expected: result equals `[]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("list_watches empty returns empty array")
 val result = "[]"
 expect(result).to_equal("[]")
 ```
@@ -491,13 +604,19 @@ expect(result).to_equal("[]")
 
 #### get_source_lines reads actual file content
 
+- get_source_lines reads actual file content
+   - Expected: uses_real_io is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_source_lines reads actual file content")
 # Uses rt_file_read_text internally
 val uses_real_io = true
 expect(uses_real_io).to_equal(true)
@@ -507,13 +626,19 @@ expect(uses_real_io).to_equal(true)
 
 #### get_source_lines handles empty file
 
+- get_source_lines handles empty file
+   - Expected: is_empty is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_source_lines handles empty file")
 val content = ""
 val is_empty = content == ""
 expect(is_empty).to_equal(true)
@@ -523,13 +648,19 @@ expect(is_empty).to_equal(true)
 
 #### get_source_lines respects start_line and count
 
+- get_source_lines respects start_line and count
+   - Expected: end_line equals `15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_source_lines respects start_line and count")
 val start_line = 5
 val line_count = 10
 val end_line = start_line + line_count
@@ -540,13 +671,18 @@ expect(end_line).to_equal(15)
 
 #### get_source_lines joins with newlines
 
+- get_source_lines joins with newlines
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("get_source_lines joins with newlines")
 val lines = ["line1", "line2", "line3"]
 val result = lines.join("\n")
 expect(result).to_contain("line1")
@@ -559,16 +695,18 @@ expect(result).to_contain("line2")
 
 #### eval_expression returns not-implemented JSON
 
-1. r = r + "\"result\": \"
+- eval_expression returns not-implemented JSON
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("eval_expression returns not-implemented JSON")
 var r = "{"
 r = r + "\"result\": \"(not implemented)\""
 r = r + ", \"type\": \"error\""
@@ -581,13 +719,19 @@ expect(r).to_contain("error")
 
 #### set_variable returns 0 stub
 
+- set_variable returns 0 stub
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("set_variable returns 0 stub")
 val result = 0
 expect(result).to_equal(0)
 ```
@@ -598,80 +742,9 @@ expect(result).to_equal(0)
 
 #### terminate resets all state
 
-<details>
-<summary>Executable SSpec</summary>
+- terminate resets all state
+   - Expected: fields_reset.len() equals `9`
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val fields_reset = ["breakpoints", "next_bp_id", "watches", "call_stack", "step_mode", "is_active", "current_file", "current_line", "selected_frame"]
-expect(fields_reset.len()).to_equal(9)
-```
-
-</details>
-
-#### terminate resets breakpoints to empty
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val breakpoints_after: [text] = []
-expect(breakpoints_after.len()).to_equal(0)
-```
-
-</details>
-
-#### terminate resets next_bp_id to 1
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val next_id = 1
-expect(next_id).to_equal(1)
-```
-
-</details>
-
-#### terminate resets watches to empty
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val watches_after: [text] = []
-expect(watches_after.len()).to_equal(0)
-```
-
-</details>
-
-#### terminate resets active to false
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val is_active = false
-expect(is_active).to_equal(false)
-```
-
-</details>
-
-#### terminate resets current position
 
 <details>
 <summary>Executable SSpec</summary>
@@ -680,6 +753,114 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("terminate resets all state")
+val fields_reset = ["breakpoints", "next_bp_id", "watches", "call_stack", "step_mode", "is_active", "current_file", "current_line", "selected_frame"]
+expect(fields_reset.len()).to_equal(9)
+```
+
+</details>
+
+#### terminate resets breakpoints to empty
+
+- terminate resets breakpoints to empty
+   - Expected: breakpoints_after.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("terminate resets breakpoints to empty")
+val breakpoints_after: [text] = []
+expect(breakpoints_after.len()).to_equal(0)
+```
+
+</details>
+
+#### terminate resets next_bp_id to 1
+
+- terminate resets next_bp_id to 1
+   - Expected: next_id equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("terminate resets next_bp_id to 1")
+val next_id = 1
+expect(next_id).to_equal(1)
+```
+
+</details>
+
+#### terminate resets watches to empty
+
+- terminate resets watches to empty
+   - Expected: watches_after.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("terminate resets watches to empty")
+val watches_after: [text] = []
+expect(watches_after.len()).to_equal(0)
+```
+
+</details>
+
+#### terminate resets active to false
+
+- terminate resets active to false
+   - Expected: is_active is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("terminate resets active to false")
+val is_active = false
+expect(is_active).to_equal(false)
+```
+
+</details>
+
+#### terminate resets current position
+
+- terminate resets current position
+   - Expected: current_file equals ``
+   - Expected: current_line equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("terminate resets current position")
 val current_file = ""
 val current_line = 0
 expect(current_file).to_equal("")
@@ -692,13 +873,19 @@ expect(current_line).to_equal(0)
 
 #### rt_debug_add_breakpoint_at delegates to ds_add_breakpoint
 
+- rt_debug_add_breakpoint_at delegates to ds_add_breakpoint
+   - Expected: delegate_target equals `ds_add_breakpoint`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rt_debug_add_breakpoint_at delegates to ds_add_breakpoint")
 val delegate_target = "ds_add_breakpoint"
 expect(delegate_target).to_equal("ds_add_breakpoint")
 ```
@@ -707,13 +894,19 @@ expect(delegate_target).to_equal("ds_add_breakpoint")
 
 #### rt_debug_list_breakpoints delegates to ds_list_breakpoints
 
+- rt_debug_list_breakpoints delegates to ds_list_breakpoints
+   - Expected: delegate_target equals `ds_list_breakpoints`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rt_debug_list_breakpoints delegates to ds_list_breakpoints")
 val delegate_target = "ds_list_breakpoints"
 expect(delegate_target).to_equal("ds_list_breakpoints")
 ```
@@ -722,13 +915,19 @@ expect(delegate_target).to_equal("ds_list_breakpoints")
 
 #### rt_debug_get_source_lines delegates to ds_get_source_lines
 
+- rt_debug_get_source_lines delegates to ds_get_source_lines
+   - Expected: delegate_target equals `ds_get_source_lines`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rt_debug_get_source_lines delegates to ds_get_source_lines")
 val delegate_target = "ds_get_source_lines"
 expect(delegate_target).to_equal("ds_get_source_lines")
 ```
@@ -737,13 +936,19 @@ expect(delegate_target).to_equal("ds_get_source_lines")
 
 #### rt_debug_terminate delegates to ds_terminate
 
+- rt_debug_terminate delegates to ds_terminate
+   - Expected: delegate_target equals `ds_terminate`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rt_debug_terminate delegates to ds_terminate")
 val delegate_target = "ds_terminate"
 expect(delegate_target).to_equal("ds_terminate")
 ```
@@ -752,19 +957,48 @@ expect(delegate_target).to_equal("ds_terminate")
 
 #### all rt_debug functions have ds_ counterparts
 
+- all rt_debug functions have ds_ counterparts
+   - Expected: rt_functions.len() equals `ds_functions.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("all rt_debug functions have ds_ counterparts")
 val rt_functions = ["rt_debug_set_active", "rt_debug_add_breakpoint_at", "rt_debug_remove_breakpoint_at", "rt_debug_continue_exec", "rt_debug_terminate"]
 val ds_functions = ["ds_set_active", "ds_add_breakpoint", "ds_remove_breakpoint", "ds_continue_exec", "ds_terminate"]
 expect(rt_functions.len()).to_equal(ds_functions.len())
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering breakpoint management, breakpoint info JSON format, execution control, frame navigation, watch expressions, source file reading, expression evaluation, terminate and cleanup, debug stubs delegation to debug_state.
+- breakpoint management
+- breakpoint info JSON format
+- execution control
+- frame navigation
+- watch expressions
+- source file reading
+- expression evaluation
+- terminate and cleanup
+- debug stubs delegation to debug_state
 
 ## Scenario Summary
 
@@ -778,3 +1012,54 @@ expect(rt_functions.len()).to_equal(ds_functions.len())
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `519f884b7663cbb6616aab91974836b5f472c128de8221d786cef370508f7a47`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `519f884b7663cbb6616aab91974836b5f472c128de8221d786cef370508f7a47`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `519f884b7663cbb6616aab91974836b5f472c128de8221d786cef370508f7a47`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_unit/mcp_debug_state_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_unit/mcp_debug_state_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_unit/mcp_debug_state_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'breakpoint entry has required fields' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'add_breakpoint returns incrementing IDs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/mcp_debug_state_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'add_breakpoint_rich includes condition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

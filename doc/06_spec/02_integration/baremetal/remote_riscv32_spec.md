@@ -1,29 +1,6 @@
-# Remote RISC-V 32 Debug Specification
+# Remote Riscv32 Specification
 
-> Remote debugging support for RISC-V 32-bit targets via GDB MI protocol, Trace32 bridge, and Trace32 native client. Includes a feature ranking system for capability-based handler selection.
-
-<!-- sdn-diagram:id=remote_riscv32_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=remote_riscv32_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-remote_riscv32_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=remote_riscv32_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Remote Debug Core Types, RISC-V 32 Target, Feature Registry, GDB MI Parser, Feature Rank Constants, FeatureId, QEMU Integration, DebugConfig class methods, HaltReason enum methods, DebugError additional variants, GdbVariable class methods, FeatureHandler class methods, FeatureRegistry impl methods.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,43 +9,7 @@ remote_riscv32_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Remote RISC-V 32 Debug Specification
-
-Remote debugging support for RISC-V 32-bit targets via GDB MI protocol, Trace32 bridge, and Trace32 native client. Includes a feature ranking system for capability-based handler selection.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #REM-001 through #REM-010 |
-| Category | Tooling |
-| Difficulty | 4/5 |
-| Status | In Progress |
-| Source | `test/02_integration/baremetal/remote_riscv32_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Remote debugging support for RISC-V 32-bit targets via GDB MI protocol,
-Trace32 bridge, and Trace32 native client. Includes a feature ranking
-system for capability-based handler selection.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Feature Registry | Maps FeatureId → ranked handlers, picks lowest rank |
-| GDB MI | GDB Machine Interface protocol for process control |
-| Trace32 Bridge | Translates T32 commands to GDB MI |
-| Emulation | Fallback handlers at higher ranks |
-
-## Behavior
-
-- Feature registry picks the lowest-rank handler for each operation
-- GDB MI client communicates with GDB via stdin/stdout FIFOs
-- Trace32 bridge translates T32 commands to GDB MI for shared features
-- Trace32 native uses t32rem CLI for unique features (flash, trace, coverage)
+# Remote Riscv32 Specification
 
 ## Scenarios
 
@@ -81,13 +22,21 @@ system for capability-based handler selection.
 
 #### converts to string _(slow)_
 
+- converts to string
+   - Expected: Architecture.RiscV32.to_string() equals `riscv32`
+   - Expected: Architecture.Arm32.to_string() equals `arm32`
+   - Expected: Architecture.X86_64.to_string() equals `x86_64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("converts to string")
 expect(Architecture.RiscV32.to_string()).to_equal("riscv32")
 expect(Architecture.Arm32.to_string()).to_equal("arm32")
 expect(Architecture.X86_64.to_string()).to_equal("x86_64")
@@ -105,13 +54,20 @@ expect(Architecture.X86_64.to_string()).to_equal("x86_64")
 
 #### converts to string _(slow)_
 
+- converts to string
+   - Expected: Endianness.Little.to_string() equals `little`
+   - Expected: Endianness.Big.to_string() equals `big`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("converts to string")
 expect(Endianness.Little.to_string()).to_equal("little")
 expect(Endianness.Big.to_string()).to_equal("big")
 ```
@@ -128,13 +84,21 @@ expect(Endianness.Big.to_string()).to_equal("big")
 
 #### creates default GDB config _(slow)_
 
+- creates default GDB config
+   - Expected: config.host equals `localhost`
+   - Expected: config.port equals `1234`
+   - Expected: config.program equals `test.elf`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("creates default GDB config")
 val config = DebugConfig.default_gdb("test.elf")
 expect(config.host).to_equal("localhost")
 expect(config.port).to_equal(1234)
@@ -151,13 +115,20 @@ expect(config.program).to_equal("test.elf")
 
 #### creates Trace32 config _(slow)_
 
+- creates Trace32 config
+   - Expected: config.host equals `192.168.1.10`
+   - Expected: config.port equals `20000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("creates Trace32 config")
 val config = DebugConfig.for_trace32("192.168.1.10", 20000)
 expect(config.host).to_equal("192.168.1.10")
 expect(config.port).to_equal(20000)
@@ -175,13 +146,21 @@ expect(config.port).to_equal(20000)
 
 #### formats error messages _(slow)_
 
+- formats error messages
+   - Expected: err.to_string() equals `connection failed: refused`
+   - Expected: err2.to_string() equals `timeout`
+   - Expected: err3.to_string() equals `breakpoint slots full`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats error messages")
 val err = DebugError.ConnectionFailed(msg: "refused")
 expect(err.to_string()).to_equal("connection failed: refused")
 
@@ -206,13 +185,21 @@ expect(err3.to_string()).to_equal("breakpoint slots full")
 
 #### reports correct name and architecture _(slow)_
 
+- reports correct name and architecture
+   - Expected: target.name() equals `RISC-V32 (RV32IMAC)`
+   - Expected: arch.to_string() equals `riscv32`
+   - Expected: endian.to_string() equals `little`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("reports correct name and architecture")
 val target = RiscV32Target.create()
 expect(target.name()).to_equal("RISC-V32 (RV32IMAC)")
 # BUG-RT workaround: split chained method calls on enum return values
@@ -234,13 +221,19 @@ expect(endian.to_string()).to_equal("little")
 
 #### has 33 registers (x0-x31 + PC) _(slow)_
 
+- has 33 registers (x0-x31 + PC)
+   - Expected: target.register_count() equals `33`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("has 33 registers (x0-x31 + PC)")
 val target = RiscV32Target.create()
 expect(target.register_count()).to_equal(33)
 ```
@@ -255,13 +248,25 @@ expect(target.register_count()).to_equal(33)
 
 #### maps ABI names correctly _(slow)_
 
+- maps ABI names correctly
+   - Expected: target.register_name(0) equals `zero`
+   - Expected: target.register_name(1) equals `ra`
+   - Expected: target.register_name(2) equals `sp`
+   - Expected: target.register_name(8) equals `s0`
+   - Expected: target.register_name(10) equals `a0`
+   - Expected: target.register_name(32) equals `pc`
+   - Expected: target.register_name(99) equals `unknown`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("maps ABI names correctly")
 val target = RiscV32Target.create()
 expect(target.register_name(0)).to_equal("zero")
 expect(target.register_name(1)).to_equal("ra")
@@ -282,13 +287,23 @@ expect(target.register_name(99)).to_equal("unknown")
 
 #### reverse-maps names to indices _(slow)_
 
+- reverse-maps names to indices
+   - Expected: target.register_index("zero") equals `0`
+   - Expected: target.register_index("sp") equals `2`
+   - Expected: target.register_index("a0") equals `10`
+   - Expected: target.register_index("pc") equals `32`
+   - Expected: target.register_index("nonexistent") equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("reverse-maps names to indices")
 val target = RiscV32Target.create()
 expect(target.register_index("zero")).to_equal(0)
 expect(target.register_index("sp")).to_equal(2)
@@ -307,13 +322,20 @@ expect(target.register_index("nonexistent")).to_equal(-1)
 
 #### reports 4-byte register size _(slow)_
 
+- reports 4-byte register size
+   - Expected: target.register_size(0) equals `4`
+   - Expected: target.register_size(32) equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("reports 4-byte register size")
 val target = RiscV32Target.create()
 expect(target.register_size(0)).to_equal(4)
 expect(target.register_size(32)).to_equal(4)
@@ -331,13 +353,21 @@ expect(target.register_size(32)).to_equal(4)
 
 #### defines argument registers a0-a7 _(slow)_
 
+- defines argument registers a0-a7
+   - Expected: arg_regs.len() equals `8`
+   - Expected: arg_regs[0] equals `10)  # a0 = x10`
+   - Expected: arg_regs[7] equals `17)  # a7 = x17`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defines argument registers a0-a7")
 val target = RiscV32Target.create()
 val arg_regs = target.arg_registers()
 expect(arg_regs.len()).to_equal(8)
@@ -355,13 +385,22 @@ expect(arg_regs[7]).to_equal(17)  # a7 = x17
 
 #### defines callee-saved registers s0-s11 _(slow)_
 
+- defines callee-saved registers s0-s11
+   - Expected: saved.len() equals `12`
+   - Expected: saved[0] equals `8)   # s0 = x8`
+   - Expected: saved[1] equals `9)   # s1 = x9`
+   - Expected: saved[2] equals `18)  # s2 = x18`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defines callee-saved registers s0-s11")
 val target = RiscV32Target.create()
 val saved = target.callee_saved_registers()
 expect(saved.len()).to_equal(12)
@@ -382,13 +421,22 @@ expect(saved[2]).to_equal(18)  # s2 = x18
 
 #### identifies PC, SP, FP correctly _(slow)_
 
+- identifies PC, SP, FP correctly
+   - Expected: target.pc_register_index() equals `32`
+   - Expected: target.sp_register_index() equals `2`
+   - Expected: target.fp_register_index() equals `8`
+   - Expected: target.return_register_index() equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("identifies PC, SP, FP correctly")
 val target = RiscV32Target.create()
 expect(target.pc_register_index()).to_equal(32)
 expect(target.sp_register_index()).to_equal(2)
@@ -408,13 +456,21 @@ expect(target.return_register_index()).to_equal(10)
 
 #### reports hardware breakpoint capabilities _(slow)_
 
+- reports hardware breakpoint capabilities
+   - Expected: target.hw_breakpoint_count() equals `4`
+   - Expected: target.hw_watchpoint_count() equals `4`
+   - Expected: target.supports_single_step() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("reports hardware breakpoint capabilities")
 val target = RiscV32Target.create()
 expect(target.hw_breakpoint_count()).to_equal(4)
 expect(target.hw_watchpoint_count()).to_equal(4)
@@ -431,13 +487,20 @@ expect(target.supports_single_step()).to_equal(true)
 
 #### defines EBREAK instruction _(slow)_
 
+- defines EBREAK instruction
+   - Expected: ebreak.len() equals `4`
+   - Expected: ebreak[0] equals `0x73`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defines EBREAK instruction")
 val target = RiscV32Target.create()
 val ebreak = target.breakpoint_instruction()
 expect(ebreak.len()).to_equal(4)
@@ -456,13 +519,20 @@ expect(ebreak[0]).to_equal(0x73)
 
 #### defines virt machine addresses _(slow)_
 
+- defines virt machine addresses
+   - Expected: target.qemu_virt_ram_base() equals `0x80000000`
+   - Expected: target.qemu_virt_uart_base() equals `0x10000000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defines virt machine addresses")
 val target = RiscV32Target.create()
 expect(target.qemu_virt_ram_base()).to_equal(0x80000000)
 expect(target.qemu_virt_uart_base()).to_equal(0x10000000)
@@ -482,8 +552,7 @@ expect(target.qemu_virt_uart_base()).to_equal(0x10000000)
 
 #### registers a single handler _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- registers a single handler
    - Expected: registry.is_supported(FeatureId.Halt) is true
    - Expected: registry.is_supported(FeatureId.Resume) is false
 
@@ -491,10 +560,12 @@ expect(target.qemu_virt_uart_base()).to_equal(0x10000000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("registers a single handler")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb",
@@ -515,10 +586,7 @@ expect(registry.is_supported(FeatureId.Resume)).to_equal(false)
 
 #### stores handlers sorted by rank _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
-3. \args: Ok
-4. \args: Ok
+- stores handlers sorted by rank
    - Expected: all.len() equals `3`
    - Expected: all[0].rank equals `0`
    - Expected: all[1].rank equals `1`
@@ -528,10 +596,12 @@ expect(registry.is_supported(FeatureId.Resume)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores handlers sorted by rank")
 var registry = FeatureRegistry.empty()
 # Register rank 4 first
 registry.register(FeatureHandler.of(
@@ -571,9 +641,7 @@ expect(all[2].rank).to_equal(4)
 
 #### picks lowest rank handler _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
-3. \args: Ok
+- picks lowest rank handler
    - Expected: best.rank equals `0`
    - Expected: best.backend_name equals `gdb`
 
@@ -581,10 +649,12 @@ expect(all[2].rank).to_equal(4)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("picks lowest rank handler")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.ReadLocals, 0, "gdb",
@@ -612,8 +682,7 @@ expect(best.backend_name).to_equal("gdb")
 
 #### falls back to emulation when native unavailable _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- falls back to emulation when native unavailable
    - Expected: best.rank equals `3`
    - Expected: best.backend_name equals `emulation`
 
@@ -621,10 +690,12 @@ expect(best.backend_name).to_equal("gdb")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("falls back to emulation when native unavailable")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.FlashProgram, 3, "emulation",
@@ -647,16 +718,22 @@ expect(best.backend_name).to_equal("emulation")
 
 #### returns error for unsupported feature _(slow)_
 
+- returns error for unsupported feature
+   - Expected: result.err == nil is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns error for unsupported feature")
 val registry = FeatureRegistry.empty()
 val result = registry.best_handler(FeatureId.TraceCapture)
-expect(result.err.?).to_equal(true)
+expect(result.err == nil).to_equal(false)
 ```
 
 </details>
@@ -671,18 +748,19 @@ expect(result.err.?).to_equal(true)
 
 #### executes best handler _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- executes best handler
    - Expected: result.unwrap() equals `halted_via_gdb`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("executes best handler")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb",
@@ -706,20 +784,19 @@ expect(result.unwrap()).to_equal("halted_via_gdb")
 
 #### lists supported features _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. FeatureId Halt, 0, "gdb", \args: Ok
-3. FeatureId Resume, 0, "gdb", \args: Ok
-4. FeatureId ReadLocals, 0, "gdb", \args: Ok
+- lists supported features
    - Expected: supported.len() equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("lists supported features")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
@@ -745,20 +822,19 @@ expect(supported.len()).to_equal(3)
 
 #### counts total handlers _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. FeatureId Halt, 0, "gdb", \args: Ok
-3. FeatureId Halt, 1, "t32", \args: Ok
-4. FeatureId Resume, 0, "gdb", \args: Ok
+- counts total handlers
    - Expected: registry.handler_count() equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("counts total handlers")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
@@ -783,8 +859,7 @@ expect(registry.handler_count()).to_equal(3)
 
 #### generates capabilities report _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. FeatureId Halt, 0, "gdb", \args: Ok
+- generates capabilities report
    - Expected: report contains `Halt`
    - Expected: report contains `gdb`
    - Expected: report contains `native`
@@ -793,10 +868,12 @@ expect(registry.handler_count()).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates capabilities report")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "GDB halt cmd"
@@ -822,20 +899,21 @@ expect(report.contains("native")).to_equal(true)
 
 #### parses done result _(slow)_
 
-1. GdbMiRecord Result
+- parses done result
    - Expected: token equals `42`
    - Expected: cls equals `done`
    - Expected: data.get("value") ?? "" equals `hello`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses done result")
 val record = GdbMiParser.parse_line("42^done,value=\"hello\"")
 match record:
     GdbMiRecord.Result(token, cls, data):
@@ -856,13 +934,19 @@ match record:
 
 #### parses error result _(slow)_
 
+- parses error result
+   - Expected: record.is_error() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses error result")
 val record = GdbMiParser.parse_line("5^error,msg=\"unknown command\"")
 expect(record.is_error()).to_equal(true)
 ```
@@ -877,18 +961,19 @@ expect(record.is_error()).to_equal(true)
 
 #### parses result without token _(slow)_
 
-1. GdbMiRecord Result
+- parses result without token
    - Expected: cls equals `done`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses result without token")
 val record = GdbMiParser.parse_line("^done")
 match record:
     GdbMiRecord.Result(token, cls, data):
@@ -909,20 +994,22 @@ match record:
 
 #### parses stopped event _(slow)_
 
-1. GdbMiRecord Async
+- parses stopped event
+   - Expected: record.is_stopped() is true
    - Expected: cls equals `stopped`
    - Expected: data.get("reason") ?? "" equals `breakpoint-hit`
    - Expected: data.get("bkptno") ?? "" equals `1`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses stopped event")
 val record = GdbMiParser.parse_line("*stopped,reason=\"breakpoint-hit\",bkptno=\"1\"")
 expect(record.is_stopped()).to_equal(true)
 match record:
@@ -944,18 +1031,19 @@ match record:
 
 #### parses thread-created notification _(slow)_
 
-1. GdbMiRecord Async
+- parses thread-created notification
    - Expected: cls equals `thread-created`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses thread-created notification")
 val record = GdbMiParser.parse_line("=thread-created,id=\"1\"")
 match record:
     GdbMiRecord.Async(cls, data):
@@ -976,19 +1064,20 @@ match record:
 
 #### parses console output _(slow)_
 
-1. GdbMiRecord Stream
+- parses console output
    - Expected: kind equals `console`
    - Expected: content contains `Hello World`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses console output")
 val record = GdbMiParser.parse_line("~\"Hello World\\n\"")
 match record:
     GdbMiRecord.Stream(kind, content):
@@ -1008,18 +1097,19 @@ match record:
 
 #### parses log output _(slow)_
 
-1. GdbMiRecord Stream
+- parses log output
    - Expected: kind equals `log`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses log output")
 val record = GdbMiParser.parse_line("&\"info\\n\"")
 match record:
     GdbMiRecord.Stream(kind, content):
@@ -1040,16 +1130,18 @@ match record:
 
 #### parses GDB prompt _(slow)_
 
-1. fail
+- parses GDB prompt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses GDB prompt")
 val record = GdbMiParser.parse_line("(gdb)")
 match record:
     GdbMiRecord.Prompt:
@@ -1070,13 +1162,20 @@ match record:
 
 #### parses simple key-value pairs _(slow)_
 
+- parses simple key-value pairs
+   - Expected: data.get("name") ?? "" equals `x`
+   - Expected: data.get("value") ?? "" equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses simple key-value pairs")
 val data = GdbMiParser.parse_key_values("name=\"x\",value=\"42\"")
 expect(data.get("name") ?? "").to_equal("x")
 expect(data.get("value") ?? "").to_equal("42")
@@ -1092,13 +1191,19 @@ expect(data.get("value") ?? "").to_equal("42")
 
 #### parses nested braces _(slow)_
 
+- parses nested braces
+   - Expected: bkpt contains `number`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses nested braces")
 val data = GdbMiParser.parse_key_values("bkpt={number=\"1\",type=\"breakpoint\"}")
 val bkpt = data.get("bkpt") ?? ""
 expect(bkpt.contains("number")).to_equal(true)
@@ -1116,13 +1221,22 @@ expect(bkpt.contains("number")).to_equal(true)
 
 #### parses list of tuples _(slow)_
 
+- parses list of tuples
+   - Expected: tuples.len() equals `2`
+   - Expected: tuples[0].get("name") ?? "" equals `x`
+   - Expected: tuples[0].get("value") ?? "" equals `42`
+   - Expected: tuples[1].get("name") ?? "" equals `y`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses list of tuples")
 val tuples = GdbMiParser.parse_tuple_list("[{name=\"x\",value=\"42\"},{name=\"y\",value=\"10\"}]")
 expect(tuples.len()).to_equal(2)
 expect(tuples[0].get("name") ?? "").to_equal("x")
@@ -1140,13 +1254,19 @@ expect(tuples[1].get("name") ?? "").to_equal("y")
 
 #### handles empty list _(slow)_
 
+- handles empty list
+   - Expected: tuples.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles empty list")
 val tuples = GdbMiParser.parse_tuple_list("[]")
 expect(tuples.len()).to_equal(0)
 ```
@@ -1163,13 +1283,21 @@ expect(tuples.len()).to_equal(0)
 
 #### parses hex values _(slow)_
 
+- parses hex values
+   - Expected: parse_hex_value("0x2a") equals `42`
+   - Expected: parse_hex_value("0xFF") equals `255`
+   - Expected: parse_hex_value("0x80000000") equals `0x80000000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses hex values")
 use app.debug.remote.protocol.gdb_mi_parser.parse_hex_value
 expect(parse_hex_value("0x2a")).to_equal(42)
 expect(parse_hex_value("0xFF")).to_equal(255)
@@ -1186,13 +1314,21 @@ expect(parse_hex_value("0x80000000")).to_equal(0x80000000)
 
 #### parses hex bytes _(slow)_
 
+- parses hex bytes
+   - Expected: parse_hex_byte("2a") equals `42`
+   - Expected: parse_hex_byte("ff") equals `255`
+   - Expected: parse_hex_byte("00") equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses hex bytes")
 use app.debug.remote.protocol.gdb_mi_parser.parse_hex_byte
 expect(parse_hex_byte("2a")).to_equal(42)
 expect(parse_hex_byte("ff")).to_equal(255)
@@ -1211,13 +1347,23 @@ expect(parse_hex_byte("00")).to_equal(0)
 
 #### defines correct rank ordering _(slow)_
 
+- defines correct rank ordering
+   - Expected: FeatureRank.NATIVE() equals `0`
+   - Expected: FeatureRank.BRIDGE() equals `1`
+   - Expected: FeatureRank.SECONDARY() equals `2`
+   - Expected: FeatureRank.EXTERNAL() equals `3`
+   - Expected: FeatureRank.EMULATED() equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defines correct rank ordering")
 expect(FeatureRank.NATIVE()).to_equal(0)
 expect(FeatureRank.BRIDGE()).to_equal(1)
 expect(FeatureRank.SECONDARY()).to_equal(2)
@@ -1235,13 +1381,19 @@ expect(FeatureRank.EMULATED()).to_equal(4)
 
 #### native is always preferred over bridge _(slow)_
 
+- native is always preferred over bridge
+   - Expected: FeatureRank.NATIVE() < FeatureRank.BRIDGE() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("native is always preferred over bridge")
 expect(FeatureRank.NATIVE() < FeatureRank.BRIDGE()).to_equal(true)
 ```
 
@@ -1255,13 +1407,19 @@ expect(FeatureRank.NATIVE() < FeatureRank.BRIDGE()).to_equal(true)
 
 #### bridge is preferred over emulated _(slow)_
 
+- bridge is preferred over emulated
+   - Expected: FeatureRank.BRIDGE() < FeatureRank.EMULATED() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("bridge is preferred over emulated")
 expect(FeatureRank.BRIDGE() < FeatureRank.EMULATED()).to_equal(true)
 ```
 
@@ -1277,13 +1435,23 @@ expect(FeatureRank.BRIDGE() < FeatureRank.EMULATED()).to_equal(true)
 
 #### covers execution control features _(slow)_
 
+- covers execution control features
+   - Expected: FeatureId.Halt.to_string() equals `Halt`
+   - Expected: FeatureId.Resume.to_string() equals `Resume`
+   - Expected: FeatureId.SingleStep.to_string() equals `SingleStep`
+   - Expected: FeatureId.StepOver.to_string() equals `StepOver`
+   - Expected: FeatureId.Reset.to_string() equals `Reset`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("covers execution control features")
 expect(FeatureId.Halt.to_string()).to_equal("Halt")
 expect(FeatureId.Resume.to_string()).to_equal("Resume")
 expect(FeatureId.SingleStep.to_string()).to_equal("SingleStep")
@@ -1301,13 +1469,20 @@ expect(FeatureId.Reset.to_string()).to_equal("Reset")
 
 #### covers memory features _(slow)_
 
+- covers memory features
+   - Expected: FeatureId.ReadMemory.to_string() equals `ReadMemory`
+   - Expected: FeatureId.WriteMemory.to_string() equals `WriteMemory`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("covers memory features")
 expect(FeatureId.ReadMemory.to_string()).to_equal("ReadMemory")
 expect(FeatureId.WriteMemory.to_string()).to_equal("WriteMemory")
 ```
@@ -1322,13 +1497,21 @@ expect(FeatureId.WriteMemory.to_string()).to_equal("WriteMemory")
 
 #### covers register features _(slow)_
 
+- covers register features
+   - Expected: FeatureId.ReadRegister.to_string() equals `ReadRegister`
+   - Expected: FeatureId.WriteRegister.to_string() equals `WriteRegister`
+   - Expected: FeatureId.ReadAllRegisters.to_string() equals `ReadAllRegisters`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("covers register features")
 expect(FeatureId.ReadRegister.to_string()).to_equal("ReadRegister")
 expect(FeatureId.WriteRegister.to_string()).to_equal("WriteRegister")
 expect(FeatureId.ReadAllRegisters.to_string()).to_equal("ReadAllRegisters")
@@ -1344,13 +1527,23 @@ expect(FeatureId.ReadAllRegisters.to_string()).to_equal("ReadAllRegisters")
 
 #### covers inspection features _(slow)_
 
+- covers inspection features
+   - Expected: FeatureId.ReadLocals.to_string() equals `ReadLocals`
+   - Expected: FeatureId.ReadGlobals.to_string() equals `ReadGlobals`
+   - Expected: FeatureId.ReadArguments.to_string() equals `ReadArguments`
+   - Expected: FeatureId.EvaluateExpression.to_string() equals `EvaluateExpression`
+   - Expected: FeatureId.ReadStackTrace.to_string() equals `ReadStackTrace`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("covers inspection features")
 expect(FeatureId.ReadLocals.to_string()).to_equal("ReadLocals")
 expect(FeatureId.ReadGlobals.to_string()).to_equal("ReadGlobals")
 expect(FeatureId.ReadArguments.to_string()).to_equal("ReadArguments")
@@ -1368,13 +1561,22 @@ expect(FeatureId.ReadStackTrace.to_string()).to_equal("ReadStackTrace")
 
 #### covers Trace32-unique features _(slow)_
 
+- covers Trace32-unique features
+   - Expected: FeatureId.FlashProgram.to_string() equals `FlashProgram`
+   - Expected: FeatureId.TraceCapture.to_string() equals `TraceCapture`
+   - Expected: FeatureId.CoverageCollect.to_string() equals `CoverageCollect`
+   - Expected: FeatureId.ProfileSample.to_string() equals `ProfileSample`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("covers Trace32-unique features")
 expect(FeatureId.FlashProgram.to_string()).to_equal("FlashProgram")
 expect(FeatureId.TraceCapture.to_string()).to_equal("TraceCapture")
 expect(FeatureId.CoverageCollect.to_string()).to_equal("CoverageCollect")
@@ -1391,13 +1593,20 @@ expect(FeatureId.ProfileSample.to_string()).to_equal("ProfileSample")
 
 #### supports equality comparison _(slow)_
 
+- supports equality comparison
+   - Expected: FeatureId.Halt.eq(FeatureId.Halt) is true
+   - Expected: FeatureId.Halt.eq(FeatureId.Resume) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("supports equality comparison")
 expect(FeatureId.Halt.eq(FeatureId.Halt)).to_equal(true)
 expect(FeatureId.Halt.eq(FeatureId.Resume)).to_equal(false)
 ```
@@ -1414,26 +1623,19 @@ expect(FeatureId.Halt.eq(FeatureId.Resume)).to_equal(false)
 
 #### connects GDB to QEMU and reads registers _(slow)_
 
-1. Ok
-2. Ok
-3. Ok
-4. Ok
+- connects GDB to QEMU and reads registers
    - Expected: regs.keys().len() > 0 is true
-5. Err
-6. backend detach
-7. Err
-8. qemu stop
-9. Err
-10. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("connects GDB to QEMU and reads registers")
 # BUG-RT: skip() doesn't halt execution and return doesn't work in itlambdas.
 # Guard entire test body with availability check.
 if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available():
@@ -1474,8 +1676,7 @@ if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_availabl
         Err(_):
             pass
 else:
-    val pending_reason = "required tools not available (QEMU/GDB/GCC)"
-    expect(pending_reason.len()).to_be_greater_than(0)
+    pending("required tools not available (QEMU/GDB/GCC)")
 ```
 
 </details>
@@ -1488,27 +1689,19 @@ else:
 
 #### sets breakpoint and inspects locals _(slow)_
 
-1. Ok
-2. Ok
-3. Ok
-4. backend run
-5. Ok
+- sets breakpoint and inspects locals
    - Expected: frames.len() > 0 is true
-6. Err
-7. backend detach
-8. Err
-9. qemu stop
-10. Err
-11. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets breakpoint and inspects locals")
 if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available():
     val build_result = build_rv32_test("test/remote/fixtures/hello_rv32.s", "/tmp/simple_test_rv32_bp.elf")
     match build_result:
@@ -1544,8 +1737,7 @@ if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_availabl
         Err(_):
             pass
 else:
-    val pending_reason = "required tools not available"
-    expect(pending_reason.len()).to_be_greater_than(0)
+    pending("required tools not available")
 ```
 
 </details>
@@ -1558,28 +1750,22 @@ else:
 
 #### verifies feature registry with real GDB _(slow)_
 
-1. Ok
-2. Ok
-3. Ok
-4. backend add emulation
+- verifies feature registry with real GDB
    - Expected: backend.supports(FeatureId.Halt) is true
    - Expected: backend.supports(FeatureId.Resume) is true
    - Expected: backend.supports(FeatureId.ReadLocals) is true
    - Expected: report contains `Halt`
-5. backend detach
-6. Err
-7. qemu stop
-8. Err
-9. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("verifies feature registry with real GDB")
 if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_available():
     val build_result = build_rv32_test("test/remote/fixtures/hello_rv32.s", "/tmp/simple_test_rv32_feat.elf")
     match build_result:
@@ -1612,8 +1798,7 @@ if is_rv32_qemu_available() and is_rv32_gdb_available() and is_rv32_gcc_availabl
         Err(_):
             pass
 else:
-    val pending_reason = "required tools not available"
-    expect(pending_reason.len()).to_be_greater_than(0)
+    pending("required tools not available")
 ```
 
 </details>
@@ -1630,13 +1815,20 @@ else:
 
 #### sets localhost and port 1234 _(slow)_
 
+- sets localhost and port 1234
+   - Expected: cfg.host equals `localhost`
+   - Expected: cfg.port equals `1234`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets localhost and port 1234")
 val cfg = DebugConfig.default_gdb("firmware.elf")
 expect(cfg.host).to_equal("localhost")
 expect(cfg.port).to_equal(1234)
@@ -1652,13 +1844,19 @@ expect(cfg.port).to_equal(1234)
 
 #### stores the program path _(slow)_
 
+- stores the program path
+   - Expected: cfg.program equals `my_app.elf`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores the program path")
 val cfg = DebugConfig.default_gdb("my_app.elf")
 expect(cfg.program).to_equal("my_app.elf")
 ```
@@ -1673,13 +1871,19 @@ expect(cfg.program).to_equal("my_app.elf")
 
 #### defaults to RiscV32 architecture _(slow)_
 
+- defaults to RiscV32 architecture
+   - Expected: arch.to_string() equals `riscv32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defaults to RiscV32 architecture")
 val cfg = DebugConfig.default_gdb("fw.elf")
 val arch = cfg.target
 expect(arch.to_string()).to_equal("riscv32")
@@ -1697,13 +1901,20 @@ expect(arch.to_string()).to_equal("riscv32")
 
 #### stores the given host and port _(slow)_
 
+- stores the given host and port
+   - Expected: cfg.host equals `10.0.0.5`
+   - Expected: cfg.port equals `20001`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores the given host and port")
 val cfg = DebugConfig.for_trace32("10.0.0.5", 20001)
 expect(cfg.host).to_equal("10.0.0.5")
 expect(cfg.port).to_equal(20001)
@@ -1719,13 +1930,19 @@ expect(cfg.port).to_equal(20001)
 
 #### sets backend option to trace32 _(slow)_
 
+- sets backend option to trace32
+   - Expected: backend equals `trace32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets backend option to trace32")
 val cfg = DebugConfig.for_trace32("10.0.0.5", 20001)
 val backend = cfg.options.get("backend") ?? ""
 expect(backend).to_equal("trace32")
@@ -1743,13 +1960,19 @@ expect(backend).to_equal("trace32")
 
 #### sets backend option to trace32-gdb _(slow)_
 
+- sets backend option to trace32-gdb
+   - Expected: backend equals `trace32-gdb`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets backend option to trace32-gdb")
 val cfg = DebugConfig.for_trace32_gdb("192.168.1.1", 3333)
 val backend = cfg.options.get("backend") ?? ""
 expect(backend).to_equal("trace32-gdb")
@@ -1765,13 +1988,20 @@ expect(backend).to_equal("trace32-gdb")
 
 #### stores host and port correctly _(slow)_
 
+- stores host and port correctly
+   - Expected: cfg.host equals `192.168.1.1`
+   - Expected: cfg.port equals `3333`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores host and port correctly")
 val cfg = DebugConfig.for_trace32_gdb("192.168.1.1", 3333)
 expect(cfg.host).to_equal("192.168.1.1")
 expect(cfg.port).to_equal(3333)
@@ -1789,13 +2019,19 @@ expect(cfg.port).to_equal(3333)
 
 #### formats Breakpoint with address _(slow)_
 
+- formats Breakpoint with address
+   - Expected: r.to_string() equals `breakpoint at 0x80000010`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats Breakpoint with address")
 val r = HaltReason.Breakpoint(addr: 0x80000010)
 expect(r.to_string()).to_equal("breakpoint at 0x80000010")
 ```
@@ -1810,13 +2046,19 @@ expect(r.to_string()).to_equal("breakpoint at 0x80000010")
 
 #### formats Watchpoint with address _(slow)_
 
+- formats Watchpoint with address
+   - Expected: r.to_string() equals `watchpoint at 0x20001000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats Watchpoint with address")
 val r = HaltReason.Watchpoint(addr: 0x20001000)
 expect(r.to_string()).to_equal("watchpoint at 0x20001000")
 ```
@@ -1831,13 +2073,19 @@ expect(r.to_string()).to_equal("watchpoint at 0x20001000")
 
 #### formats SingleStep _(slow)_
 
+- formats SingleStep
+   - Expected: r.to_string() equals `single step`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats SingleStep")
 val r = HaltReason.SingleStep
 expect(r.to_string()).to_equal("single step")
 ```
@@ -1852,13 +2100,19 @@ expect(r.to_string()).to_equal("single step")
 
 #### formats Halt _(slow)_
 
+- formats Halt
+   - Expected: r.to_string() equals `halt`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats Halt")
 val r = HaltReason.Halt
 expect(r.to_string()).to_equal("halt")
 ```
@@ -1873,13 +2127,19 @@ expect(r.to_string()).to_equal("halt")
 
 #### formats Exception with code _(slow)_
 
+- formats Exception with code
+   - Expected: r.to_string() equals `exception 3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats Exception with code")
 val r = HaltReason.Exception(code: 3)
 expect(r.to_string()).to_equal("exception 3")
 ```
@@ -1896,13 +2156,19 @@ expect(r.to_string()).to_equal("exception 3")
 
 #### formats TargetNotHalted _(slow)_
 
+- formats TargetNotHalted
+   - Expected: e.to_string() equals `target not halted`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats TargetNotHalted")
 val e = DebugError.TargetNotHalted
 expect(e.to_string()).to_equal("target not halted")
 ```
@@ -1917,13 +2183,19 @@ expect(e.to_string()).to_equal("target not halted")
 
 #### formats InvalidAddress _(slow)_
 
+- formats InvalidAddress
+   - Expected: e.to_string() equals `invalid address: 0xDEAD`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats InvalidAddress")
 val e = DebugError.InvalidAddress(addr: 0xDEAD)
 expect(e.to_string()).to_equal("invalid address: 0xDEAD")
 ```
@@ -1938,13 +2210,19 @@ expect(e.to_string()).to_equal("invalid address: 0xDEAD")
 
 #### formats InvalidRegister _(slow)_
 
+- formats InvalidRegister
+   - Expected: e.to_string() equals `invalid register: 99`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats InvalidRegister")
 val e = DebugError.InvalidRegister(index: 99)
 expect(e.to_string()).to_equal("invalid register: 99")
 ```
@@ -1959,13 +2237,19 @@ expect(e.to_string()).to_equal("invalid register: 99")
 
 #### formats ProtocolError _(slow)_
 
+- formats ProtocolError
+   - Expected: e.to_string() equals `protocol error: unexpected EOF`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats ProtocolError")
 val e = DebugError.ProtocolError(msg: "unexpected EOF")
 expect(e.to_string()).to_equal("protocol error: unexpected EOF")
 ```
@@ -1980,13 +2264,19 @@ expect(e.to_string()).to_equal("protocol error: unexpected EOF")
 
 #### formats NotSupported _(slow)_
 
+- formats NotSupported
+   - Expected: e.to_string() equals `not supported: flash write`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("formats NotSupported")
 val e = DebugError.NotSupported(msg: "flash write")
 expect(e.to_string()).to_equal("not supported: flash write")
 ```
@@ -2005,13 +2295,21 @@ expect(e.to_string()).to_equal("not supported: flash write")
 
 #### stores name value and type _(slow)_
 
+- stores name value and type
+   - Expected: v.name equals `count`
+   - Expected: v.value equals `42`
+   - Expected: v.type_name equals `int`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores name value and type")
 val v = GdbVariable.of("count", "42", "int")
 expect(v.name).to_equal("count")
 expect(v.value).to_equal("42")
@@ -2028,13 +2326,19 @@ expect(v.type_name).to_equal("int")
 
 #### defaults num_children to 0 _(slow)_
 
+- defaults num_children to 0
+   - Expected: v.num_children equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defaults num_children to 0")
 val v = GdbVariable.of("x", "1", "i32")
 expect(v.num_children).to_equal(0)
 ```
@@ -2049,13 +2353,19 @@ expect(v.num_children).to_equal(0)
 
 #### defaults has_more to false _(slow)_
 
+- defaults has_more to false
+   - Expected: v.has_more is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defaults has_more to false")
 val v = GdbVariable.of("y", "0", "bool")
 expect(v.has_more).to_equal(false)
 ```
@@ -2070,13 +2380,19 @@ expect(v.has_more).to_equal(false)
 
 #### handles pointer type name _(slow)_
 
+- handles pointer type name
+   - Expected: v.type_name equals `uint32_t *`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles pointer type name")
 val v = GdbVariable.of("ptr", "0x80001000", "uint32_t *")
 expect(v.type_name).to_equal("uint32_t *")
 ```
@@ -2095,7 +2411,7 @@ expect(v.type_name).to_equal("uint32_t *")
 
 #### stores feat rank and backend_name _(slow)_
 
-1. \args: Ok
+- stores feat rank and backend_name
    - Expected: h.rank equals `2`
    - Expected: h.backend_name equals `secondary`
 
@@ -2103,10 +2419,12 @@ expect(v.type_name).to_equal("uint32_t *")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores feat rank and backend_name")
 val h = FeatureHandler.of(
     FeatureId.Reset, 2, "secondary",
     \args: Ok("reset_ok"),
@@ -2126,17 +2444,19 @@ expect(h.backend_name).to_equal("secondary")
 
 #### stores description _(slow)_
 
-1. \args: Ok
+- stores description
    - Expected: h.description equals `GDB halt command`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores description")
 val h = FeatureHandler.of(
     FeatureId.Halt, 0, "gdb",
     \args: Ok("halted"),
@@ -2155,17 +2475,19 @@ expect(h.description).to_equal("GDB halt command")
 
 #### handler_fn returns expected result _(slow)_
 
-1. \args: Ok
+- handler_fn returns expected result
    - Expected: result.unwrap() equals `resumed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handler_fn returns expected result")
 val h = FeatureHandler.of(
     FeatureId.Resume, 0, "gdb",
     \args: Ok("resumed"),
@@ -2186,17 +2508,19 @@ expect(result.unwrap()).to_equal("resumed")
 
 #### handler_fn can receive args _(slow)_
 
-1. \args: Ok
+- handler_fn can receive args
    - Expected: result.unwrap() equals `0x80000000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handler_fn can receive args")
 val h = FeatureHandler.of(
     FeatureId.ReadMemory, 0, "gdb",
     \args: Ok(args[0]),
@@ -2221,13 +2545,19 @@ expect(result.unwrap()).to_equal("0x80000000")
 
 #### returns empty list for unknown feature _(slow)_
 
+- returns empty list for unknown feature
+   - Expected: handlers.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns empty list for unknown feature")
 val registry = FeatureRegistry.empty()
 val handlers = registry.all_handlers(FeatureId.TraceCapture)
 expect(handlers.len()).to_equal(0)
@@ -2245,18 +2575,19 @@ expect(handlers.len()).to_equal(0)
 
 #### returns true after registering the feature _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- returns true after registering the feature
    - Expected: registry.is_supported(FeatureId.SingleStep) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns true after registering the feature")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.SingleStep, 0, "gdb",
@@ -2276,18 +2607,19 @@ expect(registry.is_supported(FeatureId.SingleStep)).to_equal(true)
 
 #### returns false for an unregistered feature _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- returns false for an unregistered feature
    - Expected: registry.is_supported(FeatureId.SingleStep) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns false for an unregistered feature")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb",
@@ -2309,18 +2641,19 @@ expect(registry.is_supported(FeatureId.SingleStep)).to_equal(false)
 
 #### returns Ok value from handler _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- returns Ok value from handler
    - Expected: result.unwrap() equals `reset_done`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns Ok value from handler")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Reset, 0, "gdb",
@@ -2341,16 +2674,22 @@ expect(result.unwrap()).to_equal("reset_done")
 
 #### returns Err when no handler registered _(slow)_
 
+- returns Err when no handler registered
+   - Expected: result.err == nil is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns Err when no handler registered")
 val registry = FeatureRegistry.empty()
 val result = registry.execute(FeatureId.FlashProgram, [])
-expect(result.err.?).to_equal(true)
+expect(result.err == nil).to_equal(false)
 ```
 
 </details>
@@ -2365,20 +2704,19 @@ expect(result.err.?).to_equal(true)
 
 #### counts handlers across different features _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. FeatureId Halt, 0, "gdb", \args: Ok
-3. FeatureId Resume, 0, "gdb", \args: Ok
-4. FeatureId Reset, 0, "gdb", \args: Ok
+- counts handlers across different features
    - Expected: registry.handler_count() equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("counts handlers across different features")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
@@ -2404,9 +2742,7 @@ expect(registry.handler_count()).to_equal(3)
 
 #### includes all registered feature names _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. FeatureId ReadMemory, 0, "gdb", \args: Ok
-3. FeatureId WriteMemory, 0, "gdb", \args: Ok
+- includes all registered feature names
    - Expected: report contains `ReadMemory`
    - Expected: report contains `WriteMemory`
 
@@ -2414,10 +2750,12 @@ expect(registry.handler_count()).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("includes all registered feature names")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.ReadMemory, 0, "gdb", \args: Ok("ok"), "Read mem"
@@ -2440,18 +2778,19 @@ expect(report.contains("WriteMemory")).to_equal(true)
 
 #### labels native rank handlers as native _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. FeatureId Halt, 0, "gdb", \args: Ok
+- labels native rank handlers as native
    - Expected: report contains `native`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("labels native rank handlers as native")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "GDB halt"
@@ -2470,18 +2809,19 @@ expect(report.contains("native")).to_equal(true)
 
 #### labels emulated rank handlers as emulated _(slow)_
 
-1. var registry = FeatureRegistry empty
-2. \args: Ok
+- labels emulated rank handlers as emulated
    - Expected: report contains `emulated`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("labels emulated rank handlers as emulated")
 var registry = FeatureRegistry.empty()
 registry.register(FeatureHandler.of(
     FeatureId.TraceCapture, 4, "emulation",
@@ -2496,6 +2836,33 @@ expect(report.contains("emulated")).to_equal(true)
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Baremetal |
+| Status | Active |
+| Source | `test/02_integration/baremetal/remote_riscv32_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Remote Debug Core Types, RISC-V 32 Target, Feature Registry, GDB MI Parser, Feature Rank Constants, FeatureId, QEMU Integration, DebugConfig class methods, HaltReason enum methods, DebugError additional variants, GdbVariable class methods, FeatureHandler class methods, FeatureRegistry impl methods.
+- Remote Debug Core Types
+- RISC-V 32 Target
+- Feature Registry
+- GDB MI Parser
+- Feature Rank Constants
+- FeatureId
+- QEMU Integration
+- DebugConfig class methods
+- HaltReason enum methods
+- DebugError additional variants
+- GdbVariable class methods
+- FeatureHandler class methods
+- FeatureRegistry impl methods
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -2508,3 +2875,54 @@ expect(report.contains("emulated")).to_equal(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d21b85206754fe7b5247aff473d520a5323f31a1ae61594e5b91f6881b2b933f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d21b85206754fe7b5247aff473d520a5323f31a1ae61594e5b91f6881b2b933f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d21b85206754fe7b5247aff473d520a5323f31a1ae61594e5b91f6881b2b933f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/02_integration/baremetal/remote_riscv32_spec.spl
+mirror: doc/06_spec/02_integration/baremetal/remote_riscv32_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/baremetal/remote_riscv32_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/baremetal/remote_riscv32_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/baremetal/remote_riscv32_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 47 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/baremetal/remote_riscv32_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts to string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/baremetal/remote_riscv32_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts to string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/baremetal/remote_riscv32_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates default GDB config' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

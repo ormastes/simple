@@ -1,29 +1,6 @@
 # Database Query Specification
 
-> <details>
-
-<!-- sdn-diagram:id=database_query_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=database_query_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-database_query_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=database_query_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering QueryBuilder.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,34 +20,22 @@ database_query_spec -> std
 
 #### filters rows by equality _(slow)_
 
-1. var table = SdnTable
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. var row = SdnRow
 
-3. row set
-
-4. row set
-
-5. row set
-
-6. table add row
-
-7. var query = QueryBuilder for table
-
-8. var filtered = query filter by
-
-9. check
-
-10. check
+- filters rows by equality
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters rows by equality")
 # Create test table
 var table = SdnTable(name: "users", columns: ["id", "name", "age"], rows: [], index: {})
 
@@ -101,36 +66,18 @@ check(results[0].get("name")? == "user_2")
 
 #### filters rows by comparison operators _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. var query gt = QueryBuilder for table
-
-7. var filtered gt = query gt filter by
-
-8. check
-
-9. var query lt = QueryBuilder for table
-
-10. var filtered lt = query lt filter by
-
-11. check
+- filters rows by comparison operators
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters rows by comparison operators")
 var table = SdnTable(name: "items", columns: ["id", "price"], rows: [], index: {})
 
 # Add items with different prices
@@ -167,40 +114,18 @@ check(results_lt.len() == 3)
 
 #### filters rows by contains operator _(slow)_
 
-1. var table = SdnTable
-
-2. 
-
-3. 
-
-4. 
-
-5. 
-
-6. var row = SdnRow
-
-7. row set
-
-8. row set
-
-9. table add row
-
-10. var query = QueryBuilder for table
-
-11. var filtered = query filter by
-
-12. check
-
-13. check
+- filters rows by contains operator
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters rows by contains operator")
 var table = SdnTable(name: "files", columns: ["path", "extension"], rows: [], index: {})
 
 # Add files
@@ -237,32 +162,18 @@ check(first_path.contains("src"))
 
 #### filters with in operator _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. var query = QueryBuilder for table
-
-7. var filtered = query filter in
-
-8. check
-
-9. check
+- filters with in operator
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters with in operator")
 var table = SdnTable(name: "issues", columns: ["id", "status"], rows: [], index: {})
 val statuses = ["Open", "Closed", "Open", "Pending", "Closed"]
 for idx in 0..statuses.len():
@@ -289,44 +200,18 @@ check(results[0].get("status")? != "Pending")
 
 #### chains multiple filters _(slow)_
 
-1. var table = SdnTable
-
-2. 
-
-3. 
-
-4. 
-
-5. 
-
-6. 
-
-7. var row = SdnRow
-
-8. row set
-
-9. row set
-
-10. row set
-
-11. table add row
-
-12. var query = QueryBuilder for table
-
-13. var step1 = query filter by
-
-14. var step2 = step1 filter by
-
-15. check
+- chains multiple filters
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("chains multiple filters")
 var table = SdnTable(name: "products", columns: ["name", "category", "price"], rows: [], index: {})
 
 # Add products
@@ -370,32 +255,18 @@ check(results.len() >= 2)
 
 #### filters only valid rows _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. row set
-
-6. table add row
-
-7. var query = QueryBuilder for table
-
-8. var valid query = query only valid
-
-9. check
+- filters only valid rows
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters only valid rows")
 var table = SdnTable(name: "data", columns: ["id", "value", "valid"], rows: [], index: {})
 
 # Add rows (some invalid)
@@ -426,30 +297,18 @@ check(results.len() == 3)
 
 #### filters rows by prefix and suffix _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. table add row
-
-5. var prefix query = QueryBuilder for table
-
-6. check
-
-7. var suffix query = QueryBuilder for table
-
-8. check
+- filters rows by prefix and suffix
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters rows by prefix and suffix")
 var table = SdnTable(name: "paths", columns: ["path"], rows: [], index: {})
 val paths = ["src/main.spl", "src/test.txt", "doc/readme.md", "main.spl"]
 for path in paths:
@@ -476,38 +335,18 @@ check(suffix_results.len() == 2)
 
 #### preserves query matches across batch boundaries _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. row set
-
-6. row set
-
-7. row set
-
-8. table add row
-
-9.  filter by
-
-10.  filter by
-
-11.  execute
-
-12. check
+- preserves query matches across batch boundaries
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("preserves query matches across batch boundaries")
 var table = SdnTable(name: "batch_paths", columns: ["id", "path", "valid"], rows: [], index: {})
 for idx in 0..130:
     var row = SdnRow(fields: {})
@@ -538,30 +377,18 @@ check(results.len() == 3)
 
 #### orders results ascending _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. check
-
-7. check
-
-8. check
+- orders results ascending
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("orders results ascending")
 var table = SdnTable(name: "scores", columns: ["id", "score"], rows: [], index: {})
 val scores = [("a", "30"), ("b", "10"), ("c", "20")]
 for score in scores:
@@ -586,30 +413,18 @@ check(results[2].get("score")? == "30")
 
 #### orders results descending _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6. check
-
-7. check
-
-8. check
+- orders results descending
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("orders results descending")
 var table = SdnTable(name: "scores", columns: ["id", "score"], rows: [], index: {})
 val scores = [("a", "30"), ("b", "10"), ("c", "20")]
 for score in scores:
@@ -634,28 +449,18 @@ check(results[2].get("score")? == "10")
 
 #### limits number of results _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. table add row
-
-5. check
-
-6. check
-
-7. check
+- limits number of results
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("limits number of results")
 var table = SdnTable(name: "numbers", columns: ["id"], rows: [], index: {})
 for i in 0..5:
     var row = SdnRow(fields: {})
@@ -678,38 +483,18 @@ check(results[1].get("id")? == "1")
 
 #### combines filter, order, and limit _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-
-6.  filter by
-
-7.  order by
-
-8.  take
-
-9.  execute
-
-10. check
-
-11. check
-
-12. check
+- combines filter, order, and limit
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("combines filter, order, and limit")
 var table = SdnTable(name: "items", columns: ["id", "kind"], rows: [], index: {})
 val items = [("4", "c"), ("1", "b"), ("3", "b"), ("2", "a")]
 for item in items:
@@ -739,18 +524,18 @@ check(results[1].get("id")? == "3")
 
 #### returns empty for empty table _(slow)_
 
-1. var query = QueryBuilder for table
-
-2. check
+- returns empty for empty table
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns empty for empty table")
 val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
 
 var query = QueryBuilder.for_table(table)
@@ -771,12 +556,12 @@ check(results.len() == 0)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/database_query_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering QueryBuilder.
 - QueryBuilder
 
 ## Scenario Summary
@@ -791,3 +576,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `042b81b25b99ef2faa5b3f4d3d6562bccf828d6df0682ba2f0857f9d2ccb09e7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `042b81b25b99ef2faa5b3f4d3d6562bccf828d6df0682ba2f0857f9d2ccb09e7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `042b81b25b99ef2faa5b3f4d3d6562bccf828d6df0682ba2f0857f9d2ccb09e7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/lib/database_query_spec.spl
+mirror: doc/06_spec/02_integration/lib/database_query_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/database_query_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/database_query_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/database_query_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'filters rows by equality' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_query_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'filters rows by comparison operators' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_query_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'filters rows by contains operator' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

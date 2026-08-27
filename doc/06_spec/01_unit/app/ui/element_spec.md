@@ -1,29 +1,6 @@
 # Element Specification
 
-> 1. expect true  # NodeId new
-
-<!-- sdn-diagram:id=element_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=element_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-element_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=element_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering NodeId, ElementKind, Element, ElementTree.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,16 +17,22 @@ element_spec
 
 #### creates unique IDs
 
-1. expect true  # NodeId new
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates unique IDs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates unique IDs")
 expect true  # NodeId.new(1).value() == 1
 ```
 
@@ -57,16 +40,18 @@ expect true  # NodeId.new(1).value() == 1
 
 #### generates sequential IDs
 
-1. expect true  # id next
+- generates sequential IDs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("generates sequential IDs")
 expect true  # id.next().value() == id.value() + 1
 ```
 
@@ -74,16 +59,18 @@ expect true  # id.next().value() == id.value() + 1
 
 #### compares for equality
 
-1. expect true  # NodeId new
+- compares for equality
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compares for equality")
 expect true  # NodeId.new(42) == NodeId.new(42)
 ```
 
@@ -93,13 +80,18 @@ expect true  # NodeId.new(42) == NodeId.new(42)
 
 #### identifies block elements
 
+- identifies block elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identifies block elements")
 expect true  # Div, Box, Paragraph, Column are block
 ```
 
@@ -107,13 +99,18 @@ expect true  # Div, Box, Paragraph, Column are block
 
 #### identifies inline elements
 
+- identifies inline elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identifies inline elements")
 expect true  # Span, Text, Button are inline
 ```
 
@@ -121,13 +118,18 @@ expect true  # Span, Text, Button are inline
 
 #### identifies interactive elements
 
+- identifies interactive elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identifies interactive elements")
 expect true  # Button, Input, Checkbox are interactive
 ```
 
@@ -135,13 +137,18 @@ expect true  # Button, Input, Checkbox are interactive
 
 #### provides HTML tag names
 
+- provides HTML tag names
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides HTML tag names")
 expect true  # Div->"div", Button->"button", etc.
 ```
 
@@ -151,16 +158,18 @@ expect true  # Div->"div", Button->"button", etc.
 
 #### creates elements with given kind
 
-1. expect true  # Element new
+- creates elements with given kind
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates elements with given kind")
 expect true  # Element.new(id, ElementKind.Div)
 ```
 
@@ -168,16 +177,18 @@ expect true  # Element.new(id, ElementKind.Div)
 
 #### creates text elements
 
-1. expect true  # Element text
+- creates text elements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates text elements")
 expect true  # Element.text(id, "Hello, World!")
 ```
 
@@ -185,16 +196,18 @@ expect true  # Element.text(id, "Hello, World!")
 
 #### creates button elements with tab index
 
-1. expect true  # Element button
+- creates button elements with tab index
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates button elements with tab index")
 expect true  # Element.button(id, "Click Me")
 ```
 
@@ -202,16 +215,18 @@ expect true  # Element.button(id, "Click Me")
 
 #### supports builder pattern
 
-1. expect true  #  with key
+- supports builder pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("supports builder pattern")
 expect true  # .with_key().with_attr().with_class().with_style()
 ```
 
@@ -219,16 +234,18 @@ expect true  # .with_key().with_attr().with_class().with_style()
 
 #### adds children
 
-1. expect true  #  with child
+- adds children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds children")
 expect true  # .with_child(Element.text(id, "Child"))
 ```
 
@@ -236,16 +253,18 @@ expect true  # .with_child(Element.text(id, "Child"))
 
 #### finds child by index
 
-1. expect true  # parent child at
+- finds child by index
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds child by index")
 expect true  # parent.child_at(0)
 ```
 
@@ -253,16 +272,18 @@ expect true  # parent.child_at(0)
 
 #### finds child by key
 
-1. expect true  # parent find by key
+- finds child by key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds child by key")
 expect true  # parent.find_by_key("special")
 ```
 
@@ -270,16 +291,18 @@ expect true  # parent.find_by_key("special")
 
 #### finds descendant by ID
 
-1. expect true  # root find by id
+- finds descendant by ID
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds descendant by ID")
 expect true  # root.find_by_id(grandchild_id)
 ```
 
@@ -287,16 +310,18 @@ expect true  # root.find_by_id(grandchild_id)
 
 #### manages focus state
 
-1. expect true  # elem focus
+- manages focus state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("manages focus state")
 expect true  # elem.focus(), elem.blur(), elem.focused
 ```
 
@@ -306,16 +331,18 @@ expect true  # elem.focus(), elem.blur(), elem.focused
 
 #### creates tree with root element
 
-1. expect true  # ElementTree new
+- creates tree with root element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates tree with root element")
 expect true  # ElementTree.new(ElementKind.Div)
 ```
 
@@ -323,16 +350,18 @@ expect true  # ElementTree.new(ElementKind.Div)
 
 #### allocates sequential node IDs
 
-1. expect true  # tree alloc id
+- allocates sequential node IDs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allocates sequential node IDs")
 expect true  # tree.alloc_id()
 ```
 
@@ -340,16 +369,18 @@ expect true  # tree.alloc_id()
 
 #### manages focus
 
-1. expect true  # tree set focus
+- manages focus
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("manages focus")
 expect true  # tree.set_focus(id), tree.focused()
 ```
 
@@ -357,16 +388,18 @@ expect true  # tree.set_focus(id), tree.focused()
 
 #### cycles focus through focusable elements
 
-1. expect true  # tree focus next
+- cycles focus through focusable elements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cycles focus through focusable elements")
 expect true  # tree.focus_next(), tree.focus_prev()
 ```
 
@@ -379,12 +412,12 @@ expect true  # tree.focus_next(), tree.focus_prev()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/element_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering NodeId, ElementKind, Element, ElementTree.
 - NodeId
 - ElementKind
 - Element
@@ -402,3 +435,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4b429713ffd8e36fe2cb104241dca1b6b4ad71bb7d0974c1ea4f47eba986c03a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4b429713ffd8e36fe2cb104241dca1b6b4ad71bb7d0974c1ea4f47eba986c03a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4b429713ffd8e36fe2cb104241dca1b6b4ad71bb7d0974c1ea4f47eba986c03a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/element_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/element_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/element_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/element_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/element_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates unique IDs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/element_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates sequential IDs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/element_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares for equality' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

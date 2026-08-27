@@ -1,30 +1,6 @@
 # Tooling Gate Specification
 
-> <details>
-
-<!-- sdn-diagram:id=tooling_gate_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=tooling_gate_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-tooling_gate_spec -> std
-tooling_gate_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=tooling_gate_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering app.verify.tooling_gate, is_tooling_sensitive_path, evaluate_evidence_input, build_tooling_verify_report.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,13 +19,22 @@ tooling_gate_spec -> app
 
 #### matches wrapper and mcp paths
 
+- matches wrapper and mcp paths
+   - Expected: is_tooling_sensitive_path("bin/t32_mcp_server") is true
+   - Expected: is_tooling_sensitive_path("src/app/mcp/main.spl") is true
+   - Expected: is_tooling_sensitive_path("src/app/lsp/main.spl") is true
+   - Expected: is_tooling_sensitive_path(".mcp.json") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("matches wrapper and mcp paths")
 expect(is_tooling_sensitive_path("bin/t32_mcp_server")).to_equal(true)
 expect(is_tooling_sensitive_path("src/app/mcp/main.spl")).to_equal(true)
 expect(is_tooling_sensitive_path("src/app/lsp/main.spl")).to_equal(true)
@@ -60,13 +45,20 @@ expect(is_tooling_sensitive_path(".mcp.json")).to_equal(true)
 
 #### ignores unrelated docs
 
+- ignores unrelated docs
+   - Expected: is_tooling_sensitive_path("doc/03_plan/example.md") is false
+   - Expected: is_tooling_sensitive_path("src/lib/common/date.spl") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ignores unrelated docs")
 expect(is_tooling_sensitive_path("doc/03_plan/example.md")).to_equal(false)
 expect(is_tooling_sensitive_path("src/lib/common/date.spl")).to_equal(false)
 ```
@@ -77,13 +69,19 @@ expect(is_tooling_sensitive_path("src/lib/common/date.spl")).to_equal(false)
 
 #### fails when an artifact is missing
 
+- fails when an artifact is missing
+   - Expected: finding.level equals `FAIL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails when an artifact is missing")
 val finding = evaluate_evidence_input(make_evidence_input(
     "Wrapper audit",
     "doc/09_report/verify/mcp_wrapper_audit.md",
@@ -99,13 +97,19 @@ expect(finding.message).to_contain("missing")
 
 #### fails when performance evidence misses required tokens
 
+- fails when performance evidence misses required tokens
+   - Expected: finding.level equals `FAIL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails when performance evidence misses required tokens")
 val finding = evaluate_evidence_input(make_evidence_input(
     "Performance evidence",
     "doc/09_report/verify/mcp_perf_evidence.md",
@@ -122,13 +126,19 @@ expect(finding.message).to_contain("max rss")
 
 #### warns when an artifact reports warn
 
+- warns when an artifact reports warn
+   - Expected: finding.level equals `WARN`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("warns when an artifact reports warn")
 val finding = evaluate_evidence_input(make_evidence_input(
     "Request-path audit",
     "doc/09_report/verify/mcp_request_path_audit.md",
@@ -145,9 +155,7 @@ expect(finding.level).to_equal("WARN")
 
 #### skips the tooling gate for non-tooling changes
 
-1. make evidence input
-2. make evidence input
-3. make evidence input
+- skips the tooling gate for non-tooling changes
    - Expected: report.status equals `PASS`
    - Expected: report.tooling_paths.len() equals `0`
 
@@ -155,10 +163,12 @@ expect(finding.level).to_equal("WARN")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("skips the tooling gate for non-tooling changes")
 val report = build_tooling_verify_report(
     "current changes",
     ["doc/03_plan/example.md", "README.md"],
@@ -176,19 +186,19 @@ expect(rendered).to_contain("tooling gate skipped")
 
 #### fails when tooling changes are present and evidence is missing
 
-1. make evidence input
-2. make evidence input
-3. make evidence input
+- fails when tooling changes are present and evidence is missing
    - Expected: report.status equals `FAIL`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails when tooling changes are present and evidence is missing")
 val report = build_tooling_verify_report(
     "current changes",
     ["src/app/mcp/main.spl", "src/app/verify/main.spl"],
@@ -207,19 +217,19 @@ expect(rendered).to_contain("STATUS: FAIL")
 
 #### returns warn when evidence reports warn without failures
 
-1. make evidence input
-2. make evidence input
-3. make evidence input
+- returns warn when evidence reports warn without failures
    - Expected: report.status equals `WARN`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns warn when evidence reports warn without failures")
 val report = build_tooling_verify_report(
     "current changes",
     ["bin/simple_mcp_server"],
@@ -242,12 +252,12 @@ expect(rendered).to_contain("STATUS: WARN")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/verify/tooling_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering app.verify.tooling_gate, is_tooling_sensitive_path, evaluate_evidence_input, build_tooling_verify_report.
 - app.verify.tooling_gate
 - is_tooling_sensitive_path
 - evaluate_evidence_input
@@ -265,3 +275,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8a13c276b281facb41ca2058bc5baa715d8deb611b1d5834f6d851d9b8ce1eb3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8a13c276b281facb41ca2058bc5baa715d8deb611b1d5834f6d851d9b8ce1eb3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8a13c276b281facb41ca2058bc5baa715d8deb611b1d5834f6d851d9b8ce1eb3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/verify/tooling_gate_spec.spl
+mirror: doc/06_spec/01_unit/app/verify/tooling_gate_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/verify/tooling_gate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/verify/tooling_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/verify/tooling_gate_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/verify/tooling_gate_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches wrapper and mcp paths' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/verify/tooling_gate_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ignores unrelated docs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/verify/tooling_gate_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails when an artifact is missing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

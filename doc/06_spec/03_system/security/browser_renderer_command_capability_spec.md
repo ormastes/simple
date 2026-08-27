@@ -1,85 +1,114 @@
 # Browser renderer command capability
 
-> SBR2 renderer authority is created only by the hosted parent, becomes
-> admissible only after a complete host-wire write, is echoed unchanged by the
-> worker, and is consumed before broker or frame authority.
+> Exercises the SBR2 capability codec and a deterministic model of the private
 
 | Tests | Active | Skipped | Pending |
-|---|---:|---:|---:|
+|-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
 
-## Scope and evidence boundary
+<details>
+<summary>Full Scenario Manual</summary>
 
-The executable scenario is
-`test/03_system/security/browser_renderer_command_capability_spec.spl`.
-It covers REQ-WEB-BROWSER-014, REQ-WEB-BROWSER-021,
-and NFR-WEB-BROWSER-010. It makes no fuzz/corpus claim.
+# Browser renderer command capability
 
-This checked-in manual records SBR2 codec oracles, the real
-`HostedBrowserRendererProcess` cancellation/admission methods, and a
-deterministic 10,000-cycle counter model. It proves exact issue/consume counters
-and zero retained model-token bytes. It does **not** claim runtime latency,
-RSS, subprocess execution, Draw IR pixels, fuzz/corpus coverage, or a passing
-pure-Simple runner. Those promotion claims remain gated on the admitted current
-full pure-Simple CLI.
+Exercises the SBR2 capability codec and a deterministic model of the private
 
-## Scenario
+## At a Glance
 
-### should bind one-use SBR2 authority to each complete host wire
+| Field | Value |
+|-------|-------|
+| Category | Security |
+| Status | Active |
+| Source | `test/03_system/security/browser_renderer_command_capability_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-1. **Admit the trusted capability owner**
-   - `setup_trusted_capability_owner_fixture`
-   - `check_trusted_capability_owner_admitted`
-   - Accept exactly 32 lowercase nonzero hexadecimal bytes.
-   - Reject empty, uppercase, all-zero, legacy SBR1 input, and legacy nested
-     network/fetch/frame payload versions; production uses SBRN2/SBRQ5/SBRF9.
+Exercises the SBR2 capability codec and a deterministic model of the private
+hosted-parent issue/consume lifecycle. The 10,000-cycle receipt is a static
+counter model; it is not runtime latency, RSS, entropy, or pixel evidence.
 
-2. **Issue one fresh command token**
-   - `check_fresh_command_token_issued`
-   - Keep a split write inadmissible through byte 31.
-   - Admit the tuple only after the final byte completes the SBR2 wire.
-   - Bind generation, root command request, immediate wire, and token.
+## Scenarios
 
-3. **Reject an unissued command token**
-   - `check_unissued_command_token_rejected`
-   - Reject predicted, wrong-root, wrong-wire, wrong-generation, and replayed
-     tuples before granting authority.
-   - Accept one conforming echo exactly once.
-   - Seed a partially written old command, call real
-     `HostedBrowserRendererProcess.begin_stop`, assert `stop_after_write`,
-     complete the old write, invoke `_begin_stop_after_write`, and leave the
-     new Stop wire partial. Also drive `begin_navigate` replacing a fully
-     written command. A queued old reply is classified from its bounded nested
-     `reply_to` as stale before capability admission, leaves the new
-     staged/issued tuple untouched, keeps the process active, and preserves the
-     admitted image. A future reply rejects; only after the new Stop offset
-     reaches its full length does the test issue its tuple, and the current
-     reply alone consumes authority.
+### REQ-WEB-BROWSER-014: renderer command capability
 
-4. **Retire all capability material**
-   - `check_all_capability_material_retired`
-   - Stop/cancel retirement preserves the last admitted image witness.
-   - Terminal retirement clears image state.
-   - The 10,000-cycle deterministic model ends with 10,000 issues,
-     10,000 consumes, zero failures, and zero staged/issued token bytes.
+#### should bind one-use SBR2 authority to each complete host wire
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-The complete runnable source, including every setup/checker implementation and
-all built-in matcher assertions, is retained at
-`test/03_system/security/browser_renderer_command_capability_spec.spl`.
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val fixture = setup_trusted_capability_owner_fixture()
-step("Admit the trusted capability owner")
-check_trusted_capability_owner_admitted(fixture)
-step("Issue one fresh command token")
-check_fresh_command_token_issued(fixture)
-step("Reject an unissued command token")
-check_unissued_command_token_rejected(fixture)
-step("Retire all capability material")
-check_all_capability_material_retired(fixture)
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-014
 ```
 
 </details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-014`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cc58e225a32fd9d8ee1237d65a30a5e524d1d4c3470bf93fca97ea36716f0808`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cc58e225a32fd9d8ee1237d65a30a5e524d1d4c3470bf93fca97ea36716f0808`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cc58e225a32fd9d8ee1237d65a30a5e524d1d4c3470bf93fca97ea36716f0808`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/security/browser_renderer_command_capability_spec.spl
+mirror: doc/06_spec/03_system/security/browser_renderer_command_capability_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/security/browser_renderer_command_capability_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/security/browser_renderer_command_capability_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/security/browser_renderer_command_capability_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/security/browser_renderer_command_capability_spec.spl:394:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should bind one-use SBR2 authority to each complete host wire' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/security/browser_renderer_command_capability_spec.spl:394:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should bind one-use SBR2 authority to each complete host wire' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

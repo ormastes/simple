@@ -20,7 +20,7 @@ Release-blocking native evidence for Engine2D and Engine3D font texture
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` |
-| Updated | 2026-07-19 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Release-blocking native evidence for Engine2D and Engine3D font texture
@@ -34,13 +34,22 @@ textures cannot satisfy this spec.
 
 #### should reject missing or noncanonical SimpleOS artifact provenance
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should reject missing or noncanonical SimpleOS artifact provenance
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject missing or noncanonical SimpleOS artifact provenance")
 expect(_simpleos_artifact_metadata_valid("")).to_be(false)
 val copied = _simpleos_canonical_artifact_record().replace(
     SIMPLEOS_WRAPPER_PATH, "/tmp/copied-simpleos-evidence.shs")
@@ -51,16 +60,18 @@ expect(_simpleos_artifact_metadata_valid(copied)).to_be(false)
 
 #### should reject malformed or ambiguous SimpleOS artifact hashes
 
--  simpleos canonical artifact record
+- should reject malformed or ambiguous SimpleOS artifact hashes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject malformed or ambiguous SimpleOS artifact hashes")
 val uppercase = _simpleos_canonical_artifact_record().replace(
     SIMPLEOS_ZERO_SHA256, "A000000000000000000000000000000000000000000000000000000000000000")
 expect(_simpleos_artifact_metadata_valid(uppercase)).to_be(false)
@@ -76,13 +87,18 @@ expect(_simpleos_artifact_metadata_valid(empty_first)).to_be(false)
 
 #### should reject copied env-only SimpleOS artifact evidence
 
+- should reject copied env-only SimpleOS artifact evidence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject copied env-only SimpleOS artifact evidence")
 val copied_record = _simpleos_canonical_artifact_record()
 expect(_simpleos_artifact_metadata_valid(copied_record)).to_be(true)
 expect(_simpleos_artifact_files_valid(copied_record)).to_be(false)
@@ -92,6 +108,7 @@ expect(_simpleos_artifact_files_valid(copied_record)).to_be(false)
 
 #### should classify controlled missing native graphics hardware as unavailable
 
+- should classify controlled missing native graphics hardware as unavailable
 - Prove native submission and device readback
    - Expected: classify_native_font_promotion(unavailable_2d, unavailable_3d) equals `unavailable`
 
@@ -99,10 +116,12 @@ expect(_simpleos_artifact_files_valid(copied_record)).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should classify controlled missing native graphics hardware as unavailable")
 step("Prove native submission and device readback")
 val unavailable_2d = _engine2d_unavailable("controlled-device-unavailable")
 val unavailable_3d = _engine3d_unavailable("controlled-device-unavailable")
@@ -115,6 +134,7 @@ expect(expect_engine3d_font_readback(unavailable_3d)).to_be(false)
 
 #### should reject forged pass labels without native device proof
 
+- should reject forged pass labels without native device proof
 - Prove native submission and device readback
    - Expected: classify_native_font_promotion(forged_2d, forged_3d) equals `rejected`
 
@@ -122,10 +142,12 @@ expect(expect_engine3d_font_readback(unavailable_3d)).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject forged pass labels without native device proof")
 step("Prove native submission and device readback")
 val forged_2d = Engine2DFontReadbackEvidence(
     status: "pass", reason: "forged", device_identity: 1,
@@ -158,6 +180,7 @@ expect(expect_engine3d_font_readback(forged_3d)).to_be(false)
 
 #### should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple
 
+- should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple
 - Prove native submission and device readback
 - Render Engine2D text on the promoted backend
 - Render Engine3D HUD and world text on the promoted backend
@@ -167,10 +190,12 @@ expect(expect_engine3d_font_readback(forged_3d)).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple")
 step("Prove native submission and device readback")
 step("Render Engine2D text on the promoted backend")
 step("Render Engine3D HUD and world text on the promoted backend")
@@ -191,18 +216,20 @@ expect(promotion).to_equal("pass")
 
 #### should capture the pinned SimpleOS glyph from guest framebuffer memory
 
+- should capture the pinned SimpleOS glyph from guest framebuffer memory
 - Boot SimpleOS with the pinned font asset
 - Capture SimpleOS pinned-font pixels
-- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should capture the pinned SimpleOS glyph from guest framebuffer memory")
 step("Boot SimpleOS with the pinned font asset")
 step("Capture SimpleOS pinned-font pixels")
 val evidence = _collect_simpleos_pixel_evidence()
@@ -215,17 +242,19 @@ expect(expect_simpleos_font_pixel_oracle(evidence)).to_be(true)
 
 #### should meet warm latency, recovery, GPU benefit, upload, RSS, and resource budgets
 
+- should meet warm latency, recovery, GPU benefit, upload, RSS, and resource budgets
 - Measure warm font rendering and resource bounds
-- fail test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should meet warm latency, recovery, GPU benefit, upload, RSS, and resource budgets")
 step("Measure warm font rendering and resource bounds")
 val evidence = read_font_perf_evidence()
 if not expect_font_perf_budget(evidence):
@@ -247,3 +276,69 @@ expect(expect_font_perf_budget(evidence)).to_be(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4f38ae8c328f37fff3270dca652ab501c408a4b93ad3a5906ec2a6243dd14e23`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4f38ae8c328f37fff3270dca652ab501c408a4b93ad3a5906ec2a6243dd14e23`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4f38ae8c328f37fff3270dca652ab501c408a4b93ad3a5906ec2a6243dd14e23`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+mirror: doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:516:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing or noncanonical SimpleOS artifact provenance' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:516:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject missing or noncanonical SimpleOS artifact provenance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:525:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject malformed or ambiguous SimpleOS artifact hashes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:525:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject malformed or ambiguous SimpleOS artifact hashes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:539:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject copied env-only SimpleOS artifact evidence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:539:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject copied env-only SimpleOS artifact evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:547:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify controlled missing native graphics hardware as unavailable' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:558:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject forged pass labels without native device proof' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:588:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

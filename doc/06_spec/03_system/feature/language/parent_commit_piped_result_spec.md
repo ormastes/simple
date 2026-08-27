@@ -1,262 +1,335 @@
-# Parent-authoritative piped child results
+# Parent-authoritative piped child-result evidence
 
-> Status: authored manual mirror; pure-Simple generation and maintenance
-> verdicts are pending. This document does not claim a native SPipe PASS.
+> This executable system specification exercises the real process-transfer path
 
-## At a glance
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 4 | 4 | 0 | 0 |
 
-| Item | Value |
-|---|---|
-| Executable source | `test/03_system/feature/language/parent_commit_piped_result_spec.spl` |
-| Audience | Language/runtime maintainers and verification operators |
-| Primary boundary | Real piped child output to bounded parent-owned validation and commit |
-| Scenarios | Real fragmented/replayed child result; copied-frame isolation; mixed-batch rollback; live cancellation/revocation |
-| Acceptance runtime | An admitted pure-Simple Stage-4 test surface; admitted Stage 2/3 artifacts may prove only explicitly supported direct-compile commands |
-| Current execution state | Stage-2 copied isolation PASS; three scenarios failed from aggregate/`Option` corruption; the 2026-08-16 Stage-4 attempt was blocked by the bounded test ABI probe |
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Purpose
+# Parent-authoritative piped child-result evidence
 
-This manual explains how to run and interpret the focused parent-authoritative
-process-result specification. The executable scenario proves behavior only
-when it receives an admitted native verdict. Source inspection, the presence
-of this mirror, or a Rust bootstrap-seed result is not a replacement for that
-verdict.
+This executable system specification exercises the real process-transfer path
 
-The primary flow launches `/bin/sh` through
-`ParentCommitPipedProcessSessionV1`. The child writes one armored `SPRF1`
-result in two pieces, pauses between pieces, and then writes the same frame a
-second time. The parent must bound the partial text, accept exactly one frame,
-reject the replay, validate and apply one candidate root under
-`ParentCommitOwnerV1`, and release the native process handle once.
+## At a Glance
 
-## Requirements and evidence map
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/feature/language/parent_commit_piped_result_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-| Requirement | Observable evidence in this specification | Boundary |
-|---|---|---|
-| REQ-PAR-002 | Encoded-copy frame, bounded inbox admission, and mutation-after-offer isolation | Copy/transfer safety |
-| REQ-PAR-003 | Child-created result is decoded before parent-owned application | Child result only |
-| REQ-PAR-005 | Only armored bytes and typed envelopes cross the process boundary | No process-local pointers |
-| REQ-PAR-006 | Finite inbox capacity, partial-line retention, replay rejection | Bounded transport/backpressure |
-| REQ-PAR-008 | Parent candidate apply/verify receipt and published root assertions | Sole parent commit |
-| REQ-PAR-009 | Task ID, payload token, revision, and snapshot-token assertions | Deterministic commit |
-| NFR-PAR-001 | Canonical task/result receipt values | Determinism |
-| NFR-PAR-002 | Capacity, one-frame intake, and bounded reader state | Bounded memory |
-| NFR-PAR-003 | Typed codecs reject malformed bytes before publication | Fail closed |
+This executable system specification exercises the real process-transfer path
+from a bounded parent-owned session through validation, application-root
+verification, and deterministic parent commit. It is written for language and
+runtime maintainers reviewing actor/process ownership guarantees.
 
-The primary flow also converts eleven observed transport, commit, and lifecycle
-fields into `CanonicalEvidence` and compares them with a closed, independently
-declared `OracleSpec`. The fixed oracle checks accepted/rejected counts, replay
-rejection, both typed receipts, revision/token transition, terminal liveness,
-and the single close attempt. The direct branch assertion remains authoritative
-for the two valid terminal reasons (`exited` or `closed`). Tool availability and
-the no-seed policy are documented blockers, not executable NFR-PAR-006 coverage.
+The primary scenario starts a real child process. The child emits one armored
+result in two fragments and then replays the same frame. The parent session
+must retain the incomplete suffix, admit the first complete frame, reject the
+replay, commit only the admitted frame, and close the native handle at most
+once. Supporting scenarios make copied frame retention and atomic rollback
+independently observable.
 
-This file contributes to AC-5 and AC-6. It does not by itself complete AC-5:
-the broader acceptance criterion also requires actor public-surface,
-cancellation, backpressure, and separate-process evidence outside this focused
-flow. It does not complete AC-6 until pure-Simple doc generation and the full
-`sspec-maintain` scorecard pass.
+Requirements: REQ-PAR-002, REQ-PAR-003, REQ-PAR-005, REQ-PAR-006,
+REQ-PAR-008, REQ-PAR-009, NFR-PAR-001, NFR-PAR-002, NFR-PAR-003.
 
-## Preconditions
+Run with the admitted pure-Simple runtime:
 
-1. Use a provenance-recorded pure-Simple binary. Do not use
-   `src/compiler_rust/target/bootstrap/simple` as acceptance evidence.
-2. The runtime must support the piped process facade used by
-   `parent_commit_piped_process_session_v1`.
-3. `/bin/sh` and `sleep` must be available to the test process.
-4. Run from the repository root with `SIMPLE_LIB=src` when required by the
-   selected staged runtime.
-5. Keep the five primary-flow step labels and four frozen helpers unchanged; tooling and
-   reviewers use them as the stable manual contract.
+    SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
 
-## Primary scenario contract
+The Rust bootstrap seed is not acceptance evidence. See the mirrored operator
+manual and system-test plan for the current runner/doc-generation boundary.
 
-### 1. Create a bounded parent-owned process session
+## Scenarios
 
-The setup creates the sole long-lived `ParentCommitOwnerV1`, obtains its next
-locked process generation, calls `child_result_line`, binds the inbox through
-`parent_commit_frame_inbox_v1_for_generation`, and starts the child through
-`parent_commit_piped_process_session_v1`. A non-positive generation or process
-handle is a test failure; there is no skip or successful early return.
+### parent-authoritative piped child results
 
-Expected observations:
+#### should validate, commit, and close one fragmented child result
 
-- the process handle is positive;
-- the session is initially open;
-- the inbox has a finite four-frame admission ceiling and is bound to the
-  session generation in executable setup.
+<details>
+<summary>Executable SSpec</summary>
 
-### 2. Receive a fragmented encoded child result
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-The shell emits half of the armored line, pauses, then emits the remainder and
-a newline. The executable polls with a finite line and iteration budget.
-
-Expected observations:
-
-- at least one poll exposes retained partial bytes before acceptance;
-- exactly one frame is accepted;
-- exactly one copied frame remains in the parent inbox;
-- the reader records a positive partial-buffer high-water mark.
-
-Failure meaning:
-
-- no retained fragment indicates the platform did not expose the intended
-  split and is not accepted as fragmented-read evidence;
-- more than one accepted frame indicates replay admission;
-- zero accepted frames indicates pipe, codec, generation, or route failure.
-
-### 3. Reject stale or replayed child output
-
-After the valid line, the child writes the identical generation/region frame.
-The lifetime-bounded replay table must reject it.
-
-Expected observations:
-
-- one accepted frame and one rejected replay are reported;
-- the stale/session-generation rejection counter stays zero;
-- inbox depth stays one, so a rejected duplicate never consumes capacity.
-
-This scenario exercises replay, not a stale-generation child. The focused
-generation-mismatch unit remains separate evidence and must not be represented
-as executed by this step.
-
-### 4. Commit one validated batch at the parent
-
-The frozen local checker `drain_process_result_batch` transfers the admitted
-frame to `commit_process_result_frames_with_candidate`. The candidate root is
-`[707]`, matching the decoded ordered payload token.
-
-Expected observations:
-
-- the typed commit receipt is successful and orders task `7` with token `707`;
-- the mutation receipt advances revision `4` to `5`;
-- the application payload root changes once from `[]` to `[707]`;
-- the owner snapshot token becomes `401`;
-- the inbox is empty after transfer.
-
-The helper fails closed by submitting an empty batch if receive fails; that
-path cannot produce a successful receipt.
-
-### 5. Close the child transport exactly once
-
-Polling may reap the child naturally before explicit close. Both natural and
-explicit terminal paths are valid, but the native close attempt count must be
-exactly one. Repeated `close()` calls must return the recorded result without
-calling the native close path again.
-
-Expected observations:
-
-- the session is closed and not alive;
-- `close_attempts == 1` after two explicit close calls;
-- `terminal_reason == "exited"` when `naturally_exited` is true;
-- otherwise `terminal_reason == "closed"`.
-
-## Supporting scenarios
-
-### Copied-frame isolation
-
-The producer offers a valid encoded frame and then mutates byte zero of its
-local array. The received parent copy must still equal a separately encoded
-expected frame. This closes the mutation-after-offer source-evidence gap; an
-admitted runtime result is still required for an execution verdict.
-
-### Mixed-batch rollback
-
-The owner receives one valid frame and one malformed byte array in the same
-candidate batch. Decode must fail before publication. The negative mutation
-receipt, revision `4`, snapshot token `800`, and application root `[600]` must
-all remain observable afterward.
-
-### Live cancellation and ingress revocation
-
-The child emits one accepted generation-bound result and then remains alive.
-Cancellation must close the session, revoke the retained inbox frame, record
-one native close attempt, and make subsequent receive report `closed`. This is
-focused cancellation/revocation evidence; it does not prove provider-wide PID
-reuse protection or cross-thread actor cancellation.
-
-## Modern typed-evidence contract
-
-The executable observation schema is `parent-commit-piped-result/v1`. It is a
-closed schema: undeclared fields, missing selectors, parse errors, ambiguous
-cardinality, or a mismatched literal fail `compare_evidence`. Expected values
-are declared independently through `check_exact`; diagnostic `print` lines are
-operator context and are never used as their own oracle.
-
-The authored mirror contains no generated provenance manifest yet. Until
-pure-Simple `spipe-docgen` and `sspec-maintain` run successfully, the manual has
-no accepted source digest, environment receipt, seven-score result, or generated
-folded executable block. Those absences remain blockers, not waived findings.
-
-## Failure diagnostics
-
-| Symptom | Likely boundary | Operator action |
-|---|---|---|
-| Process handle is not positive | Native piped-process facade or child command | Record the exact runtime provenance and stderr; do not convert to SKIP |
-| Fragment assertion fails | Pipe-read scheduling or blocking read behavior | Preserve the failed verdict and inspect native read semantics |
-| Accepted count is zero | Text framing, route, generation, or codec | Compare reader reason/counters with focused hostile-stream units |
-| Replay counter is zero | Deferred suffix, process reap, or replay identity | Inspect whether both lines reached the reader before terminal close |
-| Mutation receipt is false | Candidate root or typed result mismatch | Inspect receipt reason; do not publish or reinsert the frame |
-| `close_attempts` differs from one | Reap/close lifecycle regression | Treat as a lifecycle failure even if repeated close returns true |
-
-## Commands and current blocker
-
-Intended execution:
-
-```sh
-SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
+```simple
+# @req REQ-PAR-002
+# @req REQ-PAR-003
+# @req REQ-PAR-005
+# @req REQ-PAR-006
+# @req REQ-PAR-008
+# @req REQ-PAR-009
 ```
 
-Intended mirror generation:
+</details>
 
-```sh
-bin/release/simple spipe-docgen test/03_system/feature/language/parent_commit_piped_result_spec.spl --output doc/06_spec --no-index
+<details>
+<summary>Advanced: should retain an owned copy before the producer mutates its frame</summary>
+
+#### should retain an owned copy before the producer mutates its frame
+
+- should retain an owned copy before the producer mutates its frame
+- Offer one encoded frame into parent-owned bounded storage
+   - Expected: inbox.offer_process_result_frame(offered) is true
+- Mutate the producer buffer and compare the retained parent copy
+   - Expected: received.ok is true
+   - Expected: received.frame equals `expected`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain an owned copy before the producer mutates its frame")
+step("Offer one encoded frame into parent-owned bounded storage")
+val inbox = parent_commit_frame_inbox_v1_for_generation(2, 41)
+val expected = child_result_frame(9, 909, 41)
+var offered = child_result_frame(9, 909, 41)
+
+expect(inbox.offer_process_result_frame(offered)).to_equal(true)
+
+step("Mutate the producer buffer and compare the retained parent copy")
+offered[0] = 0
+
+val received = inbox.receive()
+expect(received.ok).to_equal(true)
+expect(received.frame).to_equal(expected)
 ```
 
-Intended maintenance gate:
+</details>
 
-```sh
-bin/release/simple sspec-maintain scan test/03_system/feature/language/parent_commit_piped_result_spec.spl
+
+</details>
+
+<details>
+<summary>Advanced: should roll back a mixed valid and malformed process batch</summary>
+
+#### should roll back a mixed valid and malformed process batch
+
+- should roll back a mixed valid and malformed process batch
+- Submit one valid and one malformed frame as one candidate batch
+- Verify both canonical roots remain unchanged after rejection
+   - Expected: outcome.commit.receipt.ok is false
+   - Expected: outcome.mutation.ok is false
+   - Expected: outcome.mutation.reason equals `invalid-process-result-frame`
+   - Expected: outcome.mutation.before_revision equals `4`
+   - Expected: outcome.mutation.after_revision equals `4`
+   - Expected: outcome.mutation.before_application_payload_root equals `[600]`
+   - Expected: outcome.mutation.after_application_payload_root equals `[600]`
+   - Expected: snapshot.revision equals `4`
+   - Expected: snapshot.snapshot_token equals `800`
+   - Expected: application_root equals `[600]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should roll back a mixed valid and malformed process batch")
+step("Submit one valid and one malformed frame as one candidate batch")
+val owner = parent_commit_owner_v1_with_application_root(
+    parallel_commit_state_v1(4, 800),
+    [600],
+    ParallelCommitOrder.TaskIdThenSequence,
+    ParallelConflictPolicy.Reject)
+val valid = child_result_frame(21, 2100, 51)
+
+val outcome = owner.commit_process_result_frames_with_candidate(
+    [valid, [0, 1, 2]], parent_commit_candidate_v1(801, [600, 2100]))
+
+print "rollback evidence ok={outcome.mutation.ok} reason={outcome.mutation.reason} before={outcome.mutation.before_revision} after={outcome.mutation.after_revision}"
+
+step("Verify both canonical roots remain unchanged after rejection")
+expect(outcome.commit.receipt.ok).to_equal(false)
+expect(outcome.mutation.ok).to_equal(false)
+expect(outcome.mutation.reason).to_equal("invalid-process-result-frame")
+expect(outcome.mutation.before_revision).to_equal(4)
+expect(outcome.mutation.after_revision).to_equal(4)
+expect(outcome.mutation.before_application_payload_root).to_equal([600])
+expect(outcome.mutation.after_application_payload_root).to_equal([600])
+if val snapshot = owner.snapshot():
+    expect(snapshot.revision).to_equal(4)
+    expect(snapshot.snapshot_token).to_equal(800)
+else:
+    fail("rejected process batch must preserve the parent snapshot")
+if val application_root = owner.snapshot_application_payload_root():
+    expect(application_root).to_equal([600])
+else:
+    fail("rejected process batch must preserve the application root")
 ```
 
-This lane produced the provenance-admitted Stage-2 pure-Simple binary recorded
-in the verification report; it does not provide the Stage-4 `test`, docgen, or
-maintenance surface.
-Direct execution with that binary passed copied-frame isolation, while the
-fragmented child, rollback, and cancellation paths exposed aggregate/`Option`
-corruption and remain failed evidence. Stage 3 stopped after the mandatory
-three fix cycles. On 2026-08-16 the exact intended native command stopped before
-spec execution with `error: deployed Simple runtime failed its bounded test ABI
-probe`. Doc generation and maintenance therefore have no admitted verdict in
-this revision.
+</details>
 
-## Maintenance acceptance
 
-Before AC-6 can be called complete, regenerate this mirror from the executable
-source and review the generated result as an operator manual. Then require all
-seven `sspec-maintain` quality scores, zero blockers, mirror PASS, traceability
-PASS, and zero stubs. Replace this status note with the actual command,
-runtime provenance, and verdict; do not hand-enter a PASS.
+</details>
 
-## Review checklist
+<details>
+<summary>Advanced: should cancel a live child and revoke its accepted result</summary>
 
-- [ ] Admitted pure-Simple native scenario PASS is attached.
-- [x] Exactly five frozen primary-flow step labels are present and ordered.
-- [ ] `child_result_line`, `parent_commit_frame_inbox_v1_for_generation`,
-  `parent_commit_piped_process_session_v1`, and
-  `drain_process_result_batch` remain wired.
-- [ ] No SKIP or successful early-return path exists.
-- [ ] Natural exit preserves `terminal_reason == "exited"`.
-- [ ] Repeated close leaves `close_attempts == 1`.
-- [ ] Generated mirror matches the executable source.
-- [ ] `sspec-maintain` reports seven acceptable scores and no blocker.
-- [x] Typed observations are compared with a closed independent oracle.
+#### should cancel a live child and revoke its accepted result
 
-## Related artifacts
+- should cancel a live child and revoke its accepted result
+- Start a generation-bound child that remains alive after emitting
+   - Expected: accepted equals `1`
+   - Expected: inbox.depth() equals `1`
+- Cancel the child and revoke retained ingress exactly once
+   - Expected: session.cancel() is true
+   - Expected: session.cancel() is true
+   - Expected: terminal.cancelled is true
+   - Expected: terminal.closed is true
+   - Expected: terminal.alive is false
+   - Expected: terminal.close_attempts equals `1`
+   - Expected: terminal.terminal_reason equals `cancelled`
+   - Expected: inbox.depth() equals `0`
+   - Expected: inbox.receive().reason equals `closed`
 
-- Requirements: `doc/02_requirements/feature/parallel_ownership_memory_layout.md`
-- NFRs: `doc/02_requirements/nfr/parallel_ownership_memory_layout.md`
-- Architecture: `doc/04_architecture/language/parallel_ownership_model.md`
-- Detail design: `doc/05_design/language/concurrency/parent_commit_parallel_apps.md`
-- Focused test plan: `doc/03_plan/sys_test/parent_authoritative_actor_process.md`
-- Agent handoff: `doc/03_plan/agent_tasks/parent_authoritative_actor_process.md`
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should cancel a live child and revoke its accepted result")
+step("Start a generation-bound child that remains alive after emitting")
+val lifecycle_owner = parent_commit_owner_v1(
+    parallel_commit_state_v1(1, 100),
+    ParallelCommitOrder.TaskIdThenSequence,
+    ParallelConflictPolicy.Reject)
+val generation = lifecycle_owner.issue_process_session_generation()
+expect(generation).to_be_greater_than(0)
+val inbox = parent_commit_frame_inbox_v1_for_generation(1, generation)
+val line = child_result_line(generation)
+val session = parent_commit_piped_process_session_v1(
+    "/bin/sh", ["-c", "printf '%s\\n' '" + line + "'; sleep 5"],
+    generation, inbox)
+expect(session.status().process_handle).to_be_greater_than(0)
+var accepted = 0
+var polls = 0
+while polls < 40 and accepted == 0:
+    val read = session.poll(1)
+    accepted = accepted + read.accepted
+    if accepted == 0:
+        thread_sleep(5)
+    polls = polls + 1
+expect(accepted).to_equal(1)
+expect(inbox.depth()).to_equal(1)
+
+step("Cancel the child and revoke retained ingress exactly once")
+expect(session.cancel()).to_equal(true)
+expect(session.cancel()).to_equal(true)
+val terminal = session.status()
+print "cancel evidence accepted={accepted} depth={inbox.depth()} cancelled={terminal.cancelled} closed={terminal.closed} alive={terminal.alive} attempts={terminal.close_attempts} reason={terminal.terminal_reason}"
+expect(terminal.cancelled).to_equal(true)
+expect(terminal.closed).to_equal(true)
+expect(terminal.alive).to_equal(false)
+expect(terminal.close_attempts).to_equal(1)
+expect(terminal.terminal_reason).to_equal("cancelled")
+expect(inbox.depth()).to_equal(0)
+expect(inbox.receive().reason).to_equal("closed")
+```
+
+</details>
+
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 4 |
+| Active scenarios | 4 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-PAR-002`
+- `REQ-PAR-003`
+- `REQ-PAR-005`
+- `REQ-PAR-006`
+- `REQ-PAR-008`
+- `REQ-PAR-009`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2e156d74e70dfd705bd1ff90114904c97fda5598ed6abc9332f15ed740a15852`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2e156d74e70dfd705bd1ff90114904c97fda5598ed6abc9332f15ed740a15852`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2e156d74e70dfd705bd1ff90114904c97fda5598ed6abc9332f15ed740a15852`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/feature/language/parent_commit_piped_result_spec.spl
+mirror: doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:125:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should validate, commit, and close one fragmented child result' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:125:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate, commit, and close one fragmented child result' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:260:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain an owned copy before the producer mutates its frame' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:260:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should retain an owned copy before the producer mutates its frame' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:278:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should roll back a mixed valid and malformed process batch' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:278:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should roll back a mixed valid and malformed process batch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:313:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should cancel a live child and revoke its accepted result' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/language/parent_commit_piped_result_spec.spl:313:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should cancel a live child and revoke its accepted result' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

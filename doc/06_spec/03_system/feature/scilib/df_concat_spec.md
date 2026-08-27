@@ -2,29 +2,6 @@
 
 > Validates strict row and column concatenation for DataFrame seeds.
 
-<!-- sdn-diagram:id=df_concat_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=df_concat_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-df_concat_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=df_concat_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -45,7 +22,7 @@ Validates strict row and column concatenation for DataFrame seeds.
 | Status | Active |
 | Plan | doc/03_plan/agent_tasks/scilib_port_df.md |
 | Source | `test/03_system/feature/scilib/df_concat_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates strict row and column concatenation for DataFrame seeds.
@@ -56,12 +33,11 @@ Validates strict row and column concatenation for DataFrame seeds.
 
 #### appends rows when schemas and dtypes match
 
-1. SeriesErased F64Series
-2. SeriesErased I64Series
-3. ]) unwrap
-4. SeriesErased F64Series
-5. SeriesErased I64Series
-6. ]) unwrap
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- appends rows when schemas and dtypes match
    - Expected: out.num_rows() equals `Index.new(3)`
    - Expected: out.num_cols() equals `Index.new(2)`
    - Expected: out.col(Symbol.from("price")).unwrap().get(Index.new(2)) equals `Float64.new(3.0)`
@@ -71,10 +47,12 @@ Validates strict row and column concatenation for DataFrame seeds.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("appends rows when schemas and dtypes match")
 val left = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("price"), [Float64.new(1.0), Float64.new(2.0)])),
     SeriesErased.I64Series(Series.from_values(Symbol.from("qty"), [Int64.new(10), Int64.new(20)])),
@@ -94,20 +72,19 @@ expect(out.col(Symbol.from("qty")).unwrap().get(Index.new(2))).to_equal(Int64.ne
 
 #### rejects row concat when schemas differ
 
-1. SeriesErased F64Series
-2. ]) unwrap
-3. SeriesErased F64Series
-4. ]) unwrap
+- rejects row concat when schemas differ
    - Expected: concat([left, right], ConcatAxis.Rows).is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects row concat when schemas differ")
 val left = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("price"), [Float64.new(1.0)])),
 ]).unwrap()
@@ -123,10 +100,7 @@ expect(concat([left, right], ConcatAxis.Rows).is_err()).to_equal(true)
 
 #### appends columns when row counts match
 
-1. SeriesErased F64Series
-2. ]) unwrap
-3. SeriesErased I64Series
-4. ]) unwrap
+- appends columns when row counts match
    - Expected: out.num_rows() equals `Index.new(2)`
    - Expected: out.num_cols() equals `Index.new(2)`
    - Expected: out.columns()[1] equals `Symbol.from("qty")`
@@ -136,10 +110,12 @@ expect(concat([left, right], ConcatAxis.Rows).is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("appends columns when row counts match")
 val left = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("price"), [Float64.new(1.0), Float64.new(2.0)])),
 ]).unwrap()
@@ -157,20 +133,19 @@ expect(out.col(Symbol.from("qty")).unwrap().get(Index.new(1))).to_equal(Int64.ne
 
 #### rejects column concat with duplicate names
 
-1. SeriesErased F64Series
-2. ]) unwrap
-3. SeriesErased F64Series
-4. ]) unwrap
+- rejects column concat with duplicate names
    - Expected: concat([left, right], ConcatAxis.Cols).is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects column concat with duplicate names")
 val left = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("price"), [Float64.new(1.0)])),
 ]).unwrap()
@@ -184,13 +159,19 @@ expect(concat([left, right], ConcatAxis.Cols).is_err()).to_equal(true)
 
 #### rejects empty frame lists
 
+- rejects empty frame lists
+   - Expected: concat(frames, ConcatAxis.Rows).is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects empty frame lists")
 val frames: [DataFrame] = []
 expect(concat(frames, ConcatAxis.Rows).is_err()).to_equal(true)
 ```
@@ -210,7 +191,55 @@ expect(concat(frames, ConcatAxis.Rows).is_err()).to_equal(true)
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/agent_tasks/scilib_port_df.md](doc/03_plan/agent_tasks/scilib_port_df.md)
+- **Plan:** `doc/03_plan/agent_tasks/scilib_port_df.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b388336c2f81a62705ddccb68e161359e9f00cf2a50d90ec71adc8e4bfd928ca`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b388336c2f81a62705ddccb68e161359e9f00cf2a50d90ec71adc8e4bfd928ca`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b388336c2f81a62705ddccb68e161359e9f00cf2a50d90ec71adc8e4bfd928ca`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/scilib/df_concat_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/df_concat_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/df_concat_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/df_concat_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/df_concat_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'appends rows when schemas and dtypes match' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/df_concat_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects row concat when schemas differ' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/df_concat_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'appends columns when row counts match' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

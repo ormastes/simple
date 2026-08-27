@@ -1,137 +1,184 @@
 # SOSIX positioned filesystem matrix acceptance
 
-Status: **future-executable / runtime unrun**. This is a manual mirror of
-`test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl`, retained
-until a qualified pure-Simple Stage-4 runtime can execute the spec and replace
-this mirror through `spipe-docgen`. It is not generated evidence or PASS.
+> This specification admits FAT32, NVFS, and DBFS positioned owners and the
 
-## Purpose and audience
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
 
-This procedure is for SimpleOS/SOSIX maintainers qualifying FAT32, NVFS, and
-DBFS positioned owners plus the x86_64 `nvfs-dbfs-backed-v1` live guest. It
-fails closed when any provenance, runtime, kernel, image, or QEMU prerequisite
-is absent.
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Requirements
+# SOSIX positioned filesystem matrix acceptance
 
-- REQ-SQ-021: DBFS and NVFS provide exact binary positioned operations with
-  overwrite, extension, zero-hole, short-EOF, and persistence behavior.
-- REQ-SQ-022: `MountTable` virtual bindings are the sole canonical SOSIX
-  positioned object authority; stale, raw, wrong-family, and invalid accesses
-  fail closed.
-- REQ-SQ-023: SimpleOS boots the honestly labeled
-  `nvfs-dbfs-backed-v1` root, proves cursor-independent I/O, and observes the
-  first boot's persisted value on a second boot of the same private image.
+This specification admits FAT32, NVFS, and DBFS positioned owners and the
 
-## Qualified environment
+## At a Glance
 
-All variables are mandatory:
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Plan | `doc/03_plan/sys_test/sosix_qemu_remaining_owners.md` |
+| Source | `test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-- `SOSIX_POSITIONED_SIMPLE_RUNTIME`: admitted pure-Simple Stage-4 CLI.
-- `SOSIX_POSITIONED_STAGE4_PROVENANCE`: matching Stage-4 provenance record.
-- `SOSIX_POSITIONED_RUNTIME_RECEIPT`: exact runtime identity receipt.
-- `SOSIX_POSITIONED_KERNEL_ELF`: freshly linked dedicated-entry x86_64
-  SimpleOS kernel with a closed adjacent `.build_stamp`.
-- `SIMPLEOS_NVFS_ROOT_IMAGE`: immutable admitted source image.
-- `SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST`: adjacent provider/hash/source manifest.
+This specification admits FAT32, NVFS, and DBFS positioned owners and the
+SimpleOS NVFS live guest only through a source-matched Stage-4 pure-Simple
+runtime, exact runtime receipt, linked kernel, and immutable image manifest.
+Source checks or missing prerequisites never become live-guest PASS evidence.
 
-The Rust seed, Stage 2/3, an older linked kernel, a missing variable, source
-inspection, and `--self-test` are inadmissible for runtime or live-guest PASS.
+**Guide:** `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`
 
-Construct the kernel/image inputs with
-`scripts/check/build-simpleos-nvfs-positioned-qemu.shs`. The kernel receipt
-binds `nvfs_positioned_entry.spl`, `x86_64-unknown-none`, the kernel hash, the
-admitted runtime as compiler/runtime, and the current source revision.
+## Scenarios
 
-## Frozen acceptance steps
+### SOSIX positioned filesystem matrix
 
-1. `Validate positioned filesystem source contracts`
-2. `Reject an unqualified live-guest environment`
-3. `Bind the admitted pure-Simple runtime`
-4. `Exercise NVFS and DBFS positioned owners`
-5. `Boot the NVFS-backed SimpleOS guest`
-6. `Verify cursor-independent guest I/O`
-7. `Retain filesystem matrix evidence`
+#### should validate source contracts and reject an unqualified guest environment
 
-The executable helpers are `run_positioned_filesystem_gate`,
-`run_nvfs_qemu_gate`, `qualified_positioned_environment`,
-`expect_positioned_backend_evidence`, and
-`expect_nvfs_live_guest_evidence`.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-## Scenario: source contract and rejection
 
-Run the source gate and require
-`sosix_positioned_filesystem_source_contract=pass`. Then invoke the NVFS QEMU
-gate with empty admission inputs and require a nonzero exit plus
-`stage4-admission-failed`. An accepted empty environment is a failure.
+- should validate source contracts and reject an unqualified guest environment
+- Validate positioned filesystem source contracts
+   - Expected: source.exit_code equals `0`
+   - Expected: source.stderr equals ``
+- Reject an unqualified live-guest environment
+   - Expected: rejected.stdout equals ``
 
-This scenario traces REQ-SQ-021 and REQ-SQ-022. It proves only source shape and
-fail-closed admission, not runtime behavior.
 
-## Scenario: qualified owners and live guest
+<details>
+<summary>Executable SSpec</summary>
 
-After binding all six qualified values, execute once:
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-```sh
-sh scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit \
-  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
-  "$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
-  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
-  "$SOSIX_POSITIONED_KERNEL_ELF" \
-  "$SIMPLEOS_NVFS_ROOT_IMAGE" \
-  "$SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST"
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should validate source contracts and reject an unqualified guest environment")
+step("Validate positioned filesystem source contracts")
+val source = run_positioned_filesystem_gate(["--self-test"])
+expect(source.exit_code).to_equal(0)
+expect(source.stderr).to_equal("")
+expect(source.stdout).to_contain("sosix_positioned_filesystem_source_contract=pass")
+expect(source.stdout).to_contain("simpleos_nvfs_image_manifest_sabotage_rejection=pass")
+expect(source.stdout).to_contain("simpleos_nvfs_kernel_build_receipt_sabotage_rejection=pass")
+step("Reject an unqualified live-guest environment")
+val rejected = run_nvfs_qemu_gate(["--admit", "", "", "", "", "", ""])
+expect(rejected.exit_code).to_be_greater_than(0)
+expect(rejected.stdout).to_equal("")
+expect(rejected.stderr).to_contain("stage4-admission-failed")
 ```
 
-Require zero exit, empty stderr, and all markers:
+</details>
 
-- `sosix_fat32_positioned_acceptance=pass`
-- `sosix_dbfs_positioned_primitives=pass`
-- `sosix_nvfs_positioned_primitives=pass`
-- `sosix_positioned_mount_object_backends=pass`
-- `sosix_positioned_production_composition=pass`
-- `simpleos_nvfs_image_builder=pass`
-- `simpleos_nvfs_boot_contract=pass`
-- `simpleos_nvfs_runtime_sha256=`
-- `simpleos_nvfs_kernel_sha256=`
-- `simpleos_nvfs_kernel_build_receipt_path=`
-- `simpleos_nvfs_kernel_build_receipt_sha256=`
-- `simpleos_nvfs_source_revision=`
-- `simpleos_nvfs_image_sha256=`
-- `simpleos_nvfs_qemu_sha256=`
-- `simpleos_nvfs_boot1_transcript_path=` and `simpleos_nvfs_boot1_transcript_sha256=`
-- `simpleos_nvfs_boot2_transcript_path=` and `simpleos_nvfs_boot2_transcript_sha256=`
-- `simpleos_nvfs_positioned_live_guest=pass`
-- `sosix_positioned_filesystem_matrix_acceptance=pass`
+#### should exercise qualified filesystem owners and the NVFS live guest
 
-The QEMU owner must use a private copy, require
-`[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1`, observe the
-cursor-independent round trip, and retain matching persistence markers across
-two boots. One boot is insufficient. This scenario traces REQ-SQ-021,
-REQ-SQ-022, and REQ-SQ-023.
+- should exercise qualified filesystem owners and the NVFS live guest
+   - Artifact capture: after_step
+- Bind the admitted pure-Simple runtime
+   - Artifact capture: after_step
+- Exercise NVFS and DBFS positioned owners
+   - Artifact capture: after_step
+- Boot the NVFS-backed SimpleOS guest
+   - Artifact capture: after_step
+- Verify cursor-independent guest I/O
+   - Artifact capture: after_step
+- Retain filesystem matrix evidence
+   - Artifact capture: after_step
 
-## Executable SSpec and doc generation
 
-With the same admitted runtime, execute each command at most once:
+<details>
+<summary>Executable SSpec</summary>
 
-```sh
-"$SOSIX_POSITIONED_SIMPLE_RUNTIME" test \
-  test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl \
-  --mode=interpreter
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-"$SOSIX_POSITIONED_SIMPLE_RUNTIME" spipe-docgen \
-  test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl \
-  --output doc/06_spec --no-index
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should exercise qualified filesystem owners and the NVFS live guest")
+step("Bind the admitted pure-Simple runtime")
+val environment = qualified_positioned_environment()
+step("Exercise NVFS and DBFS positioned owners")
+val evidence = run_positioned_filesystem_gate(["--admit"] + environment)
+expect_positioned_backend_evidence(evidence)
+step("Boot the NVFS-backed SimpleOS guest")
+expect_nvfs_live_guest_evidence(evidence)
+step("Verify cursor-independent guest I/O")
+expect(evidence.stdout).to_contain("simpleos_nvfs_positioned_live_guest=pass")
+step("Retain filesystem matrix evidence")
+expect(evidence.stdout).to_contain("sosix_positioned_filesystem_matrix_acceptance=pass")
 ```
 
-Run `sspec-maintain scan` once after successful docgen. Missing qualification,
-nonzero exit, timeout, missing assertion summary, absent marker, or docgen
-stub is BLOCKED/FAIL. Do not retry an unchanged failure beyond the lane's
-three-cycle cap.
+</details>
 
-## Current evidence boundary
+## Scenario Summary
 
-Implementation and fail-closed tests are present, but no source-matched
-admitted pure-Simple Stage-4 runtime is available in this session. Therefore
-the qualified SSpec, docgen, maintenance scan, and live QEMU run are unrun.
-This manual records the exact future procedure and makes no runtime PASS,
-SimpleOS row promotion, or 24-row matrix-complete claim.
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** ``doc/03_plan/sys_test/sosix_qemu_remaining_owners.md``
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8ff405c4777033b7ef8fa4f6822ec83fbc9fe202ccbd43873dfc6fcb69ced9cb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8ff405c4777033b7ef8fa4f6822ec83fbc9fe202ccbd43873dfc6fcb69ced9cb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8ff405c4777033b7ef8fa4f6822ec83fbc9fe202ccbd43873dfc6fcb69ced9cb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl
+mirror: doc/06_spec/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=90 oracle=90
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl:100:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate source contracts and reject an unqualified guest environment' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should validate source contracts and reject an unqualified guest environment' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl:121:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should exercise qualified filesystem owners and the NVFS live guest' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

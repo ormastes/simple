@@ -2,29 +2,6 @@
 
 > System-level tests that validate CLI command families and MCP tool families each have at least one working representative, and that no placeholder commands are visible in default help output.
 
-<!-- sdn-diagram:id=cli_mcp_completeness_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cli_mcp_completeness_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cli_mcp_completeness_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cli_mcp_completeness_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 34 | 34 | 0 | 0 |
@@ -49,7 +26,7 @@ System-level tests that validate CLI command families and MCP tool families each
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/tools/cli_mcp_completeness_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -87,13 +64,19 @@ without testing individual command behavior (that is covered by unit tests).
 
 #### has working compile command
 
+- has working compile command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working compile command")
 val exec_family = ["compile", "run", "watch", "watch-daemon"]
 val implemented = ["compile", "run", "watch"]
 var has_representative = false
@@ -109,13 +92,19 @@ expect(has_representative).to_equal(true)
 
 #### has working test command
 
+- has working test command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working test command")
 val test_family = ["test", "test-daemon", "spec-coverage"]
 val implemented = ["test", "test-daemon"]
 var has_representative = false
@@ -131,13 +120,19 @@ expect(has_representative).to_equal(true)
 
 #### has working lint command
 
+- has working lint command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working lint command")
 val quality_family = ["lex", "lint", "fix", "fmt", "check",
     "duplicate-check", "doc-coverage", "check-arch",
     "check-dbs", "fix-dbs"]
@@ -153,13 +148,19 @@ expect(has_representative).to_equal(true)
 
 #### all code quality commands are implemented
 
+- all code quality commands are implemented
+   - Expected: implemented contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all code quality commands are implemented")
 val quality_family = ["lex", "lint", "fix", "fmt", "check",
     "duplicate-check", "doc-coverage", "check-arch",
     "check-dbs", "fix-dbs"]
@@ -176,13 +177,19 @@ for cmd in quality_family:
 
 #### has working build command
 
+- has working build command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working build command")
 val build_family = ["build", "native-build", "targets",
     "linkers"]
 val implemented = ["build", "native-build", "targets"]
@@ -197,13 +204,19 @@ expect(has_representative).to_equal(true)
 
 #### all build commands are implemented
 
+- all build commands are implemented
+   - Expected: implemented contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all build commands are implemented")
 val build_family = ["build", "native-build", "targets",
     "linkers"]
 val implemented = ["build", "native-build", "targets", "linkers"]
@@ -217,13 +230,19 @@ for cmd in build_family:
 
 #### has working mcp command
 
+- has working mcp command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working mcp command")
 val llm_family = ["mcp", "lsp", "diff", "constr", "query",
     "info", "brief", "context"]
 val implemented = ["mcp", "lsp", "query"]
@@ -238,13 +257,19 @@ expect(has_representative).to_equal(true)
 
 #### all LLM tool commands are implemented
 
+- all LLM tool commands are implemented
+   - Expected: implemented contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all LLM tool commands are implemented")
 val llm_family = ["mcp", "lsp", "diff", "constr", "query",
     "info", "brief", "context"]
 val implemented = ["mcp", "lsp", "diff", "constr", "query",
@@ -259,13 +284,19 @@ for cmd in llm_family:
 
 #### has working feature-gen command
 
+- has working feature-gen command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working feature-gen command")
 val doc_family = ["feature-gen", "task-gen", "spec-gen",
     "spipe-docgen", "feature-doc", "todo-scan", "todo-gen",
     "grammar-doc"]
@@ -283,13 +314,19 @@ expect(has_representative).to_equal(true)
 
 #### has working init command
 
+- has working init command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working init command")
 val pkg_family = ["init", "add", "remove", "install", "update",
     "list", "tree", "cache"]
 val implemented = ["init"]
@@ -306,13 +343,19 @@ expect(has_representative).to_equal(true)
 
 #### has working verify command
 
+- has working verify command
+   - Expected: has_representative is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working verify command")
 val verify_family = ["verify", "gen-lean"]
 val implemented = ["verify", "gen-lean"]
 var has_representative = false
@@ -328,13 +371,19 @@ expect(has_representative).to_equal(true)
 
 #### has working ffi-gen command
 
+- has working ffi-gen command
+   - Expected: implemented contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working ffi-gen command")
 val ffi_family = ["ffi-gen", "wrapper-gen"]
 val implemented = ["ffi-gen", "wrapper-gen"]
 for cmd in ffi_family:
@@ -347,13 +396,19 @@ for cmd in ffi_family:
 
 #### has working i18n command
 
+- has working i18n command
+   - Expected: implemented contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has working i18n command")
 val i18n_family = ["i18n"]
 val implemented = ["i18n"]
 for cmd in i18n_family:
@@ -368,13 +423,18 @@ for cmd in i18n_family:
 
 #### has representative debug tool
 
+- has representative debug tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative debug tool")
 val debug_tools = [
     "debug_create_session", "debug_list_sessions",
     "debug_close_session", "debug_set_breakpoint",
@@ -397,13 +457,18 @@ expect(debug_tools).to_contain("debug_create_session")
 
 #### has representative hardware debug tool
 
+- has representative hardware debug tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative hardware debug tool")
 val hw_tools = [
     "debug_trace_capture", "debug_coverage_collect",
     "debug_flash_program", "debug_system_reset",
@@ -419,13 +484,18 @@ expect(hw_tools).to_contain("debug_flash_program")
 
 #### has representative log tool
 
+- has representative log tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative log tool")
 val log_tools = [
     "debug_log_enable", "debug_log_disable",
     "debug_log_clear", "debug_log_query",
@@ -441,13 +511,18 @@ expect(log_tools).to_contain("debug_log_enable")
 
 #### has representative diagnostic tool
 
+- has representative diagnostic tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative diagnostic tool")
 val diag_tools = [
     "simple_read", "simple_check", "simple_symbols",
     "simple_status", "simple_diagnostics", "simple_edit",
@@ -463,13 +538,18 @@ expect(diag_tools).to_contain("simple_read")
 
 #### has representative VCS tool
 
+- has representative VCS tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative VCS tool")
 val vcs_tools = [
     "simple_diff", "simple_log", "simple_squash",
     "simple_new", "simple_commit", "simple_push",
@@ -485,13 +565,18 @@ expect(vcs_tools).to_contain("simple_diff")
 
 #### has representative CLI tool
 
+- has representative CLI tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative CLI tool")
 val cli_tools = [
     "simple_test", "simple_build", "simple_format",
     "simple_lint", "simple_fix", "simple_doc_coverage"
@@ -506,16 +591,21 @@ expect(cli_tools).to_contain("simple_test")
 
 #### has representative analysis tool
 
+- has representative analysis tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative analysis tool")
 val analysis_tools = [
     "simple_dependencies", "simple_api_diff",
-    "simple_context", "simple_search"
+    "simple_context", "simple_ponytail", "simple_search"
 ]
 expect(analysis_tools.len()).to_be_greater_than(0)
 expect(analysis_tools).to_contain("simple_search")
@@ -527,13 +617,18 @@ expect(analysis_tools).to_contain("simple_search")
 
 #### has representative task tool
 
+- has representative task tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative task tool")
 val task_tools = ["task_status", "task_cancel", "task_list"]
 expect(task_tools.len()).to_be_greater_than(0)
 expect(task_tools).to_contain("task_status")
@@ -545,13 +640,18 @@ expect(task_tools).to_contain("task_status")
 
 #### has representative query tool
 
+- has representative query tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative query tool")
 val query_tools = [
     "simple_ast_query", "simple_sem_query",
     "simple_query_schema"
@@ -566,13 +666,18 @@ expect(query_tools).to_contain("simple_ast_query")
 
 #### has representative test daemon tool
 
+- has representative test daemon tool
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has representative test daemon tool")
 val daemon_tools = [
     "test_daemon_run", "test_daemon_clean",
     "test_daemon_status", "test_daemon_stop"
@@ -589,17 +694,19 @@ expect(daemon_tools).to_contain("test_daemon_run")
 
 #### all help-listed commands have real implementations
 
-- placeholder in help push
+- all help-listed commands have real implementations
    - Expected: placeholder_in_help.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all help-listed commands have real implementations")
 # Commands shown in print_cli_help() that should be fully implemented
 val help_commands = [
     "compile", "watch", "targets", "linkers",
@@ -627,13 +734,19 @@ expect(placeholder_in_help.len()).to_equal(0)
 
 #### no cli_not_implemented routes exist
 
+- no cli_not_implemented routes exist
+   - Expected: expected_remaining_placeholders equals `placeholder_count`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("no cli_not_implemented routes exist")
 # This is the canonical check: the count of placeholder routes
 # MUST be zero. This test fails if any command still calls
 # cli_not_implemented().
@@ -650,13 +763,18 @@ expect(expected_remaining_placeholders).to_equal(placeholder_count)
 
 #### test command has MCP equivalent
 
+- test command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("test command has MCP equivalent")
 val cli_cmd = "test"
 val mcp_tool = "simple_test"
 val mcp_tools = [
@@ -670,13 +788,18 @@ expect(mcp_tools).to_contain(mcp_tool)
 
 #### build command has MCP equivalent
 
+- build command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("build command has MCP equivalent")
 val mcp_tools = [
     "simple_test", "simple_build", "simple_format",
     "simple_lint", "simple_fix", "simple_doc_coverage"
@@ -688,13 +811,18 @@ expect(mcp_tools).to_contain("simple_build")
 
 #### lint command has MCP equivalent
 
+- lint command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lint command has MCP equivalent")
 val mcp_tools = [
     "simple_test", "simple_build", "simple_format",
     "simple_lint", "simple_fix", "simple_doc_coverage"
@@ -706,13 +834,18 @@ expect(mcp_tools).to_contain("simple_lint")
 
 #### fmt command has MCP equivalent
 
+- fmt command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fmt command has MCP equivalent")
 val mcp_tools = [
     "simple_test", "simple_build", "simple_format",
     "simple_lint", "simple_fix", "simple_doc_coverage"
@@ -724,13 +857,18 @@ expect(mcp_tools).to_contain("simple_format")
 
 #### fix command has MCP equivalent
 
+- fix command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fix command has MCP equivalent")
 val mcp_tools = [
     "simple_test", "simple_build", "simple_format",
     "simple_lint", "simple_fix", "simple_doc_coverage"
@@ -742,13 +880,18 @@ expect(mcp_tools).to_contain("simple_fix")
 
 #### diff command has MCP equivalent
 
+- diff command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("diff command has MCP equivalent")
 val mcp_tools = [
     "simple_diff", "simple_log", "simple_squash",
     "simple_new", "simple_commit", "simple_push",
@@ -761,13 +904,18 @@ expect(mcp_tools).to_contain("simple_diff")
 
 #### check command has MCP equivalent
 
+- check command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("check command has MCP equivalent")
 val mcp_tools = [
     "simple_read", "simple_check", "simple_symbols",
     "simple_status", "simple_diagnostics", "simple_edit",
@@ -780,13 +928,18 @@ expect(mcp_tools).to_contain("simple_check")
 
 #### doc-coverage command has MCP equivalent
 
+- doc-coverage command has MCP equivalent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("doc-coverage command has MCP equivalent")
 val mcp_tools = [
     "simple_test", "simple_build", "simple_format",
     "simple_lint", "simple_fix", "simple_doc_coverage"
@@ -798,19 +951,24 @@ expect(mcp_tools).to_contain("simple_doc_coverage")
 
 #### when checking MCP tool count
 
-#### total MCP tools equals 68
+#### total MCP tools equals 69
+
+- total MCP tools equals 69
+   - Expected: family_sum equals `expected_count`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val expected_count = 68
-# Family counts: 19+6+6+8+8+1+6+4+3+3+4 = 68
-# FAIL-FIRST: family sum is 68, not 69
-val family_sum = 19 + 6 + 6 + 8 + 8 + 1 + 6 + 4 + 3 + 3 + 4
+# @req REQ-SSPEC-SYSTEM
+step("total MCP tools equals 69")
+val expected_count = 69
+# Family counts: 19+6+6+8+8+1+6+5+3+3+4 = 69
+val family_sum = 19 + 6 + 6 + 8 + 8 + 1 + 6 + 5 + 3 + 3 + 4
 expect(family_sum).to_equal(expected_count)
 ```
 
@@ -828,3 +986,57 @@ expect(family_sum).to_equal(expected_count)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `be037b03040f44cba2342c9768122553f6843188b87c02526a0b8ca284946bea`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `be037b03040f44cba2342c9768122553f6843188b87c02526a0b8ca284946bea`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `be037b03040f44cba2342c9768122553f6843188b87c02526a0b8ca284946bea`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/03_system/tools/cli_mcp_completeness_spec.spl
+mirror: doc/06_spec/03_system/tools/cli_mcp_completeness_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=95 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/cli_mcp_completeness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/cli_mcp_completeness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/cli_mcp_completeness_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/cli_mcp_completeness_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has working compile command' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/cli_mcp_completeness_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has working test command' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/cli_mcp_completeness_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has working lint command' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/cli_mcp_completeness_spec.spl:409:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'test command has MCP equivalent' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

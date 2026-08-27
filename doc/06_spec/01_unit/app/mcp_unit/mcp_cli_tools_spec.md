@@ -1,29 +1,6 @@
-# mcp_cli_tools_spec
+# Mcp Cli Tools Specification
 
-> Tests the 6 Tier 1 MCP CLI tool handlers: simple_test, simple_build, simple_format, simple_lint, simple_fix, simple_doc_coverage
-
-<!-- sdn-diagram:id=mcp_cli_tools_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mcp_cli_tools_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mcp_cli_tools_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mcp_cli_tools_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering simple_test tool, simple_build tool, simple_format tool, simple_lint tool, simple_fix tool, simple_doc_coverage tool.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,32 +9,7 @@ mcp_cli_tools_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# mcp_cli_tools_spec
-
-Tests the 6 Tier 1 MCP CLI tool handlers: simple_test, simple_build, simple_format, simple_lint, simple_fix, simple_doc_coverage
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #MCP-CLI-001 |
-| Category | Tooling |
-| Difficulty | 2/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/mcp_unit/mcp_cli_tools_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests the 6 Tier 1 MCP CLI tool handlers:
-simple_test, simple_build, simple_format, simple_lint, simple_fix, simple_doc_coverage
-
-## Behavior
-
-- Each tool wraps a bin/simple CLI command via shell_cmd
-- Parameters are optional except simple_fix (path required)
-- Output includes exit code and command output
+# Mcp Cli Tools Specification
 
 ## Scenarios
 
@@ -65,13 +17,22 @@ simple_test, simple_build, simple_format, simple_lint, simple_fix, simple_doc_co
 
 #### builds test command with no args
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds test command with no args
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds test command with no args")
 var cmd = "timeout 120 bin/simple test"
 cmd = cmd + " 2>&1"
 expect(cmd).to_contain("bin/simple test")
@@ -81,13 +42,18 @@ expect(cmd).to_contain("bin/simple test")
 
 #### builds test command with path
 
+- builds test command with path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds test command with path")
 val path = "test/unit/app/mcp/api_tool_spec.spl"
 var cmd = "timeout 120 bin/simple test"
 if path != "":
@@ -100,13 +66,18 @@ expect(cmd).to_contain(path)
 
 #### builds test command with filter
 
+- builds test command with filter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds test command with filter")
 val filter_str = "symbol"
 var cmd = "timeout 120 bin/simple test"
 if filter_str != "":
@@ -118,13 +89,18 @@ expect(cmd).to_contain("--filter symbol")
 
 #### builds test command with list flag
 
+- builds test command with list flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds test command with list flag")
 val list_flag = "true"
 var cmd = "timeout 120 bin/simple test"
 if list_flag == "true":
@@ -136,13 +112,18 @@ expect(cmd).to_contain("--list")
 
 #### builds test command with only-slow flag
 
+- builds test command with only-slow flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds test command with only-slow flag")
 val only_slow = "true"
 var cmd = "timeout 120 bin/simple test"
 if only_slow == "true":
@@ -154,13 +135,18 @@ expect(cmd).to_contain("--only-slow")
 
 #### uses per-test timeout for MCP test runs
 
+- uses per-test timeout for MCP test runs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses per-test timeout for MCP test runs")
 var cmd = "timeout 120 bin/simple test"
 cmd = cmd + " --timeout 60"
 expect(cmd).to_contain("--timeout 60")
@@ -172,13 +158,18 @@ expect(cmd).to_contain("--timeout 60")
 
 #### builds basic build command
 
+- builds basic build command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds basic build command")
 var cmd = "timeout 300 bin/simple build"
 cmd = cmd + " 2>&1"
 expect(cmd).to_contain("bin/simple build")
@@ -188,13 +179,18 @@ expect(cmd).to_contain("bin/simple build")
 
 #### builds release build command
 
+- builds release build command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds release build command")
 val release = "true"
 var cmd = "timeout 300 bin/simple build"
 if release == "true":
@@ -206,13 +202,18 @@ expect(cmd).to_contain("--release")
 
 #### builds with target
 
+- builds with target
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds with target")
 val target = "aarch64"
 var cmd = "timeout 300 bin/simple build"
 if target != "":
@@ -224,13 +225,18 @@ expect(cmd).to_contain("--target aarch64")
 
 #### builds with warn-docs
 
+- builds with warn-docs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds with warn-docs")
 val warn_docs = "true"
 var cmd = "timeout 300 bin/simple build"
 if warn_docs == "true":
@@ -244,13 +250,18 @@ expect(cmd).to_contain("--warn-docs")
 
 #### builds fmt command
 
+- builds fmt command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds fmt command")
 var cmd = "timeout 60 bin/simple fmt"
 cmd = cmd + " 2>&1"
 expect(cmd).to_contain("bin/simple fmt")
@@ -260,13 +271,18 @@ expect(cmd).to_contain("bin/simple fmt")
 
 #### builds fmt command with check flag
 
+- builds fmt command with check flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds fmt command with check flag")
 val check = "true"
 var cmd = "timeout 60 bin/simple fmt"
 if check == "true":
@@ -278,13 +294,18 @@ expect(cmd).to_contain("--check")
 
 #### builds fmt command with path
 
+- builds fmt command with path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds fmt command with path")
 val path = "src/app/cli/main.spl"
 var cmd = "timeout 60 bin/simple fmt"
 if path != "":
@@ -298,13 +319,18 @@ expect(cmd).to_contain(path)
 
 #### builds lint command
 
+- builds lint command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds lint command")
 var cmd = "timeout 60 bin/simple lint"
 cmd = cmd + " 2>&1"
 expect(cmd).to_contain("bin/simple lint")
@@ -314,13 +340,18 @@ expect(cmd).to_contain("bin/simple lint")
 
 #### builds lint command with path
 
+- builds lint command with path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds lint command with path")
 val path = "src/lib/"
 var cmd = "timeout 60 bin/simple lint"
 if path != "":
@@ -334,13 +365,19 @@ expect(cmd).to_contain("src/lib/")
 
 #### requires path parameter
 
+- requires path parameter
+   - Expected: has_error is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("requires path parameter")
 val path = ""
 val has_error = path == ""
 expect(has_error).to_equal(true)
@@ -350,13 +387,18 @@ expect(has_error).to_equal(true)
 
 #### builds fix command with path
 
+- builds fix command with path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds fix command with path")
 val path = "src/app/cli/main.spl"
 var cmd = "timeout 60 bin/simple fix " + path
 cmd = cmd + " 2>&1"
@@ -368,13 +410,18 @@ expect(cmd).to_contain(path)
 
 #### builds fix command with dry-run
 
+- builds fix command with dry-run
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds fix command with dry-run")
 val path = "src/app/cli/main.spl"
 val dry_run = "true"
 var cmd = "timeout 60 bin/simple fix " + path
@@ -389,13 +436,18 @@ expect(cmd).to_contain("--dry-run")
 
 #### builds doc-coverage command
 
+- builds doc-coverage command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds doc-coverage command")
 var cmd = "timeout 60 bin/simple doc-coverage"
 cmd = cmd + " 2>&1"
 expect(cmd).to_contain("bin/simple doc-coverage")
@@ -405,13 +457,18 @@ expect(cmd).to_contain("bin/simple doc-coverage")
 
 #### builds doc-coverage with format
 
+- builds doc-coverage with format
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds doc-coverage with format")
 val format_str = "md"
 var cmd = "timeout 60 bin/simple doc-coverage"
 if format_str != "":
@@ -423,13 +480,18 @@ expect(cmd).to_contain("--format=md")
 
 #### builds doc-coverage with missing flag
 
+- builds doc-coverage with missing flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds doc-coverage with missing flag")
 val missing = "true"
 var cmd = "timeout 60 bin/simple doc-coverage"
 if missing == "true":
@@ -438,6 +500,26 @@ expect(cmd).to_contain("--missing")
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/mcp_unit/mcp_cli_tools_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering simple_test tool, simple_build tool, simple_format tool, simple_lint tool, simple_fix tool, simple_doc_coverage tool.
+- simple_test tool
+- simple_build tool
+- simple_format tool
+- simple_lint tool
+- simple_fix tool
+- simple_doc_coverage tool
 
 ## Scenario Summary
 
@@ -451,3 +533,51 @@ expect(cmd).to_contain("--missing")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `00e1e36249c0f5f26cb65ac28fb3c22df5dae6f3e87be159ed003e3100b1d5a0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `00e1e36249c0f5f26cb65ac28fb3c22df5dae6f3e87be159ed003e3100b1d5a0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `00e1e36249c0f5f26cb65ac28fb3c22df5dae6f3e87be159ed003e3100b1d5a0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/mcp_unit/mcp_cli_tools_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_unit/mcp_cli_tools_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_unit/mcp_cli_tools_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_unit/mcp_cli_tools_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_unit/mcp_cli_tools_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds test command with no args' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/mcp_cli_tools_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds test command with path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/mcp_cli_tools_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds test command with filter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

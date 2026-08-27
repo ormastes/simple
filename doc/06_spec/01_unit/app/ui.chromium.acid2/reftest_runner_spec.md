@@ -1,29 +1,6 @@
 # Reftest Runner Specification
 
-> _Fixed-size pixel buffer used by the reftest harness._
-
-<!-- sdn-diagram:id=reftest_runner_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=reftest_runner_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-reftest_runner_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=reftest_runner_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Acid2 PixelGrid — basics, Acid2 GoldenGuard — DesktopShell frame regressions, Acid2 WPT status — enum wrapper, Acid2ReftestRunner — reftest passes.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -37,17 +14,21 @@ reftest_runner_spec -> app
 ## Scenarios
 
 ### Acid2 PixelGrid — basics
-_Fixed-size pixel buffer used by the reftest harness._
 
 #### new allocates a transparent 16x16 grid
+
+- new allocates a transparent 16x16 grid
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("new allocates a transparent 16x16 grid")
 val g = PixelGrid.new()
 expect(g.width_of() == ACID2_GRID_WIDTH).to_be_true()
 expect(g.height_of() == ACID2_GRID_HEIGHT).to_be_true()
@@ -59,13 +40,18 @@ expect(g.get(0, 0) == ACID2_PIXEL_TRANSPARENT).to_be_true()
 
 #### filled paints every cell with the palette index
 
+- filled paints every cell with the palette index
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("filled paints every cell with the palette index")
 val g = PixelGrid.filled(ACID2_PIXEL_WHITE)
 expect(g.get(0, 0) == ACID2_PIXEL_WHITE).to_be_true()
 expect(g.get(15, 15) == ACID2_PIXEL_WHITE).to_be_true()
@@ -76,16 +62,18 @@ expect(g.count_colour(ACID2_PIXEL_WHITE) == ACID2_GRID_CELLS).to_be_true()
 
 #### set + get round-trip a pixel
 
-1. var g = PixelGrid new
+- set + get round-trip a pixel
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("set + get round-trip a pixel")
 var g = PixelGrid.new()
 val ok = g.set(3, 4, ACID2_PIXEL_RED)
 expect(ok).to_be_true()
@@ -96,16 +84,18 @@ expect(g.get(3, 4) == ACID2_PIXEL_RED).to_be_true()
 
 #### set rejects out-of-bounds coordinates
 
-1. var g = PixelGrid new
+- set rejects out-of-bounds coordinates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("set rejects out-of-bounds coordinates")
 var g = PixelGrid.new()
 expect(not g.set(-1, 0, ACID2_PIXEL_RED)).to_be_true()
 expect(not g.set(0, 99, ACID2_PIXEL_RED)).to_be_true()
@@ -116,16 +106,18 @@ expect(g.get(-1, 0) == ACID2_PIXEL_TRANSPARENT).to_be_true()
 
 #### fill_rect writes a clipped rectangle and reports cells touched
 
-1. var g = PixelGrid new
+- fill_rect writes a clipped rectangle and reports cells touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fill_rect writes a clipped rectangle and reports cells touched")
 var g = PixelGrid.new()
 val n = g.fill_rect(0, 0, 3, 3, ACID2_PIXEL_SKIN)
 expect(n == 16).to_be_true()
@@ -138,16 +130,18 @@ expect(g.get(4, 4) == ACID2_PIXEL_TRANSPARENT).to_be_true()
 
 #### stroke_rect paints only the border
 
-1. var g = PixelGrid new
+- stroke_rect paints only the border
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("stroke_rect paints only the border")
 var g = PixelGrid.new()
 val n = g.stroke_rect(0, 0, 4, 4, ACID2_PIXEL_BLACK)
 expect(n > 0).to_be_true()
@@ -160,13 +154,18 @@ expect(g.get(2, 2) == ACID2_PIXEL_TRANSPARENT).to_be_true()
 
 #### equals reports identical grids as equal
 
+- equals reports identical grids as equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("equals reports identical grids as equal")
 val a = PixelGrid.filled(ACID2_PIXEL_WHITE)
 val b = PixelGrid.filled(ACID2_PIXEL_WHITE)
 expect(a.equals(b)).to_be_true()
@@ -177,19 +176,18 @@ expect(a.diff_count(b) == 0).to_be_true()
 
 #### diff_count counts differing cells
 
-1. var a = PixelGrid filled
-2. var b = PixelGrid filled
-3. b set
-4. b set
+- diff_count counts differing cells
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("diff_count counts differing cells")
 var a = PixelGrid.filled(ACID2_PIXEL_WHITE)
 var b = PixelGrid.filled(ACID2_PIXEL_WHITE)
 b.set(1, 1, ACID2_PIXEL_RED)
@@ -205,13 +203,18 @@ _Registry that tracks DesktopShell golden frames across a reftest pass._
 
 #### starts empty with no regressions
 
+- starts empty with no regressions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts empty with no regressions")
 val g = GoldenGuard.new()
 expect(g.is_empty()).to_be_true()
 expect(g.count() == 0).to_be_true()
@@ -223,16 +226,18 @@ expect(g.regression_count() == 0).to_be_true()
 
 #### register stores a golden frame by name
 
-1. var g = GoldenGuard new
+- register stores a golden frame by name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("register stores a golden frame by name")
 var g = GoldenGuard.new()
 val ok = g.register("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
 expect(ok).to_be_true()
@@ -244,17 +249,18 @@ expect(g.count() == 1).to_be_true()
 
 #### compare_frame returns MATCH for identical pixels
 
-1. var g = GoldenGuard new
-2. g register
+- compare_frame returns MATCH for identical pixels
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compare_frame returns MATCH for identical pixels")
 var g = GoldenGuard.new()
 g.register("shell.taskbar", PixelGrid.filled(ACID2_PIXEL_WHITE))
 val v = g.compare_frame("shell.taskbar", PixelGrid.filled(ACID2_PIXEL_WHITE))
@@ -268,19 +274,18 @@ expect(g.match_calls_of() == 1).to_be_true()
 
 #### compare_frame returns DRIFTED and logs the name on mismatch
 
-1. var g = GoldenGuard new
-2. g register
-3. var candidate = PixelGrid filled
-4. candidate set
+- compare_frame returns DRIFTED and logs the name on mismatch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compare_frame returns DRIFTED and logs the name on mismatch")
 var g = GoldenGuard.new()
 g.register("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
 var candidate = PixelGrid.filled(ACID2_PIXEL_WHITE)
@@ -297,16 +302,18 @@ expect(g.regression_count() == 1).to_be_true()
 
 #### compare_frame returns UNKNOWN for an unregistered name
 
-1. var g = GoldenGuard new
+- compare_frame returns UNKNOWN for an unregistered name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compare_frame returns UNKNOWN for an unregistered name")
 var g = GoldenGuard.new()
 val v = g.compare_frame("shell.ghost", PixelGrid.new())
 expect(v.is_unknown()).to_be_true()
@@ -318,21 +325,18 @@ expect(g.no_regressions()).to_be_true()
 
 #### reset_pass clears per-pass counters but keeps registered frames
 
-1. var g = GoldenGuard new
-2. g register
-3. var bad = PixelGrid filled
-4. bad set
-5. g compare frame
-6. g reset pass
+- reset_pass clears per-pass counters but keeps registered frames
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reset_pass clears per-pass counters but keeps registered frames")
 var g = GoldenGuard.new()
 g.register("a", PixelGrid.filled(ACID2_PIXEL_WHITE))
 var bad = PixelGrid.filled(ACID2_PIXEL_WHITE)
@@ -348,13 +352,18 @@ expect(g.has_golden("a")).to_be_true()
 
 #### verdict labels round-trip
 
+- verdict labels round-trip
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("verdict labels round-trip")
 val m = GoldenVerdict.match()
 val d = GoldenVerdict.drifted(7)
 val s = GoldenVerdict.size_diff(99)
@@ -372,13 +381,18 @@ _Small enum wrapper matching the WPT report status column._
 
 #### constructors build the three WPT rows
 
+- constructors build the three WPT rows
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("constructors build the three WPT rows")
 val u = Acid2WptStatus.unsupported()
 val f = Acid2WptStatus.failed()
 val s = Acid2WptStatus.supported()
@@ -391,13 +405,18 @@ expect(s.is_supported()).to_be_true()
 
 #### labels match the WPT report strings
 
+- labels match the WPT report strings
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("labels match the WPT report strings")
 expect(Acid2WptStatus.supported().label() == "SUPPORTED").to_be_true()
 expect(Acid2WptStatus.unsupported().label() == "UNSUPPORTED").to_be_true()
 expect(Acid2WptStatus.failed().label() == "FAILED").to_be_true()
@@ -407,13 +426,18 @@ expect(Acid2WptStatus.failed().label() == "FAILED").to_be_true()
 
 #### status codes match the exported constants
 
+- status codes match the exported constants
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("status codes match the exported constants")
 expect(Acid2WptStatus.supported().code_of() == ACID2_STATUS_SUPPORTED).to_be_true()
 expect(Acid2WptStatus.failed().code_of() == ACID2_STATUS_FAILED).to_be_true()
 expect(Acid2WptStatus.unsupported().code_of() == ACID2_STATUS_UNSUPPORTED).to_be_true()
@@ -426,13 +450,18 @@ _M12 acceptance harness: reftest pixels + DesktopShell golden guard._
 
 #### new creates an empty runner
 
+- new creates an empty runner
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("new creates an empty runner")
 val r = Acid2ReftestRunner.new()
 expect(r.pass_count_of() == 0).to_be_true()
 expect(r.last_diff_of() == 0).to_be_true()
@@ -442,18 +471,18 @@ expect(r.last_diff_of() == 0).to_be_true()
 
 #### identical reference + rendered grids flip WPT to SUPPORTED
 
-1. var r = Acid2ReftestRunner new
-2. r load reference
-3. r load rendered
+- identical reference + rendered grids flip WPT to SUPPORTED
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identical reference + rendered grids flip WPT to SUPPORTED")
 var r = Acid2ReftestRunner.new()
 r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
 r.load_rendered(PixelGrid.filled(ACID2_PIXEL_WHITE))
@@ -469,21 +498,18 @@ expect(r.pass_count_of() == 1).to_be_true()
 
 #### pixel mismatch flips the report to FAILED
 
-1. var r = Acid2ReftestRunner new
-2. var ref = PixelGrid filled
-3. var rendered = PixelGrid filled
-4. rendered set
-5. r load reference
-6. r load rendered
+- pixel mismatch flips the report to FAILED
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pixel mismatch flips the report to FAILED")
 var r = Acid2ReftestRunner.new()
 var ref = PixelGrid.filled(ACID2_PIXEL_WHITE)
 var rendered = PixelGrid.filled(ACID2_PIXEL_WHITE)
@@ -500,16 +526,18 @@ expect(not report.is_supported()).to_be_true()
 
 #### empty reference stays UNSUPPORTED
 
-1. var r = Acid2ReftestRunner new
+- empty reference stays UNSUPPORTED
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty reference stays UNSUPPORTED")
 var r = Acid2ReftestRunner.new()
 val report = r.run_pass()
 expect(report.status().is_unsupported()).to_be_true()
@@ -519,21 +547,18 @@ expect(report.status().is_unsupported()).to_be_true()
 
 #### DesktopShell golden regression forces SUPPORTED -> FAILED
 
-1. var r = Acid2ReftestRunner new
-2. r load reference
-3. r load rendered
-4. r register golden
-5. var bad = PixelGrid filled
-6. bad set
+- DesktopShell golden regression forces SUPPORTED -> FAILED
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("DesktopShell golden regression forces SUPPORTED -> FAILED")
 var r = Acid2ReftestRunner.new()
 r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
 r.load_rendered(PixelGrid.filled(ACID2_PIXEL_WHITE))
@@ -554,20 +579,18 @@ expect(names.len() == 1).to_be_true()
 
 #### full pass — Acid2 match + zero DesktopShell drift = SUPPORTED
 
-1. var r = Acid2ReftestRunner new
-2. r load reference
-3. r load rendered
-4. r register golden
-5. r register golden
+- full pass — Acid2 match + zero DesktopShell drift = SUPPORTED
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("full pass — Acid2 match + zero DesktopShell drift = SUPPORTED")
 var r = Acid2ReftestRunner.new()
 r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
 r.load_rendered(PixelGrid.filled(ACID2_PIXEL_WHITE))
@@ -588,20 +611,18 @@ expect(report.summary_line() == "acid2: SUPPORTED").to_be_true()
 
 #### reset_pass clears per-pass state between runs
 
-1. var r = Acid2ReftestRunner new
-2. r load reference
-3. r load rendered
-4. r run pass
-5. r reset pass
+- reset_pass clears per-pass state between runs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reset_pass clears per-pass state between runs")
 var r = Acid2ReftestRunner.new()
 r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
 r.load_rendered(PixelGrid.filled(ACID2_PIXEL_BLACK))
@@ -621,12 +642,12 @@ expect(r.guard_of().regression_count() == 0).to_be_true()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Acid2 PixelGrid — basics, Acid2 GoldenGuard — DesktopShell frame regressions, Acid2 WPT status — enum wrapper, Acid2ReftestRunner — reftest passes.
 - Acid2 PixelGrid — basics
 - Acid2 GoldenGuard — DesktopShell frame regressions
 - Acid2 WPT status — enum wrapper
@@ -644,3 +665,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b38094c77e1d7efe02a0486f39c16f05718dd94c8cab7112eca510753ecba582`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b38094c77e1d7efe02a0486f39c16f05718dd94c8cab7112eca510753ecba582`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b38094c77e1d7efe02a0486f39c16f05718dd94c8cab7112eca510753ecba582`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl
+mirror: doc/06_spec/01_unit/app/ui.chromium.acid2/reftest_runner_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui.chromium.acid2/reftest_runner_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui.chromium.acid2/reftest_runner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'new allocates a transparent 16x16 grid' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'filled paints every cell with the palette index' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'set + get round-trip a pixel' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Simpleos Wine Process Loader Runtime Specification
 
-> <details>
-
-<!-- sdn-diagram:id=simpleos_wine_process_loader_runtime_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_wine_process_loader_runtime_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_wine_process_loader_runtime_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_wine_process_loader_runtime_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SimpleOS Wine loader runtime preflight, REQ-035: full-image loader runtime evidence before arbitrary execution.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,37 +18,22 @@ simpleos_wine_process_loader_runtime_spec -> common
 ### REQ-035: full-image loader runtime evidence before arbitrary execution
 
 #### should compose image handoff, relocation, and TLS runtime checks without executing PE code
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
-val result = wine_process_plan_full_image_loader_runtime(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback")
-expect(result.ok).to_equal(true)
-expect(result.relocation_count).to_equal(0)
-expect(result.tls_callback_count).to_equal(0)
-expect(result.evidence).to_contain("full-image-loader-runtime-planned")
-expect(result.evidence).to_contain("relocation-runtime-planned")
-expect(result.evidence).to_contain("tls-runtime-planned")
-expect(result.evidence).to_contain("no-arbitrary-execution")
-expect(result.status).to_equal("full-image-loader-runtime-planned")
-```
-
-</details>
-
 #### should require PEB/TEB VM byte-write readback before loader runtime evidence
 
+- should require PEB/TEB VM byte-write readback before loader runtime evidence
+   - Expected: result.ok is true
+   - Expected: result.status equals `full-image-loader-runtime-planned`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require PEB/TEB VM byte-write readback before loader runtime evidence")
 val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
 val init = wine_peb_teb_init_default()
 val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -96,12 +58,12 @@ expect(result.evidence).to_contain("no-arbitrary-execution")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS Wine loader runtime preflight, REQ-035: full-image loader runtime evidence before arbitrary execution.
 - SimpleOS Wine loader runtime preflight
 - REQ-035: full-image loader runtime evidence before arbitrary execution
 
@@ -117,3 +79,59 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-035`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `77d63819c73f1644a894c7337cb00019b8a01f4ec1800a1a9f2ffbde352a7f81`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `77d63819c73f1644a894c7337cb00019b8a01f4ec1800a1a9f2ffbde352a7f81`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `77d63819c73f1644a894c7337cb00019b8a01f4ec1800a1a9f2ffbde352a7f81`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl
+mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=80 oracle=100
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=86; blocker cap makes effective=49
+doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl:40:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should compose image handoff, relocation, and TLS runtime checks without executing PE code' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl:40:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should compose image handoff, relocation, and TLS runtime checks without executing PE code' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl:56:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require PEB/TEB VM byte-write readback before loader runtime evidence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should require PEB/TEB VM byte-write readback before loader runtime evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

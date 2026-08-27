@@ -2,30 +2,6 @@
 
 > Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence taxonomy contracts.
 
-<!-- sdn-diagram:id=production_gui_web_renderer_parity_hardening_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=production_gui_web_renderer_parity_hardening_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-production_gui_web_renderer_parity_hardening_spec -> std
-production_gui_web_renderer_parity_hardening_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=production_gui_web_renderer_parity_hardening_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -45,7 +21,7 @@ Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence t
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
 | Source | `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -64,36 +40,27 @@ taxonomy contracts.
 #### generated common.ui widget HTML
 
 #### uses real GUI widget HTML without legacy fixture markers
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = generated_gui_widget_html()
-expect(html).to_contain("widget-button")
-expect(html).to_contain("widget-image")
-expect(html).to_contain("data-action=\"run_production_gui\"")
-expect(html.contains("data-simple-actual-gui-button")).to_equal(false)
-expect(html.contains("simple-web-engine2d-")).to_equal(false)
-expect(html.contains("data-font-corpus=\"known-site-fonts\"")).to_equal(false)
-```
-
-</details>
-
 #### Simple Web Renderer backends
 
 #### renders marker-free widget HTML to a non-empty framebuffer
 
+- renders marker-free widget HTML to a non-empty framebuffer
+   - Expected: report.has_widget_html is true
+   - Expected: report.has_legacy_fixture_marker is false
+   - Expected: report.software_pixel_count equals `96 * 72`
+   - Expected: report.timing_budget_status equals `pass`
+   - Expected: report.timing_budget_reason equals `within-render-budget`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders marker-free widget HTML to a non-empty framebuffer")
 val report = run_generated_gui_widget_backend_parity(96, 72)
 expect(report.has_widget_html).to_equal(true)
 expect(report.has_legacy_fixture_marker).to_equal(false)
@@ -117,13 +84,23 @@ expect(report.timing_budget_reason).to_equal("within-render-budget")
 
 #### matches CPU SIMD backend pixels exactly
 
+- matches CPU SIMD backend pixels exactly
+   - Expected: report.cpu_simd_resolved_backend equals `cpu_simd`
+   - Expected: report.cpu_simd_pixel_count equals `96 * 72`
+   - Expected: report.cpu_simd_different_pixels equals `0`
+   - Expected: report.cpu_simd_match_percentage equals `10000`
+   - Expected: report.cpu_simd_max_channel_diff equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches CPU SIMD backend pixels exactly")
 val report = run_generated_gui_widget_backend_parity(96, 72)
 expect(report.cpu_simd_resolved_backend).to_equal("cpu_simd")
 expect(report.cpu_simd_pixel_count).to_equal(96 * 72)
@@ -136,13 +113,26 @@ expect(report.cpu_simd_max_channel_diff).to_equal(0)
 
 #### matches Metal backend pixels exactly with no tolerance
 
+- matches Metal backend pixels exactly with no tolerance
+   - Expected: report.metal_resolved_backend equals `metal`
+   - Expected: report.metal_resolved_backend equals `software`
+   - Expected: report.tolerance_used is false
+   - Expected: report.metal_pixel_count equals `96 * 72`
+   - Expected: report.metal_different_pixels equals `0`
+   - Expected: report.metal_match_percentage equals `10000`
+   - Expected: report.metal_max_channel_diff equals `0`
+   - Expected: report.exact_backend_parity is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches Metal backend pixels exactly with no tolerance")
 val report = run_generated_gui_widget_backend_parity(96, 72)
 if is_macos():
     expect(report.metal_resolved_backend).to_equal("metal")
@@ -162,13 +152,27 @@ expect(report.exact_backend_parity).to_equal(true)
 
 #### executes real CPU SIMD drawing operations with exact software parity
 
+- executes real CPU SIMD drawing operations with exact software parity
+   - Expected: report.software_resolved_backend equals `software`
+   - Expected: report.cpu_simd_resolved_backend equals `cpu_simd`
+   - Expected: report.software_pixel_count equals `16 * 16`
+   - Expected: report.cpu_simd_pixel_count equals `16 * 16`
+   - Expected: report.cpu_simd_different_pixels equals `0`
+   - Expected: report.cpu_simd_max_channel_diff equals `0`
+   - Expected: report.tolerance_used is false
+   - Expected: report.timing_budget_status equals `pass`
+   - Expected: report.timing_budget_reason equals `within-render-budget`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes real CPU SIMD drawing operations with exact software parity")
 val report = run_backend_executed_gui_widget_scene_parity(16, 16)
 expect(report.software_resolved_backend).to_equal("software")
 expect(report.cpu_simd_resolved_backend).to_equal("cpu_simd")
@@ -196,13 +200,26 @@ expect(report.timing_budget_reason).to_equal("within-render-budget")
 
 #### executes real Metal framebuffer readback when Metal is available
 
+- executes real Metal framebuffer readback when Metal is available
+   - Expected: report.metal_resolved_backend equals `metal`
+   - Expected: report.metal_gpu_frame_complete is true
+   - Expected: report.metal_gpu_readback_pixel_count equals `16 * 16`
+   - Expected: report.metal_resolved_backend equals `software`
+   - Expected: report.metal_gpu_frame_complete is false
+   - Expected: report.metal_pixel_count equals `16 * 16`
+   - Expected: report.metal_different_pixels equals `0`
+   - Expected: report.metal_max_channel_diff equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes real Metal framebuffer readback when Metal is available")
 val report = run_backend_executed_gui_widget_scene_parity(16, 16)
 if is_macos():
     expect(report.metal_resolved_backend).to_equal("metal")
@@ -223,13 +240,24 @@ expect(report.metal_max_channel_diff).to_equal(0)
 
 #### maintains exact CPU SIMD parity at 480x270 for reduced scene
 
+- maintains exact CPU SIMD parity at 480x270 for reduced scene
+   - Expected: report.software_pixel_count equals `480 * 270`
+   - Expected: report.cpu_simd_pixel_count equals `480 * 270`
+   - Expected: report.cpu_simd_different_pixels equals `0`
+   - Expected: report.cpu_simd_max_channel_diff equals `0`
+   - Expected: report.tolerance_used is false
+   - Expected: report.exact_backend_parity is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains exact CPU SIMD parity at 480x270 for reduced scene")
 val report = run_backend_executed_gui_widget_scene_parity(480, 270)
 expect(report.software_pixel_count).to_equal(480 * 270)
 expect(report.cpu_simd_pixel_count).to_equal(480 * 270)
@@ -243,13 +271,24 @@ expect(report.exact_backend_parity).to_equal(true)
 
 #### maintains exact backend parity at 480x270 for widget HTML
 
+- maintains exact backend parity at 480x270 for widget HTML
+   - Expected: report.software_pixel_count equals `480 * 270`
+   - Expected: report.cpu_simd_pixel_count equals `480 * 270`
+   - Expected: report.cpu_simd_different_pixels equals `0`
+   - Expected: report.cpu_simd_max_channel_diff equals `0`
+   - Expected: report.tolerance_used is false
+   - Expected: report.exact_backend_parity is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains exact backend parity at 480x270 for widget HTML")
 val report = run_generated_gui_widget_backend_parity(480, 270)
 expect(report.software_pixel_count).to_equal(480 * 270)
 expect(report.cpu_simd_pixel_count).to_equal(480 * 270)
@@ -274,7 +313,67 @@ expect(report.exact_backend_parity).to_equal(true)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
+- **Requirements:** `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-HARD-013`
+- `REQ-WEB-HARD-014`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7a1d7bdfee597a6fcaa662ae661ebccdb21ae1cf940e52fe033b7fa203cf156f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7a1d7bdfee597a6fcaa662ae661ebccdb21ae1cf940e52fe033b7fa203cf156f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7a1d7bdfee597a6fcaa662ae661ebccdb21ae1cf940e52fe033b7fa203cf156f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **79/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl
+mirror: doc/06_spec/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md (current)
+findings: 8 blockers: 1
+  narrative=100 structure=90 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=79; blocker cap makes effective=49
+doc/06_spec/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:39:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'uses real GUI widget HTML without legacy fixture markers' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders marker-free widget HTML to a non-empty framebuffer' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches CPU SIMD backend pixels exactly' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches Metal backend pixels exactly with no tolerance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

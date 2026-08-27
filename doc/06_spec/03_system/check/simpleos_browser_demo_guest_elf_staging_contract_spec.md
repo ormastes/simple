@@ -1,6 +1,6 @@
-# Simpleos Browser Demo Guest Elf Staging Contract Specification
+# SimpleOS browser-demo guest ELF staging contract
 
-> <details>
+> Proves the fullscreen evidence lane builds a real freestanding browser client,
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,23 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simpleos Browser Demo Guest Elf Staging Contract Specification
+# SimpleOS browser-demo guest ELF staging contract
+
+Proves the fullscreen evidence lane builds a real freestanding browser client,
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Proves the fullscreen evidence lane builds a real freestanding browser client,
+stages its exact ELF bytes in `BROWSMF.SMF`, and correlates input with a
+ring-3 content mutation instead of accepting marker-only media.
 
 ## Scenarios
 
@@ -17,24 +33,25 @@
 
 #### builds stages and validates the real x86_64 browser client
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds stages and validates the real x86_64 browser client
 - Require the freestanding guest entry and versioned WM wire
-- " read u32
 - Require explicit ELF staging and reject marker-only fullscreen admission
-- "def wait browser content presented
-- "generation=
-- "presented match start
-- "pointer release serial offset = serial size
-- "wait pointer correlation
    - Expected: evidence.index_of("browser_demo_remote_main") equals `-1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 102 lines folded for reproduction.
+Runnable source: 107 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("builds stages and validates the real x86_64 browser client")
 step("Require the freestanding guest entry and versioned WM wire")
 val build = file_read("scripts/os/build_browser_demo_client.shs")
 val runtime = file_read("examples/09_embedded/simpleos_remote_gui/remote_window_runtime.c")
@@ -85,7 +102,10 @@ expect(shell).to_contain(
 expect(shell.contains(
     "pointer_window_id = self.compositor.surfaces[self.compositor.focused_idx].id")).to_equal(false)
 expect(shell).to_contain("self.render_baremetal_frame(executor)")
-expect(shell).to_contain("pointer_sequence > 0 and pointer_kind_code != 2")
+expect(shell).to_contain(
+    "val pointer_move_needs_render = pointer_sequence > 0 and pointer_kind_code == 3 and state_revision_changed")
+expect(shell.contains(
+    "pointer_sequence > 0 and pointer_kind_code != 2")).to_equal(false)
 
 step("Require explicit ELF staging and reject marker-only fullscreen admission")
 val disk_wrapper = file_read("scripts/os/make_os_disk.shs")
@@ -141,21 +161,6 @@ expect(evidence.index_of("browser_demo_remote_main")).to_equal(-1)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl` |
-| Updated | 2026-07-27 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- SimpleOS browser-demo guest ELF staging contract
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -168,3 +173,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-002`
+- `REQ-003`
+- `REQ-007`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `35848f1f4be2e6d76beb5aeab4876c9c6a9fc3a002cb1a9b92ad757b38249b27`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `35848f1f4be2e6d76beb5aeab4876c9c6a9fc3a002cb1a9b92ad757b38249b27`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `35848f1f4be2e6d76beb5aeab4876c9c6a9fc3a002cb1a9b92ad757b38249b27`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl
+mirror: doc/06_spec/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=100 oracle=90
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=87; blocker cap makes effective=49
+doc/06_spec/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds stages and validates the real x86_64 browser client' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

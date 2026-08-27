@@ -2,30 +2,6 @@
 
 > Checks BridgeDialog parity state without terminal rendering.
 
-<!-- sdn-diagram:id=bridge_dialog_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=bridge_dialog_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-bridge_dialog_spec -> std
-bridge_dialog_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=bridge_dialog_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -44,7 +20,7 @@ Checks BridgeDialog parity state without terminal rendering.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/bridge_dialog_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks BridgeDialog parity state without terminal rendering.
@@ -55,6 +31,11 @@ Checks BridgeDialog parity state without terminal rendering.
 
 #### models labels, visibility, and connection state
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- models labels, visibility, and connection state
 - Default empty labels to source copy
    - Expected: bridgeDialogProviderLabel(defaults) equals `Claude`
    - Expected: bridgeDialogTargetLabel(defaults) equals `remote app`
@@ -69,10 +50,12 @@ Checks BridgeDialog parity state without terminal rendering.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("models labels, visibility, and connection state")
 step("Default empty labels to source copy")
 val defaults = BridgeDialogState.new(true, false, true, "", "", "req_1", "", "")
 expect(bridgeDialogProviderLabel(defaults)).to_equal("Claude")
@@ -91,6 +74,7 @@ expect(bridgeDialogTitle(hidden)).to_equal("Bridge dialog hidden")
 
 #### summarizes status and error precedence
 
+- summarizes status and error precedence
 - Use custom status before generated connected copy
    - Expected: bridgeDialogConnectionState(connected) equals `connected`
    - Expected: bridgeDialogStatusSummary(connected) equals `Waiting for approval`
@@ -104,10 +88,12 @@ expect(bridgeDialogTitle(hidden)).to_equal("Bridge dialog hidden")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("summarizes status and error precedence")
 step("Use custom status before generated connected copy")
 val connected = BridgeDialogState.new(true, true, false, "Claude", "mobile", "req_3", "", "Waiting for approval")
 expect(bridgeDialogConnectionState(connected)).to_equal("connected")
@@ -125,6 +111,7 @@ expect(bridgeDialogCanApprove(failed)).to_equal(false)
 
 #### returns approve and cancel results
 
+- returns approve and cancel results
 - Approve connected bridge
    - Expected: approved.action equals `approve`
    - Expected: approved.approved is true
@@ -141,10 +128,12 @@ expect(bridgeDialogCanApprove(failed)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns approve and cancel results")
 step("Approve connected bridge")
 val ready = BridgeDialogState.new(true, true, false, "Claude", "desktop", "req_5", "", "")
 val approved = bridgeDialogApprove(ready)
@@ -169,6 +158,7 @@ expect(cancelled.cancelled).to_equal(true)
 
 #### exposes source helpers
 
+- exposes source helpers
 - Read source helper values
    - Expected: bridgeDialogSource() equals `BridgeDialog`
    - Expected: bridgeDialogSourceLinesModeled() equals `430`
@@ -177,10 +167,12 @@ expect(cancelled.cancelled).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exposes source helpers")
 step("Read source helper values")
 expect(bridgeDialogSource()).to_equal("BridgeDialog")
 expect(bridgeDialogSourceLinesModeled()).to_equal(430)
@@ -200,3 +192,54 @@ expect(bridgeDialogSourceLinesModeled()).to_equal(430)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1d00cc92706fb549e3b1e2dcde25392986240ecd7a84e017e76b27e8850fa7c7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1d00cc92706fb549e3b1e2dcde25392986240ecd7a84e017e76b27e8850fa7c7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1d00cc92706fb549e3b1e2dcde25392986240ecd7a84e017e76b27e8850fa7c7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/tools/llm/claude_full/components/bridge_dialog_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/claude_full/components/bridge_dialog_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/claude_full/components/bridge_dialog_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/claude_full/components/bridge_dialog_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/claude_full/components/bridge_dialog_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/claude_full/components/bridge_dialog_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'models labels, visibility, and connection state' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/bridge_dialog_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'summarizes status and error precedence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/bridge_dialog_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns approve and cancel results' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

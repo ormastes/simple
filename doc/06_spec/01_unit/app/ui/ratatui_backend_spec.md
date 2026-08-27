@@ -1,29 +1,6 @@
 # Ratatui Backend Specification
 
-> 1. expect term is valid
-
-<!-- sdn-diagram:id=ratatui_backend_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ratatui_backend_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ratatui_backend_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ratatui_backend_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Ratatui Backend FFI.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,16 +19,18 @@ ratatui_backend_spec
 
 #### creates terminal successfully
 
-1. expect term is valid
+- creates terminal successfully
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates terminal successfully")
 val term = MockTerminal.create()
 expect term.is_valid() == true
 expect term.width == 80
@@ -62,18 +41,18 @@ expect term.height == 24
 
 #### allows cleanup of terminal
 
-1. expect term is valid
-2. term cleanup
-3. expect term is valid
+- allows cleanup of terminal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("allows cleanup of terminal")
 val term = MockTerminal.create()
 expect term.is_valid() == true
 term.cleanup()
@@ -84,13 +63,18 @@ expect term.is_valid() == false
 
 #### supports terminal clear
 
+- supports terminal clear
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("supports terminal clear")
 val term = MockTerminal.create()
 val cleared = term.clear()
 expect cleared == true
@@ -102,17 +86,18 @@ expect cleared == true
 
 #### creates empty text buffer
 
-1. expect buf is empty
-2. expect buf get text
+- creates empty text buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates empty text buffer")
 val buf = MockTextBuffer.empty()
 expect buf.is_empty() == true
 expect buf.get_text() == ""
@@ -122,19 +107,18 @@ expect buf.get_text() == ""
 
 #### creates multiple independent buffers
 
-1. buf1 set text
-2. buf2 set text
-3. expect buf1 get text
-4. expect buf2 get text
+- creates multiple independent buffers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates multiple independent buffers")
 val buf1 = MockTextBuffer.empty()
 val buf2 = MockTextBuffer.empty()
 buf1.set_text("hello")
@@ -149,17 +133,18 @@ expect buf2.get_text() == "world"
 
 #### sets and gets text
 
-1. buf set text
-2. expect buf get text
+- sets and gets text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("sets and gets text")
 val buf = MockTextBuffer.empty()
 buf.set_text("hello world")
 expect buf.get_text() == "hello world"
@@ -169,18 +154,18 @@ expect buf.get_text() == "hello world"
 
 #### handles empty string
 
-1. buf set text
-2. expect buf get text
-3. expect buf is empty
+- handles empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles empty string")
 val buf = MockTextBuffer.empty()
 buf.set_text("")
 expect buf.get_text() == ""
@@ -191,17 +176,18 @@ expect buf.is_empty() == true
 
 #### handles multiline text
 
-1. buf set text
-2. expect text contains
+- handles multiline text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles multiline text")
 val buf = MockTextBuffer.empty()
 buf.set_text("line1\nline2\nline3")
 val text = buf.get_text()
@@ -212,19 +198,18 @@ expect text.contains("\n")
 
 #### inserts characters
 
-1. buf insert char
-2. buf insert char
-3. buf insert char
-4. expect buf get text
+- inserts characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("inserts characters")
 val buf = MockTextBuffer.empty()
 buf.insert_char("a")
 buf.insert_char("b")
@@ -236,18 +221,18 @@ expect buf.get_text() == "abc"
 
 #### handles backspace on non-empty buffer
 
-1. buf set text
-2. buf backspace
-3. expect buf get text
+- handles backspace on non-empty buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles backspace on non-empty buffer")
 val buf = MockTextBuffer.empty()
 buf.set_text("hello")
 buf.backspace()
@@ -258,30 +243,7 @@ expect buf.get_text() == "hell"
 
 #### handles backspace on empty buffer gracefully
 
-1. buf backspace
-2. expect buf get text
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val buf = MockTextBuffer.empty()
-buf.backspace()
-expect buf.get_text() == ""
-```
-
-</details>
-
-#### handles newline insertion
-
-1. buf set text
-2. buf insert newline
-3. buf insert char
-4. expect buf get text
+- handles backspace on empty buffer gracefully
 
 
 <details>
@@ -291,6 +253,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles backspace on empty buffer gracefully")
+val buf = MockTextBuffer.empty()
+buf.backspace()
+expect buf.get_text() == ""
+```
+
+</details>
+
+#### handles newline insertion
+
+- handles newline insertion
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("handles newline insertion")
 val buf = MockTextBuffer.empty()
 buf.set_text("line1")
 buf.insert_newline()
@@ -304,16 +289,18 @@ expect buf.get_text() == "line1\n2"
 
 #### renders text buffer with prompt
 
-1. buf set text
+- renders text buffer with prompt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("renders text buffer with prompt")
 val buf = MockTextBuffer.empty()
 buf.set_text("user input")
 val result = MockRenderResult.render_buffer(buf, "> ")
@@ -325,13 +312,18 @@ expect result.success == true
 
 #### renders empty buffer
 
+- renders empty buffer
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("renders empty buffer")
 val buf = MockTextBuffer.empty()
 val result = MockRenderResult.render_buffer(buf, "> ")
 expect result.output == "> "
@@ -341,16 +333,18 @@ expect result.output == "> "
 
 #### renders with empty prompt
 
-1. buf set text
+- renders with empty prompt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("renders with empty prompt")
 val buf = MockTextBuffer.empty()
 buf.set_text("text")
 val result = MockRenderResult.render_buffer(buf, "")
@@ -363,13 +357,18 @@ expect result.output == "text"
 
 #### reads event with timeout
 
+- reads event with timeout
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("reads event with timeout")
 # Mock event reading - simulates key press
 val event = MockEvent.printable("a")
 expect event.key == "a"
@@ -382,18 +381,18 @@ expect event.is_printable == true
 
 #### identifies printable characters
 
-1. expect is printable char
-2. expect is printable char
-3. expect is printable char
+- identifies printable characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("identifies printable characters")
 expect is_printable_char("a") == true
 expect is_printable_char("Z") == true
 expect is_printable_char(" ") == true
@@ -403,17 +402,18 @@ expect is_printable_char(" ") == true
 
 #### checks modifiers correctly
 
-1. expect check modifiers
-2. expect check modifiers
+- checks modifiers correctly
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("checks modifiers correctly")
 val normal = MockEvent.printable("a")
 val with_mod = MockEvent.with_modifier("a")
 expect check_modifiers(normal) == false
@@ -424,16 +424,18 @@ expect check_modifiers(with_mod) == true
 
 #### converts printable events to char
 
-1. expect event to char
+- converts printable events to char
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts printable events to char")
 val event = MockEvent.printable("x")
 expect event_to_char(event) == "x"
 ```
@@ -442,16 +444,18 @@ expect event_to_char(event) == "x"
 
 #### returns None for non-printable events
 
-1. expect event to char
+- returns None for non-printable events
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns None for non-printable events")
 val event = MockEvent.special("Enter")
 expect event_to_char(event) == ""
 ```
@@ -462,18 +466,18 @@ expect event_to_char(event) == ""
 
 #### can destroy terminal objects
 
-1. expect term is valid
-2. term cleanup
-3. expect term is valid
+- can destroy terminal objects
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("can destroy terminal objects")
 val term = MockTerminal.create()
 expect term.is_valid() == true
 term.cleanup()
@@ -484,18 +488,18 @@ expect term.is_valid() == false
 
 #### can destroy buffer objects
 
-1. buf set text
-2. buf set text
-3. expect buf is empty
+- can destroy buffer objects
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("can destroy buffer objects")
 val buf = MockTextBuffer.empty()
 buf.set_text("data")
 # Buffer can be reused after clearing
@@ -509,17 +513,18 @@ expect buf.is_empty() == true
 
 #### handles many sequential operations
 
-1. buf insert char
-2. expect buf get text
+- handles many sequential operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles many sequential operations")
 val buf = MockTextBuffer.empty()
 var i = 0
 while i < 100:
@@ -532,16 +537,18 @@ expect buf.get_text().len() == 100
 
 #### handles many buffer creations/destructions
 
-1. buf set text
+- handles many buffer creations/destructions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles many buffer creations/destructions")
 var i = 0
 while i < 50:
     val buf = MockTextBuffer.empty()
@@ -559,12 +566,12 @@ expect i == 50
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/ratatui_backend_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Ratatui Backend FFI.
 - Ratatui Backend FFI
 
 ## Scenario Summary
@@ -579,3 +586,57 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cb64a9024ff5940490ac12aff4e9bf9f3a989d0714c3d3ab62114554ddb83a31`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cb64a9024ff5940490ac12aff4e9bf9f3a989d0714c3d3ab62114554ddb83a31`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cb64a9024ff5940490ac12aff4e9bf9f3a989d0714c3d3ab62114554ddb83a31`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/01_unit/app/ui/ratatui_backend_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/ratatui_backend_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=90 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/ratatui_backend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/ratatui_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/ratatui_backend_spec.spl:120:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates terminal successfully' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ratatui_backend_spec.spl:128:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows cleanup of terminal' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ratatui_backend_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports terminal clear' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ratatui_backend_spec.spl:281:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can destroy terminal objects' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/ui/ratatui_backend_spec.spl:289:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can destroy buffer objects' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

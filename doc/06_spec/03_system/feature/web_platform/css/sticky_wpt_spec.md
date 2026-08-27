@@ -20,7 +20,7 @@ Proves bounded root-scroll `position: sticky; top:<px>` through Web layout,
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/sticky_wpt_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves bounded root-scroll `position: sticky; top:<px>` through Web layout,
@@ -34,145 +34,36 @@ containing-block bottom constraints remain RED.
 
 #### should pin one top-inset sticky subtree during root scrolling
 
-- Resolve sticky semantics while preserving its normal-flow layout
-   - Artifact capture: after_step
-- Lower unscrolled and root-scrolled sticky geometry to Draw IR
-   - Artifact capture: after_step
-- html, 16, 12, 0, 0, browser text input overlay empty
-   - Artifact capture: after_step
-- html, 16, 12, 0, 6, browser text input overlay empty
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
-   - Expected: zero.resolved_scroll_y equals `0`
-   - Expected: scrolled.resolved_scroll_y equals `6`
-   - Expected: child.parent_id equals `sticky`
-- Execute both truthful fallback frames through Engine2D
-   - Artifact capture: after_step
-- raster shutdown
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 2 expected checks
-   - Expected: zero_frame.skipped_command_count equals `0`
-   - Expected: scrolled_frame.skipped_command_count equals `0`
+**Scenario capture:** artifact after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 91 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = _sticky_html()
-
-step("Resolve sticky semantics while preserving its normal-flow layout")
-expect(simple_web_layout_debug_style_by_id(
-    html, "sticky", "position"
-)).to_equal("sticky")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 16, 12, "sticky", "y"
-)).to_equal("4")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 16, 12, "sticky", "w"
-)).to_equal("4")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 16, 12, "sticky", "h"
-)).to_equal("4")
-
-step("Lower unscrolled and root-scrolled sticky geometry to Draw IR")
-val zero =
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
-        html, 16, 12, 0, 0, browser_text_input_overlay_empty()
-    )
-val scrolled =
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
-        html, 16, 12, 0, 6, browser_text_input_overlay_empty()
-    )
-expect(zero.resolved_scroll_y).to_equal(0)
-expect(scrolled.resolved_scroll_y).to_equal(6)
-expect(zero.composition.batches[0].source.source_kind).to_equal(
-    "html_ast"
-)
-val zero_index = _sticky_command_index(
-    zero.composition.batches[0].commands, "sticky"
-)
-val scrolled_index = _sticky_command_index(
-    scrolled.composition.batches[0].commands, "sticky"
-)
-val scrolled_child_index = _sticky_command_index(
-    scrolled.composition.batches[0].commands, "sticky-child"
-)
-expect(zero_index).to_be_greater_than(-1)
-expect(scrolled_index).to_be_greater_than(-1)
-expect(scrolled_child_index).to_be_greater_than(-1)
-if zero_index >= 0:
-    val zero_command =
-        zero.composition.batches[0].commands[zero_index]
-    expect([
-        zero_command.x, zero_command.y,
-        zero_command.width, zero_command.height
-    ]).to_equal([0, 4, 4, 4])
-    expect(_sticky_style(
-        zero_command, "position"
-    )).to_equal("sticky")
-if scrolled_index >= 0:
-    val scrolled_command =
-        scrolled.composition.batches[0].commands[scrolled_index]
-    expect([
-        scrolled_command.x, scrolled_command.y,
-        scrolled_command.width, scrolled_command.height
-    ]).to_equal([0, 0, 4, 4])
-    expect([
-        scrolled_command.clip_rect.x, scrolled_command.clip_rect.y,
-        scrolled_command.clip_rect.width,
-        scrolled_command.clip_rect.height
-    ]).to_equal([0, 0, 16, 12])
-if scrolled_child_index >= 0:
-    val child =
-        scrolled.composition.batches[0].commands[scrolled_child_index]
-    expect([
-        child.x, child.y, child.width, child.height
-    ]).to_equal([0, 0, 2, 2])
-    expect(child.parent_id).to_equal("sticky")
-
-step("Execute both truthful fallback frames through Engine2D")
-val raster = Engine2dCompositorBackend.create_named(
-    16, 12, "software"
-)
-val zero_frame = raster.render_draw_ir_composition(
-    zero.composition, []
-)
-val scrolled_frame = raster.render_draw_ir_composition(
-    scrolled.composition, []
-)
-raster.shutdown()
-expect(zero_frame.skipped_command_count).to_equal(0)
-expect(scrolled_frame.skipped_command_count).to_equal(0)
-expect(_sticky_color_count(
-    zero_frame.pixels, 0xFF2563EBu32
-)).to_equal(16)
-expect(_sticky_color_count(
-    scrolled_frame.pixels, 0xFF2563EBu32
-)).to_equal(16)
+# @req REQ-WEB-BROWSER-003/004
 ```
 
 </details>
 
 #### should leave unsupported sticky declarations in normal scrolled flow
 
-- "top:0;transform:translateY
-- "top:0;transform:skewX
-- browser text input overlay empty
+- should leave unsupported sticky declarations in normal scrolled flow
    - Expected: _sticky_style(command, "top") equals `auto`
-- raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should leave unsupported sticky declarations in normal scrolled flow")
 for inset in [
     "", "top:auto;", "inset:auto;", "inset-block:auto;",
     "inset-block-start:auto;",
@@ -181,7 +72,7 @@ for inset in [
     "top:0;translate:0 2px;"
 ]:
     val html = (
-        "<style>html,body{margin:0}#spacer{height:4px}" +
+        "<style>html,body{{margin:0}}#spacer{height:4px}" +
         "#probe{position:sticky;" + inset +
         "width:4px;height:4px;background:#2563eb}" +
         "#tail{height:20px}</style><div id='spacer'></div>" +
@@ -221,23 +112,24 @@ for inset in [
 
 #### should not root-pin sticky nodes inside finite or scrolling wrappers
 
-- browser text input overlay empty
+- should not root-pin sticky nodes inside finite or scrolling wrappers
    - Expected: command.parent_id equals `wrapper`
-- raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should not root-pin sticky nodes inside finite or scrolling wrappers")
 for wrapper_style in [
     "height:8px;", "height:8px;overflow-y:scroll;"
 ]:
     val html = (
-        "<style>html,body{margin:0}#wrapper{" + wrapper_style +
+        "<style>html,body{{margin:0}}#wrapper{" + wrapper_style +
         "}#spacer{height:4px}#probe{position:sticky;top:0;" +
         "width:4px;height:4px;background:#2563eb}" +
         "#inner-tail{height:20px}#outer-tail{height:20px}</style>" +
@@ -286,3 +178,61 @@ for wrapper_style in [
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ab6fc5a45c60c85aed0107e04b9406b8fe237cbfb03b879eded644c336fad3cb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ab6fc5a45c60c85aed0107e04b9406b8fe237cbfb03b879eded644c336fad3cb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ab6fc5a45c60c85aed0107e04b9406b8fe237cbfb03b879eded644c336fad3cb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/feature/web_platform/css/sticky_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/sticky_wpt_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=75 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/css/sticky_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/sticky_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/sticky_wpt_spec.spl:67:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should pin one top-inset sticky subtree during root scrolling' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/sticky_wpt_spec.spl:67:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pin one top-inset sticky subtree during root scrolling' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/sticky_wpt_spec.spl:164:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should leave unsupported sticky declarations in normal scrolled flow' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/sticky_wpt_spec.spl:164:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should leave unsupported sticky declarations in normal scrolled flow' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/sticky_wpt_spec.spl:210:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should not root-pin sticky nodes inside finite or scrolling wrappers' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/sticky_wpt_spec.spl:210:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should not root-pin sticky nodes inside finite or scrolling wrappers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Os Tls Diag Specification
 
-> <details>
-
-<!-- sdn-diagram:id=os_tls_diag_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=os_tls_diag_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-os_tls_diag_spec -> std
-os_tls_diag_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=os_tls_diag_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering TLS diag.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,23 @@ os_tls_diag_spec -> os
 
 #### hkdf_extract changes when IKM changes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- hkdf_extract changes when IKM changes
+   - Expected: _bytes_eq(prk_a, prk_diff) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hkdf_extract changes when IKM changes")
 val ikm_a: [u8] = [
     0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8,
     0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8, 0x0Bu8,
@@ -74,23 +60,7 @@ expect(_bytes_eq(prk_a, prk_diff)).to_equal(false)
 
 #### hkdf_extract_from_list changes when IKM changes
 
-1. ikm a push
-2. ikm a push
-3. ikm diff push
-4. ikm diff push
-5. salt a push
-6. salt a push
-7. salt a push
-8. salt a push
-9. salt a push
-10. salt a push
-11. salt a push
-12. salt a push
-13. salt a push
-14. salt a push
-15. salt a push
-16. salt a push
-17. salt a push
+- hkdf_extract_from_list changes when IKM changes
    - Expected: prk_a.len() equals `32`
    - Expected: prk_diff.len() equals `32`
 
@@ -98,10 +68,12 @@ expect(_bytes_eq(prk_a, prk_diff)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hkdf_extract_from_list changes when IKM changes")
 var ikm_a = []
 var i = 0
 while i < 79:
@@ -141,13 +113,19 @@ expect(prk_diff.len()).to_equal(32)
 
 #### hkdf_expand_label encodes a different info block than raw expand
 
+- hkdf_expand_label encodes a different info block than raw expand
+   - Expected: _bytes_eq(label_out, raw_expand) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hkdf_expand_label encodes a different info block than raw expand")
 val prk_a: [u8] = [
     0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8, 0x08u8,
     0x09u8, 0x0Au8, 0x0Bu8, 0x0Cu8, 0x0Du8, 0x0Eu8, 0x0Fu8, 0x10u8,
@@ -164,13 +142,19 @@ expect(_bytes_eq(label_out, raw_expand)).to_equal(false)
 
 #### transcript hash changes when message bytes change
 
+- transcript hash changes when message bytes change
+   - Expected: _bytes_eq(h4, h5) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("transcript hash changes when message bytes change")
 val t0 = transcript_new()
 val h4 = transcript_hash(transcript_add(t0, [0xAAu8, 0xBBu8]))
 val h5 = transcript_hash(transcript_add(t0, [0xCCu8, 0xDDu8]))
@@ -181,20 +165,19 @@ expect(_bytes_eq(h4, h5)).to_equal(false)
 
 #### hmac_from_list differs when second-block bytes change
 
-1. msg a push
-2. msg b push
-3. msg a push
-4. msg b push
+- hmac_from_list differs when second-block bytes change
    - Expected: _bytes_eq(hmac_a, hmac_b) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hmac_from_list differs when second-block bytes change")
 var msg_a = []
 var msg_b = []
 var i = 0
@@ -223,12 +206,12 @@ expect(_bytes_eq(hmac_a, hmac_b)).to_equal(false)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/os_tls_diag_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering TLS diag.
 - TLS diag
 
 ## Scenario Summary
@@ -243,3 +226,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f6087e2fc9db2d63e06c8919496d7824cbeb3032080d0a113a076869dbe5ee64`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f6087e2fc9db2d63e06c8919496d7824cbeb3032080d0a113a076869dbe5ee64`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f6087e2fc9db2d63e06c8919496d7824cbeb3032080d0a113a076869dbe5ee64`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/os/os_tls_diag_spec.spl
+mirror: doc/06_spec/03_system/os/os_tls_diag_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/os_tls_diag_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/os_tls_diag_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/os_tls_diag_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/os_tls_diag_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hkdf_extract changes when IKM changes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/os_tls_diag_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hkdf_extract_from_list changes when IKM changes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/os_tls_diag_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hkdf_expand_label encodes a different info block than raw expand' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

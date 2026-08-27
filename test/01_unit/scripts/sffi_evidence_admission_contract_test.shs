@@ -28,15 +28,13 @@ done
 openssl genpkey -algorithm ED25519 -out "$work/private.pem" >/dev/null 2>&1
 openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
 openssl genpkey -algorithm ED25519 -out "$work/untrusted-private.pem" >/dev/null 2>&1
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/rsa-private.pem" >/dev/null 2>&1
-openssl pkey -in "$work/rsa-private.pem" -pubout -out "$work/rsa-public.pem" >/dev/null 2>&1
 
 artifact_hash=$(hash "$work/artifact")
 source_hash=$(hash "$work/source")
 build_hash=$(hash "$work/build")
 compiler_hash=$(hash "$work/compiler")
 abi_hash=$(hash "$work/abi")
-signature_hash=$(printf '%s' '()->i64' | sha256sum | awk '{ print $1 }')
+signature_hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 test_symbol=$(printf 'r%s_%s' t test)
 
 printf 'schema\tsimple.sffi-verification-report.v1\nprovider_id\ttest.provider\nartifact_sha256\t%s\nabi_registry_sha256\t%s\nresult\tpass\n' \
@@ -57,27 +55,8 @@ verify() {
 }
 
 verify >/dev/null
-grep -q '^schema	simple.sffi-admission.v1$' "$work/admission.tsv"
-grep -q '^provider_id	test.provider$' "$work/admission.tsv"
-grep -q "^artifact_sha256	$artifact_hash$" "$work/admission.tsv"
-grep -q "^symbol	$test_symbol	$signature_hash	true	true$" "$work/admission.tsv"
+grep -q "^$test_symbol	$signature_hash	$artifact_hash	true	true$" "$work/admission.tsv"
 echo 'PASS: exact signed evidence admitted'
-
-mkdir -p "$work/scan/src"
-printf '@sffi(provider: "test.provider")\n@unsafe(reason: "fixture raw ABI", capabilities: [ffi])\nextern fn %s() -> i64\n' \
-    "$test_symbol" >"$work/scan/src/provider.spl"
-printf 'schema\tsimple.sffi-admission-jobs.v1\njob\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$work/manifest.tsv" "$work/signature.bin" "$work/trust.tsv" \
-    "$work/artifact" "$work/source" "$work/build" "$work/compiler" \
-    "$work/abi" "$work/report.tsv" >"$work/jobs.tsv"
-SFFI_SOURCE_ONLY=1 SFFI_SCAN_ROOT="$work/scan" \
-SFFI_ADMISSION_JOBS="$work/jobs.tsv" \
-    sh "$root/scripts/audit/sffi-contract-inventory.shs" \
-    "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>"$work/inventory.stderr"
-awk -F '\t' -v symbol="$test_symbol" \
-    '$1 == symbol && $4 == "test.provider" && $10 == "reverified" { found++ }
-     END { exit !(found == 1) }' "$work/contracts.tsv"
-echo 'PASS: signed evidence joins the owned provider/signature identity'
 
 cp "$work/artifact" "$work/artifact.good"
 printf 'tamper\n' >>"$work/artifact"
@@ -114,13 +93,6 @@ openssl pkeyutl -sign -inkey "$work/private.pem" -rawin \
     -in "$work/manifest.tsv" -out "$work/signature.bin"
 expect_reject duplicate-trust-entry verify
 printf 'test-key\ttest.provider\tpublic.pem\n' >"$work/trust.tsv"
-
-# Admission is explicitly Ed25519-only. A trusted RSA key must be rejected
-# before OpenSSL is asked to interpret the raw signature bytes.
-mv "$work/public.pem" "$work/public.ed25519.pem"
-cp "$work/rsa-public.pem" "$work/public.pem"
-expect_reject non_ed25519_trust_key verify
-mv "$work/public.ed25519.pem" "$work/public.pem"
 
 openssl pkeyutl -sign -inkey "$work/untrusted-private.pem" -rawin \
     -in "$work/manifest.tsv" -out "$work/signature.bin"

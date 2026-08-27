@@ -1,5 +1,16 @@
 # Set Literal Syntax
 
+> Tests the `s{...}` set literal syntax for creating sets with automatic duplicate removal. Covers empty sets, integer and string elements, trailing commas, single elements, set operations (union, intersection, difference), conversion to lists, functional operations (filter, map), and relational checks (subset, disjoint). Currently uses array placeholders as set literals are not yet implemented.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 13 | 13 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Set Literal Syntax
+
 Tests the `s{...}` set literal syntax for creating sets with automatic duplicate removal. Covers empty sets, integer and string elements, trailing commas, single elements, set operations (union, intersection, difference), conversion to lists, functional operations (filter, map), and relational checks (subset, disjoint). Currently uses array placeholders as set literals are not yet implemented.
 
 ## At a Glance
@@ -9,19 +20,9 @@ Tests the `s{...}` set literal syntax for creating sets with automatic duplicate
 | Feature IDs | #SYNTAX-003 |
 | Category | Syntax |
 | Status | In Progress |
-| Source | `test/03_system/feature/usage/set_literal_spec.spl` |
-| Updated | 2026-04-07 |
-| Generator | `simple spipe-docgen` (Rust) |
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Source | `test/feature/usage/set_literal_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -34,38 +35,404 @@ Currently uses array placeholders as set literals are not yet implemented.
 ## Syntax
 
 ```simple
+use std.spec.step
+
 val nums = s{1, 2, 3}
 val union_set = a.union(b)
-val evens = nums.filter(\x: x % 2 == 0)
+val evens = nums.filter(_1 % 2 == 0)
 ```
 Set Literal Tests
 
 Test set literal syntax: s{1, 2, 3}
 
-## Evidence
-
-| Category | Count |
-|----------|------:|
-| Artifacts | 1 |
-
-### Artifacts
-
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/set_literal/result.json` |
-
 ## Scenarios
 
+### Set Literals
+
+#### creates empty set
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
 - creates empty set
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates empty set")
+# val empty = s{}  # TODO: Set literal syntax not yet implemented
+val empty = []  # Placeholder - use empty array for now
+check empty.len() == 0
+```
+
+</details>
+
+#### creates set from integer elements
+
 - creates set from integer elements
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates set from integer elements")
+# val nums = s{1, 2, 3}  # TODO: Set literal syntax not yet implemented
+val nums = [1, 2, 3]  # Placeholder - use array for now
+check nums.len() == 3
+check nums.contains(1)
+check nums.contains(2)
+check nums.contains(3)
+```
+
+</details>
+
+#### removes duplicates automatically
+
 - removes duplicates automatically
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("removes duplicates automatically")
+# val nums = s{1, 2, 2, 3, 3, 3}  # TODO: Set literal syntax not yet implemented
+val nums = [1, 2, 3]  # Placeholder - use array for now
+check nums.len() == 3
+check nums.contains(1)
+check nums.contains(2)
+check nums.contains(3)
+```
+
+</details>
+
+#### creates set from string elements
+
 - creates set from string elements
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates set from string elements")
+# val words = s{"hello", "world", "hello"}  # TODO: Set literal syntax not yet implemented
+val words = ["hello", "world"]  # Placeholder - use array for now
+check words.len() == 2
+check words.contains("hello")
+check words.contains("world")
+```
+
+</details>
+
+#### handles trailing comma
+
 - handles trailing comma
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("handles trailing comma")
+# val nums = s{1, 2, 3,}  # TODO: Set literal syntax not yet implemented
+val nums = [1, 2, 3]  # Placeholder - use array for now
+check nums.len() == 3
+```
+
+</details>
+
+#### supports single element
+
 - supports single element
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("supports single element")
+# val single = s{42}  # TODO: Set literal syntax not yet implemented
+val single = [42]  # Placeholder - use array for now
+check single.len() == 1
+check single.contains(42)
+```
+
+</details>
+
+#### computes union via concatenation
+
 - computes union via concatenation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("computes union via concatenation")
+# TODO: s{} union operator not yet implemented — using array concat
+val a = [1, 2, 3]
+val b = [2, 3, 4]
+val union_ = a + b
+check union_.len() == 6
+check union_.contains(1)
+check union_.contains(4)
+```
+
+</details>
+
+#### computes intersection via filter
+
 - computes intersection via filter
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("computes intersection via filter")
+# TODO: s{} intersect operator not yet implemented — using filter
+val a = [1, 2, 3]
+val b = [2, 3, 4]
+val common = a.filter(b.contains(_1))
+check common.len() == 2
+check common.contains(2)
+check common.contains(3)
+```
+
+</details>
+
+#### computes difference via filter
+
 - computes difference via filter
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("computes difference via filter")
+# TODO: s{} diff operator not yet implemented — using filter
+val a = [1, 2, 3]
+val b = [2, 3, 4]
+val diff = a.filter(not b.contains(_1))
+check diff.len() == 1
+check diff.contains(1)
+```
+
+</details>
+
+#### supports filter
+
 - supports filter
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("supports filter")
+# val nums = s{1, 2, 3, 4, 5}  # TODO: Set literal syntax not yet implemented
+val nums = [1, 2, 3, 4, 5]  # Placeholder - use array for now
+val evens = nums.filter(_ % 2 == 0)
+check evens.len() == 2
+check evens.contains(2)
+check evens.contains(4)
+```
+
+</details>
+
+#### supports map
+
 - supports map
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("supports map")
+# val nums = s{1, 2, 3}  # TODO: Set literal syntax not yet implemented
+val nums = [1, 2, 3]  # Placeholder - use array for now
+val doubled = nums.map(_ * 2)
+check doubled.len() == 3
+check doubled.contains(2)
+check doubled.contains(4)
+check doubled.contains(6)
+```
+
+</details>
+
+#### checks subset via all-contained
+
 - checks subset via all-contained
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("checks subset via all-contained")
+# TODO: s{} is_subset operator not yet implemented — using manual check
+val small = [1, 2]
+val large = [1, 2, 3, 4]
+# All elements of small are in large (manual loop to avoid closure capture)
+var small_in_large_count = 0
+for x in small:
+    if large.contains(x):
+        small_in_large_count = small_in_large_count + 1
+check small_in_large_count == small.len()
+# Not all elements of large are in small
+var large_in_small_count = 0
+for x in large:
+    if small.contains(x):
+        large_in_small_count = large_in_small_count + 1
+check large_in_small_count != large.len()
+```
+
+</details>
+
+#### checks disjoint via no overlap
+
 - checks disjoint via no overlap
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("checks disjoint via no overlap")
+# TODO: s{} is_disjoint operator not yet implemented — using manual check
+val a = [1, 2, 3]
+val b = [4, 5, 6]
+val c = [3, 4, 5]
+var ab_overlap = 0
+for x in a:
+    if b.contains(x):
+        ab_overlap = ab_overlap + 1
+check ab_overlap == 0
+var ac_overlap = 0
+for x in a:
+    if c.contains(x):
+        ac_overlap = ac_overlap + 1
+check ac_overlap > 0
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 13 |
+| Active scenarios | 13 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-FEATURE`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `dd3d5d4aded9733742e14bb376c70e2044883f5e86724d93e99ac5cdf87558a3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `dd3d5d4aded9733742e14bb376c70e2044883f5e86724d93e99ac5cdf87558a3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `dd3d5d4aded9733742e14bb376c70e2044883f5e86724d93e99ac5cdf87558a3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/feature/usage/set_literal_spec.spl
+mirror: doc/06_spec/feature/usage/set_literal_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/feature/usage/set_literal_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/feature/usage/set_literal_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/feature/usage/set_literal_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty set' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/set_literal_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates set from integer elements' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/set_literal_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'removes duplicates automatically' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Linalg Backend Diagnostics Specification
 
-> 1. fail
-
-<!-- sdn-diagram:id=linalg_backend_diagnostics_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=linalg_backend_diagnostics_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-linalg_backend_diagnostics_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=linalg_backend_diagnostics_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering linalg backend diagnostics.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,24 +17,33 @@ linalg_backend_diagnostics_spec -> std
 
 #### reports the configured backend without requiring native libraries
 
-1. fail
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- reports the configured backend without requiring native libraries
+   - Expected: status.selected equals `mock`
+   - Expected: status.available is true
+   - Expected: status.real_native is false
+   - Expected: required.selected equals `cuda`
+   - Expected: name equals `cuda`
    - Expected: required.selected equals `pytorch`
    - Expected: name equals `status.requested`
-2. fail
    - Expected: status.selected equals `scalar`
    - Expected: status.available is true
    - Expected: required.selected equals `openblas`
    - Expected: name equals `openblas`
-3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports the configured backend without requiring native libraries")
 val status = linalg_backend_status()
 if status.requested == "mock":
     expect(status.selected).to_equal("mock")
@@ -96,18 +82,22 @@ if status.requested == "openblas":
 
 #### returns typed unavailable errors for optional accelerator backends
 
-1. fail
+- returns typed unavailable errors for optional accelerator backends
+   - Expected: status.selected equals `openblas`
+   - Expected: status.available is true
+   - Expected: name equals `openblas`
    - Expected: name equals `cuda`
-2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns typed unavailable errors for optional accelerator backends")
 val openblas = require_linalg_backend("openblas")
 match openblas:
     case Ok(status):
@@ -130,16 +120,19 @@ match cuda:
 
 #### returns typed missing-symbol errors for backend symbol probes
 
-1. fail
+- returns typed missing-symbol errors for backend symbol probes
+   - Expected: symbol equals `rt_blas_dgemm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns typed missing-symbol errors for backend symbol probes")
 val missing = check_linalg_symbol("mock", "rt_blas_dgemm", false)
 match missing:
     case Err(BackendError.MissingRuntimeSymbol(symbol)):
@@ -152,16 +145,19 @@ match missing:
 
 #### returns typed unsupported errors for unknown backend names
 
-1. fail
+- returns typed unsupported errors for unknown backend names
+   - Expected: name equals `not-a-backend`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns typed unsupported errors for unknown backend names")
 val unknown = require_linalg_backend("not-a-backend")
 match unknown:
     case Err(BackendError.UnsupportedBackend(name)):
@@ -179,12 +175,12 @@ match unknown:
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/scilib/linalg_backend_diagnostics_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering linalg backend diagnostics.
 - linalg backend diagnostics
 
 ## Scenario Summary
@@ -199,3 +195,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b0ae1e227097b34a35bcc40200d0654eba662c50c004559e691779c8de237abe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b0ae1e227097b34a35bcc40200d0654eba662c50c004559e691779c8de237abe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b0ae1e227097b34a35bcc40200d0654eba662c50c004559e691779c8de237abe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/scilib/linalg_backend_diagnostics_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/linalg_backend_diagnostics_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/linalg_backend_diagnostics_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/linalg_backend_diagnostics_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/linalg_backend_diagnostics_spec.spl:11:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports the configured backend without requiring native libraries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/linalg_backend_diagnostics_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns typed unavailable errors for optional accelerator backends' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/linalg_backend_diagnostics_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns typed missing-symbol errors for backend symbol probes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

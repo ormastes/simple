@@ -17,13 +17,22 @@
 
 #### detects no seasonality in linear trend
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- detects no seasonality in linear trend
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects no seasonality in linear trend")
 # values 10,12,14,16,18,20 on timeline 1..6: trend = 8 + 2t, no seasonality
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
@@ -47,13 +56,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("24")
 
 #### predicts with zero residuals at t=8
 
+- predicts with zero residuals at t=8
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("predicts with zero residuals at t=8")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -76,13 +90,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("24")
 
 #### detects seasonality period=2 in alternating pattern
 
+- detects seasonality period=2 in alternating pattern
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects seasonality period=2 in alternating pattern")
 # values 5,9,5,9,5,9,5,9 on timeline 1..8: period=2
 var sh = Sheet.new("f")
 sh.set_value("A1", "5")
@@ -110,13 +129,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("5")
 
 #### accepts explicit seasonality parameter
 
+- accepts explicit seasonality parameter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("accepts explicit seasonality parameter")
 var sh = Sheet.new("f")
 sh.set_value("A1", "5")
 sh.set_value("A2", "9")
@@ -143,13 +167,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("5")
 
 #### errors on mismatched values and timeline
 
+- errors on mismatched values and timeline
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on mismatched values and timeline")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -167,13 +196,18 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 
 #### errors on insufficient data
 
+- errors on insufficient data
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on insufficient data")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("B1", "1")
@@ -188,13 +222,18 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 
 #### returns 0 for zero residuals
 
+- returns 0 for zero residuals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for zero residuals")
 # Linear fit with no residuals: confint = z * 0 = 0
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
@@ -218,13 +257,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("0")
 
 #### supports confidence 0.90
 
+- supports confidence 0.90
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("supports confidence 0.90")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -247,13 +291,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("0")
 
 #### errors on unsupported confidence
 
+- errors on unsupported confidence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on unsupported confidence")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -270,13 +319,18 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 
 #### defaults to 0.95 confidence
 
+- defaults to 0.95 confidence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("defaults to 0.95 confidence")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -301,13 +355,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("0")
 
 #### returns 0 for linear data
 
+- returns 0 for linear data
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for linear data")
 # 10,12,14,16,18,20 has no seasonality
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
@@ -331,13 +390,18 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 
 #### detects period=2 in alternating pattern
 
+- detects period=2 in alternating pattern
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects period=2 in alternating pattern")
 # 5,9,5,9,5,9,5,9 should detect seasonality=2
 var sh = Sheet.new("f")
 sh.set_value("A1", "5")
@@ -365,13 +429,18 @@ cell_display_text(sh.get_cell("Z1")).to_equal("2")
 
 #### errors on insufficient data
 
+- errors on insufficient data
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on insufficient data")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -388,13 +457,18 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 
 #### returns 0 for alpha parameter (type 1)
 
+- returns 0 for alpha parameter (type 1)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for alpha parameter (type 1)")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -417,13 +491,18 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 
 #### returns 0 for beta parameter (type 2)
 
+- returns 0 for beta parameter (type 2)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for beta parameter (type 2)")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -446,13 +525,18 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 
 #### returns 0 for gamma parameter (type 3)
 
+- returns 0 for gamma parameter (type 3)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for gamma parameter (type 3)")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -475,13 +559,18 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 
 #### returns step size (type 8)
 
+- returns step size (type 8)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns step size (type 8)")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -504,13 +593,18 @@ cell_display_text(sh.get_cell("Z1")).to_equal("1")
 
 #### returns RMSE (type 7) = 0 for perfect fit
 
+- returns RMSE (type 7) = 0 for perfect fit
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns RMSE (type 7) = 0 for perfect fit")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -533,13 +627,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("0")
 
 #### returns MAE (type 6) = 0 for perfect fit
 
+- returns MAE (type 6) = 0 for perfect fit
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns MAE (type 6) = 0 for perfect fit")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -562,13 +661,18 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("0")
 
 #### errors on unsupported type
 
+- errors on unsupported type
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on unsupported type")
 var sh = Sheet.new("f")
 sh.set_value("A1", "10")
 sh.set_value("A2", "12")
@@ -587,13 +691,18 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 
 #### returns grand total with no field/item pairs
 
+- returns grand total with no field/item pairs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns grand total with no field/item pairs")
 var sh = Sheet.new("pivot_test")
 # Build a simple pivot: Region/Product/Amount
 # East, A, 10; East, B, 20; West, A, 30; West, B, 40
@@ -645,13 +754,18 @@ cell_display_text(sh.get_cell("D1")).to_equal("100")
 
 #### returns row total for one field/item pair
 
+- returns row total for one field/item pair
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns row total for one field/item pair")
 var sh = Sheet.new("pivot_test2")
 sh.set_value("A1", "Region")
 sh.set_value("B1", "Product")
@@ -695,13 +809,18 @@ cell_display_text(sh.get_cell("D1")).to_equal("30")
 
 #### returns intersection for two field/item pairs
 
+- returns intersection for two field/item pairs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns intersection for two field/item pairs")
 var sh = Sheet.new("pivot_test3")
 sh.set_value("A1", "Region")
 sh.set_value("B1", "Product")
@@ -745,13 +864,18 @@ cell_display_text(sh.get_cell("D1")).to_equal("10")
 
 #### errors on field/item not found
 
+- errors on field/item not found
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on field/item not found")
 var sh = Sheet.new("pivot_test4")
 sh.set_value("A1", "Region")
 sh.set_value("B1", "Product")
@@ -786,13 +910,18 @@ cell_display_text(sh.get_cell("D1")).to_contain("#ERR")
 
 #### errors on unknown data_field instead of returning the grand total
 
+- errors on unknown data_field instead of returning the grand total
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("errors on unknown data_field instead of returning the grand total")
 var sh = Sheet.new("pivot_test5")
 sh.set_value("A1", "Region")
 sh.set_value("B1", "Product")
@@ -838,13 +967,18 @@ cell_display_text(sh.get_cell("D2")).to_equal("100")
 
 #### returns intersection on the second value column of a wider cross-tab
 
+- returns intersection on the second value column of a wider cross-tab
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns intersection on the second value column of a wider cross-tab")
 var sh = Sheet.new("pivot_test6")
 sh.set_value("A1", "Region")
 sh.set_value("B1", "Product")
@@ -904,7 +1038,7 @@ cell_display_text(sh.get_cell("D2")).to_equal("40")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -928,3 +1062,59 @@ Tests covering FORECAST.ETS, FORECAST.ETS.CONFINT, FORECAST.ETS.SEASONALITY, FOR
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c4dd45f7693d537bcb398a5d3a6aa31ae66eea6369fcc8bbe2e33962855642c4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c4dd45f7693d537bcb398a5d3a6aa31ae66eea6369fcc8bbe2e33962855642c4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c4dd45f7693d537bcb398a5d3a6aa31ae66eea6369fcc8bbe2e33962855642c4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **76/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md (current)
+findings: 7 blockers: 2
+  narrative=100 structure=100 oracle=50
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=76; blocker cap makes effective=49
+doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects no seasonality in linear trend' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'predicts with zero residuals at t=8' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects seasonality period=2 in alternating pattern' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

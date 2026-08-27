@@ -24,7 +24,7 @@ Validates the aggregate status gate for the full HTML/CSS traceability and Rende
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md |
 | Source | `test/03_system/check/html_css_renderdoc_goal_status_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -81,6 +81,11 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 
 #### reports the current evidence state without assuming stale local captures
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- reports the current evidence state without assuming stale local captures
 - Run the aggregate RenderDoc goal-status gate in an isolated build directory
    - Expected: code equals `0`
 - Read the current evidence contract emitted by the gate
@@ -107,10 +112,12 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 162 lines folded for reproduction.
+Runnable source: 164 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports the current evidence state without assuming stale local captures")
 step("Run the aggregate RenderDoc goal-status gate in an isolated build directory")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status && BUILD_DIR=build/test-html-css-renderdoc-goal-status REPORT_PATH=build/test-html-css-renderdoc-goal-status/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -279,6 +286,7 @@ expect(report).to_contain("- blocked completion gates:")
 
 #### rejects magic-only Simple RDOC beside valid external-host and Electron fixtures
 
+- rejects magic-only Simple RDOC beside valid external-host and Electron fixtures
 - Create magic-only Simple and controlled external-host and Electron RenderDoc evidence
    - Expected: code equals `1`
 - Assert the aggregate rejects the Simple capture without live replay evidence
@@ -287,10 +295,12 @@ expect(report).to_contain("- blocked completion gates:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects magic-only Simple RDOC beside valid external-host and Electron fixtures")
 step("Create magic-only Simple and controlled external-host and Electron RenderDoc evidence")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external/capture/html build/test-html-css-renderdoc-goal-status-pass/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-html-css-renderdoc-goal-status-pass/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-html-css-renderdoc-goal-status-pass/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_requested_api=vulkan\\nrdoc_external_host_gate_requested_angle=vulkan\\nrdoc_external_host_gate_requested_features=Vulkan\\nrdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_api=vulkan\\nrdoc_external_host_required_angle=vulkan\\nrdoc_external_host_required_features=Vulkan\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan\\nrdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/.bin/electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-html-css-renderdoc-goal-status-pass/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--enable-features=Vulkan --use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-pass/electron/evidence.env && HTML_CSS_TRACEABILITY_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status/sspec-traceability/evidence.env HTML_CSS_RENDERING_MANIFEST_TRACEABILITY_ENV=build/test-html-css-renderdoc-goal-status/rendering-manifest/evidence.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/electron/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -370,6 +380,7 @@ expect(evidence).to_contain("renderdoc_goal_blocked_gates=Simple Vulkan Engine2D
 
 #### rejects original external-host RenderDoc metadata when capture bytes are not RDOC
 
+- rejects original external-host RenderDoc metadata when capture bytes are not RDOC
 - Create controlled evidence whose external host metadata claims RDOC but the file bytes do not
    - Expected: code equals `0`
 - Assert actual capture bytes override spoofed external RenderDoc metadata
@@ -378,10 +389,12 @@ expect(evidence).to_contain("renderdoc_goal_blocked_gates=Simple Vulkan Engine2D
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects original external-host RenderDoc metadata when capture bytes are not RDOC")
 step("Create controlled evidence whose external host metadata claims RDOC but the file bytes do not")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status-external-spoof && mkdir -p build/test-html-css-renderdoc-goal-status-external-spoof/simple build/test-html-css-renderdoc-goal-status-external-spoof/external/capture/html build/test-html-css-renderdoc-goal-status-external-spoof/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/simple/simple.rdc && printf 'NOPEsynthetic external capture\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/external/capture/html/html.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-external-spoof/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-html-css-renderdoc-goal-status-external-spoof/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-html-css-renderdoc-goal-status-external-spoof/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_file_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_capture_file_magic=RDOC\\nrdoc_external_host_gate_requested_api=vulkan\\nrdoc_external_host_gate_requested_angle=vulkan\\nrdoc_external_host_gate_requested_features=Vulkan\\nrdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/external/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-external-spoof/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/.bin/electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-html-css-renderdoc-goal-status-external-spoof/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--enable-features=Vulkan --use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-external-spoof/electron/evidence.env && HTML_CSS_TRACEABILITY_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status/sspec-traceability/evidence.env HTML_CSS_RENDERING_MANIFEST_TRACEABILITY_ENV=build/test-html-css-renderdoc-goal-status/rendering-manifest/evidence.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-external-spoof/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-external-spoof/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-external-spoof/electron/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-external-spoof/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-external-spoof/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -409,6 +422,7 @@ expect(evidence).to_contain("renderdoc_goal_blocked_gates=Simple Vulkan Engine2D
 
 #### fails closed for missing configured traceability evidence files
 
+- fails closed for missing configured traceability evidence files
 - Run the aggregate gate with configured but missing reusable evidence
    - Expected: code equals `0`
 - Assert configured missing files do not fall back to stale generated evidence
@@ -417,10 +431,12 @@ expect(evidence).to_contain("renderdoc_goal_blocked_gates=Simple Vulkan Engine2D
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails closed for missing configured traceability evidence files")
 step("Run the aggregate gate with configured but missing reusable evidence")
 val command = "rm -rf build/test-html-css-renderdoc-goal-status-missing-configured && HTML_CSS_TRACEABILITY_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-missing-configured/missing-traceability.env HTML_CSS_RENDERING_MANIFEST_TRACEABILITY_ENV=build/test-html-css-renderdoc-goal-status-missing-configured/missing-rendering-manifest.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-missing-configured REPORT_PATH=build/test-html-css-renderdoc-goal-status-missing-configured/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -457,3 +473,48 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_reason=mis
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3fed0de3b5ac3ab5fd98843de334811f287c44d44b5c2bff39673da7663789b6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3fed0de3b5ac3ab5fd98843de334811f287c44d44b5c2bff39673da7663789b6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3fed0de3b5ac3ab5fd98843de334811f287c44d44b5c2bff39673da7663789b6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/03_system/check/html_css_renderdoc_goal_status_spec.spl
+mirror: doc/06_spec/03_system/check/html_css_renderdoc_goal_status_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/html_css_renderdoc_goal_status_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/html_css_renderdoc_goal_status_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/html_css_renderdoc_goal_status_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/html_css_renderdoc_goal_status_spec.spl:344:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed for missing configured traceability evidence files' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

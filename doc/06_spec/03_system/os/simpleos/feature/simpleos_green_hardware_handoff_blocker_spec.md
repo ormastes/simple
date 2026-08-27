@@ -2,29 +2,6 @@
 
 > This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Earlier QEMU evidence proved AP startup, fixed-slot dispatch, preemption, scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, and prerequisite user-entry readiness markers. Current direct QEMU evidence now reaches `USER_CR3_READY=true`; the final live lane still requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user path so prerequisite markers cannot be mistaken for final hardware proof.
 
-<!-- sdn-diagram:id=simpleos_green_hardware_handoff_blocker_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_green_hardware_handoff_blocker_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_green_hardware_handoff_blocker_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_green_hardware_handoff_blocker_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
@@ -48,7 +25,7 @@ This SSpec keeps the final SimpleOS green-thread hardware handoff boundary execu
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -106,7 +83,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/sim
 ## TUI Capture
 
 ```text
-Simple Test Runner v1.0.0-beta
+Simple Test Runner v1.0.0-RC
 Running: test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl
 Spec file completed: simpleos_green_hardware_handoff_blocker_spec.spl PASSED
 Files: 1
@@ -174,6 +151,11 @@ Failed: 0
 
 #### keeps prerequisite evidence separate from final handoff closure evidence
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- keeps prerequisite evidence separate from final handoff closure evidence
 - Read the blocker and current QEMU green-carrier spec
 - Verify the prerequisite and final markers remain documented separately
    - Expected: absent_in_text(qemu_spec, "future final hardware handoff lane") equals `1`
@@ -183,10 +165,12 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps prerequisite evidence separate from final handoff closure evidence")
 step("Read the blocker and current QEMU green-carrier spec")
 val blocker = read_text("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 val qemu_spec = read_text("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
@@ -231,6 +215,7 @@ expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_USER_SYSCALL_MARKE
 
 #### names the concrete context switch and user-entry proof points
 
+- names the concrete context switch and user-entry proof points
 - Read blocker and handoff implementation surfaces
 - Verify the blocker links the live probe and current context-switch symbols
 - Verify current implementation files expose the named proof points
@@ -239,10 +224,12 @@ expect(qemu_spec).to_contain("expect(serial).to_contain(GREEN_USER_SYSCALL_MARKE
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("names the concrete context switch and user-entry proof points")
 step("Read blocker and handoff implementation surfaces")
 val blocker = read_text("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 val context_switch = read_text("src/os/kernel/scheduler/context_switch.spl")
@@ -294,6 +281,7 @@ expect(probe).to_contain("USER_CR3_READY")
 
 #### keeps requirements and evidence report aligned with the final live gate
 
+- keeps requirements and evidence report aligned with the final live gate
 - Read requirements, NFR, QEMU spec, and current evidence report
 - Verify requirement docs require the final marker triplet
 - Verify the QEMU spec owns the explicit final live gate
@@ -304,10 +292,12 @@ expect(probe).to_contain("USER_CR3_READY")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps requirements and evidence report aligned with the final live gate")
 step("Read requirements, NFR, QEMU spec, and current evidence report")
 val feature_req = read_text("doc/02_requirements/feature/multicore_green.md")
 val nfr_req = read_text("doc/02_requirements/nfr/multicore_green.md")
@@ -375,10 +365,62 @@ expect(report).to_contain("[green-carrier-qemu] USER_SYSCALL_PASS=true")
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
-- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
-- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
-- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
+- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
+- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
+- **Design:** `doc/05_design/multicore_green.md`
+- **Research:** `doc/01_research/local/multicore_green.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-MCG-007`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a22b878df256d9d781954008404bf9e7a24acf28533a872b5b3cdf1e3a4a2bfc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a22b878df256d9d781954008404bf9e7a24acf28533a872b5b3cdf1e3a4a2bfc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a22b878df256d9d781954008404bf9e7a24acf28533a872b5b3cdf1e3a4a2bfc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl
+mirror: doc/06_spec/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl:147:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps prerequisite evidence separate from final handoff closure evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl:189:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names the concrete context switch and user-entry proof points' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl:238:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps requirements and evidence report aligned with the final live gate' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

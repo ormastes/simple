@@ -2,29 +2,6 @@
 
 > Parser Improvement Tests for the Simple language compiler.
 
-<!-- sdn-diagram:id=parser_improvements_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=parser_improvements_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-parser_improvements_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=parser_improvements_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 19 | 19 | 0 | 0 |
@@ -43,7 +20,7 @@ Parser Improvement Tests for the Simple language compiler.
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/parser_improvements_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Parser Improvement Tests for the Simple language compiler.
@@ -58,13 +35,18 @@ function return types, generics, struct literals, and string operations.
 
 #### supports arrow syntax in match expressions
 
+- supports arrow syntax in match expressions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports arrow syntax in match expressions")
 val value = 2
 val result = match value:
     1 -> "one"
@@ -77,13 +59,18 @@ expect result == "two"
 
 #### supports multiple patterns with arrows
 
+- supports multiple patterns with arrows
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports multiple patterns with arrows")
 val x = 3
 val msg = match x:
     0 -> "zero"
@@ -99,16 +86,18 @@ expect msg == "many"
 
 #### parses return type annotations
 
-1. expect double
+- parses return type annotations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses return type annotations")
 expect double(5) == 10
 ```
 
@@ -116,13 +105,18 @@ expect double(5) == 10
 
 #### supports complex return types
 
+- supports complex return types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports complex return types")
 val result = make_pair(42)
 expect result.is_some == true
 ```
@@ -133,16 +127,18 @@ expect result.is_some == true
 
 #### supports Option generic type
 
-1. expect v unwrap
+- supports Option generic type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports Option generic type")
 val v = make_pair(42)
 expect v.unwrap() == 42
 ```
@@ -151,13 +147,18 @@ expect v.unwrap() == 42
 
 #### supports Result generic type
 
+- supports Result generic type
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports Result generic type")
 val r = compute()
 expect r.is_ok == true
 ```
@@ -168,13 +169,18 @@ expect r.is_ok == true
 
 #### supports named field initialization
 
+- supports named field initialization
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports named field initialization")
 val p = Point { x: 10, y: 20 }
 expect p.x == 10
 expect p.y == 20
@@ -184,13 +190,18 @@ expect p.y == 20
 
 #### supports multi-line struct literals
 
+- supports multi-line struct literals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports multi-line struct literals")
 val c = Config {
     name: "test",
     value: 42
@@ -204,13 +215,18 @@ expect c.name == "test"
 
 #### repeats string with * operator
 
+- repeats string with * operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("repeats string with * operator")
 val sep = "=" * 5
 expect sep == "====="
 ```
@@ -219,13 +235,18 @@ expect sep == "====="
 
 #### handles zero repetition
 
+- handles zero repetition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles zero repetition")
 val empty = "x" * 0
 expect empty == ""
 ```
@@ -234,13 +255,18 @@ expect empty == ""
 
 #### handles single repetition
 
+- handles single repetition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single repetition")
 val single = "ab" * 1
 expect single == "ab"
 ```
@@ -253,20 +279,18 @@ expect single == "ab"
 
 #### supports method chaining across lines
 
-1. static fn start
-2. ChainBuilder
-3. me add
-4.  add
-5.  add
+- supports method chaining across lines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports method chaining across lines")
 # Multi-line chaining now works
 class ChainBuilder:
     val_: i32
@@ -285,20 +309,18 @@ expect result.val_ == 3
 
 #### supports fluent interface pattern
 
-1. static fn create
-2. Fluent
-3. me append
-4.  append
-5.  append
+- supports fluent interface pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports fluent interface pattern")
 class Fluent:
     data: text
     static fn create() -> Fluent:
@@ -318,13 +340,18 @@ expect f.data == "ab"
 
 #### supports qualified enum variant creation
 
+- supports qualified enum variant creation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports qualified enum variant creation")
 val variant = ParserImprovementVariant.Ready
 val result = match variant:
     ParserImprovementVariant.Ready -> "ready"
@@ -336,16 +363,18 @@ expect result == "ready"
 
 #### supports enum variant with data
 
-1. ParserImprovementVariant WithData
+- supports enum variant with data
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports enum variant with data")
 val variant = ParserImprovementVariant.WithData(7)
 val result = match variant:
     ParserImprovementVariant.WithData(value) -> value
@@ -359,18 +388,18 @@ expect result == 7
 
 #### supports method call chains
 
-1. static fn create
-2. Container
-3. fn get value
+- supports method call chains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports method call chains")
 # Basic method chaining works
 class Container:
     inner_val: i32
@@ -386,16 +415,18 @@ expect v == 42
 
 #### supports module-level access
 
-1. sp expect
+- supports module-level access
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports module-level access")
 # Module function access works via alias
 # sp imported at module level (use inside it blocks causes stack overflow)
 sp.expect(true == true)
@@ -407,13 +438,18 @@ sp.expect(true == true)
 
 #### supports string interpolation with variables
 
+- supports string interpolation with variables
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports string interpolation with variables")
 val name = "World"
 val greeting = "Hello, {name}!"
 expect greeting == "Hello, World!"
@@ -423,13 +459,18 @@ expect greeting == "Hello, World!"
 
 #### supports expressions in braces
 
+- supports expressions in braces
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports expressions in braces")
 val x = 5
 val y = 3
 val result = "Sum: {x + y}"
@@ -450,3 +491,51 @@ expect result == "Sum: 8"
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a92827209eb0db16ce53228526459b2b62db547d7898aca1732e300c7217ec47`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a92827209eb0db16ce53228526459b2b62db547d7898aca1732e300c7217ec47`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a92827209eb0db16ce53228526459b2b62db547d7898aca1732e300c7217ec47`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/compiler/parser_improvements_spec.spl
+mirror: doc/06_spec/03_system/compiler/parser_improvements_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/compiler/parser_improvements_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/compiler/parser_improvements_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/compiler/parser_improvements_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports arrow syntax in match expressions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/parser_improvements_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports multiple patterns with arrows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/parser_improvements_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses return type annotations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

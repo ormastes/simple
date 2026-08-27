@@ -1,29 +1,6 @@
 # TreeSitter Error Handling and Edge Cases Specification
 
-> use compiler.treesitter.*
-
-<!-- sdn-diagram:id=treesitter_error_recovery_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=treesitter_error_recovery_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-treesitter_error_recovery_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=treesitter_error_recovery_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ treesitter_error_recovery_spec -> compiler
 
 # TreeSitter Error Handling and Edge Cases Specification
 
-use compiler.treesitter.*
+use std.spec.step
 
 ## At a Glance
 
@@ -44,12 +21,14 @@ use compiler.treesitter.*
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/treesitter_error_recovery_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## API
 
 ```simple
+use std.spec.step
+
 use compiler.treesitter.*
 
 var ts = TreeSitter.new(source)
@@ -63,20 +42,22 @@ val outline = ts.parse_outline()
 
 #### produces empty module for empty source
 
-1. var ts = TreeSitter new
-2. expect outline functions len
-3. expect outline classes len
-4. expect outline structs len
-5. expect outline enums len
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- produces empty module for empty source
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces empty module for empty source")
 var ts = TreeSitter.new("")
 val outline = ts.parse_outline()
 expect outline.functions.len() to_equal 0
@@ -89,17 +70,18 @@ expect outline.enums.len() to_equal 0
 
 #### produces empty module for whitespace only
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- produces empty module for whitespace only
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces empty module for whitespace only")
 var ts = TreeSitter.new("   \n   \n   ")
 val outline = ts.parse_outline()
 expect outline.functions.len() to_equal 0
@@ -109,17 +91,18 @@ expect outline.functions.len() to_equal 0
 
 #### produces empty module for comments only
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- produces empty module for comments only
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces empty module for comments only")
 var ts = TreeSitter.new("# just a comment\n# another comment")
 val outline = ts.parse_outline()
 expect outline.functions.len() to_equal 0
@@ -131,17 +114,18 @@ expect outline.functions.len() to_equal 0
 
 #### parses three functions
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- parses three functions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses three functions")
 val source = "fn alpha():\n    1\n\nfn beta():\n    2\n\nfn gamma():\n    3"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -152,16 +136,18 @@ expect outline.functions.len() to_equal 3
 
 #### preserves function names
 
-1. var ts = TreeSitter new
+- preserves function names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves function names")
 val source = "fn first():\n    1\n\nfn second():\n    2"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -175,17 +161,18 @@ expect outline.functions[1].name to_equal "second"
 
 #### parses extern fn
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- parses extern fn
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses extern fn")
 val source = "extern fn rt_read(path: text) -> text"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -199,17 +186,18 @@ expect f.is_extern to_equal true
 
 #### parses extern fn with params
 
-1. var ts = TreeSitter new
-2. expect f params len
+- parses extern fn with params
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses extern fn with params")
 val source = "extern fn rt_write(path: text, content: text) -> bool"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -223,18 +211,18 @@ expect f.params.len() to_equal 2
 
 #### parses static method in impl
 
-1. var ts = TreeSitter new
-2. expect outline impls len
-3. expect impl block methods len
+- parses static method in impl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses static method in impl")
 val source = "impl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -249,18 +237,18 @@ expect m.is_static to_equal true
 
 #### parses mutable method in impl
 
-1. var ts = TreeSitter new
-2. expect outline impls len
-3. expect impl block methods len
+- parses mutable method in impl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses mutable method in impl")
 val source = "impl Point:\n    me move(dx: i64):\n        self.x = self.x + dx"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -277,17 +265,18 @@ expect m.is_mutable to_equal true
 
 #### attaches doc comment to function
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- attaches doc comment to function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("attaches doc comment to function")
 val source = "## This is a doc comment\nfn hello():\n    42"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -300,17 +289,18 @@ expect f.has_doc_comment to_equal true
 
 #### attaches doc comment to struct
 
-1. var ts = TreeSitter new
-2. expect outline structs len
+- attaches doc comment to struct
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("attaches doc comment to struct")
 val source = "## A 2D point\nstruct Point:\n    x: i64\n    y: i64"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -325,17 +315,18 @@ expect s.has_doc_comment to_equal true
 
 #### continues parsing after valid declarations
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- continues parsing after valid declarations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("continues parsing after valid declarations")
 val source = "fn valid_first():\n    1\n\nfn valid_second():\n    2"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -346,17 +337,18 @@ expect outline.functions.len() to_equal 2
 
 #### parses complex source without crashing
 
-1. var ts = TreeSitter new
-2. expect outline functions len
+- parses complex source without crashing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses complex source without crashing")
 val source = "use std.text.{NL2}\n\nfn main():\n    val x = 42\n    print x\n\nstruct Config:\n    name: text\n    debug: bool"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -370,18 +362,18 @@ expect outline.functions.len() >= 1
 
 #### parses trait followed by impl
 
-1. var ts = TreeSitter new
-2. expect outline traits len
-3. expect outline impls len
+- parses trait followed by impl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses trait followed by impl")
 val source = "trait Greetable:\n    fn greet() -> text:\n        pass\n\nimpl Person:\n    fn greet() -> text:\n        self.name"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -393,17 +385,18 @@ expect outline.impls.len() to_equal 1
 
 #### parses impl methods
 
-1. var ts = TreeSitter new
-2. expect impl block methods len
+- parses impl methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses impl methods")
 val source = "impl Calculator:\n    fn add(a: i64, b: i64) -> i64:\n        a + b\n    fn sub(a: i64, b: i64) -> i64:\n        a - b"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -425,3 +418,51 @@ expect impl_block.methods.len() to_equal 2
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `251d22d698fdfa9d77709788dd09d6b22097f94627ae6282058ee240b34eea90`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `251d22d698fdfa9d77709788dd09d6b22097f94627ae6282058ee240b34eea90`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `251d22d698fdfa9d77709788dd09d6b22097f94627ae6282058ee240b34eea90`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/treesitter_error_recovery_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/treesitter_error_recovery_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/treesitter_error_recovery_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/treesitter_error_recovery_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/treesitter_error_recovery_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces empty module for empty source' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/treesitter_error_recovery_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces empty module for whitespace only' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/treesitter_error_recovery_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces empty module for comments only' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

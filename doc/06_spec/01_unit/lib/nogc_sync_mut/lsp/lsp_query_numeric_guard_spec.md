@@ -1,29 +1,6 @@
 # Lsp Query Numeric Guard Specification
 
-> <details>
-
-<!-- sdn-diagram:id=lsp_query_numeric_guard_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lsp_query_numeric_guard_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lsp_query_numeric_guard_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lsp_query_numeric_guard_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering lsp query numeric guard.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,24 @@ lsp_query_numeric_guard_spec
 
 #### defaults malformed line and column arguments
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- defaults malformed line and column arguments
+   - Expected: source does not contain `val line_num = args[2].to_int()\n`
+   - Expected: source does not contain `col = args[3].to_int()\n`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("defaults malformed line and column arguments")
 val source = rt_file_read_text("src/lib/nogc_sync_mut/lsp/lsp_query.spl") ?? ""
 
 expect(source).to_contain("val line_num = args[2].to_int() ?? 0")
@@ -64,12 +52,12 @@ expect(source.contains("col = args[3].to_int()\n")).to_equal(false)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering lsp query numeric guard.
 - lsp query numeric guard
 
 ## Scenario Summary
@@ -84,3 +72,53 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5b83c9f4e3df8f1db4c11cc74507f682e51ee8cbc8708c6d4049403965d3ab64`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5b83c9f4e3df8f1db4c11cc74507f682e51ee8cbc8708c6d4049403965d3ab64`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5b83c9f4e3df8f1db4c11cc74507f682e51ee8cbc8708c6d4049403965d3ab64`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **79/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.md (current)
+findings: 5 blockers: 2
+  narrative=100 structure=100 oracle=50
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=79; blocker cap makes effective=49
+doc/06_spec/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/nogc_sync_mut/lsp/lsp_query_numeric_guard_spec.spl:13:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defaults malformed line and column arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

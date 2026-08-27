@@ -24,7 +24,7 @@ Lane `.spipe/simple_enterprise_suite` W3-B: the enterprise web app grows the boo
 | Design | N/A |
 | Research | doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md |
 | Source | `test/03_system/app/enterprise/enterprise_web_app_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -66,6 +66,11 @@ Lane: .spipe/simple_enterprise_suite (v2, W3-B).
 
 #### holds, conflicts with 409, confirms, and cancels over HTTP
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- holds, conflicts with 409, confirms, and cancels over HTTP
 - Seed an exclusive-unit resource and open a booking-role session
 - List resources over GET /booking/resources
    - Expected: http_status_code(list.status) equals `200`
@@ -88,10 +93,12 @@ Lane: .spipe/simple_enterprise_suite (v2, W3-B).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("holds, conflicts with 409, confirms, and cancels over HTTP")
 step("Seed an exclusive-unit resource and open a booking-role session")
 val store = fresh_full("booking")
 val t = tenant_a()
@@ -145,6 +152,7 @@ store_close(store)
 
 #### re-POSTing the same hold form produces exactly one effect
 
+- re-POSTing the same hold form produces exactly one effect
 - Place the hold once
    - Expected: http_status_code(first.status) equals `200`
 - Replay with the same idem key but a different booking id
@@ -157,10 +165,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("re-POSTing the same hold form produces exactly one effect")
 val store = fresh_full("replay")
 val t = tenant_a()
 val admin = admin_a()
@@ -191,6 +201,7 @@ store_close(store)
 
 #### opens a table, orders, serves, views, and closes the bill over HTTP
 
+- opens a table, orders, serves, views, and closes the bill over HTTP
 - Seed the menu (sale catalog) and open an admin session
 - Open table 7 — POST /restaurant/table/open
    - Expected: http_status_code(open.status) equals `200`
@@ -218,10 +229,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("opens a table, orders, serves, views, and closes the bill over HTTP")
 step("Seed the menu (sale catalog) and open an admin session")
 val store = fresh_full("restaurant")
 val t = tenant_a()
@@ -292,6 +305,7 @@ store_close(store)
 
 #### summarizes per-tenant counts and escapes a hostile product name
 
+- summarizes per-tenant counts and escapes a hostile product name
 - Seed one hostile-named product, an order, a hold, and an open table
    - Expected: http_status_code(order.status) equals `200`
    - Expected: http_status_code(hold.status) equals `200`
@@ -306,10 +320,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("summarizes per-tenant counts and escapes a hostile product name")
 step("Seed one hostile-named product, an order, a hold, and an open table")
 val store = fresh_full("dashboard")
 val t = tenant_a()
@@ -356,6 +372,7 @@ store_close(store)
 
 #### an inactive session gets 401 before any route logic runs
 
+- an inactive session gets 401 before any route logic runs
 - Booking family — GET /booking/resources is 401
    - Expected: http_status_code(b.status) equals `401`
 - Restaurant family — POST /restaurant/table/open is 401
@@ -367,10 +384,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("an inactive session gets 401 before any route logic runs")
 val store = fresh_full("unauth")
 val t = tenant_a()
 val admin = admin_a()
@@ -411,3 +430,54 @@ store_close(store)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7f7bd9d1e304cc76d0568e5c2f48867420479349e750cf61c8a1789b359e99e3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7f7bd9d1e304cc76d0568e5c2f48867420479349e750cf61c8a1789b359e99e3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7f7bd9d1e304cc76d0568e5c2f48867420479349e750cf61c8a1789b359e99e3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/enterprise_web_app_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/enterprise_web_app_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/enterprise_web_app_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/enterprise_web_app_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/enterprise_web_app_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 27 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/enterprise_web_app_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'holds, conflicts with 409, confirms, and cancels over HTTP' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/enterprise_web_app_spec.spl:143:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 're-POSTing the same hold form produces exactly one effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/enterprise_web_app_spec.spl:170:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'opens a table, orders, serves, views, and closes the bill over HTTP' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

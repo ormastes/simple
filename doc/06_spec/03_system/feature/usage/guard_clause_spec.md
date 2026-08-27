@@ -2,29 +2,6 @@
 
 > match value:
 
-<!-- sdn-diagram:id=guard_clause_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=guard_clause_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-guard_clause_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=guard_clause_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -44,7 +21,7 @@ match value:
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/guard_clause_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -70,17 +47,18 @@ body
 
 #### matches when guard is true
 
-1. fn classify
-2. expect classify
+- matches when guard is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches when guard is true")
 fn classify(x: i64) -> text:
     match x:
         case n if n > 10:
@@ -96,17 +74,18 @@ expect classify(15) == "large"
 
 #### falls through when guard is false
 
-1. fn classify
-2. expect classify
+- falls through when guard is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("falls through when guard is false")
 fn classify(x: i64) -> text:
     match x:
         case n if n > 10:
@@ -122,17 +101,18 @@ expect classify(5) == "small"
 
 #### reaches default case when all guards fail
 
-1. fn classify
-2. expect classify
+- reaches default case when all guards fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reaches default case when all guards fail")
 fn classify(x: i64) -> text:
     match x:
         case n if n > 10:
@@ -150,19 +130,18 @@ expect classify(-5) == "non-positive"
 
 #### matches exact value via guard
 
-1. fn identify
-2. expect identify
-3. expect identify
-4. expect identify
+- matches exact value via guard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches exact value via guard")
 fn identify(x: i64) -> text:
     match x:
         case n if n == 0:
@@ -182,19 +161,18 @@ expect identify(99) == "other"
 
 #### uses bound variables in guard
 
-1. fn check sum
-2. expect check sum
-3. expect check sum
-4. expect check sum
+- uses bound variables in guard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses bound variables in guard")
 fn check_sum(pair: (i64, i64)) -> text:
     match pair:
         case (a, b) if a + b > 100:
@@ -212,19 +190,18 @@ expect check_sum((1, 2)) == "other"
 
 #### guards with multiple comparisons
 
-1. fn check range
-2. expect check range
-3. expect check range
-4. expect check range
+- guards with multiple comparisons
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("guards with multiple comparisons")
 fn check_range(pair: (i64, i64)) -> text:
     match pair:
         case (a, b) if a > 0 && b > 0:
@@ -244,20 +221,18 @@ expect check_range((5, -10)) == "mixed"
 
 #### filters enum payload with guard
 
-1. fn categorize
-2. expect categorize
-3. expect categorize
-4. expect categorize
-5. expect categorize
+- filters enum payload with guard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("filters enum payload with guard")
 fn categorize(v: GuardValue) -> text:
     match v:
         case GuardValue.Num(n) if n > 100:
@@ -280,18 +255,18 @@ expect categorize(GuardValue.Empty) == "empty"
 
 #### references variables from outer scope
 
-1. fn above threshold
-2. expect above threshold
-3. expect above threshold
+- references variables from outer scope
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("references variables from outer scope")
 fn above_threshold(x: i64, threshold: i64) -> bool:
     match x:
         case n if n > threshold:
@@ -308,18 +283,18 @@ expect above_threshold(25, 50) == false
 
 #### uses modulo in guard
 
-1. fn parity
-2. expect parity
-3. expect parity
+- uses modulo in guard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses modulo in guard")
 fn parity(x: i64) -> text:
     match x:
         case n if n % 2 == 0:
@@ -334,20 +309,18 @@ expect parity(7) == "odd"
 
 #### uses logical or in guard
 
-1. fn is special
-2. expect is special
-3. expect is special
-4. expect is special
-5. expect is special
+- uses logical or in guard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses logical or in guard")
 fn is_special(x: i64) -> bool:
     match x:
         case n if n == 1 || n == 42 || n == 100:
@@ -374,3 +347,51 @@ expect is_special(50) == false
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5926e875e4742621b021fb77401d436b2a924583a8ed4a87ec271b45e2cde9bf`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5926e875e4742621b021fb77401d436b2a924583a8ed4a87ec271b45e2cde9bf`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5926e875e4742621b021fb77401d436b2a924583a8ed4a87ec271b45e2cde9bf`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/guard_clause_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/guard_clause_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/guard_clause_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/guard_clause_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/guard_clause_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches when guard is true' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/guard_clause_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'falls through when guard is false' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/guard_clause_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reaches default case when all guards fail' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

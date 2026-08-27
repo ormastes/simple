@@ -1,29 +1,6 @@
 # Simpleos Wine Dll View Tls Dispatch Specification
 
-> <details>
-
-<!-- sdn-diagram:id=simpleos_wine_dll_view_tls_dispatch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_wine_dll_view_tls_dispatch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_wine_dll_view_tls_dispatch_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_wine_dll_view_tls_dispatch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering REQ-050 SimpleOS Wine DLL view TLS dispatch.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,24 +17,19 @@ simpleos_wine_dll_view_tls_dispatch_spec -> common
 
 #### records TLS dispatch order after DLL import binding without executing callbacks
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val data = _dll_with_import_relocation_tls()
-val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
-val result = wine_dll_record_file_view_tls_dispatch("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 91, 92, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback")
-expect(result.ok).to_equal(true)
-expect(result.status).to_equal("dll-view-tls-dispatch-recorded")
-expect(result.callback_count).to_equal(1)
-expect(result.dispatch_count).to_equal(1)
-expect(result.evidence).to_contain("dll-import-thunk-bytes-written")
-expect(result.evidence).to_contain("tls-before-dllmain")
-expect(result.evidence).to_contain("no-tls-callback-executed")
-expect(result.evidence).to_contain("no-dllmain-executed")
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-050
 ```
 
 </details>
@@ -69,12 +41,12 @@ expect(result.evidence).to_contain("no-dllmain-executed")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering REQ-050 SimpleOS Wine DLL view TLS dispatch.
 - REQ-050 SimpleOS Wine DLL view TLS dispatch
 
 ## Scenario Summary
@@ -89,3 +61,50 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-050`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c0f1dd7d6a310d2b590dfde2d71fe18965818ccf2ba526c2687b8e24d8cca7e9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c0f1dd7d6a310d2b590dfde2d71fe18965818ccf2ba526c2687b8e24d8cca7e9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c0f1dd7d6a310d2b590dfde2d71fe18965818ccf2ba526c2687b8e24d8cca7e9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.spl
+mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.md (current)
+findings: 4 blockers: 1
+  narrative=100 structure=90 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=85; blocker cap makes effective=49
+doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.spl:100:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'records TLS dispatch order after DLL import binding without executing callbacks' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+<!-- sspec-maintain:scorecard:end -->

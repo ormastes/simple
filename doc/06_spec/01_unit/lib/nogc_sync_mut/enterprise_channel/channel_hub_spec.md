@@ -24,7 +24,7 @@ Specs for `std.enterprise_channel` (sync-tier impl `src/lib/nogc_sync_mut/enterp
 | Design | doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §8 |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -55,6 +55,11 @@ Lane: .spipe/simple_enterprise_suite (W5-C, channel hub §8, rollout step 1).
 
 #### pages scripted orders deterministically by cursor
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- pages scripted orders deterministically by cursor
 - Page 1 from the empty cursor
    - Expected: p1.orders.len() equals `2`
    - Expected: p1.orders[0].external_id equals `ext-100`
@@ -69,10 +74,12 @@ Lane: .spipe/simple_enterprise_suite (W5-C, channel hub §8, rollout step 1).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("pages scripted orders deterministically by cursor")
 val adapter = mock_channel(scripted_orders(), 2)
 step("Page 1 from the empty cursor")
 val p1 = channel_fetch_orders(adapter, "")
@@ -96,6 +103,7 @@ expect(p3.orders.len()).to_equal(0)
 
 #### imports every external order as exactly one internal order via the cursor
 
+- imports every external order as exactly one internal order via the cursor
 - Import a full batch — two pages via cursor
    - Expected: rep.fetched equals `4`
    - Expected: rep.imported equals `4`
@@ -112,10 +120,12 @@ expect(p3.orders.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("imports every external order as exactly one internal order via the cursor")
 val store = fresh_store()
 val t = tenant_a()
 val a = admin()
@@ -144,6 +154,7 @@ store_close(store)
 
 #### re-running the import produces zero new internal effects
 
+- re-running the import produces zero new internal effects
 - Replay the import from a reset cursor position (fresh adapter, same script)
 - All 4 are recorded results — dedup by external order id, no second effect
    - Expected: rep2.fetched equals `4`
@@ -156,10 +167,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("re-running the import produces zero new internal effects")
 val store = fresh_store()
 val t = tenant_a()
 val a = admin()
@@ -186,6 +199,7 @@ store_close(store)
 
 #### keeps the checkpoint at the last success and completes on rerun without duplicates
 
+- keeps the checkpoint at the last success and completes on rerun without duplicates
 - Import with a provider that fails at cursor 2 (page 2)
    - Expected: rep1.reason equals `store-error`
    - Expected: rep1.imported equals `2`
@@ -202,10 +216,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("keeps the checkpoint at the last success and completes on rerun without duplicates")
 val store = fresh_store()
 val t = tenant_a()
 val a = admin()
@@ -236,6 +252,7 @@ store_close(store)
 
 #### denies every hub operation on a killed channel with reason forbidden
 
+- denies every hub operation on a killed channel with reason forbidden
 - Kill the channel
 - Import, listing publish, and ack are all denied with forbidden
    - Expected: rep.reason equals `forbidden`
@@ -249,10 +266,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("denies every hub operation on a killed channel with reason forbidden")
 val store = fresh_store()
 val t = tenant_a()
 val a = admin()
@@ -282,6 +301,7 @@ store_close(store)
 
 #### maps sku to external listing id and acks an imported order once
 
+- maps sku to external listing id and acks an imported order once
 - Publish a listing — mapping row records the external id
    - Expected: channel_listing_external_id(store, "tenant-a", "mock-1", "widget-1") equals `ext-listing-widget-1`
 - Import, then acknowledge one order
@@ -296,10 +316,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("maps sku to external listing id and acks an imported order once")
 val store = fresh_store()
 val t = tenant_a()
 val a = admin()
@@ -332,6 +354,7 @@ store_close(store)
 
 #### detects a seeded orphan, unacked orders, and checkpoint stats
 
+- detects a seeded orphan, unacked orders, and checkpoint stats
 - Import 4 orders plus one order for an UNKNOWN sku (rejected -> orphan inbox row)
 - Ack one order, then reconcile
    - Expected: rep.inbox_total equals `5`
@@ -346,10 +369,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("detects a seeded orphan, unacked orders, and checkpoint stats")
 val store = fresh_store()
 val t = tenant_a()
 val a = admin()
@@ -378,6 +403,7 @@ store_close(store)
 
 #### imports, cursors, and reconciliation never cross tenants
 
+- imports, cursors, and reconciliation never cross tenants
 - Tenant B registers its own channel and catalog
 - Tenant A imports; tenant B does not
    - Expected: channel_inbox_count(store, "tenant-a", "mock-1") equals `4`
@@ -392,10 +418,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("imports, cursors, and reconciliation never cross tenants")
 val store = fresh_store()
 val ta = tenant_a()
 val a = admin()
@@ -426,6 +454,7 @@ store_close(store)
 
 #### cursor, inbox, and dedup survive close and reopen
 
+- cursor, inbox, and dedup survive close and reopen
 - Open a file-backed store; import page 1 then hit a provider failure
    - Expected: channel_cursor(store, "tenant-a", "mock-1") equals `2`
 - Reopen — cursor persisted; import resumes at 2 and completes without duplicates
@@ -439,10 +468,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("cursor, inbox, and dedup survive close and reopen")
 dir_create_all("/tmp/simple_channel_spec")
 val path = "/tmp/simple_channel_spec/restart_survival.db"
 if file_exists(path):
@@ -495,3 +526,54 @@ file_delete(path)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d32b583ebca80e691035cdfd462b1ecaad27e7a483a345755fe579c1e4abfcd9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d32b583ebca80e691035cdfd462b1ecaad27e7a483a345755fe579c1e4abfcd9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d32b583ebca80e691035cdfd462b1ecaad27e7a483a345755fe579c1e4abfcd9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 34 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pages scripted orders deterministically by cursor' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl:113:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports every external order as exactly one internal order via the cursor' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl:138:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 're-running the import produces zero new internal effects' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

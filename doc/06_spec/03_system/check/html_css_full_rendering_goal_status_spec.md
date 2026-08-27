@@ -2,29 +2,6 @@
 
 > Validates the non-launching status gate for the full HTML/CSS rendering objective. The current renderer must prove all WHATWG HTML tags and the implemented Simple Web CSS subset through real rendered fixtures, while the broader W3C CSS inventory remains explicitly incomplete until those properties move from inventory assignment into rendered behavior.
 
-<!-- sdn-diagram:id=html_css_full_rendering_goal_status_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=html_css_full_rendering_goal_status_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-html_css_full_rendering_goal_status_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=html_css_full_rendering_goal_status_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
@@ -47,7 +24,7 @@ Validates the non-launching status gate for the full HTML/CSS rendering objectiv
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/html_css_full_rendering_goal_status_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -93,6 +70,11 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 
 #### reports complete HTML and implemented CSS while full CSS remains incomplete
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- reports complete HTML and implemented CSS while full CSS remains incomplete
 - Run the full rendering goal status check without network-dependent HTML fetches
    - Expected: code equals `0`
 - Read the full rendering goal evidence
@@ -182,27 +164,9 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
    - Expected: full_css_unrendered_words does not contain `,contain,`
    - Expected: full_css_unrendered_words does not contain `,float,`
    - Expected: full_css_unrendered_words does not contain `,font-family,`
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
-- expect not
    - Expected: full_css_unrendered_words does not contain `,font-kerning,`
    - Expected: full_css_unrendered_words does not contain `,font-optical-sizing,`
-- expect not
-- expect not
-- expect not
-- expect not
    - Expected: full_css_unrendered_words does not contain `,font-synthesis,`
-- expect not
-- expect not
-- expect not
    - Expected: full_css_unrendered_words does not contain `,font-synthesis-weight,`
    - Expected: full_css_unrendered_words does not contain `,image-rendering,`
    - Expected: full_css_unrendered_words does not contain `,line-break,`
@@ -229,10 +193,12 @@ sh scripts/check/check-html-css-full-rendering-goal-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 191 lines folded for reproduction.
+Runnable source: 193 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports complete HTML and implemented CSS while full CSS remains incomplete")
 step("Run the full rendering goal status check without network-dependent HTML fetches")
 val command = "rm -rf build/test-html-css-full-rendering-goal-status && BUILD_DIR=build/test-html-css-full-rendering-goal-status REPORT_PATH=build/test-html-css-full-rendering-goal-status/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 sh scripts/check/check-html-css-full-rendering-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -430,6 +396,7 @@ expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 
 #### fails in strict mode while the full CSS inventory is not rendered
 
+- fails in strict mode while the full CSS inventory is not rendered
 - Run the same gate in strict mode
    - Expected: code equals `1`
 - Assert strict mode still emits inspectable evidence
@@ -438,10 +405,12 @@ expect(report).to_contain("- animation CSS rendered: 0/0 (pass)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails in strict mode while the full CSS inventory is not rendered")
 step("Run the same gate in strict mode")
 val command = "rm -rf build/test-html-css-full-rendering-goal-status-strict && BUILD_DIR=build/test-html-css-full-rendering-goal-status-strict REPORT_PATH=build/test-html-css-full-rendering-goal-status-strict/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 sh scripts/check/check-html-css-full-rendering-goal-status.shs --strict"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -470,7 +439,55 @@ expect(evidence).to_contain("html_css_full_rendering_goal_full_css_unrendered_co
 
 ## Related Documentation
 
-- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c17cec1a237d5ca00b7726bcd0954783e8144ee88a1bf468fb72cd5fa69c47ec`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c17cec1a237d5ca00b7726bcd0954783e8144ee88a1bf468fb72cd5fa69c47ec`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c17cec1a237d5ca00b7726bcd0954783e8144ee88a1bf468fb72cd5fa69c47ec`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/check/html_css_full_rendering_goal_status_spec.spl
+mirror: doc/06_spec/03_system/check/html_css_full_rendering_goal_status_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/html_css_full_rendering_goal_status_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/html_css_full_rendering_goal_status_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/html_css_full_rendering_goal_status_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/html_css_full_rendering_goal_status_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports complete HTML and implemented CSS while full CSS remains incomplete' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/html_css_full_rendering_goal_status_spec.spl:260:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails in strict mode while the full CSS inventory is not rendered' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,52 +2,6 @@
 
 > Composing multiple mixins with proper field and method resolution. Tests application order, field shadowing, and method overriding.
 
-<!-- sdn-diagram:id=mixin_composition_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mixin_composition_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mixin_composition_spec -> First
-mixin_composition_spec -> Second
-mixin_composition_spec -> Alpha
-mixin_composition_spec -> Beta
-mixin_composition_spec -> MA
-mixin_composition_spec -> MB
-mixin_composition_spec -> MC
-mixin_composition_spec -> M1
-mixin_composition_spec -> M2
-mixin_composition_spec -> Base
-mixin_composition_spec -> P
-mixin_composition_spec -> Q
-mixin_composition_spec -> HasX
-mixin_composition_spec -> HasY
-mixin_composition_spec -> HasSum
-mixin_composition_spec -> Taggable
-mixin_composition_spec -> Shared
-mixin_composition_spec -> Left
-mixin_composition_spec -> Right
-mixin_composition_spec -> A
-mixin_composition_spec -> B
-mixin_composition_spec -> Level1
-mixin_composition_spec -> Level2
-mixin_composition_spec -> C
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mixin_composition_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -68,7 +22,7 @@ Composing multiple mixins with proper field and method resolution. Tests applica
 | Difficulty | 3/5 |
 | Status | Partial (basic composition implemented, advanced resolution planned) |
 | Source | `test/03_system/feature/features/mixin_composition_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -91,13 +45,18 @@ Tests application order, field shadowing, and method overriding.
 
 #### fields from multiple mixins are accessible
 
+- fields from multiple mixins are accessible
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fields from multiple mixins are accessible")
 mixin First:
     a: i64
 
@@ -119,19 +78,18 @@ expect obj.c == 3
 
 #### methods from multiple mixins resolve
 
-1. fn get x
-2. fn get y
-3. expect p get x
-4. expect p get y
+- methods from multiple mixins resolve
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("methods from multiple mixins resolve")
 mixin Alpha:
     x: i64
 
@@ -157,21 +115,18 @@ expect p.get_y() == 20
 
 #### three mixins compose correctly
 
-1. fn get a
-2. fn get b
-3. fn get c
-4. expect t get a
-5. expect t get b
-6. expect t get c
+- three mixins compose correctly
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("three mixins compose correctly")
 mixin MA:
     a: i64
     fn get_a() -> i64:
@@ -204,18 +159,18 @@ expect t.get_c() == 3
 
 #### first mixin method wins when names conflict
 
-1. fn value
-2. fn value
-3. expect b value
+- first mixin method wins when names conflict
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("first mixin method wins when names conflict")
 mixin M1:
     x: i64
     fn value() -> i64:
@@ -238,18 +193,18 @@ expect b.value() == 10
 
 #### class method beats mixin method
 
-1. fn value
-2. fn value
-3. expect o value
+- class method beats mixin method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("class method beats mixin method")
 mixin Base:
     n: i64
 
@@ -270,19 +225,18 @@ expect o.value() == 300
 
 #### class method overrides even with multiple mixins
 
-1. fn result
-2. fn result
-3. fn result
-4. expect pq result
+- class method overrides even with multiple mixins
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("class method overrides even with multiple mixins")
 mixin P:
     p: i64
     fn result() -> i64:
@@ -310,19 +264,18 @@ expect pq.result() == 10
 
 #### mixin method can call methods from other mixins on same class
 
-1. fn get x
-2. fn get y
-3. fn compute sum
-4. expect s compute sum
+- mixin method can call methods from other mixins on same class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mixin method can call methods from other mixins on same class")
 mixin HasX:
     x: i64
     fn get_x() -> i64:
@@ -352,18 +305,18 @@ expect s.compute_sum() == 30
 
 #### same mixin applied to multiple classes
 
-1. fn get tag
-2. expect d get tag
-3. expect i get tag
+- same mixin applied to multiple classes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("same mixin applied to multiple classes")
 mixin Taggable:
     tag: text
 
@@ -390,16 +343,18 @@ expect i.get_tag() == "photo"
 
 #### handles diamond mixin hierarchy
 
-1. fn get id
+- handles diamond mixin hierarchy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles diamond mixin hierarchy")
 mixin Shared:
     id: i64
 
@@ -428,17 +383,18 @@ expect d.right_val == 3
 
 #### shared mixin applied once
 
-1. fn get base
-2. expect obj get base
+- shared mixin applied once
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shared mixin applied once")
 mixin Base:
     base: i64
 
@@ -469,19 +425,18 @@ expect obj.b == 30
 
 #### supports nested mixin composition
 
-1. fn get x
-2. fn get y
-3. expect d get x
-4. expect d get y
+- supports nested mixin composition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports nested mixin composition")
 mixin Level1:
     x: i64
 
@@ -507,13 +462,18 @@ expect d.get_y() == 2
 
 #### resolves all fields correctly
 
+- resolves all fields correctly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves all fields correctly")
 mixin A:
     a: i64
 
@@ -548,3 +508,51 @@ expect obj.c == 3
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ff348e2a87b422f64014b76cbf9424147e4c4ab4c0706f6b413a247fd83273fb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ff348e2a87b422f64014b76cbf9424147e4c4ab4c0706f6b413a247fd83273fb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ff348e2a87b422f64014b76cbf9424147e4c4ab4c0706f6b413a247fd83273fb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/features/mixin_composition_spec.spl
+mirror: doc/06_spec/03_system/feature/features/mixin_composition_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/features/mixin_composition_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/features/mixin_composition_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/features/mixin_composition_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fields from multiple mixins are accessible' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/mixin_composition_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'methods from multiple mixins resolve' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/mixin_composition_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'three mixins compose correctly' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

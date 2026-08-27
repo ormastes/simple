@@ -1,29 +1,6 @@
 # Physics 3d Collision Specification
 
-> <details>
-
-<!-- sdn-diagram:id=physics_3d_collision_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=physics_3d_collision_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-physics_3d_collision_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=physics_3d_collision_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Physics2 3D Collision.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,24 @@ physics_3d_collision_spec -> std
 
 #### sphere-sphere overlap
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- sphere-sphere overlap
+   - Expected: c.has_contact is true
+   - Expected: c.penetration equals `0.5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sphere-sphere overlap")
 val c = collide_sphere_sphere(0.0, 0.0, 0.0, 1.0, 1.5, 0.0, 0.0, 1.0)
 expect(c.has_contact).to_equal(true)
 expect(c.penetration).to_equal(0.5)
@@ -56,13 +44,19 @@ expect(c.penetration).to_equal(0.5)
 
 #### sphere-sphere miss
 
+- sphere-sphere miss
+   - Expected: c.has_contact is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sphere-sphere miss")
 val c = collide_sphere_sphere(0.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0, 1.0)
 expect(c.has_contact).to_equal(false)
 ```
@@ -71,13 +65,19 @@ expect(c.has_contact).to_equal(false)
 
 #### sphere-box overlap
 
+- sphere-box overlap
+   - Expected: c.has_contact is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sphere-box overlap")
 val c = collide_sphere_aabb_3d(1.4, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
 expect(c.has_contact).to_equal(true)
 ```
@@ -86,13 +86,19 @@ expect(c.has_contact).to_equal(true)
 
 #### sphere-box miss
 
+- sphere-box miss
+   - Expected: c.has_contact is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sphere-box miss")
 val c = collide_sphere_aabb_3d(5.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
 expect(c.has_contact).to_equal(false)
 ```
@@ -101,13 +107,19 @@ expect(c.has_contact).to_equal(false)
 
 #### box-box overlap
 
+- box-box overlap
+   - Expected: c.has_contact is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("box-box overlap")
 val c = collide_aabb_aabb_3d(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.5, 0.0, 0.0, 1.0, 1.0, 1.0)
 expect(c.has_contact).to_equal(true)
 ```
@@ -116,13 +128,19 @@ expect(c.has_contact).to_equal(true)
 
 #### box-box separated
 
+- box-box separated
+   - Expected: c.has_contact is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("box-box separated")
 val c = collide_aabb_aabb_3d(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 5.0, 0.0, 0.0, 1.0, 1.0, 1.0)
 expect(c.has_contact).to_equal(false)
 ```
@@ -136,12 +154,12 @@ expect(c.has_contact).to_equal(false)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/engine/physics_3d_collision_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Physics2 3D Collision.
 - Physics2 3D Collision
 
 ## Scenario Summary
@@ -156,3 +174,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `09bc36ae61e97c68fd2fb92bdb6fd378173ce688240f29db476327e1c52d93b3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `09bc36ae61e97c68fd2fb92bdb6fd378173ce688240f29db476327e1c52d93b3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `09bc36ae61e97c68fd2fb92bdb6fd378173ce688240f29db476327e1c52d93b3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/engine/physics_3d_collision_spec.spl
+mirror: doc/06_spec/03_system/engine/physics_3d_collision_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/engine/physics_3d_collision_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/engine/physics_3d_collision_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/engine/physics_3d_collision_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/engine/physics_3d_collision_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sphere-sphere overlap' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/engine/physics_3d_collision_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sphere-sphere miss' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/engine/physics_3d_collision_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sphere-box overlap' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

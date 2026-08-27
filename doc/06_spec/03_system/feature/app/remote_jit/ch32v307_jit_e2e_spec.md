@@ -1,31 +1,5 @@
 # CH32V307 Direct Hardware E2E
 
-> <details>
-
-<!-- sdn-diagram:id=ch32v307_jit_e2e_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ch32v307_jit_e2e_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ch32v307_jit_e2e_spec -> std
-ch32v307_jit_e2e_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ch32v307_jit_e2e_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -42,7 +16,7 @@ ch32v307_jit_e2e_spec -> app
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 #
@@ -58,13 +32,23 @@ ch32v307_jit_e2e_spec -> app
 
 #### discovers WCH-Link tools _(slow)_
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- discovers WCH-Link tools
+   - Expected: version.exit_code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("discovers WCH-Link tools")
 if not wlink_available():
     print "[skip] wlink not installed"
 else:
@@ -82,13 +66,20 @@ else:
 
 #### reuses the shared baremetal workload fixture _(slow)_
 
+- reuses the shared baremetal workload fixture
+   - Expected: shared_workload_available() is true
+   - Expected: workload_elf_available() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reuses the shared baremetal workload fixture")
 expect(shared_workload_available()).to_equal(true)
 expect(workload_elf_available()).to_equal(true)
 ```
@@ -103,13 +94,19 @@ expect(workload_elf_available()).to_equal(true)
 
 #### detects CH32V307 through WCH-Link _(slow)_
 
+- detects CH32V307 through WCH-Link
+   - Expected: ch32v307_detected() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects CH32V307 through WCH-Link")
 if not wlink_available():
     print "[skip] wlink not installed"
 else if not ch32v307_detected():
@@ -128,13 +125,19 @@ else:
 
 #### writes and reads back RAM through WCH-Link _(slow)_
 
+- writes and reads back RAM through WCH-Link
+   - Expected: ram_write_readback_ok() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("writes and reads back RAM through WCH-Link")
 if not wlink_available():
     print "[skip] wlink not installed"
 else if not ch32v307_detected():
@@ -153,13 +156,19 @@ else:
 
 #### reads registers through WCH-Link _(slow)_
 
+- reads registers through WCH-Link
+   - Expected: register_dump_ok() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reads registers through WCH-Link")
 if not wlink_available():
     print "[skip] wlink not installed"
 else if not ch32v307_detected():
@@ -178,13 +187,18 @@ else:
 
 #### attempts the shared collections workload through flashed RV32 ELF _(slow)_
 
+- attempts the shared collections workload through flashed RV32 ELF
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("attempts the shared collections workload through flashed RV32 ELF")
 if not wlink_available():
     print "[skip] wlink not installed"
 else if not ch32v307_detected():
@@ -218,3 +232,54 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `27638fdcf89b602adaf8cc9a50504797a847829b3754c046f041a5ad0b67dc6e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `27638fdcf89b602adaf8cc9a50504797a847829b3754c046f041a5ad0b67dc6e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `27638fdcf89b602adaf8cc9a50504797a847829b3754c046f041a5ad0b67dc6e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl
+mirror: doc/06_spec/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'discovers WCH-Link tools' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reuses the shared baremetal workload fixture' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects CH32V307 through WCH-Link' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

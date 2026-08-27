@@ -1,29 +1,6 @@
-# Time Utilities Specification
+# Time Utils Specification
 
-> This specification covers comprehensive time and duration utility functions: 1. Duration creation and manipulation (millis, seconds, minutes, hours, days) 2. Duration arithmetic (add, subtract, multiply, divide) 3. Duration parsing from strings (e.g., "1h30m45s") 4. Duration formatting and display 5. Timestamp and time range operations 6. Duration comparisons and utilities 7. Common durations (one_second, one_minute, etc.)
-
-<!-- sdn-diagram:id=time_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=time_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-time_utils_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=time_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Time Utilities, Duration Creation, Duration Components, Duration Arithmetic, Duration Parsing, Duration Formatting, Time Unit Conversion, Timestamp, Duration Comparison, Common Durations, Duration Utilities, Time Range, Round-trip, Edge Cases.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,52 +9,7 @@ time_utils_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Time Utilities Specification
-
-This specification covers comprehensive time and duration utility functions: 1. Duration creation and manipulation (millis, seconds, minutes, hours, days) 2. Duration arithmetic (add, subtract, multiply, divide) 3. Duration parsing from strings (e.g., "1h30m45s") 4. Duration formatting and display 5. Timestamp and time range operations 6. Duration comparisons and utilities 7. Common durations (one_second, one_minute, etc.)
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #TIME-001 to #TIME-040 |
-| Category | Tooling \| Time & Duration |
-| Difficulty | 3/5 |
-| Status | In Progress |
-| Source | `test/01_unit/app/tooling/time_utils_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-This specification covers comprehensive time and duration utility functions:
-1. Duration creation and manipulation (millis, seconds, minutes, hours, days)
-2. Duration arithmetic (add, subtract, multiply, divide)
-3. Duration parsing from strings (e.g., "1h30m45s")
-4. Duration formatting and display
-5. Timestamp and time range operations
-6. Duration comparisons and utilities
-7. Common durations (one_second, one_minute, etc.)
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Duration | Immutable time span in milliseconds |
-| Timestamp | Point in time (Unix epoch seconds) |
-| Time Range | Span between two timestamps |
-| Components | Break duration into days, hours, minutes, seconds, millis |
-| Parsing | String to duration conversion (e.g., "1h30m") |
-| Formatting | Duration to human-readable string |
-
-## Behavior
-
-- Duration stores milliseconds internally
-- Timestamp represents Unix epoch seconds
-- Duration parsing supports: d=days, h=hours, m=minutes, s=seconds
-- Format output includes only non-zero components or 0s
-- Time ranges are inclusive on both bounds
-- Negative durations are allowed
+# Time Utils Specification
 
 ## Scenarios
 
@@ -87,16 +19,18 @@ This specification covers comprehensive time and duration utility functions:
 
 #### creates from millis
 
-1. expect duration total millis
+- creates from millis
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates from millis")
 val duration = Duration.from_millis(5000)
 expect duration.total_millis() == 5000
 ```
@@ -105,17 +39,18 @@ expect duration.total_millis() == 5000
 
 #### creates from seconds
 
-1. expect duration total seconds
-2. expect duration total millis
+- creates from seconds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates from seconds")
 val duration = Duration.from_seconds(10)
 expect duration.total_seconds() == 10
 expect duration.total_millis() == 10000
@@ -125,17 +60,18 @@ expect duration.total_millis() == 10000
 
 #### creates from minutes
 
-1. expect duration total minutes
-2. expect duration total seconds
+- creates from minutes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates from minutes")
 val duration = Duration.from_minutes(5)
 expect duration.total_minutes() == 5
 expect duration.total_seconds() == 300
@@ -145,17 +81,18 @@ expect duration.total_seconds() == 300
 
 #### creates from hours
 
-1. expect duration total hours
-2. expect duration total minutes
+- creates from hours
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates from hours")
 val duration = Duration.from_hours(2)
 expect duration.total_hours() == 2
 expect duration.total_minutes() == 120
@@ -165,17 +102,18 @@ expect duration.total_minutes() == 120
 
 #### creates from days
 
-1. expect duration total days
-2. expect duration total hours
+- creates from days
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates from days")
 val duration = Duration.from_days(3)
 expect duration.total_days() == 3
 expect duration.total_hours() == 72
@@ -187,13 +125,18 @@ expect duration.total_hours() == 72
 
 #### extracts simple components
 
+- extracts simple components
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts simple components")
 val duration = Duration.from_seconds(90)
 val comps = duration.components()
 expect comps.0 == 0
@@ -207,13 +150,18 @@ expect comps.4 == 0
 
 #### extracts complex components
 
+- extracts complex components
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts complex components")
 val ms = (1 * 24 * 60 * 60 * 1000) + (2 * 60 * 60 * 1000) + (30 * 60 * 1000) + (45 * 1000)
 val duration = Duration.from_millis(ms)
 val comps = duration.components()
@@ -229,16 +177,18 @@ expect comps.3 == 45
 
 #### adds durations
 
-1. expect result total seconds
+- adds durations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds durations")
 val d1 = Duration.from_seconds(30)
 val d2 = Duration.from_seconds(15)
 val result = d1.add(d2)
@@ -249,16 +199,18 @@ expect result.total_seconds() == 45
 
 #### subtracts durations
 
-1. expect result total seconds
+- subtracts durations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("subtracts durations")
 val d1 = Duration.from_seconds(50)
 val d2 = Duration.from_seconds(20)
 val result = d1.subtract(d2)
@@ -269,16 +221,18 @@ expect result.total_seconds() == 30
 
 #### multiplies duration
 
-1. expect result total seconds
+- multiplies duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("multiplies duration")
 val duration = Duration.from_seconds(10)
 val result = duration.multiply(3)
 expect result.total_seconds() == 30
@@ -288,16 +242,18 @@ expect result.total_seconds() == 30
 
 #### divides duration
 
-1. expect result total seconds
+- divides duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("divides duration")
 val duration = Duration.from_seconds(60)
 val result = duration.divide(4)
 expect result.total_seconds() == 15
@@ -309,13 +265,18 @@ expect result.total_seconds() == 15
 
 #### parses seconds
 
+- parses seconds
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses seconds")
 match parse_duration("45s"):
     case Some(duration): expect duration.total_seconds() == 45
     case nil: expect false
@@ -325,13 +286,18 @@ match parse_duration("45s"):
 
 #### parses minutes
 
+- parses minutes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses minutes")
 match parse_duration("5m"):
     case Some(duration): expect duration.total_minutes() == 5
     case nil: expect false
@@ -341,13 +307,18 @@ match parse_duration("5m"):
 
 #### parses hours
 
+- parses hours
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hours")
 match parse_duration("2h"):
     case Some(duration): expect duration.total_hours() == 2
     case nil: expect false
@@ -357,13 +328,18 @@ match parse_duration("2h"):
 
 #### parses days
 
+- parses days
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses days")
 match parse_duration("3d"):
     case Some(duration): expect duration.total_days() == 3
     case nil: expect false
@@ -373,13 +349,18 @@ match parse_duration("3d"):
 
 #### parses combined duration
 
+- parses combined duration
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses combined duration")
 match parse_duration("1h30m"):
     case Some(duration): expect duration.total_minutes() == 90
     case nil: expect false
@@ -389,13 +370,18 @@ match parse_duration("1h30m"):
 
 #### parses complex duration
 
+- parses complex duration
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses complex duration")
 match parse_duration("2d5h30m15s"):
     case Some(duration):
         val comps = duration.components()
@@ -410,13 +396,18 @@ match parse_duration("2d5h30m15s"):
 
 #### parses with spaces
 
+- parses with spaces
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses with spaces")
 match parse_duration("1h 30m"):
     case Some(duration): expect duration.total_minutes() == 90
     case nil: expect false
@@ -426,13 +417,18 @@ match parse_duration("1h 30m"):
 
 #### parses number only as seconds
 
+- parses number only as seconds
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses number only as seconds")
 match parse_duration("30"):
     case Some(duration): expect duration.total_seconds() == 30
     case nil: expect false
@@ -442,13 +438,18 @@ match parse_duration("30"):
 
 #### returns nil for invalid
 
+- returns nil for invalid
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for invalid")
 match parse_duration("invalid"):
     case Some(_): expect false
     case nil: expect true
@@ -458,13 +459,18 @@ match parse_duration("invalid"):
 
 #### returns nil for empty
 
+- returns nil for empty
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for empty")
 match parse_duration(""):
     case Some(_): expect false
     case nil: expect true
@@ -476,13 +482,18 @@ match parse_duration(""):
 
 #### formats seconds
 
+- formats seconds
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats seconds")
 val duration = Duration.from_seconds(45)
 val formatted = format_duration(duration)
 expect formatted == "45s"
@@ -492,13 +503,18 @@ expect formatted == "45s"
 
 #### formats minutes
 
+- formats minutes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats minutes")
 val duration = Duration.from_minutes(5)
 val formatted = format_duration(duration)
 expect formatted == "5m"
@@ -508,13 +524,18 @@ expect formatted == "5m"
 
 #### formats hours
 
+- formats hours
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats hours")
 val duration = Duration.from_hours(2)
 val formatted = format_duration(duration)
 expect formatted == "2h"
@@ -524,17 +545,18 @@ expect formatted == "2h"
 
 #### formats combined
 
-1. expect formatted contains
-2. expect formatted contains
+- formats combined
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats combined")
 val duration = Duration.from_seconds(90)
 val formatted = format_duration(duration)
 expect formatted.contains("1m")
@@ -545,13 +567,18 @@ expect formatted.contains("30s")
 
 #### formats zero
 
+- formats zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats zero")
 val duration = Duration.from_millis(0)
 val formatted = format_duration(duration)
 expect formatted == "0s"
@@ -561,16 +588,18 @@ expect formatted == "0s"
 
 #### formats compact
 
-1. expect formatted contains
+- formats compact
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats compact")
 val duration = Duration.from_seconds(90)
 val formatted = format_duration_compact(duration)
 expect formatted.contains("1m30s")
@@ -580,17 +609,18 @@ expect formatted.contains("1m30s")
 
 #### formats as seconds
 
-1. expect formatted contains
-2. expect formatted contains
+- formats as seconds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats as seconds")
 val duration = Duration.from_seconds(123)
 val formatted = format_as_seconds(duration)
 expect formatted.contains("123")
@@ -601,17 +631,18 @@ expect formatted.contains("s")
 
 #### formats as minutes
 
-1. expect formatted contains
-2. expect formatted contains
+- formats as minutes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats as minutes")
 val duration = Duration.from_seconds(150)
 val formatted = format_as_minutes(duration)
 expect formatted.contains("2m")
@@ -622,17 +653,18 @@ expect formatted.contains("30s")
 
 #### formats as hours
 
-1. expect formatted contains
-2. expect formatted contains
+- formats as hours
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats as hours")
 val duration = Duration.from_minutes(150)
 val formatted = format_as_hours(duration)
 expect formatted.contains("2h")
@@ -645,16 +677,18 @@ expect formatted.contains("30m")
 
 #### converts millis to seconds
 
-1. expect millis to seconds
+- converts millis to seconds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts millis to seconds")
 expect millis_to_seconds(5000) == 5
 ```
 
@@ -662,16 +696,18 @@ expect millis_to_seconds(5000) == 5
 
 #### converts seconds to millis
 
-1. expect seconds to millis
+- converts seconds to millis
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts seconds to millis")
 expect seconds_to_millis(10) == 10000
 ```
 
@@ -679,16 +715,18 @@ expect seconds_to_millis(10) == 10000
 
 #### converts minutes to seconds
 
-1. expect minutes to seconds
+- converts minutes to seconds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts minutes to seconds")
 expect minutes_to_seconds(5) == 300
 ```
 
@@ -696,16 +734,18 @@ expect minutes_to_seconds(5) == 300
 
 #### converts hours to minutes
 
-1. expect hours to minutes
+- converts hours to minutes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts hours to minutes")
 expect hours_to_minutes(2) == 120
 ```
 
@@ -713,16 +753,18 @@ expect hours_to_minutes(2) == 120
 
 #### converts days to hours
 
-1. expect days to hours
+- converts days to hours
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts days to hours")
 expect days_to_hours(3) == 72
 ```
 
@@ -730,16 +772,18 @@ expect days_to_hours(3) == 72
 
 #### converts hours to seconds
 
-1. expect hours to seconds
+- converts hours to seconds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts hours to seconds")
 expect hours_to_seconds(1) == 3600
 ```
 
@@ -747,16 +791,18 @@ expect hours_to_seconds(1) == 3600
 
 #### converts days to seconds
 
-1. expect days to seconds
+- converts days to seconds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts days to seconds")
 expect days_to_seconds(1) == 86400
 ```
 
@@ -766,25 +812,7 @@ expect days_to_seconds(1) == 86400
 
 #### creates from seconds
 
-1. expect ts get seconds
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ts = Timestamp.from_seconds(1000000)
-expect ts.get_seconds() == 1000000
-```
-
-</details>
-
-#### adds duration
-
-1. expect new ts get seconds
+- creates from seconds
 
 
 <details>
@@ -794,6 +822,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates from seconds")
+val ts = Timestamp.from_seconds(1000000)
+expect ts.get_seconds() == 1000000
+```
+
+</details>
+
+#### adds duration
+
+- adds duration
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("adds duration")
 val ts = Timestamp.from_seconds(1000)
 val duration = Duration.from_seconds(500)
 val new_ts = ts.add_duration(duration)
@@ -804,16 +854,18 @@ expect new_ts.get_seconds() == 1500
 
 #### subtracts duration
 
-1. expect new ts get seconds
+- subtracts duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("subtracts duration")
 val ts = Timestamp.from_seconds(1000)
 val duration = Duration.from_seconds(200)
 val new_ts = ts.subtract_duration(duration)
@@ -824,16 +876,18 @@ expect new_ts.get_seconds() == 800
 
 #### calculates duration since
 
-1. expect duration total seconds
+- calculates duration since
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates duration since")
 val ts1 = Timestamp.from_seconds(2000)
 val ts2 = Timestamp.from_seconds(1000)
 val duration = ts1.duration_since(ts2)
@@ -844,16 +898,18 @@ expect duration.total_seconds() == 1000
 
 #### handles boundary
 
-1. expect ts get seconds
+- handles boundary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles boundary")
 val ts = Timestamp.from_seconds(0)
 expect ts.get_seconds() == 0
 ```
@@ -864,16 +920,18 @@ expect ts.get_seconds() == 0
 
 #### checks equality
 
-1. expect duration equals
+- checks equality
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks equality")
 val d1 = Duration.from_seconds(60)
 val d2 = Duration.from_minutes(1)
 expect duration_equals(d1=d1, d2=d2)
@@ -883,16 +941,18 @@ expect duration_equals(d1=d1, d2=d2)
 
 #### checks greater than
 
-1. expect duration greater than
+- checks greater than
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks greater than")
 val d1 = Duration.from_seconds(100)
 val d2 = Duration.from_seconds(50)
 expect duration_greater_than(d1=d1, d2=d2)
@@ -902,16 +962,18 @@ expect duration_greater_than(d1=d1, d2=d2)
 
 #### checks less than
 
-1. expect duration less than
+- checks less than
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks less than")
 val d1 = Duration.from_seconds(30)
 val d2 = Duration.from_seconds(60)
 expect duration_less_than(d1=d1, d2=d2)
@@ -921,16 +983,18 @@ expect duration_less_than(d1=d1, d2=d2)
 
 #### finds max
 
-1. expect max d total seconds
+- finds max
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds max")
 val d1 = Duration.from_seconds(100)
 val d2 = Duration.from_seconds(50)
 val max_d = duration_max(d1=d1, d2=d2)
@@ -941,16 +1005,18 @@ expect max_d.total_seconds() == 100
 
 #### finds min
 
-1. expect min d total seconds
+- finds min
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds min")
 val d1 = Duration.from_seconds(100)
 val d2 = Duration.from_seconds(50)
 val min_d = duration_min(d1=d1, d2=d2)
@@ -963,16 +1029,18 @@ expect min_d.total_seconds() == 50
 
 #### one_millisecond
 
-1. expect duration total millis
+- one_millisecond
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("one_millisecond")
 val duration = one_millisecond()
 expect duration.total_millis() == 1
 ```
@@ -981,16 +1049,18 @@ expect duration.total_millis() == 1
 
 #### one_second
 
-1. expect duration total seconds
+- one_second
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("one_second")
 val duration = one_second()
 expect duration.total_seconds() == 1
 ```
@@ -999,16 +1069,18 @@ expect duration.total_seconds() == 1
 
 #### one_minute
 
-1. expect duration total minutes
+- one_minute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("one_minute")
 val duration = one_minute()
 expect duration.total_minutes() == 1
 ```
@@ -1017,16 +1089,18 @@ expect duration.total_minutes() == 1
 
 #### one_hour
 
-1. expect duration total hours
+- one_hour
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("one_hour")
 val duration = one_hour()
 expect duration.total_hours() == 1
 ```
@@ -1035,16 +1109,18 @@ expect duration.total_hours() == 1
 
 #### one_day
 
-1. expect duration total days
+- one_day
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("one_day")
 val duration = one_day()
 expect duration.total_days() == 1
 ```
@@ -1055,16 +1131,18 @@ expect duration.total_days() == 1
 
 #### checks zero duration
 
-1. expect is zero duration
+- checks zero duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks zero duration")
 val duration = Duration.from_millis(0)
 expect is_zero_duration(duration)
 ```
@@ -1073,16 +1151,18 @@ expect is_zero_duration(duration)
 
 #### checks negative duration
 
-1. expect is negative duration
+- checks negative duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks negative duration")
 val duration = Duration.from_millis(-1000)
 expect is_negative_duration(duration)
 ```
@@ -1091,16 +1171,18 @@ expect is_negative_duration(duration)
 
 #### abs of positive
 
-1. expect abs d total seconds
+- abs of positive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("abs of positive")
 val duration = Duration.from_seconds(100)
 val abs_d = duration_abs(duration)
 expect abs_d.total_seconds() == 100
@@ -1110,16 +1192,18 @@ expect abs_d.total_seconds() == 100
 
 #### abs of negative
 
-1. expect abs d total seconds
+- abs of negative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("abs of negative")
 val duration = Duration.from_millis(-100000)
 val abs_d = duration_abs(duration)
 expect abs_d.total_seconds() == 100
@@ -1129,16 +1213,18 @@ expect abs_d.total_seconds() == 100
 
 #### negates duration
 
-1. expect negated total seconds
+- negates duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("negates duration")
 val duration = Duration.from_seconds(100)
 val negated = duration_negate(duration)
 expect negated.total_seconds() == -100
@@ -1148,19 +1234,18 @@ expect negated.total_seconds() == -100
 
 #### sums durations
 
-1. Duration from seconds
-2. Duration from seconds
-3. Duration from seconds
-4. expect sum total seconds
+- sums durations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sums durations")
 val durations = [
     Duration.from_seconds(10),
     Duration.from_seconds(20),
@@ -1174,16 +1259,18 @@ expect sum.total_seconds() == 60
 
 #### sums empty list
 
-1. expect sum total millis
+- sums empty list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sums empty list")
 val durations: [Duration] = []
 val sum = sum_durations(durations)
 expect sum.total_millis() == 0
@@ -1193,18 +1280,18 @@ expect sum.total_millis() == 0
 
 #### averages durations
 
-1. Duration from seconds
-2. Duration from seconds
-3. Duration from seconds
+- averages durations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("averages durations")
 val durations = [
     Duration.from_seconds(10),
     Duration.from_seconds(20),
@@ -1219,13 +1306,18 @@ match average_duration(durations):
 
 #### average of empty returns nil
 
+- average of empty returns nil
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("average of empty returns nil")
 val durations: [Duration] = []
 match average_duration(durations):
     case Some(_): expect false
@@ -1238,16 +1330,18 @@ match average_duration(durations):
 
 #### calculates duration
 
-1. expect duration total seconds
+- calculates duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates duration")
 val start = Timestamp.from_seconds(1000)
 val end = Timestamp.from_seconds(2000)
 val range = TimeRange.create(start=start, end=end)
@@ -1259,17 +1353,18 @@ expect duration.total_seconds() == 1000
 
 #### contains timestamp
 
-1. expect range contains
-2. expect not range contains
+- contains timestamp
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("contains timestamp")
 val start = Timestamp.from_seconds(1000)
 val end = Timestamp.from_seconds(2000)
 val range = TimeRange.create(start=start, end=end)
@@ -1283,21 +1378,18 @@ expect not range.contains(ts_outside)
 
 #### detects overlap
 
-1. start=Timestamp from seconds
-2. end=Timestamp from seconds
-3. start=Timestamp from seconds
-4. end=Timestamp from seconds
-5. expect range1 overlaps
-6. expect range2 overlaps
+- detects overlap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects overlap")
 val range1 = TimeRange.create(
     start=Timestamp.from_seconds(1000),
     end=Timestamp.from_seconds(2000)
@@ -1314,20 +1406,18 @@ expect range2.overlaps(range1)
 
 #### detects no overlap
 
-1. start=Timestamp from seconds
-2. end=Timestamp from seconds
-3. start=Timestamp from seconds
-4. end=Timestamp from seconds
-5. expect not range1 overlaps
+- detects no overlap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects no overlap")
 val range1 = TimeRange.create(
     start=Timestamp.from_seconds(1000),
     end=Timestamp.from_seconds(2000)
@@ -1345,13 +1435,18 @@ expect not range1.overlaps(range2)
 
 #### parse and format simple
 
+- parse and format simple
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parse and format simple")
 val original = "1h30m45s"
 match parse_duration(original):
     case Some(duration):
@@ -1364,17 +1459,18 @@ match parse_duration(original):
 
 #### parse and format complex
 
-1. expect formatted contains
-2. expect formatted contains
+- parse and format complex
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parse and format complex")
 val original = "2d5h"
 match parse_duration(original):
     case Some(duration):
@@ -1390,16 +1486,18 @@ match parse_duration(original):
 
 #### handles very large duration
 
-1. expect duration total days
+- handles very large duration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles very large duration")
 val duration = Duration.from_days(365)
 expect duration.total_days() == 365
 ```
@@ -1408,17 +1506,18 @@ expect duration.total_days() == 365
 
 #### handles zero operations
 
-1. expect added total seconds
-2. expect subtracted total seconds
+- handles zero operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles zero operations")
 val zero = Duration.from_millis(0)
 val d = Duration.from_seconds(100)
 val added = d.add(zero)
@@ -1428,6 +1527,34 @@ expect subtracted.total_seconds() == 100
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/tooling/time_utils_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Time Utilities, Duration Creation, Duration Components, Duration Arithmetic, Duration Parsing, Duration Formatting, Time Unit Conversion, Timestamp, Duration Comparison, Common Durations, Duration Utilities, Time Range, Round-trip, Edge Cases.
+- Time Utilities
+- Duration Creation
+- Duration Components
+- Duration Arithmetic
+- Duration Parsing
+- Duration Formatting
+- Time Unit Conversion
+- Timestamp
+- Duration Comparison
+- Common Durations
+- Duration Utilities
+- Time Range
+- Round-trip
+- Edge Cases
 
 ## Scenario Summary
 
@@ -1441,3 +1568,51 @@ expect subtracted.total_seconds() == 100
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2dd1d312a5667c2a9d5116e228e1ecfeb1e9f970cdaf7885ddc2513da271ccc0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2dd1d312a5667c2a9d5116e228e1ecfeb1e9f970cdaf7885ddc2513da271ccc0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2dd1d312a5667c2a9d5116e228e1ecfeb1e9f970cdaf7885ddc2513da271ccc0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/time_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/time_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/time_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/time_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/time_utils_spec.spl:360:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates from millis' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/time_utils_spec.spl:366:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates from seconds' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/time_utils_spec.spl:373:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates from minutes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

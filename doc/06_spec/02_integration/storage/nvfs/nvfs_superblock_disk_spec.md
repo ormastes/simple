@@ -1,34 +1,10 @@
 # Nvfs Superblock Disk Specification
 
-> 1. var dev =  make device
-
-<!-- sdn-diagram:id=nvfs_superblock_disk_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=nvfs_superblock_disk_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-nvfs_superblock_disk_spec -> std
-nvfs_superblock_disk_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=nvfs_superblock_disk_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering NVFS superblock disk I/O.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,19 +17,23 @@ nvfs_superblock_disk_spec -> os
 
 #### device registration works
 
-1. var dev =  make device
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. nvfs superblock set device
+
+- device registration works
    - Expected: nvfs_superblock_has_device() is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("device registration works")
 var dev = _make_device()
 nvfs_superblock_set_device(dev)
 expect(nvfs_superblock_has_device()).to_equal(true)
@@ -63,19 +43,19 @@ expect(nvfs_superblock_has_device()).to_equal(true)
 
 #### probe returns false on blank disk
 
-1. var dev =  make device
-
-2. nvfs superblock set device
+- probe returns false on blank disk
    - Expected: found is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("probe returns false on blank disk")
 var dev = _make_device()
 nvfs_superblock_set_device(dev)
 val found = nvfs_superblock_probe_disk()
@@ -86,19 +66,19 @@ expect(found).to_equal(false)
 
 #### format returns true on valid device
 
-1. var dev =  make device
-
-2. nvfs superblock set device
+- format returns true on valid device
    - Expected: ok is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("format returns true on valid device")
 var dev = _make_device()
 nvfs_superblock_set_device(dev)
 val ok = nvfs_superblock_format_disk(0x1234u64, 0x5678u64)
@@ -109,11 +89,7 @@ expect(ok).to_equal(true)
 
 #### raw sector write and read round-trips
 
-1. var dev =  make device
-
-2. nvfs superblock set device
-
-3. var buf = rt bytes alloc
+- raw sector write and read round-trips
    - Expected: w is true
    - Expected: rd.len() >= 512 is true
    - Expected: rd[0] equals `0xAA`
@@ -122,12 +98,14 @@ expect(ok).to_equal(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("raw sector write and read round-trips")
 var dev = _make_device()
 nvfs_superblock_set_device(dev)
 var buf = rt_bytes_alloc(512)
@@ -147,20 +125,20 @@ expect(rd[511]).to_equal(0xFF)
 
 #### probe returns true after format
 
-1. var dev =  make device
-
-2. nvfs superblock set device
+- probe returns true after format
    - Expected: ok is true
    - Expected: found is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("probe returns true after format")
 var dev = _make_device()
 nvfs_superblock_set_device(dev)
 val ok = nvfs_superblock_format_disk(0xAAAAu64, 0xBBBBu64)
@@ -173,36 +151,154 @@ expect(found).to_equal(true)
 
 #### read-back after format has correct fields
 
-1. var dev =  make device
-
-2. nvfs superblock set device
+- read-back after format has correct fields
    - Expected: ok is true
    - Expected: sb.valid is true
-   - Expected: sb.magic == NVFS_MAGIC is true
-   - Expected: sb.version == NVFS_VERSION is true
-   - Expected: sb.uuid_hi == 0x1111u64 is true
-   - Expected: sb.uuid_lo == 0x2222u64 is true
-   - Expected: sb.mount_generation == 1u64 is true
+   - Expected: sb.magic equals `NVFS_MAGIC`
+   - Expected: sb.version equals `NVFS_VERSION`
+   - Expected: sb.uuid_hi equals `0x1111u64`
+   - Expected: sb.uuid_lo equals `0x2222u64`
+   - Expected: sb.mount_generation equals `1u64`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("read-back after format has correct fields")
 var dev = _make_device()
 nvfs_superblock_set_device(dev)
 val ok = nvfs_superblock_format_disk(0x1111u64, 0x2222u64)
 expect(ok).to_equal(true)
 val sb = nvfs_superblock_read_from_disk()
 expect(sb.valid).to_equal(true)
-expect(sb.magic == NVFS_MAGIC).to_equal(true)
-expect(sb.version == NVFS_VERSION).to_equal(true)
-expect(sb.uuid_hi == 0x1111u64).to_equal(true)
-expect(sb.uuid_lo == 0x2222u64).to_equal(true)
-expect(sb.mount_generation == 1u64).to_equal(true)
+expect(sb.magic).to_equal(NVFS_MAGIC)
+expect(sb.version).to_equal(NVFS_VERSION)
+expect(sb.uuid_hi).to_equal(0x1111u64)
+expect(sb.uuid_lo).to_equal(0x2222u64)
+expect(sb.mount_generation).to_equal(1u64)
+```
+
+</details>
+
+#### rejects a corrupt replica and reconstructs from the intact peer
+
+- rejects a corrupt replica and reconstructs from the intact peer
+   - Expected: recovered.replica_id equals `1u8`
+   - Expected: recovered.uuid_hi equals `0x3333u64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("rejects a corrupt replica and reconstructs from the intact peer")
+var dev = _make_device()
+nvfs_superblock_set_device(dev)
+expect(nvfs_superblock_format_disk(0x3333u64, 0x4444u64)).to_be(true)
+var replica_a = nvfs_raw_read_sector(0u64)
+replica_a[8] = replica_a[8] ^ 0x5Au8
+expect(nvfs_raw_write_sector(0u64, replica_a)).to_be(true)
+val recovered = nvfs_superblock_read_from_disk()
+expect(recovered.valid).to_be(true)
+expect(recovered.replica_id).to_equal(1u8)
+expect(recovered.uuid_hi).to_equal(0x3333u64)
+```
+
+</details>
+
+#### repairs a corrupt slot from the intact validated peer
+
+- repairs a corrupt slot from the intact validated peer
+   - Expected: recovered_a[48] equals `0u8`
+   - Expected: recovered.uuid_hi equals `0x7777u64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("repairs a corrupt slot from the intact validated peer")
+var dev = _make_device()
+nvfs_superblock_set_device(dev)
+expect(nvfs_superblock_format_disk(0x7777u64, 0x8888u64)).to_be(true)
+var replica_a = nvfs_raw_read_sector(0u64)
+replica_a[8] = replica_a[8] ^ 0x5Au8
+expect(nvfs_raw_write_sector(0u64, replica_a)).to_be(true)
+expect(nvfs_superblock_recover_disk()).to_be(true)
+val recovered_a = nvfs_raw_read_sector(0u64)
+expect(recovered_a[48]).to_equal(0u8)
+val recovered = nvfs_superblock_read_from_disk()
+expect(recovered.valid).to_be(true)
+expect(recovered.uuid_hi).to_equal(0x7777u64)
+```
+
+</details>
+
+#### rejects valid replicas stored in the wrong physical slots
+
+- rejects valid replicas stored in the wrong physical slots
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("rejects valid replicas stored in the wrong physical slots")
+var dev = _make_device()
+nvfs_superblock_set_device(dev)
+expect(nvfs_superblock_format_disk(0x9999u64, 0xAAAAu64)).to_be(true)
+val replica_a = nvfs_raw_read_sector(0u64)
+val replica_b = nvfs_raw_read_sector(1u64)
+expect(nvfs_raw_write_sector(0u64, replica_b)).to_be(true)
+expect(nvfs_raw_write_sector(1u64, replica_a)).to_be(true)
+expect(nvfs_superblock_probe_disk()).to_be(false)
+expect(nvfs_superblock_recover_disk()).to_be(false)
+```
+
+</details>
+
+#### fails closed when both replicas are corrupt
+
+- fails closed when both replicas are corrupt
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("fails closed when both replicas are corrupt")
+var dev = _make_device()
+nvfs_superblock_set_device(dev)
+expect(nvfs_superblock_format_disk(0x5555u64, 0x6666u64)).to_be(true)
+var replica_a = nvfs_raw_read_sector(0u64)
+var replica_b = nvfs_raw_read_sector(1u64)
+replica_a[16] = replica_a[16] ^ 0x33u8
+replica_b[16] = replica_b[16] ^ 0x77u8
+expect(nvfs_raw_write_sector(0u64, replica_a)).to_be(true)
+expect(nvfs_raw_write_sector(1u64, replica_b)).to_be(true)
+expect(nvfs_superblock_probe_disk()).to_be(false)
+expect(nvfs_superblock_read_from_disk().valid).to_be(false)
 ```
 
 </details>
@@ -214,23 +310,71 @@ expect(sb.mount_generation == 1u64).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/nvfs/nvfs_superblock_disk_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering NVFS superblock disk I/O.
 - NVFS superblock disk I/O
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `abae2685528029f567509d689600726220231b84f23398c03eb878fdf5600284`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `abae2685528029f567509d689600726220231b84f23398c03eb878fdf5600284`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `abae2685528029f567509d689600726220231b84f23398c03eb878fdf5600284`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/storage/nvfs/nvfs_superblock_disk_spec.spl
+mirror: doc/06_spec/02_integration/storage/nvfs/nvfs_superblock_disk_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/storage/nvfs/nvfs_superblock_disk_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/storage/nvfs/nvfs_superblock_disk_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/storage/nvfs/nvfs_superblock_disk_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'device registration works' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/nvfs/nvfs_superblock_disk_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'probe returns false on blank disk' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/nvfs/nvfs_superblock_disk_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'format returns true on valid device' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

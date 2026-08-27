@@ -1,30 +1,6 @@
 # Widget Tree Specification
 
-> 1. expect tw kind name
-
-<!-- sdn-diagram:id=widget_tree_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=widget_tree_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-widget_tree_spec -> common
-widget_tree_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=widget_tree_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Tree widget creation, TreeNode widget creation, TreeLeaf widget creation, Nested tree structure, Tree HTML rendering, child_count works for tree nodes.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,16 +17,22 @@ widget_tree_spec -> app
 
 #### creates a widget with kind tree
 
-1. expect tw kind name
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates a widget with kind tree
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a widget with kind tree")
 val tw = tree_widget("tw_create_1", [])
 expect tw.kind_name() to_equal "tree"
 ```
@@ -59,13 +41,18 @@ expect tw.kind_name() to_equal "tree"
 
 #### assigns the correct id
 
+- assigns the correct id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("assigns the correct id")
 val tw = tree_widget("tw_id_1", [])
 expect tw.id to_equal "tw_id_1"
 ```
@@ -74,16 +61,18 @@ expect tw.id to_equal "tw_id_1"
 
 #### has vbox layout
 
-1. expect tw layout name
+- has vbox layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has vbox layout")
 val tw = tree_widget("tw_layout_1", [])
 expect tw.layout_name() to_equal "vbox"
 ```
@@ -92,16 +81,18 @@ expect tw.layout_name() to_equal "vbox"
 
 #### empty tree has zero children
 
-1. expect tw child count
+- empty tree has zero children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty tree has zero children")
 val tw = tree_widget("tw_empty_1", [])
 expect tw.child_count() to_equal 0
 ```
@@ -110,26 +101,7 @@ expect tw.child_count() to_equal 0
 
 #### tree with one child has child_count 1
 
-1. expect tw child count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val leaf = tree_leaf("tw_child_leaf_1", "File.txt")
-val tw = tree_widget("tw_one_child_1", [leaf])
-expect tw.child_count() to_equal 1
-```
-
-</details>
-
-#### tree with multiple children has correct count
-
-1. expect tw child count
+- tree with one child has child_count 1
 
 
 <details>
@@ -139,6 +111,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tree with one child has child_count 1")
+val leaf = tree_leaf("tw_child_leaf_1", "File.txt")
+val tw = tree_widget("tw_one_child_1", [leaf])
+expect tw.child_count() to_equal 1
+```
+
+</details>
+
+#### tree with multiple children has correct count
+
+- tree with multiple children has correct count
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("tree with multiple children has correct count")
 val c1 = tree_leaf("tw_mc_1", "A")
 val c2 = tree_leaf("tw_mc_2", "B")
 val c3 = tree_leaf("tw_mc_3", "C")
@@ -152,76 +147,7 @@ expect tw.child_count() to_equal 3
 
 #### creates a widget with kind treenode
 
-1. expect tn kind name
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val tn = tree_node("tn_create_1", "Folder", [])
-expect tn.kind_name() to_equal "treenode"
-```
-
-</details>
-
-#### assigns the correct id
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val tn = tree_node("tn_id_1", "Docs", [])
-expect tn.id to_equal "tn_id_1"
-```
-
-</details>
-
-#### stores label prop
-
-1. expect tn get prop
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val tn = tree_node("tn_label_1", "Documents", [])
-expect tn.get_prop("label") to_equal "Documents"
-```
-
-</details>
-
-#### defaults expanded to true
-
-1. expect tn get prop
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val tn = tree_node("tn_expanded_1", "Folder", [])
-expect tn.get_prop("expanded") to_equal "true"
-```
-
-</details>
-
-#### tree_node with children has correct child count
-
-1. expect tn child count
+- creates a widget with kind treenode
 
 
 <details>
@@ -231,6 +157,88 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a widget with kind treenode")
+val tn = tree_node("tn_create_1", "Folder", [])
+expect tn.kind_name() to_equal "treenode"
+```
+
+</details>
+
+#### assigns the correct id
+
+- assigns the correct id
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("assigns the correct id")
+val tn = tree_node("tn_id_1", "Docs", [])
+expect tn.id to_equal "tn_id_1"
+```
+
+</details>
+
+#### stores label prop
+
+- stores label prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("stores label prop")
+val tn = tree_node("tn_label_1", "Documents", [])
+expect tn.get_prop("label") to_equal "Documents"
+```
+
+</details>
+
+#### defaults expanded to true
+
+- defaults expanded to true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("defaults expanded to true")
+val tn = tree_node("tn_expanded_1", "Folder", [])
+expect tn.get_prop("expanded") to_equal "true"
+```
+
+</details>
+
+#### tree_node with children has correct child count
+
+- tree_node with children has correct child count
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("tree_node with children has correct child count")
 val child1 = tree_leaf("tn_cc_1", "file1.txt")
 val child2 = tree_leaf("tn_cc_2", "file2.txt")
 val tn = tree_node("tn_children_1", "Docs", [child1, child2])
@@ -241,13 +249,18 @@ expect tn.child_count() to_equal 2
 
 #### child is accessible via child_at
 
+- child is accessible via child_at
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("child is accessible via child_at")
 val child = tree_leaf("tn_at_1", "readme.md")
 val tn = tree_node("tn_access_1", "Root", [child])
 val retrieved = tn.child_at(0)
@@ -261,16 +274,18 @@ expect retrieved.id to_equal "tn_at_1"
 
 #### creates a widget with kind treenode
 
-1. expect tl kind name
+- creates a widget with kind treenode
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a widget with kind treenode")
 val tl = tree_leaf("tl_create_1", "file.spl")
 expect tl.kind_name() to_equal "treenode"
 ```
@@ -279,16 +294,18 @@ expect tl.kind_name() to_equal "treenode"
 
 #### stores label prop
 
-1. expect tl get prop
+- stores label prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("stores label prop")
 val tl = tree_leaf("tl_label_1", "readme.md")
 expect tl.get_prop("label") to_equal "readme.md"
 ```
@@ -297,16 +314,18 @@ expect tl.get_prop("label") to_equal "readme.md"
 
 #### has expanded set to false
 
-1. expect tl get prop
+- has expanded set to false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has expanded set to false")
 val tl = tree_leaf("tl_exp_1", "data.csv")
 expect tl.get_prop("expanded") to_equal "false"
 ```
@@ -315,16 +334,18 @@ expect tl.get_prop("expanded") to_equal "false"
 
 #### has no children
 
-1. expect tl child count
+- has no children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has no children")
 val tl = tree_leaf("tl_no_child_1", "notes.txt")
 expect tl.child_count() to_equal 0
 ```
@@ -335,18 +356,18 @@ expect tl.child_count() to_equal 0
 
 #### parent with two children each with sub-children
 
-1. expect tw child count
-2. expect first child count
-3. expect second child count
+- parent with two children each with sub-children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parent with two children each with sub-children")
 val sub1a = tree_leaf("nest_sub1a", "a.txt")
 val sub1b = tree_leaf("nest_sub1b", "b.txt")
 val child1 = tree_node("nest_child1", "Folder1", [sub1a, sub1b])
@@ -370,18 +391,18 @@ expect second.child_count() to_equal 1
 
 #### deeply nested tree preserves structure
 
-1. expect top node get prop
-2. expect mid node get prop
-3. expect leaf node get prop
+- deeply nested tree preserves structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("deeply nested tree preserves structure")
 val deep_leaf = tree_leaf("deep_leaf_1", "deep.txt")
 val mid = tree_node("deep_mid_1", "Mid", [deep_leaf])
 val top = tree_node("deep_top_1", "Top", [mid])
@@ -406,13 +427,18 @@ expect leaf_node.get_prop("label") to_equal "deep.txt"
 
 #### output contains widget-tree class
 
+- output contains widget-tree class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains widget-tree class")
 val leaf = tree_leaf("html_tree_leaf_1", "file.spl")
 val node = tree_widget("html_tree_1", [leaf])
 val tree = UITree.new(node)
@@ -425,13 +451,18 @@ expect html to_contain "widget-tree"
 
 #### output contains tree-root ul
 
+- output contains tree-root ul
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains tree-root ul")
 val leaf = tree_leaf("html_tree_leaf_2", "item")
 val node = tree_widget("html_tree_2", [leaf])
 val tree = UITree.new(node)
@@ -444,13 +475,18 @@ expect html to_contain "tree-root"
 
 #### output contains tree-node class
 
+- output contains tree-node class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains tree-node class")
 val leaf = tree_leaf("html_tree_leaf_3", "item")
 val node = tree_widget("html_tree_3", [leaf])
 val tree = UITree.new(node)
@@ -463,13 +499,18 @@ expect html to_contain "tree-node"
 
 #### output contains tree-label span
 
+- output contains tree-label span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains tree-label span")
 val leaf = tree_leaf("html_tree_leaf_4", "my_file.spl")
 val node = tree_widget("html_tree_4", [leaf])
 val tree = UITree.new(node)
@@ -483,13 +524,18 @@ expect html to_contain "my_file.spl"
 
 #### expanded node contains tree-toggle span
 
+- expanded node contains tree-toggle span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expanded node contains tree-toggle span")
 val child = tree_leaf("html_exp_leaf_1", "child.txt")
 val parent = tree_node("html_exp_node_1", "Parent", [child])
 val node = tree_widget("html_exp_tree_1", [parent])
@@ -503,13 +549,18 @@ expect html to_contain "tree-toggle"
 
 #### expanded node has expanded class
 
+- expanded node has expanded class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expanded node has expanded class")
 val child = tree_leaf("html_expclass_leaf_1", "c.txt")
 val parent = tree_node("html_expclass_node_1", "Dir", [child])
 val node = tree_widget("html_expclass_tree_1", [parent])
@@ -523,17 +574,18 @@ expect html to_contain "expanded"
 
 #### collapsed node has collapsed class
 
-1. var parent = tree node
-2. parent = parent set prop
+- collapsed node has collapsed class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("collapsed node has collapsed class")
 val child = tree_leaf("html_col_leaf_1", "x.txt")
 var parent = tree_node("html_col_node_1", "Archive", [child])
 parent = parent.set_prop("expanded", "false")
@@ -548,13 +600,18 @@ expect html to_contain "collapsed"
 
 #### leaf node has leaf class
 
+- leaf node has leaf class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("leaf node has leaf class")
 val leaf = tree_leaf("html_leafclass_1", "single.txt")
 val node = tree_widget("html_leafclass_tree_1", [leaf])
 val tree = UITree.new(node)
@@ -567,13 +624,18 @@ expect html to_contain "leaf"
 
 #### focused tree has focused class
 
+- focused tree has focused class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("focused tree has focused class")
 val leaf = tree_leaf("html_focus_leaf_1", "f.txt")
 val node = tree_widget("html_focus_tree_1", [leaf])
 val tree = UITree.new(node)
@@ -587,13 +649,18 @@ expect html to_contain "focused"
 
 #### output includes widget id attribute
 
+- output includes widget id attribute
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output includes widget id attribute")
 val node = tree_widget("html_id_tree_1", [])
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -605,13 +672,18 @@ expect html to_contain "id=\"html_id_tree_1\""
 
 #### toggle data-action references node id
 
+- toggle data-action references node id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("toggle data-action references node id")
 val child = tree_leaf("html_toggle_leaf_1", "f.spl")
 val parent = tree_node("html_toggle_node_1", "Src", [child])
 val node = tree_widget("html_toggle_tree_1", [parent])
@@ -627,16 +699,18 @@ expect html to_contain "data-action=\"toggle_html_toggle_node_1\""
 
 #### tree_node child_count returns correct value
 
-1. expect tn child count
+- tree_node child_count returns correct value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tree_node child_count returns correct value")
 val a = tree_leaf("cc_a_1", "a")
 val b = tree_leaf("cc_b_1", "b")
 val c = tree_leaf("cc_c_1", "c")
@@ -648,25 +722,7 @@ expect tn.child_count() to_equal 3
 
 #### tree_leaf child_count returns zero
 
-1. expect tl child count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val tl = tree_leaf("cc_leaf_1", "x")
-expect tl.child_count() to_equal 0
-```
-
-</details>
-
-#### tree_widget child_count returns number of top-level nodes
-
-1. expect tw child count
+- tree_leaf child_count returns zero
 
 
 <details>
@@ -676,6 +732,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tree_leaf child_count returns zero")
+val tl = tree_leaf("cc_leaf_1", "x")
+expect tl.child_count() to_equal 0
+```
+
+</details>
+
+#### tree_widget child_count returns number of top-level nodes
+
+- tree_widget child_count returns number of top-level nodes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("tree_widget child_count returns number of top-level nodes")
 val n1 = tree_node("cc_tw_n1", "D1", [])
 val n2 = tree_leaf("cc_tw_n2", "f1")
 val tw = tree_widget("cc_tw_1", [n1, n2])
@@ -691,12 +769,12 @@ expect tw.child_count() to_equal 2
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/widget_tree_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Tree widget creation, TreeNode widget creation, TreeLeaf widget creation, Nested tree structure, Tree HTML rendering, child_count works for tree nodes.
 - Tree widget creation
 - TreeNode widget creation
 - TreeLeaf widget creation
@@ -716,3 +794,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `de348f20b7d6af7465be50fb27c21f982ed4be0198f7bfcf9c942ea0967e5436`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `de348f20b7d6af7465be50fb27c21f982ed4be0198f7bfcf9c942ea0967e5436`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `de348f20b7d6af7465be50fb27c21f982ed4be0198f7bfcf9c942ea0967e5436`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/widget_tree_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/widget_tree_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/widget_tree_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/widget_tree_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/widget_tree_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a widget with kind tree' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/widget_tree_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'assigns the correct id' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/widget_tree_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has vbox layout' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
-# MCP simple_api Tool Specification
+# Api Tool Specification
 
-> Tests the simple_api MCP tool: symbol extraction, visibility filtering, and module path resolution with numbered directory support.
-
-<!-- sdn-diagram:id=api_tool_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=api_tool_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-api_tool_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=api_tool_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Symbol Extraction Heuristic, Visibility Filtering, API Tool Helpers, Type Domain Path Normalization.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,33 +9,7 @@ api_tool_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# MCP simple_api Tool Specification
-
-Tests the simple_api MCP tool: symbol extraction, visibility filtering, and module path resolution with numbered directory support.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #MCP-API-001 |
-| Category | Tooling |
-| Difficulty | 2/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/mcp_unit/api_tool_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests the simple_api MCP tool: symbol extraction, visibility filtering,
-and module path resolution with numbered directory support.
-
-## Behavior
-
-- Extracts functions, classes, structs, enums, traits from source
-- Applies visibility markers: P (public), F (friend), I (internal), - (private)
-- Filters by visibility level: public, friend, package, all
-- Resolves dotted module paths through numbered directories
+# Api Tool Specification
 
 ## Scenarios
 
@@ -66,13 +17,24 @@ and module path resolution with numbered directory support.
 
 #### extracts public function
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- extracts public function
+   - Expected: has_pub is true
+   - Expected: has_fn is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts public function")
 val source = "pub fn parse(source: text) -> Result:"
 val has_pub = source.starts_with("pub ")
 val has_fn = source.contains("fn ")
@@ -84,13 +46,20 @@ expect(has_fn).to_equal(true)
 
 #### extracts private function
 
+- extracts private function
+   - Expected: has_pub is false
+   - Expected: has_fn is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts private function")
 val source = "fn helper() -> text:"
 val has_pub = source.starts_with("pub ")
 val has_fn = source.starts_with("fn ")
@@ -102,13 +71,19 @@ expect(has_fn).to_equal(true)
 
 #### extracts exported function as public
 
+- extracts exported function as public
+   - Expected: is_exported is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts exported function as public")
 val exports = ["parse", "Token"]
 val name = "parse"
 var is_exported = false
@@ -122,13 +97,19 @@ expect(is_exported).to_equal(true)
 
 #### extracts internal_export as friend-visible
 
+- extracts internal_export as friend-visible
+   - Expected: is_internal is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts internal_export as friend-visible")
 val internal_exports = ["Builder"]
 val name = "Builder"
 var is_internal = false
@@ -142,13 +123,19 @@ expect(is_internal).to_equal(true)
 
 #### extracts pub(friend) function
 
+- extracts pub(friend) function
+   - Expected: has_friend is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts pub(friend) function")
 val source = "pub(friend) fn lower() -> MirModule:"
 val has_friend = source.starts_with("pub(friend)")
 expect(has_friend).to_equal(true)
@@ -158,13 +145,19 @@ expect(has_friend).to_equal(true)
 
 #### extracts pub(package) function
 
+- extracts pub(package) function
+   - Expected: has_package is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts pub(package) function")
 val source = "pub(package) fn validate() -> bool:"
 val has_package = source.starts_with("pub(package)")
 expect(has_package).to_equal(true)
@@ -174,13 +167,20 @@ expect(has_package).to_equal(true)
 
 #### extracts struct declarations
 
+- extracts struct declarations
+   - Expected: has_struct is true
+   - Expected: has_pub is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts struct declarations")
 val source = "pub struct Point:"
 val has_struct = source.contains("struct ")
 val has_pub = source.starts_with("pub ")
@@ -192,13 +192,19 @@ expect(has_pub).to_equal(true)
 
 #### extracts enum declarations
 
+- extracts enum declarations
+   - Expected: has_enum is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts enum declarations")
 val source = "enum Color:"
 val has_enum = source.starts_with("enum ")
 expect(has_enum).to_equal(true)
@@ -208,13 +214,20 @@ expect(has_enum).to_equal(true)
 
 #### extracts trait declarations
 
+- extracts trait declarations
+   - Expected: has_trait is true
+   - Expected: has_pub is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts trait declarations")
 val source = "pub trait Printable:"
 val has_trait = source.contains("trait ")
 val has_pub = source.starts_with("pub ")
@@ -228,13 +241,19 @@ expect(has_pub).to_equal(true)
 
 #### public filter shows only P symbols
 
+- public filter shows only P symbols
+   - Expected: pub_count equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("public filter shows only P symbols")
 val visibilities = ["P", "-"]
 var pub_count: i64 = 0
 for v in visibilities:
@@ -247,13 +266,18 @@ expect(pub_count).to_equal(1)
 
 #### all filter shows everything
 
+- all filter shows everything
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("all filter shows everything")
 val visibilities = ["P", "-", "F", "I"]
 expect(visibilities.len()).to_be_greater_than(1)
 ```
@@ -264,60 +288,9 @@ expect(visibilities.len()).to_be_greater_than(1)
 
 #### extract_fn_name from simple signature
 
-<details>
-<summary>Executable SSpec</summary>
+- extract_fn_name from simple signature
+   - Expected: name equals `parse`
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val line = "fn parse(source: text) -> Result:"
-# Extract function name: skip "fn " and take until "("
-val after_fn = line.substring(3)
-val paren_idx = after_fn.index_of("(") ?? 0
-val name = after_fn.substring(0, paren_idx)
-expect(name).to_equal("parse")
-```
-
-</details>
-
-#### extract_fn_name from method signature
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val line = "me move(dx: i64):"
-# Extract method name: skip "me " and take until "("
-val after_me = line.substring(3)
-val paren_idx = after_me.index_of("(") ?? 0
-val name = after_me.substring(0, paren_idx)
-expect(name).to_equal("move")
-```
-
-</details>
-
-#### extract_type_name from struct
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val after_kw = "Point:"
-val colon_idx = after_kw.index_of(":") ?? 0
-val name = after_kw.substring(0, colon_idx)
-expect(name).to_equal("Point")
-```
-
-</details>
-
-#### extract_type_name with generic
 
 <details>
 <summary>Executable SSpec</summary>
@@ -326,9 +299,84 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extract_fn_name from simple signature")
+val line = "fn parse(source: text) -> Result:"
+# Extract function name: skip "fn " and take until "("
+val after_fn = line.substring(3)
+val paren_idx = after_fn.index_of("(")
+val name = after_fn.substring(0, paren_idx)
+expect(name).to_equal("parse")
+```
+
+</details>
+
+#### extract_fn_name from method signature
+
+- extract_fn_name from method signature
+   - Expected: name equals `move`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("extract_fn_name from method signature")
+val line = "me move(dx: i64):"
+# Extract method name: skip "me " and take until "("
+val after_me = line.substring(3)
+val paren_idx = after_me.index_of("(")
+val name = after_me.substring(0, paren_idx)
+expect(name).to_equal("move")
+```
+
+</details>
+
+#### extract_type_name from struct
+
+- extract_type_name from struct
+   - Expected: name equals `Point`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("extract_type_name from struct")
+val after_kw = "Point:"
+val colon_idx = after_kw.index_of(":")
+val name = after_kw.substring(0, colon_idx)
+expect(name).to_equal("Point")
+```
+
+</details>
+
+#### extract_type_name with generic
+
+- extract_type_name with generic
+   - Expected: name equals `List`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("extract_type_name with generic")
 val after_kw = "List<T>:"
-val angle_idx = after_kw.index_of("<") ?? 0
-val colon_idx = after_kw.index_of(":") ?? 0
+val angle_idx = after_kw.index_of("<")
+val colon_idx = after_kw.index_of(":")
 var end_idx = colon_idx
 if angle_idx > 0 and angle_idx < colon_idx:
     end_idx = angle_idx
@@ -340,13 +388,19 @@ expect(name).to_equal("List")
 
 #### compute_visibility for exported symbol
 
+- compute_visibility for exported symbol
+   - Expected: vis equals `P`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("compute_visibility for exported symbol")
 val exports = ["parse", "Token"]
 val internal_exports: [text] = []
 val name = "parse"
@@ -364,13 +418,19 @@ expect(vis).to_equal("P")
 
 #### compute_visibility for internal_export symbol
 
+- compute_visibility for internal_export symbol
+   - Expected: vis equals `F`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("compute_visibility for internal_export symbol")
 val exports: [text] = []
 val internal_exports = ["Builder"]
 val name = "Builder"
@@ -388,13 +448,19 @@ expect(vis).to_equal("F")
 
 #### compute_visibility for private symbol
 
+- compute_visibility for private symbol
+   - Expected: vis equals `-`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("compute_visibility for private symbol")
 val exports = ["parse"]
 val internal_exports = ["Builder"]
 val name = "helper"
@@ -414,13 +480,19 @@ expect(vis).to_equal("-")
 
 #### normalizes bare type name to default type domain
 
+- normalizes bare type name to default type domain
+   - Expected: normalized equals `src/type/simple_lang/I64.spl`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("normalizes bare type name to default type domain")
 val normalized = normalize_type_api_path("I64")
 expect(normalized).to_equal("src/type/simple_lang/I64.spl")
 ```
@@ -429,13 +501,19 @@ expect(normalized).to_equal("src/type/simple_lang/I64.spl")
 
 #### normalizes owned-domain import path to type directory
 
+- normalizes owned-domain import path to type directory
+   - Expected: normalized equals `src/type/simple_lang/I64.spl`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("normalizes owned-domain import path to type directory")
 val normalized = normalize_type_api_path("simple-lang/I64")
 expect(normalized).to_equal("src/type/simple_lang/I64.spl")
 ```
@@ -444,13 +522,19 @@ expect(normalized).to_equal("src/type/simple_lang/I64.spl")
 
 #### preserves nested owned-domain path segments
 
+- preserves nested owned-domain path segments
+   - Expected: normalized equals `src/type/simple_lang/math/F64.spl`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("preserves nested owned-domain path segments")
 val normalized = normalize_type_api_path("simple-lang/math/F64")
 expect(normalized).to_equal("src/type/simple_lang/math/F64.spl")
 ```
@@ -459,18 +543,42 @@ expect(normalized).to_equal("src/type/simple_lang/math/F64.spl")
 
 #### does not rewrite dotted module paths
 
+- does not rewrite dotted module paths
+   - Expected: normalized equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("does not rewrite dotted module paths")
 val normalized = normalize_type_api_path("compiler.frontend.parser_types")
 expect(normalized).to_equal("")
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/mcp_unit/api_tool_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Symbol Extraction Heuristic, Visibility Filtering, API Tool Helpers, Type Domain Path Normalization.
+- Symbol Extraction Heuristic
+- Visibility Filtering
+- API Tool Helpers
+- Type Domain Path Normalization
 
 ## Scenario Summary
 
@@ -484,3 +592,54 @@ expect(normalized).to_equal("")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b5ace5529bc7095735cef3f68a24fc4672424a53b8f2f3eb8f9da92e6f63ab8e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b5ace5529bc7095735cef3f68a24fc4672424a53b8f2f3eb8f9da92e6f63ab8e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b5ace5529bc7095735cef3f68a24fc4672424a53b8f2f3eb8f9da92e6f63ab8e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/mcp_unit/api_tool_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_unit/api_tool_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_unit/api_tool_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_unit/api_tool_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_unit/api_tool_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/mcp_unit/api_tool_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts public function' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/api_tool_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts private function' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/api_tool_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts exported function as public' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

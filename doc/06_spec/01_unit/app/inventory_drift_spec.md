@@ -2,29 +2,6 @@
 
 > Detects when new CLI commands or MCP tools are added to the dispatch tables without being classified in the surface_alignment module. This is the core "inventory drift" guard required by REQ-F3-003.
 
-<!-- sdn-diagram:id=inventory_drift_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=inventory_drift_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-inventory_drift_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=inventory_drift_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 9 | 9 | 0 | 0 |
@@ -49,7 +26,7 @@ Detects when new CLI commands or MCP tools are added to the dispatch tables with
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/app/inventory_drift_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -85,13 +62,19 @@ classify the new entry before merging.
 
 #### classification count matches expected dispatch count
 
+- classification count matches expected dispatch count
+   - Expected: classified_count equals `expected_dispatch_count`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classification count matches expected dispatch count")
 # The actual dispatch in main.spl has 70 case branches
 # (excluding -h, --help, -v, --version, -c, and default _).
 # all_cli_commands() must return exactly this many entries.
@@ -115,13 +98,19 @@ expect(classified_count).to_equal(expected_dispatch_count)
 
 #### no unclassified CLI commands exist
 
+- no unclassified CLI commands exist
+   - Expected: classified_commands contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("no unclassified CLI commands exist")
 # Canonical list of all CLI dispatch commands from main.spl
 val dispatch_commands = [
     "compile", "run", "watch", "watch-daemon", "targets",
@@ -171,13 +160,19 @@ for cmd in dispatch_commands:
 
 #### no stale classified commands that are not in dispatch
 
+- no stale classified commands that are not in dispatch
+   - Expected: dispatch_commands contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("no stale classified commands that are not in dispatch")
 val dispatch_commands = [
     "compile", "run", "watch", "watch-daemon", "targets",
     "test", "test-daemon", "spec-coverage",
@@ -234,13 +229,19 @@ for cmd in classified_commands:
 
 #### classification count matches expected tool table count
 
+- classification count matches expected tool table count
+   - Expected: classified_count equals `expected_tool_count`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classification count matches expected tool table count")
 # tool_table.spl + tool_table_cli_tiers.spl has 100 tool_entry() calls
 val expected_tool_count = 100
 # all_mcp_tools() must return the same count
@@ -252,13 +253,19 @@ expect(classified_count).to_equal(expected_tool_count)
 
 #### every tool table entry is classified
 
+- every tool table entry is classified
+   - Expected: classified_tools contains `tool`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 102 lines folded for reproduction.
+Runnable source: 104 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("every tool table entry is classified")
 # All 99 tool names from tool_table.spl
 val table_tools = [
     "debug_create_session", "debug_list_sessions",
@@ -367,13 +374,19 @@ for tool in table_tools:
 
 #### no stale classified tools that are not in tool table
 
+- no stale classified tools that are not in tool table
+   - Expected: table_tools contains `tool`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 100 lines folded for reproduction.
+Runnable source: 102 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("no stale classified tools that are not in tool table")
 val table_tools = [
     "debug_create_session", "debug_list_sessions",
     "debug_close_session", "debug_set_breakpoint",
@@ -484,13 +497,19 @@ for tool in classified_tools:
 
 #### CLI expected count matches classified count
 
+- CLI expected count matches classified count
+   - Expected: classified equals `expected`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CLI expected count matches classified count")
 val expected = 70
 val classified = 70
 expect(classified).to_equal(expected)
@@ -502,13 +521,19 @@ expect(classified).to_equal(expected)
 
 #### MCP expected count matches classified count
 
+- MCP expected count matches classified count
+   - Expected: classified equals `expected`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("MCP expected count matches classified count")
 val expected = 100
 val classified = 100
 expect(classified).to_equal(expected)
@@ -520,13 +545,19 @@ expect(classified).to_equal(expected)
 
 #### MCP has exactly 8 categories
 
+- MCP has exactly 8 categories
+   - Expected: categories.len() equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("MCP has exactly 8 categories")
 val categories = [
     "debug", "debug-log", "diagnostics", "vcs",
     "cli", "query", "task", "test-daemon"
@@ -549,8 +580,60 @@ expect(categories.len()).to_equal(8)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/simple_cli_mcp_completeness.md](doc/02_requirements/feature/simple_cli_mcp_completeness.md)
-- **Plan:** [doc/03_plan/simple_cli_mcp_completeness_plan_2026-03-27.md](doc/03_plan/simple_cli_mcp_completeness_plan_2026-03-27.md)
+- **Requirements:** `doc/02_requirements/feature/simple_cli_mcp_completeness.md`
+- **Plan:** `doc/03_plan/simple_cli_mcp_completeness_plan_2026-03-27.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-F3-003.`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d78faa783e47e761f6c94ac66837ca699ae738b3d8534fa68c1d43f4a6d63de5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d78faa783e47e761f6c94ac66837ca699ae738b3d8534fa68c1d43f4a6d63de5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d78faa783e47e761f6c94ac66837ca699ae738b3d8534fa68c1d43f4a6d63de5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/inventory_drift_spec.spl
+mirror: doc/06_spec/01_unit/app/inventory_drift_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/inventory_drift_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/inventory_drift_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/inventory_drift_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/inventory_drift_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'classification count matches expected dispatch count' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/inventory_drift_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'no unclassified CLI commands exist' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/inventory_drift_spec.spl:139:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'no stale classified commands that are not in dispatch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

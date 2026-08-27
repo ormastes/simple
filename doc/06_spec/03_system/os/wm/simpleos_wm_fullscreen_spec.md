@@ -1,6 +1,6 @@
-# Simpleos Wm Fullscreen Specification
+# SimpleOS WM Fullscreen
 
-> <details>
+> Runs the existing fail-closed x86_64 QEMU evidence wrapper once. An unavailable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,24 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simpleos Wm Fullscreen Specification
+# SimpleOS WM Fullscreen
+
+Runs the existing fail-closed x86_64 QEMU evidence wrapper once. An unavailable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Runs the existing fail-closed x86_64 QEMU evidence wrapper once. An unavailable
+runtime remains an explicit nonzero, non-PASS result. A successful run must
+retain the production guest font crop, corrupt-copy rejection, three QMP
+captures, and correlated keyboard and pointer evidence in one bundle.
 
 ## Scenarios
 
@@ -17,31 +34,27 @@
 
 #### should retain one valid QEMU font and input bundle or report runtime unavailability
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should retain one valid QEMU font and input bundle or report runtime unavailability
+   - Artifact capture: after_step
 - Boot the canonical pure-Simple x86_64 desktop through the production QEMU wrapper
    - Artifact capture: after_step
 - Load the retained production evidence bundle
    - Artifact capture: after_step
 - Prove the pinned guest font crop and corrupt-copy rejection
    - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
+   - Evidence: artifact verified by 4 expected checks
    - Expected: file_read_bytes(BUILD_DIR + "/font-region.rgb").len() equals `8064`
    - Expected: file_hash_sha256(BUILD_DIR + "/font-region.rgb") equals `FONT_REGION_SHA256`
    - Expected: file_read_bytes(BUILD_DIR + "/font-region-corrupt-calibration.rgb").len() equals `8064`
-- evidence value
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
    - Expected: file_hash_sha256(BUILD_DIR + "/font-region-corrupt-calibration.rgb").index_of(FONT_REGION_SHA256) equals `-1`
 - Prove detected scanout and retained QMP frames
    - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
+   - Evidence: artifact verified by 9 expected checks
    - Expected: evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_capture_size") equals `scanout_pitch * scanout_height`
-- evidence i64
-   - Artifact capture: after_step
-- evidence i64
-   - Artifact capture: after_step
-- evidence i64
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 8 expected checks
    - Expected: baseline_sha256.len() equals `64`
    - Expected: maximized_sha256.len() equals `64`
    - Expected: restored_sha256.len() equals `64`
@@ -52,8 +65,6 @@
    - Expected: restored_sha256 equals `baseline_sha256`
 - Bind the browser event, content mutation, and rendered frame to one window
    - Artifact capture: after_step
-- browser window to string
-   - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: browser_before.len() equals `64`
    - Expected: browser_after.len() equals `64`
@@ -62,25 +73,21 @@
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: delta_generation equals `presented_generation`
-- "input seq=" + pointer seq to string
-   - Artifact capture: after_step
-- "generation=" + presented generation to string
-   - Artifact capture: after_step
 - Keep an unavailable runtime explicit and reject PASS promotion
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: out.index_of("simpleos_wm_fullscreen_status=pass") equals `-1`
-- fail
-   - Artifact capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 168 lines folded for reproduction.
+Runnable source: 170 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain one valid QEMU font and input bundle or report runtime unavailability")
 step("Boot the canonical pure-Simple x86_64 desktop through the production QEMU wrapper")
 val (out, _err, code) = process_run(
     "/usr/bin/env",
@@ -253,21 +260,6 @@ else:
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl` |
-| Updated | 2026-07-27 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- SimpleOS production WM fullscreen
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -280,3 +272,56 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-2`
+- `REQ-5`
+- `REQ-7`
+- `REQ-8`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `116d99b9bf1f24041effeaa0659230b6dc2f37c5391ac1eaf86674083dbb600b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `116d99b9bf1f24041effeaa0659230b6dc2f37c5391ac1eaf86674083dbb600b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `116d99b9bf1f24041effeaa0659230b6dc2f37c5391ac1eaf86674083dbb600b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+mirror: doc/06_spec/03_system/os/wm/simpleos_wm_fullscreen_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=95 oracle=70
+  traceability=60 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/os/wm/simpleos_wm_fullscreen_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/wm/simpleos_wm_fullscreen_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 4 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl:45:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain one valid QEMU font and input bundle or report runtime unavailability' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

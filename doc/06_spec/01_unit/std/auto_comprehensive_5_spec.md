@@ -1,29 +1,6 @@
-# Comprehensive Coverage Test
+# Auto Comprehensive 5 Specification
 
-> 1. check
-
-<!-- sdn-diagram:id=auto_comprehensive_5_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=auto_comprehensive_5_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-auto_comprehensive_5_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=auto_comprehensive_5_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Comprehensive Test Suite.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,18 +9,7 @@ auto_comprehensive_5_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Comprehensive Coverage Test
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #AUTO |
-| Category | Testing |
-| Status | Implemented |
-| Source | `test/01_unit/std/auto_comprehensive_5_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+# Auto Comprehensive 5 Specification
 
 ## Scenarios
 
@@ -51,19 +17,22 @@ auto_comprehensive_5_spec
 
 #### arithmetic coverage 1
 
-1. check
-2. check
-3. check
-4. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- arithmetic coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("arithmetic coverage 1")
 check(1 + 1 == 2)
 check(5 - 3 == 2)
 check(4 * 3 == 12)
@@ -74,18 +43,18 @@ check(10 / 2 == 5)
 
 #### arithmetic coverage 2
 
-1. check
-2. check
-3. check
+- arithmetic coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("arithmetic coverage 2")
 check(7 % 3 == 1)
 check(2 ** 3 == 8)
 check(-5 * 2 == -10)
@@ -95,19 +64,18 @@ check(-5 * 2 == -10)
 
 #### comparison coverage 1
 
-1. check
-2. check
-3. check
-4. check
+- comparison coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("comparison coverage 1")
 check(5 > 3)
 check(2 < 10)
 check(5 >= 5)
@@ -118,18 +86,18 @@ check(3 <= 3)
 
 #### comparison coverage 2
 
-1. check
-2. check
-3. check
+- comparison coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("comparison coverage 2")
 check(10 != 5)
 check(5 == 5)
 check(not (3 > 5))
@@ -139,19 +107,18 @@ check(not (3 > 5))
 
 #### boolean logic 1
 
-1. check
-2. check
-3. check
-4. check
+- boolean logic 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("boolean logic 1")
 check(true and true)
 check(not (true and false))
 check(true or false)
@@ -162,17 +129,18 @@ check(not (false and false))
 
 #### boolean logic 2
 
-1. check
-2. check
+- boolean logic 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("boolean logic 2")
 check(not false)
 check(not not true)
 ```
@@ -181,19 +149,18 @@ check(not not true)
 
 #### string coverage 1
 
-1. check
-2. check
-3. check
-4. check
+- string coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("string coverage 1")
 val s1 = "hello"
 val has_ell = s1.contains("ell")
 check(has_ell)
@@ -211,17 +178,18 @@ check(s4.len() == 5)
 
 #### string coverage 2
 
-1. check
-2. check
+- string coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("string coverage 2")
 val s = "test"
 check(s[0..2] == "te")
 check(s + "ing" == "testing")
@@ -231,19 +199,18 @@ check(s + "ing" == "testing")
 
 #### array coverage 1
 
-1. check
-2. check
-3. check
-4. check
+- array coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("array coverage 1")
 val a0 = [1, 2, 3, 4, 5][0]
 check(a0 == 1)
 val a4 = [1, 2, 3, 4, 5][4]
@@ -257,17 +224,18 @@ check([1, 2, 3, 4, 5].len() == 5)
 
 #### array coverage 2
 
-1. check
-2. check
+- array coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("array coverage 2")
 var arr = [10, 20, 30]
 check(arr[0..2].len() == 2)
 val appended = arr.append(40)
@@ -278,18 +246,18 @@ check(appended.len() == 4)
 
 #### dict coverage 1
 
-1. check
-2. check
-3. check
+- dict coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dict coverage 1")
 val d = {"a": 1, "b": 2}
 check(d["a"] == 1)
 check(d["b"] == 2)
@@ -300,40 +268,42 @@ check(dict_keys(d).len() == 2)
 
 #### dict coverage 2
 
-1. check
-2. check
+- dict coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dict coverage 2")
 val d1 = {"key": "value"}
 val got = d1.get("key")
-check(got.? == true)
+check(got != nil)
 val d2 = {"key": "value"}
 val missing = d2.get("missing")
-check(missing.? == false)
+check(missing == nil)
 ```
 
 </details>
 
 #### option coverage 1
 
-1. check
-2. check
+- option coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("option coverage 1")
 val opt = Some(42)
 check(opt.?)
 check(opt? == 42)
@@ -343,25 +313,7 @@ check(opt? == 42)
 
 #### option coverage 2
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val opt = nil
-check(not opt.?)
-```
-
-</details>
-
-#### range coverage 1
-
-1. check
+- option coverage 2
 
 
 <details>
@@ -371,6 +323,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("option coverage 2")
+val opt = nil
+check(not opt.?)
+```
+
+</details>
+
+#### range coverage 1
+
+- range coverage 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("range coverage 1")
 var count = 0
 for i in 0..10:
     count = count + 1
@@ -381,16 +355,18 @@ check(count == 10)
 
 #### range coverage 2
 
-1. check
+- range coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("range coverage 2")
 var sum = 0
 for i in 1..6:
     sum = sum + i
@@ -401,46 +377,7 @@ check(sum == 15)
 
 #### conditional coverage 1
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val x = 10
-val result = if x > 5: "big" else: "small"
-check(result == "big")
-```
-
-</details>
-
-#### conditional coverage 2
-
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val x = 2
-val result = if x > 5: "big" else: "small"
-check(result == "small")
-```
-
-</details>
-
-#### match coverage 1
-
-1. Some
-2. check
+- conditional coverage 1
 
 
 <details>
@@ -450,6 +387,50 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("conditional coverage 1")
+val x = 10
+val result = if x > 5: "big" else: "small"
+check(result == "big")
+```
+
+</details>
+
+#### conditional coverage 2
+
+- conditional coverage 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("conditional coverage 2")
+val x = 2
+val result = if x > 5: "big" else: "small"
+check(result == "small")
+```
+
+</details>
+
+#### match coverage 1
+
+- match coverage 1
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("match coverage 1")
 val x = Some(100)
 val result = match x:
     Some(v): v * 2
@@ -461,17 +442,18 @@ check(result == 200)
 
 #### match coverage 2
 
-1. Some
-2. check
+- match coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("match coverage 2")
 val x = nil
 val result = match x:
     Some(v): v * 2
@@ -486,16 +468,18 @@ check(result == -1)
 
 #### loop coverage 1
 
-1. check
+- loop coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("loop coverage 1")
 var total = 0
 for i in [10, 20, 30]:
     total = total + i
@@ -512,17 +496,18 @@ check(total == 60)
 
 #### loop coverage 2
 
-1. fn run while
-2. check
+- loop coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("loop coverage 2")
 fn run_while() -> i64:
     var i = 0
     while i < 5:
@@ -538,18 +523,18 @@ check(run_while() == 5)
 
 #### nested coverage 1
 
-1. check
-2. check
-3. check
+- nested coverage 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("nested coverage 1")
 val a = true
 val b = true
 if a:
@@ -565,18 +550,18 @@ else:
 
 #### nested coverage 2
 
-1. check
-2. check
-3. check
+- nested coverage 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("nested coverage 2")
 val x = 10
 val y = 20
 if x < y:
@@ -592,25 +577,7 @@ else:
 
 #### complex expression 1
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = (1 + 2) * (3 + 4)
-check(result == 21)
-```
-
-</details>
-
-#### complex expression 2
-
-1. check
+- complex expression 1
 
 
 <details>
@@ -620,6 +587,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("complex expression 1")
+val result = (1 + 2) * (3 + 4)
+check(result == 21)
+```
+
+</details>
+
+#### complex expression 2
+
+- complex expression 2
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("complex expression 2")
 val a = 10
 val b = 5
 val result = a * 2 + b / 5
@@ -630,16 +619,18 @@ check(result == 21)
 
 #### chained comparison
 
-1. check
+- chained comparison
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("chained comparison")
 val x = 5
 check(0 < x and x < 10)
 ```
@@ -648,27 +639,7 @@ check(0 < x and x < 10)
 
 #### ternary-like
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val x = 7
-val result = if x % 2 == 0: "even" else: "odd"
-check(result == "odd")
-```
-
-</details>
-
-#### list comprehension simulation
-
-1. evens = evens append
-2. check
+- ternary-like
 
 
 <details>
@@ -678,6 +649,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ternary-like")
+val x = 7
+val result = if x % 2 == 0: "even" else: "odd"
+check(result == "odd")
+```
+
+</details>
+
+#### list comprehension simulation
+
+- list comprehension simulation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("list comprehension simulation")
 var evens = []
 for i in 0..10:
     if i % 2 == 0:
@@ -689,21 +683,38 @@ check(evens.len() == 5)
 
 #### error path
 
-1. check
+- error path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("error path")
 var error = nil
 check(error == nil)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/auto_comprehensive_5_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Comprehensive Test Suite.
+- Comprehensive Test Suite
 
 ## Scenario Summary
 
@@ -717,3 +728,51 @@ check(error == nil)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `df2a9ca729d41d46c257bce4ae116985b2effea33ba6a6a734d413bc9c8c1964`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `df2a9ca729d41d46c257bce4ae116985b2effea33ba6a6a734d413bc9c8c1964`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `df2a9ca729d41d46c257bce4ae116985b2effea33ba6a6a734d413bc9c8c1964`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/auto_comprehensive_5_spec.spl
+mirror: doc/06_spec/01_unit/std/auto_comprehensive_5_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/auto_comprehensive_5_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/auto_comprehensive_5_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/auto_comprehensive_5_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'arithmetic coverage 1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/auto_comprehensive_5_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'arithmetic coverage 2' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/auto_comprehensive_5_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'comparison coverage 1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

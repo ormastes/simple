@@ -2,29 +2,6 @@
 
 > UFCS (Uniform Function Call Syntax) allows calling free functions using method syntax. When `x.method()` is called, the compiler resolves in priority order: 1. Instance method on x's type (highest priority) 2. Trait method implemented by x's type 3. Free function `method(x)` where first param matches x's type (UFCS)
 
-<!-- sdn-diagram:id=ufcs_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ufcs_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ufcs_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ufcs_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -45,7 +22,7 @@ UFCS (Uniform Function Call Syntax) allows calling free functions using method s
 | Difficulty | 4/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/ufcs_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -62,6 +39,8 @@ This enables fluent API chaining without requiring methods to be defined on type
 
 ```simple
 # Free function
+use std.spec.step
+
 fn double(x: i64) -> i64:
 x * 2
 
@@ -94,13 +73,18 @@ Files involved:
 
 #### calls math.abs via dot notation
 
+- calls math.abs via dot notation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls math.abs via dot notation")
 val n = -5
 val result = n.abs()
 expect result == 5
@@ -110,13 +94,18 @@ expect result == 5
 
 #### calls math.sqrt via dot notation
 
+- calls math.sqrt via dot notation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls math.sqrt via dot notation")
 val x = 16.0
 val result = x.sqrt()
 expect result == 4.0
@@ -128,13 +117,18 @@ expect result == 4.0
 
 #### calls array.len via dot notation
 
+- calls array.len via dot notation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls array.len via dot notation")
 var arr = [1, 2, 3, 4, 5]
 val result = arr.len()
 expect result == 5
@@ -144,13 +138,18 @@ expect result == 5
 
 #### calls array.first via dot notation
 
+- calls array.first via dot notation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls array.first via dot notation")
 var arr = [10, 20, 30]
 val result = arr.first()
 expect result == 10
@@ -160,13 +159,18 @@ expect result == 10
 
 #### calls array.last via dot notation
 
+- calls array.last via dot notation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls array.last via dot notation")
 var arr = [10, 20, 30]
 val result = arr.last()
 expect result == 30
@@ -180,13 +184,18 @@ expect result == 30
 
 #### chains abs and to_string
 
+- chains abs and to_string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains abs and to_string")
 val n = -42
 val result = n.abs().to_string()
 expect result == "42"
@@ -196,13 +205,18 @@ expect result == "42"
 
 #### chains array operations
 
+- chains array operations
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains array operations")
 var arr = [1, 2, 3]
 val result = arr.len().to_string()
 expect result == "3"
@@ -216,13 +230,18 @@ expect result == "3"
 
 #### calls string.len method not free function
 
+- calls string.len method not free function
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls string.len method not free function")
 val s = "hello"
 val result = s.len()
 expect result == 5
@@ -232,17 +251,18 @@ expect result == 5
 
 #### calls array.push method
 
-1. arr = arr push
-2. expect arr len
+- calls array.push method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls array.push method")
 var arr = [1, 2, 3]
 arr = arr.push(4)
 expect arr.len() == 4
@@ -256,13 +276,18 @@ expect arr.len() == 4
 
 #### matches i64 receiver with i64 parameter
 
+- matches i64 receiver with i64 parameter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches i64 receiver with i64 parameter")
 val n: i64 = -5
 val result = n.abs()
 expect result == 5
@@ -272,13 +297,18 @@ expect result == 5
 
 #### matches f64 receiver with f64 parameter
 
+- matches f64 receiver with f64 parameter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches f64 receiver with f64 parameter")
 val x: f64 = 16.0
 val result = x.sqrt()
 expect result == 4.0
@@ -292,13 +322,18 @@ expect result == 4.0
 
 #### works with zero
 
+- works with zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with zero")
 val n = 0
 val result = n.abs()
 expect result == 0
@@ -308,13 +343,18 @@ expect result == 0
 
 #### works with negative float
 
+- works with negative float
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with negative float")
 val x = -3.14
 val result = x.abs()
 expect result == 3.14
@@ -326,13 +366,18 @@ expect result == 3.14
 
 #### len of empty array is zero
 
+- len of empty array is zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("len of empty array is zero")
 val arr: [i64] = []
 val result = arr.len()
 expect result == 0
@@ -342,13 +387,18 @@ expect result == 0
 
 #### first of empty array is None
 
+- first of empty array is None
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("first of empty array is None")
 val arr: [i64] = []
 val result = arr.first()
 expect result == nil
@@ -360,13 +410,18 @@ expect result == nil
 
 #### works with literal receiver
 
+- works with literal receiver
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with literal receiver")
 val result = (-5).abs()
 expect result == 5
 ```
@@ -375,13 +430,18 @@ expect result == 5
 
 #### works with arithmetic expression receiver
 
+- works with arithmetic expression receiver
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with arithmetic expression receiver")
 val result = (3 - 8).abs()
 expect result == 5
 ```
@@ -400,3 +460,51 @@ expect result == 5
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `767f3752f6c874f5145689fe42637ce50fc37aaf06d6e0e4a92630ce822dd8fe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `767f3752f6c874f5145689fe42637ce50fc37aaf06d6e0e4a92630ce822dd8fe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `767f3752f6c874f5145689fe42637ce50fc37aaf06d6e0e4a92630ce822dd8fe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/ufcs_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/ufcs_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/ufcs_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/ufcs_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/ufcs_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls math.abs via dot notation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/ufcs_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls math.sqrt via dot notation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/ufcs_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls array.len via dot notation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

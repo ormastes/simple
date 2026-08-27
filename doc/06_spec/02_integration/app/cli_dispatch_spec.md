@@ -1,33 +1,10 @@
 # Cli Dispatch Specification
 
-> <details>
-
-<!-- sdn-diagram:id=cli_dispatch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cli_dispatch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cli_dispatch_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cli_dispatch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering pure-Simple CLI command dispatch.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -36,118 +13,16 @@ cli_dispatch_spec -> app
 
 ## Scenarios
 
-### CLI Command Dispatch System
+### pure-Simple CLI command dispatch
 
-### Command Table
+#### derives inventory from the canonical command table
 
-#### has 48 total commands
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val count = command_count()
-expect count == 48
-```
-
-</details>
-
-#### has 47 Simple implementations
-
-1. expect simple count >= 47  # At least 47
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val simple_count = simple_impl_count()
-expect simple_count >= 47  # At least 47 (test might be Rust-only)
-```
-
-</details>
-
-#### has 98% coverage
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val coverage = coverage_percentage()
-expect coverage >= 97.0  # At least 97%
-```
-
-</details>
-
-### Command Lookup
-
-#### finds compile command
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-match find_command("compile"):
-    case Some(entry):
-        expect entry.name == "compile"
-        expect entry.app_path == "src/app/compile/main.spl"
-    case None:
-        fail "compile command not found"
-```
-
-</details>
-
-#### finds build command
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-match find_command("build"):
-    case Some(entry):
-        expect entry.name == "build"
-        expect entry.app_path == "src/app/build/main.spl"
-    case None:
-        fail "build command not found"
-```
-
-</details>
-
-#### returns None for invalid command
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = find_command("invalid-command-xyz")
-expect not result.?
-```
-
-</details>
-
-### Environment Overrides
-
-#### detects SIMPLE_COMPILE_RUST override
-
-1. env set
+- derives inventory from the canonical command table
+   - Expected: command_count() equals `get_all_commands().len()`
 
 
 <details>
@@ -157,17 +32,19 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-env_set("SIMPLE_COMPILE_RUST", "1")
-val entry = find_command("compile").unwrap()
-val should_rust = entry.should_use_rust(["compile", "test.spl"])
-expect should_rust
+# @req REQ-SSPEC-INTEGRATION
+step("derives inventory from the canonical command table")
+expect(command_count()).to_equal(get_all_commands().len())
+expect(command_count()).to_be_greater_than(80)
 ```
 
 </details>
 
-#### does not override when env var is unset
+#### reports every registered command as a Simple implementation
 
-1. env set
+- reports every registered command as a Simple implementation
+   - Expected: simple_impl_count() equals `command_count()`
+   - Expected: coverage_percentage() equals `100.0`
 
 
 <details>
@@ -177,288 +54,88 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-env_set("SIMPLE_COMPILE_RUST", "")
-val entry = find_command("compile").unwrap()
-val should_rust = entry.should_use_rust(["compile", "test.spl"])
-expect not should_rust
+# @req REQ-SSPEC-INTEGRATION
+step("reports every registered command as a Simple implementation")
+expect(simple_impl_count()).to_equal(command_count())
+expect(coverage_percentage()).to_equal(100.0)
 ```
 
 </details>
 
-### Special Flags
+#### resolves representative developer tools
 
-#### detects --json flag for lint
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val entry = find_command("lint").unwrap()
-val should_rust = entry.should_use_rust(["lint", "--json", "file.spl"])
-expect should_rust
-```
-
-</details>
-
-#### detects --fix flag for lint
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val entry = find_command("lint").unwrap()
-val should_rust = entry.should_use_rust(["lint", "--fix", "file.spl"])
-expect should_rust
-```
-
-</details>
-
-#### does not trigger on regular args
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val entry = find_command("lint").unwrap()
-val should_rust = entry.should_use_rust(["lint", "file.spl"])
-expect not should_rust
-```
-
-</details>
-
-### Simple Implementation Detection
-
-#### reports Simple impl exists for compile
-
-1. expect entry has simple impl
+- resolves representative developer tools
+   - Expected: entry == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val entry = find_command("compile").unwrap()
-expect entry.has_simple_impl()
+# @req REQ-SSPEC-INTEGRATION
+step("resolves representative developer tools")
+val names = ["compile", "run", "test", "check", "lint", "fmt", "fix", "duplicate-check", "gen-lean"]
+for name in names:
+    val entry = find_command(name)
+    expect(entry == nil).to_equal(false)
 ```
 
 </details>
 
-#### reports Simple impl exists for build
+#### keeps production entries free of Rust override flags
 
-1. expect entry has simple impl
+- keeps production entries free of Rust override flags
+   - Expected: entry.env_override equals ``
+   - Expected: entry.needs_rust_flags.len() equals `0`
+   - Expected: entry.has_simple_impl() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val entry = find_command("build").unwrap()
-expect entry.has_simple_impl()
+# @req REQ-SSPEC-INTEGRATION
+step("keeps production entries free of Rust override flags")
+for name in get_all_commands():
+    val entry = find_command(name).unwrap()
+    expect(entry.env_override).to_equal("")
+    expect(entry.needs_rust_flags.len()).to_equal(0)
+    expect(entry.has_simple_impl()).to_equal(true)
 ```
 
 </details>
 
-#### reports no Simple impl for test
+#### routes test through the pure-Simple runner
 
-1. expect not entry has simple impl
+- routes test through the pure-Simple runner
+   - Expected: entry.app_path equals `src/app/test_runner_new/main.spl`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("routes test through the pure-Simple runner")
 val entry = find_command("test").unwrap()
-expect not entry.has_simple_impl()  # Rust-only (cargo integration)
+expect(entry.app_path).to_equal("src/app/test_runner_new/main.spl")
 ```
 
 </details>
 
-### Command Categories
+#### fails lookup for unknown commands
 
-#### has all compilation commands
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val commands = ["compile", "targets", "linkers", "check"]
-for cmd in commands:
-    val entry = find_command(cmd)
-    expect entry.?
-```
-
-</details>
-
-#### has all code quality commands
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val commands = ["lint", "fix", "fmt"]
-for cmd in commands:
-    val entry = find_command(cmd)
-    expect entry.?
-```
-
-</details>
-
-#### has all build system commands
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val commands = ["build", "run", "clean"]
-for cmd in commands:
-    val entry = find_command(cmd)
-    expect entry.?
-```
-
-</details>
-
-#### has all package management commands
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val commands = ["init", "install", "add", "remove", "list", "tree"]
-for cmd in commands:
-    val entry = find_command(cmd)
-    expect entry.?
-```
-
-</details>
-
-#### has all documentation commands
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val commands = ["feature-gen", "spec-gen", "todo-scan", "brief"]
-for cmd in commands:
-    val entry = find_command(cmd)
-    expect entry.?
-```
-
-</details>
-
-### CLI Dispatch Performance
-
-### Dispatch Performance
-
-#### dispatches in under 10ms overhead
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# Target: <10ms dispatch overhead; generous limit (50ms) for CI variability
-val start = rt_time_now_unix_micros()
-val (stdout, stderr, code) = rt_process_run(find_simple_binary(), ["compile", "--help"])
-val end = rt_time_now_unix_micros()
-val elapsed_ms = (end - start) / 1000
-expect elapsed_ms < 50
-```
-
-</details>
-
-#### startup completes in under 25ms
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# Target: <25ms startup; generous limit (100ms) for CI variability
-val start = rt_time_now_unix_micros()
-val (stdout, stderr, code) = rt_process_run(find_simple_binary(), ["--version"])
-val end = rt_time_now_unix_micros()
-val elapsed_ms = (end - start) / 1000
-expect elapsed_ms < 100
-```
-
-</details>
-
-### CLI Dispatch Robustness
-
-### Error Handling
-
-#### handles missing command gracefully
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = find_command("nonexistent-cmd")
-expect not result.?
-```
-
-</details>
-
-#### handles empty command name
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = find_command("")
-expect not result.?
-```
-
-</details>
-
-### Edge Cases
-
-#### handles command with no Simple impl
-
-1. expect not entry has simple impl
+- fails lookup for unknown commands
+   - Expected: find_command("not-a-simple-command") == nil is true
 
 
 <details>
@@ -468,28 +145,9 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val entry = find_command("test").unwrap()
-expect not entry.has_simple_impl()
-# Should fallback to Rust without crashing
-```
-
-</details>
-
-#### handles command with empty app_path
-
-1. expect not entry has simple impl
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val entry = find_command("test").unwrap()
-expect entry.app_path == ""
-expect not entry.has_simple_impl()
+# @req REQ-SSPEC-INTEGRATION
+step("fails lookup for unknown commands")
+expect(find_command("not-a-simple-command") == nil).to_equal(true)
 ```
 
 </details>
@@ -501,34 +159,74 @@ expect not entry.has_simple_impl()
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/cli_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
-- CLI Command Dispatch System
-- Command Table
-- Command Lookup
-- Environment Overrides
-- Special Flags
-- Simple Implementation Detection
-- Command Categories
-- CLI Dispatch Performance
-- Dispatch Performance
-- CLI Dispatch Robustness
-- Error Handling
-- Edge Cases
+Tests covering pure-Simple CLI command dispatch.
+- pure-Simple CLI command dispatch
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `833655a27e148ab42dc82d082cd480f8c9dbd67367d416c179ed03d4eeb99e3b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `833655a27e148ab42dc82d082cd480f8c9dbd67367d416c179ed03d4eeb99e3b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `833655a27e148ab42dc82d082cd480f8c9dbd67367d416c179ed03d4eeb99e3b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/02_integration/app/cli_dispatch_spec.spl
+mirror: doc/06_spec/02_integration/app/cli_dispatch_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/app/cli_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/app/cli_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/app/cli_dispatch_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/app/cli_dispatch_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'derives inventory from the canonical command table' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/cli_dispatch_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports every registered command as a Simple implementation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/cli_dispatch_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves representative developer tools' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

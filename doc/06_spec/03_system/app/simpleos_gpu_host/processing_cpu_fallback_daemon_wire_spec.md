@@ -1,154 +1,324 @@
-# Processing CPU Fallback Daemon Wire Spec
+# processing_cpu_fallback_daemon_wire_spec
 
-## Purpose
+> Source contract for host-only CPU fallback over the file-backed wire.
 
-Drive the native SimpleOS GPU host through file-backed shared memory, allow the
-HELLO CUDA probe, inject the following CUDA submit failure, and validate the
-real fallback receipt.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
 
-The same harness also drives repeated device-success requests through one
-daemon-owned CUDA executor.
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Run
+# processing_cpu_fallback_daemon_wire_spec
 
-Build the host and
-`src/app/test/simpleos_gpu_fallback_wire_probe.spl` incrementally, then run:
+Source contract for host-only CPU fallback over the file-backed wire.
 
-```sh
-sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Source contract for host-only CPU fallback over the file-backed wire.
+
+## Scenarios
+
+### SimpleOS processing CPU fallback daemon wire
+
+#### normalizes writable mmap flags before the native ABI
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- normalizes writable mmap flags before the native ABI
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("normalizes writable mmap flags before the native ABI")
+val app_file_ops = file_read("src/app/io/file_ops.spl")
+val lib_file_ops = file_read("src/lib/nogc_sync_mut/io/file_ops.spl")
+for source in [app_file_ops, lib_file_ops]:
+    expect(source).to_contain(
+        "extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: i64) -> i64")
+    expect(source).to_contain(
+        "rt_mmap(path, size, offset, if readonly: 1 else: 0)")
 ```
 
-Run source-matched retained-session device evidence:
+</details>
 
-```sh
-SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm \
-  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host-source-matched \
-  SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
-  sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+#### owns the daemon lifetime outside the native array ABI
+
+- owns the daemon lifetime outside the native array ABI
+   - Expected: file_exists("scripts/check/check-simpleos-gpu-fallback-wire.shs") is true
+   - Expected: probe does not contain `process_spawn_async`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("owns the daemon lifetime outside the native array ABI")
+val wrapper = file_read("scripts/check/check-simpleos-gpu-fallback-wire.shs")
+val probe = file_read("src/app/test/simpleos_gpu_fallback_wire_probe.spl")
+expect(file_exists("scripts/check/check-simpleos-gpu-fallback-wire.shs")).to_equal(true)
+expect(wrapper).to_contain("DAEMON_TIMEOUT_SECONDS=$((TEST_TIMEOUT_SECONDS + 10))")
+expect(wrapper).to_contain("timeout -k 2 \"$DAEMON_TIMEOUT_SECONDS\" env")
+expect(wrapper).to_contain("SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES=1")
+expect(wrapper).to_contain("trap cleanup EXIT INT TERM")
+expect(wrapper).to_contain("receipt_status=4 reason=$EXPECTED_REASON source=2")
+expect(wrapper).to_contain("grep -Fq \"HOST_GPU_DAEMON_TRANSPORT shm_offset=\" \"$DAEMON_LOG\"")
+expect(wrapper).to_contain("simpleos_gpu_fallback_wire_reason=daemon-not-ready")
+expect(wrapper).to_contain("SIMPLEOS_GPU_FALLBACK_WIRE_MIN_OFFLOAD_ELEMENTS:-0")
+expect(wrapper).to_contain("SIMPLEOS_GPU_FALLBACK_WIRE_EXPECT_REASON:-16")
+expect(wrapper).to_contain("0|[1-9]*) ;; *) exit 2")
+expect(probe.contains("process_spawn_async")).to_equal(false)
+expect(probe).to_contain("host_gpu_ivshmem_fallback_receipt_valid")
+expect(probe).to_contain("if args.contains(\"--mmap-smoke\"):")
+expect(probe).to_contain("GPU_FALLBACK_MMAP status=")
 ```
 
-`device-warm` explicitly enables `--processing-verify-cpu` and requires eight
-CPU/device comparison records. To measure the production path without the
-duplicate CPU workload, use:
+</details>
 
-```sh
-SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm-production \
-  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host-source-matched \
-  SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
-  sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+#### measures repeated exact CUDA device requests through one daemon
+
+- measures repeated exact CUDA device requests through one daemon
+   - Expected: probe.split("_output_exact(receipt, count, value)").len() equals `2`
+   - Expected: probe does not contain `arg[prefix.len():]`
+   - Expected: probe does not contain `processing_ir_execute_cpu`
+   - Expected: daemon does not contain `while i < count:`
+   - Expected: daemon does not contain `words[5].to_u32()`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 52 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("measures repeated exact CUDA device requests through one daemon")
+val wrapper = file_read("scripts/check/check-simpleos-gpu-fallback-wire.shs")
+val probe = file_read("src/app/test/simpleos_gpu_fallback_wire_probe.spl")
+val daemon = file_read("src/app/simpleos_gpu_host/daemon_runner.spl")
+expect(wrapper).to_contain(
+    "case \"$MODE\" in fallback|device-warm|device-warm-production)")
+expect(wrapper).to_contain("--processing-fallback=none")
+expect(wrapper).to_contain("--processing-verify-cpu >\"$DAEMON_LOG\"")
+expect(wrapper).to_contain("\"$PROBE_BIN\" --shm \"$SHM\" --device-warm")
+expect(wrapper).to_contain("warmups=3 samples=5 requests=8 count=1048576")
+expect(wrapper).to_contain("checksum=809508928")
+expect(wrapper).to_contain("preference != expected")
+expect(wrapper).to_contain("generation != seen + 2")
+expect(wrapper).to_contain("simpleos_gpu_device_warm_wire_status=pass")
+expect(wrapper).to_contain(
+    "simpleos_gpu_device_warm_production_wire_status=pass")
+expect(wrapper).to_contain(
+    "HOST_GPU_DAEMON_VERIFY processing_verify_cpu=$expected_verify$")
+expect(wrapper).to_contain(
+    "simpleos_gpu_fallback_wire_reason=daemon-verifier-mode-mismatch")
+expect(wrapper).to_contain("cpu <= 0 || device <= 0")
+expect(wrapper).to_contain(
+    "simpleos_gpu_fallback_wire_reason=unexpected-cpu-verification")
+expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid")
+expect(probe).to_contain("val warmups: i64 = 3")
+expect(probe).to_contain("val samples: i64 = 5")
+expect(probe).to_contain("val expected_checksum: i64 = 809508928")
+expect(probe).to_contain("_output_exact(receipt, count, value)")
+expect(probe.split("_output_exact(receipt, count, value)").len()).to_equal(2)
+expect(probe).to_contain("receipt.native_handle == handle")
+expect(probe).to_contain("receipt.device_identity == identity")
+expect(probe).to_contain("if receipt.output_addr > 0u64 and receipt.output_bytes >= 4:")
+expect(probe).to_contain(
+    "last_receipt_valid=" + "{" + "last_receipt_valid}")
+expect(probe).to_contain(
+    "last_output_exact=" + "{" + "last_output_exact}")
+expect(probe).to_contain("last_output0=" + "{" + "last_output0}")
+expect(probe).to_contain("GPU_DEVICE_WARM_MEDIAN status=")
+expect(probe).to_contain(
+    "median_device_us=" + "{" + "median_device_us}")
+expect(probe).to_contain(
+    "median_non_device_us=" + "{" + "median_non_device_us}")
+expect(probe.contains("arg[prefix.len():]")).to_equal(false)
+expect(probe.contains("processing_ir_execute_cpu")).to_equal(false)
+expect(daemon).to_contain("raw_read_i32(")
+expect(daemon).to_contain("simpleos_host_gpu_wire_payload_offset() + 5 * 8")
+expect(daemon).to_contain("simpleos_host_gpu_wire_payload_offset() + 5 * 8) as u32")
+expect(daemon).to_contain("processing_ir_fill_u32(element_count, fill_value)")
+expect(daemon).to_contain("raw_write_u32s_checksum(")
+expect(daemon.contains("while i < count:")).to_equal(false)
+expect(daemon.contains("words[5].to_u32()")).to_equal(false)
 ```
 
-Production mode requires the daemon's explicit
-`HOST_GPU_DAEMON_VERIFY processing_verify_cpu=false` startup receipt and fails
-if the daemon emits any `HOST_GPU_PROCESS_PERF` record.
+</details>
 
-## Checks
+#### retains the canonical OpenCL and SIMD providers in the GPU runtime
 
-1. HELLO completes with CUDA mask `8`.
-2. The processing receipt has fallback status `4`, submit reason `16`, CPU
-   readback source `2`, requested backend `4`, and exact correlation.
-3. Native handle and device identity are zero.
-4. All eight readback values equal `0x01020304`; output bytes, exact checksum,
-   and elapsed time are validated by the guest bridge.
-5. Writable mappings normalize the public `bool` to native ABI `0/1`; the
-   probe's `--mmap-smoke` path writes and reads the protocol magic directly.
-6. The executable spec checks wrapper/probe ownership and receipt assertions.
-   The canonical wrapper fails if either native binary is missing, bounds the
-   probe to 60 seconds by default, keeps the daemon guard 10 seconds longer,
-   and waits up to five seconds for the daemon's transport-ready marker.
-7. `SIMPLEOS_GPU_FALLBACK_WIRE_MIN_OFFLOAD_ELEMENTS` and
-   `SIMPLEOS_GPU_FALLBACK_WIRE_EXPECT_REASON` reuse the same wire harness for
-   reason `16` failure injection and reason `18` calibrated policy evidence.
-8. The Linux GPU runtime retains the canonical OpenCL provider and shared SIMD
-   hit counters through the supported runtime symbol table.
-9. HELLO and request publication use separate monotonic budgets. Production
-   rendering keeps the 50-million-poll default; diagnostics may request the
-   250-million-poll absolute cap, while every request also has a five-second
-   deadline.
-10. Device-warm mode emits eight correlated CUDA device receipts: three
-    warmups and five measured 1,048,576-element requests.
-11. Every device readback value and checksum is exact, handle and identity stay
-    stable, and the five measured samples produce median device, round-trip,
-    and non-device-overhead timings. Evidence mode includes the daemon's CPU
-    oracle and comparison; production mode excludes both.
-12. Evidence mode requires exactly eight `HOST_GPU_PROCESS_PERF` records.
-    Every record must contain positive CPU and device times. Production mode
-    requires an explicit verifier-disabled startup receipt and zero comparison
-    records.
-13. Production FillU32 validation and wire copy use one runtime pass. A wrong
-    value returns mismatch before a successful device receipt is published.
+- retains the canonical OpenCL and SIMD providers in the GPU runtime
 
-## Current Evidence
 
-The six-example source contract passes 6/6. Fallback receipt validation
-previously passed 13/13. The source-matched daemon (`1 compiled, 212 cached`)
-and final probe (`1 compiled, 18 cached`) complete both native rows: calibrated
-small-request reason `18`, and threshold-`0` CUDA submit-failure reason `16`.
-Both receipts have CPU source `2`, zero handle/identity, 32 bytes, and checksum
-`135272480`.
+<details>
+<summary>Executable SSpec</summary>
 
-The device-warm probe builds strictly with `1 compiled, 18 cached, 0 failed`,
-no generated stubs, and its three-case median self-test passes. Reusing
-`rt_bytes_to_text` and byte snapshots removed unavailable scalar/byte method
-dependencies, and strict daemon cycle 2 linked with `4 compiled, 213 cached, 0
-failed`. A focused Rust runtime test for the missing string predicate passes;
-the refreshed CUDA/Vulkan archive exports it, and cycle 3 links with `2
-compiled, 215 cached, 0 failed`.
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-A source-complete strict rebuild (`4 compiled, 213 cached, 0 failed`) then
-produced a `string_core` object with zero primitive self-relocations and zero
-jump-to-self bodies. Platform-owned render probing removed the next
-trait-erased shutdown fault and rebuilt strictly with `4 compiled, 213 cached,
-0 failed`. The checksum-corrected probe also rebuilt with `4 compiled, 15
-cached, 0 failed`. Its preserved first CUDA receipt has PASS status, zero
-reason, device readback, positive handle/identity, exact correlation, and
-`4,194,304` bytes, but the output value is 8x the payload. Retained-cache
-rebuilds using `words[5] as u32` (`3 compiled, 214 cached`) and an ABI-exact
-`raw_read_i32` payload read (`2 compiled, 215 cached`) both preserved that
-result. The rebuilt diagnostic probe proves the receipt itself is valid and
-only checksum/output parity fail. A fresh 217-module daemon then exposed a
-trait-erased `Engine2D.shutdown()` crash during HELLO; concrete retained-backend
-shutdown rebuilt at `2 compiled, 215 cached` and restored the valid CUDA
-receipt. Fresh-cache disassembly shows tagged `[u32]` slots being loaded as
-unboxed values in the old per-pixel wire loop. Source now uses one
-runtime-owned bulk copy+checksum call, whose focused Rust unit passes. The
-specialized CUDA/Vulkan runtime exports that helper, and the isolated daemon
-relinks with `4 compiled, 213 cached, 0 failed`.
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("retains the canonical OpenCL and SIMD providers in the GPU runtime")
+val runtime_build = file_read("src/compiler_rust/runtime/build.rs")
+val simd_runtime = file_read("src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs")
+val qemu_gate = file_read("scripts/check/check-simpleos-qemu-host-gpu-2d.shs")
+expect(runtime_build).to_contain("\"runtime_simd_dispatch.c\"")
+expect(runtime_build).to_contain("build.define(\"SIMPLE_RUNTIME_OPENCL_ONLY\", None)")
+expect(runtime_build).to_contain("collect_c_runtime_exports")
+expect(runtime_build).to_contain("symbol.starts_with(\"rt_opencl_\")")
+expect(simd_runtime).to_contain("pub extern \"C\" fn rt_simd_engine2d_neon_hits() -> i64")
+expect(simd_runtime).to_contain("pub extern \"C\" fn rt_simd_engine2d_neon_reset() -> i64")
+expect(qemu_gate).to_contain("--features vulkan,cuda,runtime-symbol-table")
+expect(qemu_gate).to_contain("\\\"runtime-symbol-table\\\"")
+```
 
-The exact device-warm wrapper passes all three warmups plus five measured
-1,048,576-element requests: checksum `809508928`, first output word `16909060`,
-positive stable handle/identity, exact correlation, and no fallback. Medians
-are `155110 us` device, `312012 us` round trip, and `156902 us` non-device
-overhead. The measured-request CPU median is `82097 us`, and all receipts are
-correctly classified `available-not-preferred`.
+</details>
 
-Before the startup-mode receipt became mandatory, the retained bulk-readback
-daemon passed evidence mode with medians `116663 us` device, `236498 us` round
-trip, and `119835 us` non-device overhead, then production mode rejected its
-CPU comparison records with `unexpected-cpu-verification`. That daemon predates
-both the optimization and `HOST_GPU_DAEMON_VERIFY`, so the strengthened wrapper
-now rejects it earlier with `daemon-verifier-mode-mismatch`. These values are
-historical repeat baseline evidence, not current-checker or optimized evidence.
+#### routes native string primitives to runtime owners without self dispatch
 
-A fresh source-matched production daemon remains blocked. Stable-input,
-non-admitted Stage3 candidate
-`c2a638a51df632e27352543a458289e857c16bfefd79e020bcce39c608f6870a`
-clears the prior multiline parser failure. Its retained daemon logs report
-relative resolution of `common.ui.draw_ir`, degradation of
-`Simple2dDrawIrPlan` to `ANY`, and, in another retained log, an empty native
-module-name collision. Diagnose
-`native_entry_closure_common_import_type_loss_2026-07-27.md`, build the daemon
-incrementally, and rerun `device-warm-production`; no bootstrap is required by
-this measurement plan.
+- routes native string primitives to runtime owners without self dispatch
+   - Expected: strings does not contain `"\n    s`
+   - Expected: strings does not contain `\n    s.starts_with(prefix)`
 
-The fused copy/validation runtime unit passes 1/1 and the policy source
-contract passes 10/10. Runtime ABI manifest/generated symbol-table tests pass,
-and strict-probe capsule SHA-256
-`6eadbb64103830416faea595cf6c1df328f9a46ac48e5e764d0a1e7512b8a0b0`
-exports both checksum helpers. Its strict no-stub, entry-closure-pruned
-pure-Simple native smoke passes exact copy/checksum, mismatch, and extra-length
-rejection. Provenance-bound Stage3
-`af6a3e1b19156793bba13f7294ba60319cca1c31abdfffed68a7f49472f862e9`
-still fails at the same `draw_ir_adv.spl:847` parser boundary. The macOS host
-provider's formerly empty class body now has the canonical explicit
-`create()` constructor; its focused parse check and selector contract pass.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes native string primitives to runtime owners without self dispatch")
+val strings = file_read("src/lib/common/string_core.spl")
+val runtime = file_read("src/compiler_rust/runtime/src/value/collections.rs")
+val simple_core = file_read("src/runtime/simple_core/core_string.spl")
+expect(strings).to_contain("fn str_len(s: text) -> i64:\n    rt_string_len(s)")
+expect(strings).to_contain("fn str_contains(s: text, sub: text) -> bool:\n    rt_string_contains(s, sub)")
+expect(strings).to_contain("fn str_starts_with(s: text, prefix: text) -> bool:\n    rt_string_starts_with(s, prefix)")
+expect(strings).to_contain("fn str_index_of(s: text, sub: text) -> i64:\n    rt_string_find(s, sub)")
+expect(strings).to_contain("fn str_last_index_of(s: text, sub: text) -> i64:\n    rt_string_rfind(s, sub)")
+expect(strings.contains("\n    s.contains(sub)")).to_equal(false)
+expect(strings.contains("\n    s.starts_with(prefix)")).to_equal(false)
+expect(runtime).to_contain("pub extern \"C\" fn rt_string_contains")
+expect(simple_core).to_contain("pub fn rt_string_contains(value: i64, needle: i64) -> i64:")
+```
+
+</details>
+
+#### bounds request completion by an independent deadline and poll ceiling
+
+- bounds request completion by an independent deadline and poll ceiling
+   - Expected: probe does not contain `50000000`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("bounds request completion by an independent deadline and poll ceiling")
+val bridge = file_read("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
+val probe = file_read("src/app/test/simpleos_gpu_fallback_wire_probe.spl")
+expect(bridge).to_contain("HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS: i64 = 50000000")
+expect(bridge).to_contain("HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS: i64 = 250000000")
+expect(bridge).to_contain("HOST_GPU_IVSHMEM_REQUEST_BUDGET_US: i64 = 5000000")
+expect(bridge).to_contain("boot_monotonic_deadline_us(started_now, HOST_GPU_IVSHMEM_REQUEST_BUDGET_US)")
+expect(bridge).to_contain("val bounded_timeout_polls = if timeout_polls < HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS:")
+expect(bridge).to_contain("polls < bounded_timeout_polls and observed < generation and now_us > 0 and now_us <= deadline_us")
+expect(bridge).to_contain("observed != generation or now_us <= 0 or now_us > deadline_us")
+expect(probe).to_contain("HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS")
+expect(probe.contains("50000000")).to_equal(false)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b952315d92549d697193d8aa9d448bc32641ded7831e2e89dff20c8437f0ae3d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b952315d92549d697193d8aa9d448bc32641ded7831e2e89dff20c8437f0ae3d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b952315d92549d697193d8aa9d448bc32641ded7831e2e89dff20c8437f0ae3d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl
+mirror: doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl:14:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes writable mmap flags before the native ABI' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'owns the daemon lifetime outside the native array ABI' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'measures repeated exact CUDA device requests through one daemon' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

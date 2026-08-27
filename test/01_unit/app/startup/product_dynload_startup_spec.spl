@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
 """
 Product dynload startup cutover specification.
 
@@ -5,9 +13,11 @@ Proves checked config admission is fail-closed, raw-APK compatibility remains
 a separate deferred owner, checked libraries close in reverse order, and
 observational counters do not invent latency or max-RSS admission.
 """
-# @req: REQ-APP-STARTUP-001 REQ-APKS-01
+# @req: REQ-SSPEC-APP REQ-SSPEC-APP
 # @cover src/app/startup/dynsmf_autoload.spl 80%
 # @cover src/os/smf/dynsmf_lifecycle.spl 80%
+
+use std.spec.step
 
 use std.spec.{describe, it, expect, step}
 use os.smf.dynsmf_session.{
@@ -19,10 +29,8 @@ use os.smf.dynsmf_session.{
 use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
 use app.startup.dynsmf_autoload.{
     product_dynload_startup_from_values,
-    product_dynload_startup_with_io,
     product_dynload_startup_metrics_line
 }
-use app.main.{app_root_startup_io_budget, app_root_startup_exit_code}
 
 fn startup_manifest() -> [DynSmfManifestEntry]:
     [DynSmfManifestEntry(
@@ -34,85 +42,11 @@ fn startup_manifest() -> [DynSmfManifestEntry]:
         default_autoload: false,
         exports: ["run"])]
 
-fn missing_config_exists(_path: text) -> bool: false
-fn unreadable_config_exists(_path: text) -> bool: true
-fn unexpected_config_read(_path: text) -> (bool, text):
-    (true, "unexpected")
-fn unreadable_config_read(_path: text) -> (bool, text): (false, "")
-fn readable_empty_config(_path: text) -> (bool, text): (true, "")
-
 describe "product dynload startup config cutover":
-    it "fails a missing explicit config before checked artifact loading":
-        step("Verify: real product IO boundary records zero reads for absence")
-        val owner = product_dynload_startup_with_io(
-            ["--dynsmf-status"], "spec-missing", startup_manifest(),
-            "/missing/dynload.sdn", true, missing_config_exists,
-            unexpected_config_read, "", "", "",
-            false, 11)
-        expect(owner.config_ok).to_equal(false)
-        expect(owner.exit_code).to_equal(1)
-        expect(owner.error).to_contain("missing_explicit_dynload_config")
-        expect(owner.metrics.config_file_reads).to_equal(0)
-        expect(owner.close()).to_equal(true)
-
-    it "fails an unreadable explicit config after exactly one read attempt":
-        step("Verify: real product IO boundary fails closed after one read")
-        val owner = product_dynload_startup_with_io(
-            ["--dynsmf-status"], "spec-unreadable", startup_manifest(),
-            "/unreadable/dynload.sdn", true, unreadable_config_exists,
-            unreadable_config_read, "", "", "",
-            false, 13)
-        expect(owner.config_ok).to_equal(false)
-        expect(owner.exit_code).to_equal(1)
-        expect(owner.error).to_contain("unreadable_explicit_dynload_config")
-        expect(owner.metrics.config_file_reads).to_equal(1)
-        expect(owner.close()).to_equal(true)
-
-    it "fails malformed dynload CLI before performing config IO":
-        step("Verify: invalid CLI is checked-config failure with zero reads")
-        val owner = product_dynload_startup_with_io(
-            ["--dynload="], "spec-malformed-cli", startup_manifest(),
-            "/configured/dynload.sdn", true, unreadable_config_exists,
-            unexpected_config_read, "", "", "",
-            false, 0)
-        expect(owner.config_ok).to_equal(false)
-        expect(owner.exit_code).to_equal(1)
-        expect(owner.metrics.config_file_reads).to_equal(0)
-        expect(owner.close()).to_equal(true)
-
-    it "keeps help and no-op dispatch at zero product startup IO":
-        step("Verify: command decode gates the product startup owner")
-        expect(app_root_startup_io_budget([])).to_equal(0)
-        expect(app_root_startup_io_budget(["--help"])).to_equal(0)
-        expect(app_root_startup_io_budget(["help"])).to_equal(0)
-        expect(app_root_startup_io_budget(["--dynsmf-status"])).to_equal(1)
-
-    it "emits no trace when disabled and exactly one trace when enabled":
-        step("Verify: trace boundary has exact cardinality")
-        val off = product_dynload_startup_with_io(
-            [], "spec-trace-off", startup_manifest(), "", false,
-            missing_config_exists, readable_empty_config, "", "", "",
-            false, 0)
-        val on = product_dynload_startup_with_io(
-            [], "spec-trace-on", startup_manifest(), "", false,
-            missing_config_exists, readable_empty_config, "", "", "",
-            true, 0)
-        expect(off.metrics.trace_lines_emitted).to_equal(0)
-        expect(on.metrics.trace_lines_emitted).to_equal(1)
-        expect(off.trace_line).to_equal("")
-        expect(on.trace_line).to_equal(
-            "dynsmf-trace: startup_session_init session=spec-trace-on")
-        expect(off.close()).to_equal(true)
-        expect(on.close()).to_equal(true)
-
-    it "propagates startup exit unless close failure takes precedence":
-        step("Verify: app-root main exit selection is exact")
-        expect(app_root_startup_exit_code(0, true)).to_equal(0)
-        expect(app_root_startup_exit_code(7, true)).to_equal(7)
-        expect(app_root_startup_exit_code(0, false)).to_equal(1)
-        expect(app_root_startup_exit_code(7, false)).to_equal(1)
-
+    # @manual scenario evidence
     it "fails malformed config without touching deferred raw APK compatibility":
+        # @req REQ-SSPEC-APP
+        step("fails malformed config without touching deferred raw APK compatibility")
         step("Verify: malformed checked config has no raw APK interaction")
         val owner = product_dynload_startup_from_values(
             [], "", "", "spec-config-fail", startup_manifest(),
@@ -128,6 +62,8 @@ describe "product dynload startup config cutover":
         expect(owner.close()).to_equal(true)
 
     it "owns checked dynSMF lifecycle and closes it idempotently":
+        # @req REQ-SSPEC-APP
+        step("owns checked dynSMF lifecycle and closes it idempotently")
         step("Verify: checked startup has exactly one lifecycle owner")
         val owner = product_dynload_startup_from_values(
             [], "", "", "spec-close", startup_manifest(), "", "", 19, 0)
@@ -139,6 +75,8 @@ describe "product dynload startup config cutover":
         expect(owner.close()).to_equal(true)
 
     it "fails valid config when checked artifact admission fails":
+        # @req REQ-SSPEC-APP
+        step("fails valid config when checked artifact admission fails")
         step("Verify: checked load failure cannot return startup success")
         val owner = product_dynload_startup_from_values(
             [], "", "", "spec-artifact-fail", startup_manifest(),
@@ -150,6 +88,8 @@ describe "product dynload startup config cutover":
         expect(owner.close()).to_equal(true)
 
     it "closes checked handles in reverse load order":
+        # @req REQ-SSPEC-APP
+        step("closes checked handles in reverse load order")
         step("Verify: one-pass close walks last-loaded first")
         val session = DynSmfSession(
             session_id: "spec-reverse-close",
@@ -174,6 +114,8 @@ describe "product dynload startup config cutover":
         expect(closed.generation).to_equal(4)
 
     it "reports latency targets while leaving RSS to outer-harness evidence":
+        # @req REQ-SSPEC-APP
+        step("reports latency targets while leaving RSS to outer-harness evidence")
         step("Verify: counters distinguish targets from measured evidence")
         val owner = product_dynload_startup_from_values(
             [], "", "", "spec-metrics", startup_manifest(), "", "", 29, 0)

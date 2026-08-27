@@ -1,29 +1,6 @@
-# Vllm Dashboard Live Control Specification
+# vllm_dashboard_live_control_spec
 
-> <details>
-
-<!-- sdn-diagram:id=vllm_dashboard_live_control_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=vllm_dashboard_live_control_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-vllm_dashboard_live_control_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=vllm_dashboard_live_control_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Prove that vLLM dashboard live control executor.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,23 @@ vllm_dashboard_live_control_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Vllm Dashboard Live Control Specification
+# vllm_dashboard_live_control_spec
+
+Purpose: Prove that vLLM dashboard live control executor.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove that vLLM dashboard live control executor.
+Audience: compiler and tooling engineers who maintain this spec.
 
 ## Scenarios
 
@@ -40,13 +33,32 @@ vllm_dashboard_live_control_spec -> app
 
 #### preflights through runtime readiness without spawning
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- preflights through runtime readiness without spawning
+- Verify: preflights through runtime readiness without spawning
+   - Expected: result.action equals `preflight`
+   - Expected: result.status equals `planned`
+   - Expected: result.reason equals `serve_and_models_probe_planned`
+   - Expected: result.models_status equals `not_fetched`
+   - Expected: result.requires_runtime_executor is false
+   - Expected: result.evidence_jsonl.split("base-model").len() equals `1`
+   - Expected: result.evidence_jsonl.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("preflights through runtime readiness without spawning")
+step("Verify: preflights through runtime readiness without spawning")
+# @req: REQ-APP-LLM-RUNTIME-001
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "preflight", -1, true, true)
 
@@ -57,20 +69,29 @@ expect(result.models_status).to_equal("not_fetched")
 expect(result.requires_runtime_executor).to_equal(false)
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
-expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
 
 #### preflight JSONL helper stays pure dashboard intent evidence
 
+- preflight JSONL helper stays pure dashboard intent evidence
+- Verify: preflight JSONL helper stays pure dashboard intent evidence
+   - Expected: result.split("base-model").len() equals `1`
+   - Expected: result.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("preflight JSONL helper stays pure dashboard intent evidence")
+step("Verify: preflight JSONL helper stays pure dashboard intent evidence")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control_jsonl(manifest, "preflight", -1, true, true)
 
@@ -79,26 +100,38 @@ expect(result).to_contain("\"status\":\"planned\"")
 expect(result).to_contain("\"reason\":\"serve_and_models_probe_planned\"")
 expect(result).to_contain("\"requires_runtime_executor\":false")
 expect(result.split("base-model").len()).to_equal(1)
-expect(result.split(absence_marker()).len()).to_equal(1)
+expect(result.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
 
 #### skips start before process spawn when local resources are missing
 
+- skips start before process spawn when local resources are missing
+- Verify: skips start before process spawn when local resources are missing
+   - Expected: result.status equals `skipped`
+   - Expected: result.reason equals `missing_local_vllm_and_gpu`
+   - Expected: result.started_pid equals `-1`
+   - Expected: result.models_status equals `not_fetched`
+   - Expected: result.requires_runtime_executor is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("skips start before process spawn when local resources are missing")
+step("Verify: skips start before process spawn when local resources are missing")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "start", -1, false, false)
 
 expect(result.status).to_equal("skipped")
 expect(result.reason).to_equal("missing_local_vllm_and_gpu")
-expect(result.started_pid).to_equal(-1)
+expect(result.started_pid).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 expect(result.models_status).to_equal("not_fetched")
 expect(result.requires_runtime_executor).to_equal(false)
 ```
@@ -107,19 +140,30 @@ expect(result.requires_runtime_executor).to_equal(false)
 
 #### reports invalid manifests before start can spawn
 
+- reports invalid manifests before start can spawn
+- Verify: reports invalid manifests before start can spawn
+   - Expected: result.status equals `not_started`
+   - Expected: result.reason equals `missing_base_model`
+   - Expected: result.started_pid equals `-1`
+   - Expected: result.requires_runtime_executor is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("reports invalid manifests before start can spawn")
+step("Verify: reports invalid manifests before start can spawn")
 val manifest = llm_runtime_manifest("", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "start", -1, true, true)
 
 expect(result.status).to_equal("not_started")
 expect(result.reason).to_equal("missing_base_model")
-expect(result.started_pid).to_equal(-1)
+expect(result.started_pid).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 expect(result.requires_runtime_executor).to_equal(false)
 ```
 
@@ -127,13 +171,24 @@ expect(result.requires_runtime_executor).to_equal(false)
 
 #### rejects poll for invalid pid without process inspection
 
+- rejects poll for invalid pid without process inspection
+- Verify: rejects poll for invalid pid without process inspection
+   - Expected: result.status equals `not_ready`
+   - Expected: result.reason equals `invalid_pid`
+   - Expected: result.running_status equals `not_running`
+   - Expected: result.requires_runtime_executor is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects poll for invalid pid without process inspection")
+step("Verify: rejects poll for invalid pid without process inspection")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "poll", 0, true, true)
 
@@ -147,13 +202,24 @@ expect(result.requires_runtime_executor).to_equal(false)
 
 #### skips probe before HTTP when local resources are missing
 
+- skips probe before HTTP when local resources are missing
+- Verify: skips probe before HTTP when local resources are missing
+   - Expected: result.status equals `skipped`
+   - Expected: result.reason equals `missing_local_vllm`
+   - Expected: result.models_status equals `not_fetched`
+   - Expected: result.requires_runtime_executor is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("skips probe before HTTP when local resources are missing")
+step("Verify: skips probe before HTTP when local resources are missing")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "probe", 12345, false, true)
 
@@ -167,19 +233,30 @@ expect(result.requires_runtime_executor).to_equal(false)
 
 #### does not kill invalid pids for stop
 
+- does not kill invalid pids for stop
+- Verify: does not kill invalid pids for stop
+   - Expected: result.status equals `not_stopped`
+   - Expected: result.reason equals `invalid_pid`
+   - Expected: result.stopped_pid equals `-1`
+   - Expected: result.requires_runtime_executor is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("does not kill invalid pids for stop")
+step("Verify: does not kill invalid pids for stop")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "stop", -1, true, true)
 
 expect(result.status).to_equal("not_stopped")
 expect(result.reason).to_equal("invalid_pid")
-expect(result.stopped_pid).to_equal(-1)
+expect(result.stopped_pid).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 expect(result.requires_runtime_executor).to_equal(false)
 ```
 
@@ -187,33 +264,54 @@ expect(result.requires_runtime_executor).to_equal(false)
 
 #### rejects unknown actions with public JSONL evidence
 
+- rejects unknown actions with public JSONL evidence
+- Verify: rejects unknown actions with public JSONL evidence
+   - Expected: result.status equals `rejected`
+   - Expected: result.reason equals `unknown_action`
+   - Expected: result.requires_runtime_executor is false
+   - Expected: result.evidence_jsonl.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects unknown actions with public JSONL evidence")
+step("Verify: rejects unknown actions with public JSONL evidence")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "restart", 12345, true, true)
 
 expect(result.status).to_equal("rejected")
 expect(result.reason).to_equal("unknown_action")
 expect(result.requires_runtime_executor).to_equal(false)
-expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
 
 #### marks valid side-effecting control plans as requiring the runtime executor
 
+- marks valid side-effecting control plans as requiring the runtime executor
+- Verify: marks valid side-effecting control plans as requiring the runtime executor
+   - Expected: result.status equals `planned`
+   - Expected: result.reason equals `live_executor_required`
+   - Expected: result.requires_runtime_executor is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("marks valid side-effecting control plans as requiring the runtime executor")
+step("Verify: marks valid side-effecting control plans as requiring the runtime executor")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control(manifest, "start", -1, true, true)
 
@@ -227,13 +325,26 @@ expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":true")
 
 #### keeps preflight as pure dashboard intent evidence
 
+- keeps preflight as pure dashboard intent evidence
+- Verify: keeps preflight as pure dashboard intent evidence
+   - Expected: boundary.boundary_status equals `intent-only`
+   - Expected: boundary.dashboard_route_status equals `pure_dashboard_route`
+   - Expected: boundary.live_executor_status equals `not_required`
+   - Expected: boundary.process_access equals `not_used`
+   - Expected: boundary.http_access equals `not_used`
+   - Expected: boundary.acceptance_status equals `not_live_evidence`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("keeps preflight as pure dashboard intent evidence")
+step("Verify: keeps preflight as pure dashboard intent evidence")
 val boundary = llm_runtime_dashboard_live_boundary("preflight", true, true)
 
 expect(boundary.boundary_status).to_equal("intent-only")
@@ -249,13 +360,26 @@ expect(boundary.evidence_jsonl).to_contain("llm_runtime_vllm_dashboard_live_boun
 
 #### requires runtime owner live executor for side-effecting actions
 
+- requires runtime owner live executor for side-effecting actions
+- Verify: requires runtime owner live executor for side-effecting actions
+   - Expected: boundary.boundary_status equals `executor-required`
+   - Expected: boundary.reason equals `live_executor_required`
+   - Expected: boundary.live_executor_status equals `runtime_owner_required`
+   - Expected: boundary.process_access equals `runtime_owner_only`
+   - Expected: boundary.http_access equals `runtime_owner_only`
+   - Expected: boundary.evidence_jsonl.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("requires runtime owner live executor for side-effecting actions")
+step("Verify: requires runtime owner live executor for side-effecting actions")
 val boundary = llm_runtime_dashboard_live_boundary("start", true, true)
 
 expect(boundary.boundary_status).to_equal("executor-required")
@@ -263,20 +387,27 @@ expect(boundary.reason).to_equal("live_executor_required")
 expect(boundary.live_executor_status).to_equal("runtime_owner_required")
 expect(boundary.process_access).to_equal("runtime_owner_only")
 expect(boundary.http_access).to_equal("runtime_owner_only")
-expect(boundary.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(boundary.evidence_jsonl.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
 
 #### blocks live boundary evidence when local resources are unavailable
 
+- blocks live boundary evidence when local resources are unavailable
+- Verify: blocks live boundary evidence when local resources are unavailable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("blocks live boundary evidence when local resources are unavailable")
+step("Verify: blocks live boundary evidence when local resources are unavailable")
 val jsonl = llm_runtime_dashboard_live_boundary_jsonl("probe", false, true)
 
 expect(jsonl).to_contain("\"boundary_status\":\"blocked\"")
@@ -289,13 +420,26 @@ expect(jsonl).to_contain("\"acceptance_status\":\"not_live_evidence\"")
 
 #### live executor preflight reports missing resources without process or HTTP side effects
 
+- live executor preflight reports missing resources without process or HTTP side effects
+- Verify: live executor preflight reports missing resources without process or HTTP side effects
+   - Expected: result.action equals `preflight`
+   - Expected: result.status equals `skipped`
+   - Expected: result.reason equals `missing_local_vllm_and_gpu`
+   - Expected: result.running_status equals `not_started`
+   - Expected: result.models_reason equals `environment_skipped`
+   - Expected: result.evidence_jsonl.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("live executor preflight reports missing resources without process or HTTP side effects")
+step("Verify: live executor preflight reports missing resources without process or HTTP side effects")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control_live(manifest, "preflight", -1, false, false)
 
@@ -305,27 +449,39 @@ expect(result.reason).to_equal("missing_local_vllm_and_gpu")
 expect(result.running_status).to_equal("not_started")
 expect(result.models_reason).to_equal("environment_skipped")
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":false")
-expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
 
 #### live executor start delegates to safe planning when local resources are missing
 
+- live executor start delegates to safe planning when local resources are missing
+- Verify: live executor start delegates to safe planning when local resources are missing
+   - Expected: result.action equals `start`
+   - Expected: result.status equals `skipped`
+   - Expected: result.reason equals `missing_local_vllm`
+   - Expected: result.started_pid equals `-1`
+   - Expected: result.requires_runtime_executor is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("live executor start delegates to safe planning when local resources are missing")
+step("Verify: live executor start delegates to safe planning when local resources are missing")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val result = llm_runtime_execute_dashboard_control_live(manifest, "start", -1, false, true)
 
 expect(result.action).to_equal("start")
 expect(result.status).to_equal("skipped")
 expect(result.reason).to_equal("missing_local_vllm")
-expect(result.started_pid).to_equal(-1)
+expect(result.started_pid).to_equal(-1)  # oracle: -1 — named expected value from the requirement
 expect(result.requires_runtime_executor).to_equal(false)
 ```
 
@@ -333,13 +489,27 @@ expect(result.requires_runtime_executor).to_equal(false)
 
 #### live executor poll, probe, and stop handle invalid pids without host effects
 
+- live executor poll, probe, and stop handle invalid pids without host effects
+- Verify: live executor poll, probe, and stop handle invalid pids without host effects
+   - Expected: poll.status equals `not_ready`
+   - Expected: poll.reason equals `invalid_pid`
+   - Expected: probe.status equals `not_ready`
+   - Expected: probe.reason equals `invalid_pid`
+   - Expected: stop.status equals `not_stopped`
+   - Expected: stop.reason equals `invalid_pid`
+   - Expected: stop.evidence_jsonl.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("live executor poll, probe, and stop handle invalid pids without host effects")
+step("Verify: live executor poll, probe, and stop handle invalid pids without host effects")
 val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
 val poll = llm_runtime_execute_dashboard_control_live(manifest, "poll", 0, true, true)
 val probe = llm_runtime_execute_dashboard_control_live(manifest, "probe", 0, true, true)
@@ -352,20 +522,32 @@ expect(probe.reason).to_equal("invalid_pid")
 expect(stop.status).to_equal("not_stopped")
 expect(stop.reason).to_equal("invalid_pid")
 expect(stop.evidence_jsonl).to_contain("\"stopped_pid\":0")
-expect(stop.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(stop.evidence_jsonl.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
 
 #### live executor observation mapping emits public JSONL evidence
 
+- live executor observation mapping emits public JSONL evidence
+- Verify: live executor observation mapping emits public JSONL evidence
+   - Expected: result.action equals `probe`
+   - Expected: result.status equals `ready`
+   - Expected: result.reason equals `models_ready`
+   - Expected: result.evidence_jsonl.split("base-model").len() equals `1`
+   - Expected: result.evidence_jsonl.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("live executor observation mapping emits public JSONL evidence")
+step("Verify: live executor observation mapping emits public JSONL evidence")
 val result = llm_runtime_dashboard_control_execution_from_observation("probe", "ready", "models_ready", 42, "running", "configured", "ready", "models_listed", 200, -1, -1)
 
 expect(result.action).to_equal("probe")
@@ -375,25 +557,10 @@ expect(result.evidence_jsonl).to_contain("\"event\":\"llm_runtime_vllm_dashboard
 expect(result.evidence_jsonl).to_contain("\"http_status\":200")
 expect(result.evidence_jsonl).to_contain("\"requires_runtime_executor\":true")
 expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
-expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- vLLM dashboard live control executor
 
 ## Scenario Summary
 
@@ -407,3 +574,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-APP-LLM-RUNTIME-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e859ed1ae375a7549f254b5e9273aa73aaf36cec8ccae41b1e4788efb6a3a251`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e859ed1ae375a7549f254b5e9273aa73aaf36cec8ccae41b1e4788efb6a3a251`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e859ed1ae375a7549f254b5e9273aa73aaf36cec8ccae41b1e4788efb6a3a251`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl
+mirror: doc/06_spec/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preflights through runtime readiness without spawning' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preflight JSONL helper stays pure dashboard intent evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'skips start before process spawn when local resources are missing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

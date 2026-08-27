@@ -1,65 +1,152 @@
 # LLM Caret Advanced Claude CLI Forwarding
 
-> Direct offline contract for the production `claude_cli_send` advanced
-> argument boundary. This is not cached-Caret wrapper qualification.
+> This deterministic offline contract invokes the production
 
 | Tests | Active | Skipped | Pending |
-|-------|-------:|--------:|--------:|
+|-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
-
-This manual records zero executed scenarios: the qualified pure-Simple test
-runtime is not currently available. It describes the executable contract and
-does not claim a live-provider, CLI-wrapper, or TUI PASS.
 
 <details>
 <summary>Full Scenario Manual</summary>
+
+# LLM Caret Advanced Claude CLI Forwarding
+
+This deterministic offline contract invokes the production
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Application / provider CLI |
-| Requirement | REQ-LLM-CARET-FULL-003 |
-| Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
+| Category | Application |
+| Status | Active |
+| Plan | doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl` |
-| Fixture | `test/fixtures/llm_caret/mock_claude_cli.shs` |
-| Evidence | Runner `exec` and textual response capture |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Scope and Safety
+## Scope
 
-The spec calls the production `app.llm_caret.claude_cli.claude_cli_send`
-function. Its local executable fixture receives a one-shot JSON request and
-never accesses credentials, an installed `claude` executable, or the network.
-The contract is deliberately distinct from cached `bin/caret` qualification,
-which is owned by `llm_caret_cli_cached_spec.spl`.
+This deterministic offline contract invokes the production
+`claude_cli_send` function with an existing session, maximum turns, a JSON
+schema, the ordered `Read` and `Write` tool vector, and an explicitly allowed
+fixture extra argument. The local fixture validates the received process
+arguments and returns a structured response.
 
-## Scenario
+It proves the shared production sender's advanced one-shot argument boundary;
+it does not exercise `bin/caret`, a cached Caret artifact, an installed Claude
+binary, authentication, or a network provider.
 
-### should forward the advanced request through the production Claude sender
+## Scenarios
 
-1. Prepare offline Claude CLI fixture.
-2. Send advanced provider request.
-3. Check forwarded response and status.
+### LLM Caret advanced Claude CLI forwarding
 
-The request fixes the sender inputs to session `advanced-resume`, maximum turns
-`3`, schema `{"type":"object"}`, and a single variadic `--allowedTools`
-vector ordered as `Read`, then `Write`; `--fixture-extra` proves the approved
-extra-argument tail is retained. The fixture rejects any missing, reordered,
-or malformed field and only then emits deterministic JSON. The response must be
-non-error `advanced-ok`, model `sonnet`, session `advanced-session`, and the
-parser-default `end_turn` stop reason.
+### REQ-LLM-CARET-FULL-003: advanced Claude provider request
 
-## Execution Boundary
+#### should forward the advanced request through the production Claude sender
 
-Run with the self-hosted runtime once it is available:
+- should forward the advanced request through the production Claude sender
+- Prepare offline Claude CLI fixture
+- Send advanced provider request
+- Check forwarded response and status
+   - Expected: response.content equals `advanced-ok`
+   - Expected: response.model equals `sonnet`
+   - Expected: response.session_id equals `advanced-session`
+   - Expected: response.stop_reason equals `end_turn`
+   - Expected: response.error equals ``
 
-```sh
-bin/simple test test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl --mode=interpreter
-SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl --mode=native
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-LLM-CARET-FULL-003
+step("should forward the advanced request through the production Claude sender")
+step("Prepare offline Claude CLI fixture")
+expect(file_exists(MOCK_CLAUDE)).to_be(true)
+
+step("Send advanced provider request")
+val response = claude_cli_send(
+    MOCK_CLAUDE, "fixture-advanced", "sonnet", "Be concise",
+    "advanced-resume", 3, 0, "{\"type\":\"object\"}",
+    ["Read", "Write"], ["--fixture-extra"]
+)
+
+step("Check forwarded response and status")
+expect(response.is_error).to_be(false)
+expect(response.content).to_equal("advanced-ok")
+expect(response.model).to_equal("sonnet")
+expect(response.session_id).to_equal("advanced-session")
+expect(response.stop_reason).to_equal("end_turn")
+expect(response.error).to_equal("")
+expect(response.raw).to_contain("advanced-ok")
 ```
 
-Then regenerate this manual with `bin/simple spipe-docgen ... --output
-doc/06_spec --no-index`. A source fallback, bootstrap seed, unavailable runtime,
-or fixture failure is not execution evidence.
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md`
+
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-LLM-CARET-FULL-003`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2c2dde6a05fdf2312a391fda7700436b4500b85a30452a302655ba10dcaf1442`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2c2dde6a05fdf2312a391fda7700436b4500b85a30452a302655ba10dcaf1442`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2c2dde6a05fdf2312a391fda7700436b4500b85a30452a302655ba10dcaf1442`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
+
+SSpec documentization score: 94/100
+source: test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl:39:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should forward the advanced request through the production Claude sender' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should forward the advanced request through the production Claude sender' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

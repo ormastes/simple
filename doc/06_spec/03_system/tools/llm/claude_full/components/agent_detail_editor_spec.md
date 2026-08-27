@@ -2,30 +2,6 @@
 
 > Checks agent detail row/action parity and editor validation/save summaries.
 
-<!-- sdn-diagram:id=agent_detail_editor_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=agent_detail_editor_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-agent_detail_editor_spec -> std
-agent_detail_editor_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=agent_detail_editor_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -44,7 +20,7 @@ Checks agent detail row/action parity and editor validation/save summaries.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks agent detail row/action parity and editor validation/save summaries.
@@ -55,6 +31,11 @@ Checks agent detail row/action parity and editor validation/save summaries.
 
 #### renders detail rows and enabled actions
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- renders detail rows and enabled actions
 - Build enabled detail
 - Assert rows and summary
    - Expected: detail.statusLabel() equals `enabled`
@@ -73,10 +54,12 @@ Checks agent detail row/action parity and editor validation/save summaries.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders detail rows and enabled actions")
 step("Build enabled detail")
 val detail = agentDetailReady("reviewer", "Reviews changes", "sonnet", ["read", "write"], "/agents/reviewer.md")
 val rows = detail.rows()
@@ -102,6 +85,7 @@ expect(actions[2].enabled).to_equal(true)
 
 #### renders missing and disabled detail states
 
+- renders missing and disabled detail states
 - Build missing detail
    - Expected: missing.statusLabel() equals `missing`
    - Expected: missingRows.len() equals `3`
@@ -119,10 +103,12 @@ expect(actions[2].enabled).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders missing and disabled detail states")
 step("Build missing detail")
 val missing = agentDetailMissing("planner", "/agents/planner.md")
 val missingRows = missing.rows()
@@ -147,6 +133,7 @@ expect(disabledActions[2].reason).to_equal("agent is disabled")
 
 #### validates editor drafts and renders save summaries
 
+- validates editor drafts and renders save summaries
 - Validate empty draft
    - Expected: empty.canSave() is false
    - Expected: errors.len() equals `3`
@@ -164,10 +151,12 @@ expect(disabledActions[2].reason).to_equal("agent is disabled")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates editor drafts and renders save summaries")
 step("Validate empty draft")
 val empty = agentEditorEmptyDraft()
 val errors = empty.validate()
@@ -193,6 +182,7 @@ expect(saved.render()).to_equal("saved | reviewer | sonnet | tools=2 | disabled"
 
 #### exports source-backed helpers
 
+- exports source-backed helpers
 - Check detail and editor helper values
    - Expected: joinAgentTools([]) equals `none`
    - Expected: joinAgentTools(["read", "write"]) equals `read, write`
@@ -208,10 +198,12 @@ expect(saved.render()).to_equal("saved | reviewer | sonnet | tools=2 | disabled"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exports source-backed helpers")
 step("Check detail and editor helper values")
 expect(joinAgentTools([])).to_equal("none")
 expect(joinAgentTools(["read", "write"])).to_equal("read, write")
@@ -238,3 +230,54 @@ expect(agentEditorRequiredFieldCount()).to_equal(3)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c1e7ff36420aaaa579c0e93c50130f2496c56b8a74a9da72d43f30f760b65203`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c1e7ff36420aaaa579c0e93c50130f2496c56b8a74a9da72d43f30f760b65203`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c1e7ff36420aaaa579c0e93c50130f2496c56b8a74a9da72d43f30f760b65203`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders detail rows and enabled actions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders missing and disabled detail states' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/agent_detail_editor_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates editor drafts and renders save summaries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

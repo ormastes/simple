@@ -1,29 +1,6 @@
 # Reporter Specification
 
-> 1. fn run
-
-<!-- sdn-diagram:id=reporter_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=reporter_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-reporter_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=reporter_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering format_bytes, report_console, escape_sdn.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,17 +17,22 @@ reporter_spec -> app
 
 #### formats small byte counts
 
-1. fn run
-2. run
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- formats small byte counts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats small byte counts")
 fn run():
     val r0 = format_bytes(0)
     expect(r0).to_contain("0")
@@ -63,17 +45,18 @@ run()
 
 #### formats KB range
 
-1. fn run
-2. run
+- formats KB range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats KB range")
 fn run():
     val r1k = format_bytes(1024)
     expect(r1k).to_contain("KB")
@@ -86,17 +69,18 @@ run()
 
 #### formats MB range
 
-1. fn run
-2. run
+- formats MB range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats MB range")
 fn run():
     val r1m = format_bytes(1048576)
     expect(r1m).to_contain("MB")
@@ -111,17 +95,18 @@ run()
 
 #### shows no leaks verdict for clean result
 
-1. fn run
-2. run
+- shows no leaks verdict for clean result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("shows no leaks verdict for clean result")
 fn run():
     val result = empty_leak_check_result()
     val output = report_console(result)
@@ -134,17 +119,18 @@ run()
 
 #### shows mode in report
 
-1. fn run
-2. run
+- shows mode in report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("shows mode in report")
 fn run():
     val result = empty_leak_check_result()
     val output = report_console(result)
@@ -158,18 +144,19 @@ run()
 
 #### escapes backslashes
 
-1. fn run
+- escapes backslashes
    - Expected: result equals `hello world`
-2. run
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escapes backslashes")
 fn run():
     val result = escape_sdn("hello world")
     expect(result).to_equal("hello world")
@@ -180,18 +167,19 @@ run()
 
 #### leaves clean strings unchanged
 
-1. fn run
+- leaves clean strings unchanged
    - Expected: result equals `hello world`
-2. run
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("leaves clean strings unchanged")
 fn run():
     val result = escape_sdn("hello world")
     expect(result).to_equal("hello world")
@@ -207,12 +195,12 @@ run()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/leak_check/reporter_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering format_bytes, report_console, escape_sdn.
 - format_bytes
 - report_console
 - escape_sdn
@@ -229,3 +217,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6c447cf713ab2aaf59b4d2418f113fffaf447a3bb61335bc6b7e40688c3401f0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6c447cf713ab2aaf59b4d2418f113fffaf447a3bb61335bc6b7e40688c3401f0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6c447cf713ab2aaf59b4d2418f113fffaf447a3bb61335bc6b7e40688c3401f0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/leak_check/reporter_spec.spl
+mirror: doc/06_spec/01_unit/app/leak_check/reporter_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/leak_check/reporter_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/leak_check/reporter_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/leak_check/reporter_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats small byte counts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/leak_check/reporter_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats KB range' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/leak_check/reporter_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats MB range' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

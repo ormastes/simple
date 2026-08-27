@@ -24,7 +24,7 @@ Prepared SimpleOS QEMU guests receive ordered VirtIO input and complete non-sile
 | Design | doc/05_design/simpleos_qemu_host_gpu_2d.md |
 | Research | doc/01_research/local/simpleos_qemu_host_gpu_2d.md |
 | Source | `test/03_system/os/qemu/simpleos_io_audio_spec.spl` |
-| Updated | 2026-08-08 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -89,6 +89,8 @@ device-origin readback before the combined environment can pass.
 
 #### delivers guest input and non-silent playback and capture
 
+- prepares admitted guest artifacts and virtual devices
+   - Log capture: after_step
 - Boot the guest with the selected virtual devices
    - Log capture: after_step
    - Evidence: log output verified by 4 expected checks
@@ -96,6 +98,8 @@ device-origin readback before the combined environment can pass.
    - Expected: err equals ``
    - Expected: admission.status equals `UiEnvironmentAdmissionStatus.Ready`
    - Expected: admission.reason equals `live-guest-proof-required`
+- delivers guest input and non-silent playback and capture
+   - Log capture: after_step
 - Open the event and audio endpoints
    - Log capture: after_step
    - Evidence: log output verified by 3 expected checks
@@ -115,10 +119,12 @@ device-origin readback before the combined environment can pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("prepares admitted guest artifacts and virtual devices")
 step("Boot the guest with the selected virtual devices")
 val (out, err, code) = run_io_audio_qemu_check("--preflight")
 # oracle: the canonical checker uses process success only after all prerequisites pass.
@@ -140,6 +146,8 @@ expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Ready)
 expect(admission.reason).to_equal("live-guest-proof-required")
 expect(admission.promotion_eligible).to_be(false)
 
+# @req REQ-SSPEC-SYSTEM
+step("delivers guest input and non-silent playback and capture")
 step("Open the event and audio endpoints")
 val (out, err, code) = run_io_audio_qemu_check("--live")
 val profile = simpleos_qemu_2d_environment_profiles()[X86_PROFILE_INDEX]
@@ -164,6 +172,8 @@ expect(out).to_contain("simpleos_io_audio_qemu_row=pass arch=riscv64 backend=vir
 
 #### rejects host substitutes stale artifacts and incomplete receipts
 
+- rejects host substitutes stale artifacts and incomplete receipts
+   - Log capture: after_step
 - Validate guest and pure-Simple provenance
    - Log capture: after_step
    - Evidence: log output verified by 2 expected checks
@@ -174,10 +184,12 @@ expect(out).to_contain("simpleos_io_audio_qemu_row=pass arch=riscv64 backend=vir
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects host substitutes stale artifacts and incomplete receipts")
 step("Validate guest and pure-Simple provenance")
 val (out, err, code) = run_io_audio_qemu_check("--self-test")
 expect(code).to_equal(CHECK_SUCCESS)
@@ -210,3 +222,45 @@ expect(out).to_contain("simpleos_io_audio_qemu_self_test=pass")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c84caa14db5c505b7ebc695181fdbbf7e7f383cd26b0476e93cb01975a8e4e80`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c84caa14db5c505b7ebc695181fdbbf7e7f383cd26b0476e93cb01975a8e4e80`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c84caa14db5c505b7ebc695181fdbbf7e7f383cd26b0476e93cb01975a8e4e80`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **96/100**; effective score: **96/100**; blockers: **0**.
+
+SSpec documentization score: 96/100
+source: test/03_system/os/qemu/simpleos_io_audio_spec.spl
+mirror: doc/06_spec/03_system/os/qemu/simpleos_io_audio_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=90
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/qemu/simpleos_io_audio_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+test/03_system/os/qemu/simpleos_io_audio_spec.spl:114:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'delivers guest input and non-silent playback and capture' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/qemu/simpleos_io_audio_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects host substitutes stale artifacts and incomplete receipts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

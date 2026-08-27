@@ -20,7 +20,7 @@ Proves bounded fixed-layout and explicit-width automatic-layout table slices
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/table_formatting_spec.spl` |
-| Updated | 2026-07-30 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves bounded fixed-layout and explicit-width automatic-layout table slices
@@ -32,6 +32,8 @@ through computed Style, canonical Draw IR geometry, and Engine2D pixels.
 
 #### should format caption rows cells and colspan through shared layout
 
+- should format caption rows cells and colspan through shared layout
+   - Artifact capture: after_step
 - Render a fixed two-row two-column table
    - Artifact capture: after_step
 - Expose the HTML table display roles in computed Style
@@ -65,20 +67,22 @@ through computed Style, canonical Draw IR geometry, and Engine2D pixels.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 108 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should format caption rows cells and colspan through shared layout")
 step("Render a fixed two-row two-column table")
 val html = (
     "<html><head><style>" +
     "html,body{margin:0;background:#ffffff}" +
     "table{table-layout:fixed;width:40px}" +
-    "caption{background:#ffff00}" +
-    "tr{background:#dddddd}" +
+    "caption{{background:#ffff00}}" +
+    "tr{{background:#dddddd}}" +
     "th,td{padding:2px;border:1px solid #000000}" +
-    "#a{background:#ff0000}#b{background:#00ff00}" +
-    "#wide{background:#0000ff}" +
+    "#a{{background:#ff0000}}#b{{background:#00ff00}}" +
+    "#wide{{background:#0000ff}}" +
     "</style></head><body><table id='grid'>" +
     "<caption id='cap'>T</caption>" +
     "<tr id='row1'><th id='a'>A</th><td id='b'>B</td></tr>" +
@@ -181,27 +185,37 @@ expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
 
 #### should resolve one-row two-cell collapse and fail closed otherwise
 
+- should resolve one-row two-cell collapse and fail closed otherwise
+   - Artifact capture: after_step
 - Parse the table structure
-  - `inherit` and `unset` retain collapsed inheritance; `initial` resets to separate.
+   - Artifact capture: after_step
 - Resolve collapsed border ownership
-  - Admit exactly one LTR table row with two direct cells.
-  - Fail closed for colspan, rowspan, multiple rows, and non-table-row structure.
-  - Resolve equal edges by LTR origin, suppress a solid edge with `hidden`, choose wider authored borders before style rank, and use style rank only for equal widths.
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: admitted_collapse equals `["0px", "0", "3"]`
 - Emit canonical Draw IR
-  - Preserve row parentage and exact two-column geometry.
-  - Re-resolve style identity and ownership after the retained animation promotes the left edge.
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: collapsed_parentage equals `["row", "row"]`
 - Verify absolute pixels
-  - Confirm the selected blue shared border and adjacent white pixels through Engine2D readback.
-  - Confirm a wider dotted red edge paints and the competing narrow blue edge does not.
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 5 expected checks
+   - Expected: pixel_before_shared_border equals `0xFFFFFFFFu32`
+   - Expected: pixel_at_shared_border_start equals `0xFF1D4ED8u32`
+   - Expected: pixel_at_shared_border_center equals `0xFF1D4ED8u32`
+   - Expected: pixel_at_shared_border_end equals `0xFF1D4ED8u32`
+   - Expected: pixel_after_shared_border equals `0xFFFFFFFFu32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 308 lines folded for reproduction.
+Runnable source: 309 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should resolve one-row two-cell collapse and fail closed otherwise")
 step("Parse the table structure")
 val value_html = (
     "<style>#scope{border-collapse:collapse}" +
@@ -515,6 +529,7 @@ expect(_table_color_count(
 
 #### should separate fixed table cells with authored border spacing
 
+- should separate fixed table cells with authored border spacing
 - Render two fixed columns with horizontal and vertical spacing
 - Expose normalized spacing and exact Draw IR table geometry
    - Expected: spaced_row.parent_id equals `spaced`
@@ -546,17 +561,19 @@ expect(_table_color_count(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 315 lines folded for reproduction.
+Runnable source: 317 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should separate fixed table cells with authored border spacing")
 step("Render two fixed columns with horizontal and vertical spacing")
 val spaced_html = (
     "<style>html,body{margin:0;background:#fff}" +
     "table{table-layout:fixed;width:40px;border-spacing:4px 3px;" +
     "background:#112233}td{height:8px}" +
-    "#spaced-a{background:#ff0000}" +
-    "#spaced-b{background:#00ff00}</style>" +
+    "#spaced-a{{background:#ff0000}}" +
+    "#spaced-b{{background:#00ff00}}</style>" +
     "<table id='spaced'><tr id='spaced-row'>" +
     "<td id='spaced-a'></td><td id='spaced-b'></td>" +
     "</tr></table>"
@@ -630,8 +647,8 @@ val control_html = (
     "<style>html,body{margin:0;background:#fff}" +
     "table{table-layout:fixed;width:40px;border-spacing:0;" +
     "background:#112233}td{height:8px}" +
-    "#control-a{background:#ff0000}" +
-    "#control-b{background:#00ff00}</style>" +
+    "#control-a{{background:#ff0000}}" +
+    "#control-b{{background:#00ff00}}</style>" +
     "<table id='control'><tr id='control-row'>" +
     "<td id='control-a'></td><td id='control-b'></td>" +
     "</tr></table>"
@@ -682,7 +699,7 @@ val auto_html = (
     "<style>html,body{margin:0;background:#fff}" +
     "table{width:40px;border-spacing:4px 3px;background:#112233}" +
     "td{width:10px;height:8px}" +
-    "#auto-a{background:#ff0000}#auto-b{background:#00ff00}" +
+    "#auto-a{{background:#ff0000}}#auto-b{{background:#00ff00}}" +
     "</style><table id='auto-spaced'><tr>" +
     "<td id='auto-a'></td><td id='auto-b'></td></tr></table>"
 )
@@ -715,7 +732,7 @@ val grouped_html = (
     "caption{caption-side:bottom;height:2px;background:#ffff00}" +
     "td{height:4px}#group-a{width:10px;min-width:30px;" +
     "background:#ff0000}#group-b{width:10px;background:#00ff00}" +
-    "#group-wide{background:#0000ff}</style>" +
+    "#group-wide{{background:#0000ff}}</style>" +
     "<table id='grouped'><caption id='group-caption'></caption>" +
     "<tbody id='group'><tr id='group-row-a'>" +
     "<td id='group-a'></td><td id='group-b'></td></tr>" +
@@ -803,7 +820,7 @@ expect(grouped_pixels[17 * 48 + 1]).to_equal(0xFFFFFF00u32)
 
 step("Expand a narrow fixed table to contain valid large spacing")
 val large_html = (
-    "<style>html,body{margin:0}table{table-layout:fixed;" +
+    "<style>html,body{{margin:0}}table{table-layout:fixed;" +
     "width:40px;border-spacing:100px 0}td{height:1px}</style>" +
     "<table id='large'><tr><td id='large-a'></td>" +
     "<td id='large-b'></td></tr></table>"
@@ -871,6 +888,8 @@ expect(simple_web_layout_debug_style_by_id(
 
 #### should keep vertical-only spacing constraints inside the table
 
+- should keep vertical-only spacing constraints inside the table
+   - Artifact capture: after_step
 - Lay out a constrained auto table with vertical-only spacing
    - Artifact capture: after_step
 - Keep constrained and colspan cells non-overlapping and contained
@@ -886,13 +905,15 @@ expect(simple_web_layout_debug_style_by_id(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep vertical-only spacing constraints inside the table")
 step("Lay out a constrained auto table with vertical-only spacing")
 val html = (
-    "<style>html,body{margin:0}table{width:40px;" +
+    "<style>html,body{{margin:0}}table{width:40px;" +
     "border-spacing:0 3px}td{width:10px;height:4px}" +
     "#vertical-a{min-width:30px}</style>" +
     "<table id='vertical-table'><tr>" +
@@ -927,6 +948,8 @@ expect(wide.x + wide.width).to_equal(table.x + table.width)
 
 #### should place captions from the inherited caption-side value
 
+- should place captions from the inherited caption-side value
+   - Artifact capture: after_step
 - Trace implemented CSS properties through canonical rendering
    - Artifact capture: after_step
 - Preserve the top default and move bottom captions after table rows
@@ -943,10 +966,12 @@ expect(wide.x + wide.width).to_equal(table.x + table.width)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 116 lines folded for reproduction.
+Runnable source: 118 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should place captions from the inherited caption-side value")
 step("Trace implemented CSS properties through canonical rendering")
 val common = (
     "<style>html,body{margin:0;background:#fff}" +
@@ -1069,6 +1094,8 @@ expect(pixels[10 * 40 + 2]).to_equal(0xFF1D4ED8u32)
 
 #### should route grouped tbody rows through the table owner
 
+- should route grouped tbody rows through the table owner
+   - Artifact capture: after_step
 - Render fixed rows owned by a tbody group
    - Artifact capture: after_step
 - Expose grouped semantics and canonical Draw IR ownership
@@ -1089,18 +1116,20 @@ expect(pixels[10 * 40 + 2]).to_equal(0xFF1D4ED8u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should route grouped tbody rows through the table owner")
 step("Render fixed rows owned by a tbody group")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "table{table-layout:fixed;width:40px}" +
-    "caption{background:#ffff00}tbody{background:#eeeeee}" +
-    "tr{background:#dddddd}td{padding:2px;border:1px solid #000}" +
-    "#ga{background:#ff0000}#gb{background:#00ff00}" +
-    "#gc{background:#0000ff}#gd{background:#ff00ff}</style>" +
+    "caption{{background:#ffff00}}tbody{{background:#eeeeee}}" +
+    "tr{{background:#dddddd}}td{padding:2px;border:1px solid #000}" +
+    "#ga{{background:#ff0000}}#gb{{background:#00ff00}}" +
+    "#gc{{background:#0000ff}}#gd{{background:#ff00ff}}</style>" +
     "<table id='grouped'><caption id='gcap'>G</caption>" +
     "<tbody id='group'><tr id='grow1'>" +
     "<td id='ga'>A</td><td id='gb'>B</td></tr>" +
@@ -1157,6 +1186,8 @@ expect(pixels[40 * 48 + 22]).to_equal(0xFFFF00FFu32)
 
 #### should size explicit non-spanning columns in automatic layout
 
+- should size explicit non-spanning columns in automatic layout
+   - Artifact capture: after_step
 - Render an explicit-width table with automatic column layout
    - Artifact capture: after_step
 - Use one stable column plan for every row
@@ -1181,10 +1212,12 @@ expect(pixels[40 * 48 + 22]).to_equal(0xFFFF00FFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 136 lines folded for reproduction.
+Runnable source: 138 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should size explicit non-spanning columns in automatic layout")
 step("Render an explicit-width table with automatic column layout")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
@@ -1192,8 +1225,8 @@ val html = (
     "td{box-sizing:border-box;height:12px;padding:0}" +
     "#aa,#ac{width:50px}" +
     "#ab,#ad{width:10px}" +
-    "#aa{background:#ff0000}#ab{background:#00ff00}" +
-    "#ac{background:#0000ff}#ad{background:#ff00ff}</style>" +
+    "#aa{{background:#ff0000}}#ab{{background:#00ff00}}" +
+    "#ac{{background:#0000ff}}#ad{{background:#ff00ff}}</style>" +
     "<table id='auto'><tr id='ar1'>" +
     "<td id='aa'></td><td id='ab'></td></tr>" +
     "<tr id='ar2'><td id='ac'></td><td id='ad'></td></tr>" +
@@ -1327,6 +1360,8 @@ expect(pixels[25 * 88 + 2]).to_equal(0xFFFFFFFFu32)
 
 #### should preserve generic automatic layout when explicit columns overflow
 
+- should preserve generic automatic layout when explicit columns overflow
+   - Artifact capture: after_step
 - Render explicit automatic columns wider than their table
    - Artifact capture: after_step
 - Keep Web layout semantics without equal-width shrinking
@@ -1342,16 +1377,18 @@ expect(pixels[25 * 88 + 2]).to_equal(0xFFFFFFFFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve generic automatic layout when explicit columns overflow")
 step("Render explicit automatic columns wider than their table")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "table{width:80px}td{box-sizing:border-box;width:50px;" +
     "height:12px;padding:0}" +
-    "#oa{background:#ff0000}#ob{background:#00ff00}</style>" +
+    "#oa{{background:#ff0000}}#ob{{background:#00ff00}}</style>" +
     "<table id='overflow'><tr id='orow'>" +
     "<td id='oa'></td><td id='ob'></td></tr></table>"
 )
@@ -1392,6 +1429,8 @@ expect(pixels[2 * 88 + 52]).to_equal(0xFFFFFFFFu32)
 
 #### should preserve generic automatic layout for constrained cells
 
+- should preserve generic automatic layout for constrained cells
+   - Artifact capture: after_step
 - Render automatic cells with minimum and maximum widths
    - Artifact capture: after_step
 - Apply constraints before emitting canonical Draw IR geometry
@@ -1407,10 +1446,12 @@ expect(pixels[2 * 88 + 52]).to_equal(0xFFFFFFFFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve generic automatic layout for constrained cells")
 step("Render automatic cells with minimum and maximum widths")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
@@ -1460,6 +1501,8 @@ expect(pixels[2 * 88 + 32]).to_equal(0xFFFFFFFFu32)
 
 #### should include content box padding and borders in automatic columns
 
+- should include content box padding and borders in automatic columns
+   - Artifact capture: after_step
 - Render supported content-box automatic columns
    - Artifact capture: after_step
 - Include padding and borders in Web and Draw IR geometry
@@ -1476,10 +1519,12 @@ expect(pixels[2 * 88 + 32]).to_equal(0xFFFFFFFFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should include content box padding and borders in automatic columns")
 step("Render supported content-box automatic columns")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
@@ -1544,3 +1589,74 @@ expect(pixels[2 * 88 + 55]).to_equal(0xFF000000u32)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5980a1e72740d1e6db23dcfd9e7d393ee4bc538fa5acb0211d485fcabc3d9eb4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5980a1e72740d1e6db23dcfd9e7d393ee4bc538fa5acb0211d485fcabc3d9eb4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5980a1e72740d1e6db23dcfd9e7d393ee4bc538fa5acb0211d485fcabc3d9eb4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/table_formatting_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/table_formatting_spec.md (current)
+findings: 12 blockers: 1
+  narrative=100 structure=70 oracle=100
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/table_formatting_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/table_formatting_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:58:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should format caption rows cells and colspan through shared layout' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should format caption rows cells and colspan through shared layout' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:171:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve one-row two-cell collapse and fail closed otherwise' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:171:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should resolve one-row two-cell collapse and fail closed otherwise' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:482:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should separate fixed table cells with authored border spacing' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:482:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should separate fixed table cells with authored border spacing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:804:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep vertical-only spacing constraints inside the table' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:842:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should place captions from the inherited caption-side value' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/table_formatting_spec.spl:965:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route grouped tbody rows through the table owner' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

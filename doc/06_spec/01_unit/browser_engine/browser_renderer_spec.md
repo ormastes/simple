@@ -17,6 +17,11 @@
 
 #### bounds the direct-render node arena at its exact limit
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- bounds the direct-render node arena at its exact limit
 - Render a small document with exact and roomy node limits
    - Expected: simple_web_layout_debug_capped_node_count(html, 3) equals `3`
    - Expected: simple_web_layout_debug_capped_node_count(html, 100) equals `7`
@@ -25,10 +30,12 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("bounds the direct-render node arena at its exact limit")
 step("Render a small document with exact and roomy node limits")
 val html = "<div>one</div><p>two</p>"
 expect(simple_web_layout_debug_capped_node_count(html, 3)).to_equal(3)
@@ -39,18 +46,19 @@ expect(simple_web_layout_debug_capped_node_count(html, 100)).to_equal(7)
 
 #### rejects oversized direct-render HTML before parser allocation
 
+- rejects oversized direct-render HTML before parser allocation
 - Render the same document at and below its input byte envelope
-- html, html len
-- html, html len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("rejects oversized direct-render HTML before parser allocation")
 step("Render the same document at and below its input byte envelope")
 val html = "<div>one</div><p>two</p>"
 expect(simple_web_layout_debug_capped_input_node_count(
@@ -65,17 +73,19 @@ expect(simple_web_layout_debug_capped_input_node_count(
 
 #### keeps exact-envelope tag storms out of hosted Draw IR parsing
 
+- keeps exact-envelope tag storms out of hosted Draw IR parsing
 - Render tag storms at and beyond the hosted HTML envelope
-- oversized layout composition batches len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("keeps exact-envelope tag storms out of hosted Draw IR parsing")
 step("Render tag storms at and beyond the hosted HTML envelope")
 val exact_storm = "<".repeat(1048576)
 val oversized = "<".repeat(1048577)
@@ -95,9 +105,8 @@ expect(
 
 #### caps CSS rules across style blocks and preserves the valid prefix
 
+- caps CSS rules across style blocks and preserves the valid prefix
 - Render bounded CSS rules and malformed brace storms
-- "x" repeat
-- "x" repeat
    - Expected: open_pixels[0] equals `0xFF123456u32`
    - Expected: close_pixels[0] equals `0xFF123456u32`
 
@@ -105,15 +114,17 @@ expect(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("caps CSS rules across style blocks and preserves the valid prefix")
 step("Render bounded CSS rules and malformed brace storms")
 val html = "<style>.a{color:red}.b{color:green}</style><style>.c{color:blue}</style>"
-val open_storm = "<style>body{background-color:#123456}" +
+val open_storm = "<style>body{{background-color:#123456}}" +
     "x".repeat(20000) + "{".repeat(13000) + "</style><body></body>"
-val close_storm = "<style>body{background-color:#123456}" +
+val close_storm = "<style>body{{background-color:#123456}}" +
     "x".repeat(20000) + "}".repeat(13000) + "</style><body></body>"
 
 expect(simple_web_layout_debug_capped_css_rule_count(
@@ -147,30 +158,30 @@ expect(close_layout.composition.batches[0].commands[0].color).to_equal(
 
 #### bounds CSS variable expansion and selector lists
 
+- bounds CSS variable expansion and selector lists
 - Render variable, selector-list, and combinator storms
-- " unused{content:var
-- " never," repeat
--
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("bounds CSS variable expansion and selector lists")
 step("Render variable, selector-list, and combinator storms")
 val amplified = "<style>:root{--x:" + "a".repeat(4096) +
-    ";}body{background-color:#123456}" +
+    ";}body{{background-color:#123456}}" +
     ".unused{content:var(--x)}".repeat(300) +
     "</style><body></body>"
-val selector_storm = "<style>body{background-color:#123456}" +
+val selector_storm = "<style>body{{background-color:#123456}}" +
     ".never,".repeat(1000) +
-    "body{background-color:#abcdef}</style><body></body>"
-val combinator_storm = "<style>body{background-color:#123456}" +
+    "body{{background-color:#abcdef}}</style><body></body>"
+val combinator_storm = "<style>body{{background-color:#123456}}" +
     ("x>".repeat(300)) +
-    "body{background-color:#abcdef}</style><body></body>"
+    "body{{background-color:#abcdef}}</style><body></body>"
 
 expect(simple_web_layout_render_html_software_pixels(
     amplified, 4, 4
@@ -187,20 +198,21 @@ expect(simple_web_layout_render_html_software_pixels(
 
 #### admits exactly 256 declarations and rejects the next
 
+- admits exactly 256 declarations and rejects the next
 - Render styles at and beyond the declaration limit
-- "unused:value;" repeat
-- "unused:value;" repeat
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("admits exactly 256 declarations and rejects the next")
 step("Render styles at and beyond the declaration limit")
-val base = "<style>body{background-color:#123456}body{"
+val base = "<style>body{{background-color:#123456}}body{"
 val exact = base + "background-color:#abcdef;" +
     "unused:value;".repeat(255) + "}</style><body></body>"
 val over = base + "background-color:#abcdef;" +
@@ -218,8 +230,8 @@ expect(simple_web_layout_render_html_software_pixels(
 
 #### captures source HTML and visible text before pixel evidence
 
+- captures source HTML and visible text before pixel evidence
 - Render the page and inspect its HTML capture before pixels
-- var renderer = BrowserRenderer create
    - Expected: result.ok is true
    - Expected: result.has_html_capture() is true
    - Expected: result.title equals `Expect Draw Web`
@@ -229,10 +241,12 @@ expect(simple_web_layout_render_html_software_pixels(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("captures source HTML and visible text before pixel evidence")
 step("Render the page and inspect its HTML capture before pixels")
 val html = _expect_draw_web_html()
 var renderer = BrowserRenderer.create(WEB_W, WEB_H)
@@ -251,8 +265,8 @@ expect(result.pixel_data.len()).to_equal(WEB_W * WEB_H)
 
 #### exposes CSS-backed scene evidence after HTML assertions
 
+- exposes CSS-backed scene evidence after HTML assertions
 - Render the styled page and inspect its scene commands
-- var renderer = BrowserRenderer create
    - Expected: scene.width equals `WEB_W`
    - Expected: scene.height equals `WEB_H`
    - Expected: scene.commands.len() equals `1`
@@ -263,10 +277,12 @@ expect(result.pixel_data.len()).to_equal(WEB_W * WEB_H)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("exposes CSS-backed scene evidence after HTML assertions")
 step("Render the styled page and inspect its scene commands")
 val html = _expect_draw_web_html()
 var renderer = BrowserRenderer.create(WEB_W, WEB_H)
@@ -286,6 +302,7 @@ expect(scene.commands[0].color).to_equal(0xFF123456u32)
 
 #### keeps the viewport helper on the same HTML capture contract
 
+- keeps the viewport helper on the same HTML capture contract
 - Render through the viewport helper and inspect its HTML capture
    - Expected: result.has_html_capture() is true
    - Expected: result.pixel_data.len() equals `WEB_W * WEB_H`
@@ -295,10 +312,12 @@ expect(scene.commands[0].color).to_equal(0xFF123456u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("keeps the viewport helper on the same HTML capture contract")
 step("Render through the viewport helper and inspect its HTML capture")
 val html = _expect_draw_web_html()
 val result = render_html_to_pixels_with_viewport(html, WEB_W, WEB_H)
@@ -313,6 +332,7 @@ expect(result.byte_count()).to_equal((WEB_W * WEB_H * 4).to_i64())
 
 #### keeps widget class paint flags active through the pure Simple renderer
 
+- keeps widget class paint flags active through the pure Simple renderer
 - Render focused widget classes through the pure Simple renderer
    - Expected: pixels.len() equals `WEB_W * WEB_H`
    - Expected: pixels[0] equals `0xFF0066CCu32`
@@ -322,10 +342,12 @@ expect(result.byte_count()).to_equal((WEB_W * WEB_H * 4).to_i64())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-BROWSER_ENGINE
+step("keeps widget class paint flags active through the pure Simple renderer")
 step("Render focused widget classes through the pure Simple renderer")
 val html = "<html><body><SECTION class=\"widget-panel focused\"><BUTTON class=\"widget-button\">Go</BUTTON  ><IMG class=\"widget-image icon-image\" /></SECTION  ></body></html>"
 val pixels = simple_web_layout_render_html_software_pixels(html, WEB_W, WEB_H)
@@ -344,7 +366,7 @@ expect(pixels[(WEB_H - 1) * WEB_W]).to_equal(0xFF0066CCu32)
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/browser_engine/browser_renderer_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -364,3 +386,54 @@ Tests covering BrowserRenderer HTML/CSS expect-draw evidence.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-BROWSER_ENGINE`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9909641d079c0b271ba4c20d528483fde34ab71aa53dde1e5086319326ab0983`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9909641d079c0b271ba4c20d528483fde34ab71aa53dde1e5086319326ab0983`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9909641d079c0b271ba4c20d528483fde34ab71aa53dde1e5086319326ab0983`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/browser_engine/browser_renderer_spec.spl
+mirror: doc/06_spec/01_unit/browser_engine/browser_renderer_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/browser_engine/browser_renderer_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/browser_engine/browser_renderer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/browser_engine/browser_renderer_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/browser_engine/browser_renderer_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bounds the direct-render node arena at its exact limit' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/browser_engine/browser_renderer_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects oversized direct-render HTML before parser allocation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/browser_engine/browser_renderer_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps exact-envelope tag storms out of hosted Draw IR parsing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

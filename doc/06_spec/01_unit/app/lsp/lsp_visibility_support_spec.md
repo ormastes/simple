@@ -2,29 +2,6 @@
 
 > Validates that the LSP server correctly exposes visibility metadata (public, boundary, private) for symbols across hover, completion, document symbols, workspace symbols, and semantic tokens.
 
-<!-- sdn-diagram:id=lsp_visibility_support_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lsp_visibility_support_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lsp_visibility_support_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lsp_visibility_support_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 44 | 44 | 0 | 0 |
@@ -49,7 +26,7 @@ Validates that the LSP server correctly exposes visibility metadata (public, bou
 | Design | doc/05_design/simple_lsp_visibility_support.md |
 | Research | doc/01_research/local/simple_lsp_visibility_support.md |
 | Source | `test/01_unit/app/lsp/lsp_visibility_support_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -75,36 +52,6 @@ document symbols, workspace symbols, and semantic tokens.
 
 #### distinguishes public, boundary, and private display levels
 
-1. check
-2. check
-3. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# The three canonical display level strings
-val public_level = "public"
-val boundary_level = "boundary"
-val private_level = "private"
-
-check(public_level != boundary_level)
-check(boundary_level != private_level)
-check(public_level != private_level)
-```
-
-</details>
-
-#### ranks public before boundary before private
-
-1. check
-2. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -112,6 +59,31 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-LSPVIS-001
+# @req REQ-LSPVIS-002
+# @req REQ-LSPVIS-003
+# @req REQ-LSPVIS-004
+# @req REQ-LSPVIS-006
+# @req REQ-LSPVIS-007
+# @req REQ-LSPVIS-008
+```
+
+</details>
+
+#### ranks public before boundary before private
+
+- ranks public before boundary before private
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("ranks public before boundary before private")
 # visibility_rank: public=0, boundary=10, private=20
 val public_rank = 0
 val boundary_rank = 10
@@ -125,20 +97,18 @@ check(boundary_rank < private_rank)
 
 #### treats public and boundary as reachable, private as unreachable
 
-1. check
-2. check
-3. check
-4. check
-5. check
+- treats public and boundary as reachable, private as unreachable
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("treats public and boundary as reachable, private as unreachable")
 check("public" != "private")
 check("boundary" != "private")
 # Private symbols are not reachable from external scopes
@@ -157,19 +127,19 @@ check(not is_reachable_private)
 
 #### supports public, internal, package, and private declared levels
 
-1. check
-2. check
-3. check
-4. check
+- supports public, internal, package, and private declared levels
+   - Expected: levels.len() equals `4`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("supports public, internal, package, and private declared levels")
 val levels = ["public", "internal", "package", "private"]
 
 expect(levels.len()).to_equal(4)
@@ -183,13 +153,19 @@ check(levels[3] == "private")
 
 #### maps declared public to display public
 
+- maps declared public to display public
+   - Expected: display equals `public`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("maps declared public to display public")
 val declared = "public"
 val display = if declared == "public": "public" else: "boundary"
 expect(display).to_equal("public")
@@ -199,13 +175,19 @@ expect(display).to_equal("public")
 
 #### maps declared private to display private
 
+- maps declared private to display private
+   - Expected: display equals `private`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("maps declared private to display private")
 val declared = "private"
 val display = if declared == "private": "private" else: "boundary"
 expect(display).to_equal("private")
@@ -215,13 +197,20 @@ expect(display).to_equal("private")
 
 #### maps declared internal and package to display boundary
 
+- maps declared internal and package to display boundary
+   - Expected: internal_display equals `boundary`
+   - Expected: package_display equals `boundary`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("maps declared internal and package to display boundary")
 val internal_display = "boundary"
 val package_display = "boundary"
 expect(internal_display).to_equal("boundary")
@@ -234,18 +223,18 @@ expect(package_display).to_equal("boundary")
 
 #### formats public exported symbol with provenance
 
-1. detail = display + "
-2. check
-3. check
+- formats public exported symbol with provenance
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats public exported symbol with provenance")
 val display = "public"
 val boundary_module = "std.net.http"
 val exported_by = "src/lib/nogc_sync_mut/net/__init__.spl"
@@ -261,18 +250,19 @@ check(detail.contains("exported from std.net.http"))
 
 #### formats boundary symbol with boundary provenance
 
-1. detail = display + "
-2. detail = display + "
+- formats boundary symbol with boundary provenance
    - Expected: detail equals `boundary (boundary: std.net.http)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats boundary symbol with boundary provenance")
 val display = "boundary"
 val boundary_module = "std.net.http"
 val exported_by = ""
@@ -288,18 +278,19 @@ expect(detail).to_equal("boundary (boundary: std.net.http)")
 
 #### formats private symbol without extra provenance
 
-1. detail = display + "
-2. detail = display + "
+- formats private symbol without extra provenance
    - Expected: detail equals `private`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats private symbol without extra provenance")
 val display = "private"
 val boundary_module = "std.net.http"
 val exported_by = ""
@@ -317,16 +308,18 @@ expect(detail).to_equal("private")
 
 #### includes reachable public symbols in completions
 
-1. check
+- includes reachable public symbols in completions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes reachable public symbols in completions")
 val reachable = true
 check(reachable)
 ```
@@ -335,16 +328,18 @@ check(reachable)
 
 #### includes reachable boundary symbols in completions
 
-1. check
+- includes reachable boundary symbols in completions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes reachable boundary symbols in completions")
 val reachable = true
 check(reachable)
 ```
@@ -353,16 +348,18 @@ check(reachable)
 
 #### excludes unreachable private symbols from completions
 
-1. check
+- excludes unreachable private symbols from completions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("excludes unreachable private symbols from completions")
 val reachable = false
 check(not reachable)
 ```
@@ -371,16 +368,18 @@ check(not reachable)
 
 #### includes reachable symbols in workspace search
 
-1. check
+- includes reachable symbols in workspace search
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes reachable symbols in workspace search")
 val reachable = true
 check(reachable)
 ```
@@ -389,16 +388,18 @@ check(reachable)
 
 #### excludes unreachable symbols from workspace search
 
-1. check
+- excludes unreachable symbols from workspace search
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("excludes unreachable symbols from workspace search")
 val reachable = false
 check(not reachable)
 ```
@@ -409,16 +410,18 @@ check(not reachable)
 
 #### ranks exact match above prefix match
 
-1. check
+- ranks exact match above prefix match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ranks exact match above prefix match")
 # Simulates rank_workspace_symbol_candidate scoring
 var exact_score = 1000 - 300
 var prefix_score = 1000 - 220
@@ -429,16 +432,18 @@ check(exact_score < prefix_score)
 
 #### ranks prefix match above substring match
 
-1. check
+- ranks prefix match above substring match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ranks prefix match above substring match")
 var prefix_score = 1000 - 220
 var substring_score = 1000 - 120
 check(prefix_score < substring_score)
@@ -448,16 +453,18 @@ check(prefix_score < substring_score)
 
 #### prefers public over boundary when match quality ties
 
-1. check
+- prefers public over boundary when match quality ties
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("prefers public over boundary when match quality ties")
 val base = 1000 - 220
 val public_score = base + 0
 val boundary_score = base + 10
@@ -468,16 +475,18 @@ check(public_score < boundary_score)
 
 #### prefers boundary over private when match quality ties
 
-1. check
+- prefers boundary over private when match quality ties
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("prefers boundary over private when match quality ties")
 val base = 1000 - 220
 val boundary_score = base + 10
 val private_score = base + 20
@@ -490,13 +499,19 @@ check(boundary_score < private_score)
 
 #### assigns correct bitmask for public visibility
 
+- assigns correct bitmask for public visibility
+   - Expected: modifier equals `512`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("assigns correct bitmask for public visibility")
 val modifier = 512
 expect(modifier).to_equal(512)
 ```
@@ -505,13 +520,19 @@ expect(modifier).to_equal(512)
 
 #### assigns correct bitmask for boundary visibility
 
+- assigns correct bitmask for boundary visibility
+   - Expected: modifier equals `1024`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("assigns correct bitmask for boundary visibility")
 val modifier = 1024
 expect(modifier).to_equal(1024)
 ```
@@ -520,13 +541,19 @@ expect(modifier).to_equal(1024)
 
 #### assigns correct bitmask for private visibility
 
+- assigns correct bitmask for private visibility
+   - Expected: modifier equals `2048`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("assigns correct bitmask for private visibility")
 val modifier = 2048
 expect(modifier).to_equal(2048)
 ```
@@ -535,18 +562,18 @@ expect(modifier).to_equal(2048)
 
 #### uses disjoint bitmask values for all three levels
 
-1. check
-2. check
-3. check
+- uses disjoint bitmask values for all three levels
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("uses disjoint bitmask values for all three levels")
 val public_mod = 512
 val boundary_mod = 1024
 val private_mod = 2048
@@ -560,7 +587,7 @@ check(public_mod != private_mod)
 
 #### maps display string to correct modifier
 
-1. fn mod for
+- maps display string to correct modifier
    - Expected: mod_for("public") equals `512`
    - Expected: mod_for("boundary") equals `1024`
    - Expected: mod_for("private") equals `2048`
@@ -569,10 +596,12 @@ check(public_mod != private_mod)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("maps display string to correct modifier")
 # visibility_modifier_for_display logic
 fn mod_for(display: text) -> i64:
     if display == "public":
@@ -591,17 +620,18 @@ expect(mod_for("private")).to_equal(2048)
 
 #### includes visibility display in hover prose
 
-1. lines = lines push
-2. check
+- includes visibility display in hover prose
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes visibility display in hover prose")
 var lines: [text] = []
 lines = lines.push("Visibility: **public**")
 val prose = lines.join("\n")
@@ -612,18 +642,18 @@ check(prose.contains("Visibility: **public**"))
 
 #### includes boundary module when present
 
-1. lines = lines push
-2. lines = lines push
-3. check
+- includes boundary module when present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes boundary module when present")
 var lines: [text] = []
 lines = lines.push("Visibility: **boundary**")
 lines = lines.push("Boundary: `std.net.http` (boundary)")
@@ -635,18 +665,18 @@ check(prose.contains("Boundary: `std.net.http`"))
 
 #### includes exported-by provenance when present
 
-1. lines = lines push
-2. lines = lines push
-3. check
+- includes exported-by provenance when present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes exported-by provenance when present")
 var lines: [text] = []
 lines = lines.push("Visibility: **public**")
 lines = lines.push("Exported by: `src/lib/nogc_sync_mut/net/__init__.spl`")
@@ -658,17 +688,18 @@ check(prose.contains("Exported by:"))
 
 #### shows visibility for unreachable symbols without blocking navigation
 
-1. lines = lines push
-2. check
+- shows visibility for unreachable symbols without blocking navigation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("shows visibility for unreachable symbols without blocking navigation")
 # REQ-LSPVIS-005: hover always shows visibility, definition always navigates
 val display = "private"
 val reachable = false
@@ -685,16 +716,18 @@ check(prose.contains("Visibility: **private**"))
 
 #### detects client visibility support from experimental field
 
-1. check
+- detects client visibility support from experimental field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects client visibility support from experimental field")
 val experimental = "\"simpleVisibility\":true"
 val supports = experimental.contains("simpleVisibility")
 check(supports)
@@ -704,16 +737,18 @@ check(supports)
 
 #### returns false for empty experimental field
 
-1. check
+- returns false for empty experimental field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns false for empty experimental field")
 val experimental = ""
 val supports = experimental.contains("simpleVisibility")
 check(not supports)
@@ -723,16 +758,18 @@ check(not supports)
 
 #### returns false for unrelated experimental capabilities
 
-1. check
+- returns false for unrelated experimental capabilities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns false for unrelated experimental capabilities")
 val experimental = "\"otherFeature\":true"
 val supports = experimental.contains("simpleVisibility")
 check(not supports)
@@ -742,16 +779,18 @@ check(not supports)
 
 #### server advertises simpleVisibilityProvider in initialize result
 
-1. check
+- server advertises simpleVisibilityProvider in initialize result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("server advertises simpleVisibilityProvider in initialize result")
 val server_experimental = "\"simpleVisibilityProvider\":true"
 check(server_experimental.contains("simpleVisibilityProvider"))
 ```
@@ -762,13 +801,19 @@ check(server_experimental.contains("simpleVisibilityProvider"))
 
 #### recognizes open boundary kind
 
+- recognizes open boundary kind
+   - Expected: kind equals `open`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes open boundary kind")
 val kind = "open"
 expect(kind).to_equal("open")
 ```
@@ -777,13 +822,19 @@ expect(kind).to_equal("open")
 
 #### recognizes boundary kind
 
+- recognizes boundary kind
+   - Expected: kind equals `boundary`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes boundary kind")
 val kind = "boundary"
 expect(kind).to_equal("boundary")
 ```
@@ -792,13 +843,19 @@ expect(kind).to_equal("boundary")
 
 #### recognizes bypass boundary kind
 
+- recognizes bypass boundary kind
+   - Expected: kind equals `bypass`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes bypass boundary kind")
 val kind = "bypass"
 expect(kind).to_equal("bypass")
 ```
@@ -809,16 +866,18 @@ expect(kind).to_equal("bypass")
 
 #### includes required display field
 
-1. check
+- includes required display field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes required display field")
 val payload = "{\"display\":\"public\",\"reachable\":true,\"boundaryKind\":\"open\",\"declared\":\"public\"}"
 check(payload.contains("\"display\":\"public\""))
 ```
@@ -827,16 +886,18 @@ check(payload.contains("\"display\":\"public\""))
 
 #### includes required reachable field
 
-1. check
+- includes required reachable field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes required reachable field")
 val payload = "{\"display\":\"public\",\"reachable\":true,\"boundaryKind\":\"open\",\"declared\":\"public\"}"
 check(payload.contains("\"reachable\":true"))
 ```
@@ -845,16 +906,18 @@ check(payload.contains("\"reachable\":true"))
 
 #### includes required boundaryKind field
 
-1. check
+- includes required boundaryKind field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes required boundaryKind field")
 val payload = "{\"display\":\"public\",\"reachable\":true,\"boundaryKind\":\"open\",\"declared\":\"public\"}"
 check(payload.contains("\"boundaryKind\":\"open\""))
 ```
@@ -863,16 +926,18 @@ check(payload.contains("\"boundaryKind\":\"open\""))
 
 #### includes required declared field
 
-1. check
+- includes required declared field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes required declared field")
 val payload = "{\"display\":\"public\",\"reachable\":true,\"boundaryKind\":\"open\",\"declared\":\"public\"}"
 check(payload.contains("\"declared\":\"public\""))
 ```
@@ -881,16 +946,18 @@ check(payload.contains("\"declared\":\"public\""))
 
 #### includes optional boundaryModule when present
 
-1. check
+- includes optional boundaryModule when present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes optional boundaryModule when present")
 val payload = "{\"display\":\"boundary\",\"reachable\":true,\"boundaryKind\":\"boundary\",\"declared\":\"private\",\"boundaryModule\":\"lib.nogc_sync_mut.lsp\"}"
 check(payload.contains("\"boundaryModule\":\"lib.nogc_sync_mut.lsp\""))
 ```
@@ -899,16 +966,18 @@ check(payload.contains("\"boundaryModule\":\"lib.nogc_sync_mut.lsp\""))
 
 #### includes optional exportedBy when present
 
-1. check
+- includes optional exportedBy when present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes optional exportedBy when present")
 val payload = "{\"display\":\"public\",\"reachable\":true,\"boundaryKind\":\"boundary\",\"declared\":\"public\",\"exportedBy\":\"src/lib/nogc_sync_mut/lsp/__init__.spl\"}"
 check(payload.contains("\"exportedBy\":"))
 ```
@@ -917,16 +986,18 @@ check(payload.contains("\"exportedBy\":"))
 
 #### includes optional friendPackages as array
 
-1. check
+- includes optional friendPackages as array
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes optional friendPackages as array")
 val payload = "{\"display\":\"boundary\",\"reachable\":false,\"boundaryKind\":\"boundary\",\"declared\":\"internal\",\"friendPackages\":[\"net\",\"http\"]}"
 check(payload.contains("\"friendPackages\":["))
 ```
@@ -935,30 +1006,7 @@ check(payload.contains("\"friendPackages\":["))
 
 #### includes optional capsuleName for MDSOC symbols
 
-1. check
-2. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val payload = "{\"display\":\"boundary\",\"reachable\":true,\"boundaryKind\":\"boundary\",\"declared\":\"private\",\"capsuleName\":\"mdsoc.weaver\",\"capsuleVisibility\":\"internal\"}"
-check(payload.contains("\"capsuleName\":\"mdsoc.weaver\""))
-check(payload.contains("\"capsuleVisibility\":\"internal\""))
-```
-
-</details>
-
-#### omits optional fields when not applicable
-
-1. check
-2. check
-3. check
-4. check
+- includes optional capsuleName for MDSOC symbols
 
 
 <details>
@@ -968,6 +1016,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("includes optional capsuleName for MDSOC symbols")
+val payload = "{\"display\":\"boundary\",\"reachable\":true,\"boundaryKind\":\"boundary\",\"declared\":\"private\",\"capsuleName\":\"mdsoc.weaver\",\"capsuleVisibility\":\"internal\"}"
+check(payload.contains("\"capsuleName\":\"mdsoc.weaver\""))
+check(payload.contains("\"capsuleVisibility\":\"internal\""))
+```
+
+</details>
+
+#### omits optional fields when not applicable
+
+- omits optional fields when not applicable
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("omits optional fields when not applicable")
 val payload = "{\"display\":\"private\",\"reachable\":false,\"boundaryKind\":\"open\",\"declared\":\"private\"}"
 check(not payload.contains("\"boundaryModule\""))
 check(not payload.contains("\"exportedBy\""))
@@ -990,9 +1061,79 @@ check(not payload.contains("\"capsuleName\""))
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/simple_lsp_visibility_support.md](doc/02_requirements/feature/simple_lsp_visibility_support.md)
-- **Design:** [doc/05_design/simple_lsp_visibility_support.md](doc/05_design/simple_lsp_visibility_support.md)
-- **Research:** [doc/01_research/local/simple_lsp_visibility_support.md](doc/01_research/local/simple_lsp_visibility_support.md)
+- **Requirements:** `doc/02_requirements/feature/simple_lsp_visibility_support.md`
+- **Design:** `doc/05_design/simple_lsp_visibility_support.md`
+- **Research:** `doc/01_research/local/simple_lsp_visibility_support.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-LSPVIS-001`
+- `REQ-LSPVIS-001:`
+- `REQ-LSPVIS-002:`
+- `REQ-LSPVIS-003:`
+- `REQ-LSPVIS-004:`
+- `REQ-LSPVIS-005:`
+- `REQ-LSPVIS-006:`
+- `REQ-LSPVIS-007:`
+- `REQ-LSPVIS-008:`
+- `REQ-LSPVIS-002`
+- `REQ-LSPVIS-003`
+- `REQ-LSPVIS-004`
+- `REQ-LSPVIS-006`
+- `REQ-LSPVIS-007`
+- `REQ-LSPVIS-008`
+- `REQ-SSPEC-APP`
+- `REQ-LSPVIS-005)`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a8b93ddf1e6d76e4f12c01a7743814a763b8a0fddf93e5ef3736cc62b8dd4de6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a8b93ddf1e6d76e4f12c01a7743814a763b8a0fddf93e5ef3736cc62b8dd4de6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a8b93ddf1e6d76e4f12c01a7743814a763b8a0fddf93e5ef3736cc62b8dd4de6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+
+SSpec documentization score: 85/100
+source: test/01_unit/app/lsp/lsp_visibility_support_spec.spl
+mirror: doc/06_spec/01_unit/app/lsp/lsp_visibility_support_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=90 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/lsp/lsp_visibility_support_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/lsp/lsp_visibility_support_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/lsp/lsp_visibility_support_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/lsp/lsp_visibility_support_spec.spl:61:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'distinguishes public, boundary, and private display levels' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/app/lsp/lsp_visibility_support_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ranks public before boundary before private' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lsp/lsp_visibility_support_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'treats public and boundary as reachable, private as unreachable' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lsp/lsp_visibility_support_spec.spl:120:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports public, internal, package, and private declared levels' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

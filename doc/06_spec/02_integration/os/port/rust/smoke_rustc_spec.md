@@ -1,29 +1,6 @@
 # Smoke Rustc Specification
 
-> _Env-gated checks for a working Rust cross-toolchain targeting x86_64-unknown-simpleos._
-
-<!-- sdn-diagram:id=smoke_rustc_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=smoke_rustc_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-smoke_rustc_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=smoke_rustc_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SimpleOS Rust cross-compile smoke.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -37,51 +14,72 @@ smoke_rustc_spec -> std
 ## Scenarios
 
 ### SimpleOS Rust cross-compile smoke
-_Env-gated checks for a working Rust cross-toolchain targeting x86_64-unknown-simpleos._
 
 #### target JSON exists at src/os/toolchain/rust/x86_64-unknown-simpleos.json
+
+- target JSON exists at src/os/toolchain/rust/x86_64-unknown-simpleos.json
+   - Expected: fs.file_exists(TARGET_JSON) is true
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-fs.exists(TARGET_JSON).to_equal(true)
+# @req REQ-SSPEC-INTEGRATION
+step("target JSON exists at src/os/toolchain/rust/x86_64-unknown-simpleos.json")
+"""Always passes when repo is intact — verifies the target spec file is present."""
+expect(fs.file_exists(TARGET_JSON)).to_equal(true)
 ```
 
 </details>
 
 #### rustc --print target-list contains simpleos when using forked rustc
 
+- rustc --print target-list contains simpleos when using forked rustc
+   - Expected: res.exit_code equals `0`
+   - Expected: res.stdout contains `simpleos`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("rustc --print target-list contains simpleos when using forked rustc")
+"""Skip when RUST_SRC is unset (system nightly does not know the custom target)."""
 val rs = rust_src()
 if rs == "":
     return "skip: RUST_SRC not set — forked rustc not configured"
 val rustc = "{rs}/bin/rustc"
-val (out, err, code) = process.run(rustc, ["--print", "target-list"])
-code.to_equal(0)
-out.contains("simpleos").to_equal(true)
+val res = process.run(rustc, ["--print", "target-list"])
+expect(res.exit_code).to_equal(0)
+expect(res.stdout.contains("simpleos")).to_equal(true)
 ```
 
 </details>
 
 #### cargo +nightly build --target x86_64-unknown-simpleos exits 0
 
+- cargo +nightly build --target x86_64-unknown-simpleos exits 0
+   - Expected: res.exit_code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("cargo +nightly build --target x86_64-unknown-simpleos exits 0")
+"""Skip when RUST_BUILD_DRY_RUN=1 or SIMPLEOS_SYSROOT is unset."""
 if rust_gate() == false:
     return "skip: no RUST_SRC and no system nightly rustc"
 val dry = rt_env_get("RUST_BUILD_DRY_RUN")
@@ -92,7 +90,7 @@ if sysroot == nil:
     return "skip: SIMPLEOS_SYSROOT not set"
 if sysroot == "":
     return "skip: SIMPLEOS_SYSROOT not set"
-val (out, err, code) = process.run("cargo", [
+val res = process.run("cargo", [
     "+nightly",
     "build",
     "--release",
@@ -101,20 +99,27 @@ val (out, err, code) = process.run("cargo", [
     "-Z",
     "build-std=core,alloc,compiler_builtins",
 ], HELLO_RS_DIR)
-code.to_equal(0)
+expect(res.exit_code).to_equal(0)
 ```
 
 </details>
 
 #### output binary exists after build
 
+- output binary exists after build
+   - Expected: fs.file_exists(HELLO_RS_OUT) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("output binary exists after build")
+"""Skip when RUST_BUILD_DRY_RUN=1 or SIMPLEOS_SYSROOT is unset."""
 if rust_gate() == false:
     return "skip: no RUST_SRC and no system nightly rustc"
 val dry = rt_env_get("RUST_BUILD_DRY_RUN")
@@ -125,7 +130,7 @@ if sysroot == nil:
     return "skip: SIMPLEOS_SYSROOT not set"
 if sysroot == "":
     return "skip: SIMPLEOS_SYSROOT not set"
-fs.exists(HELLO_RS_OUT).to_equal(true)
+expect(fs.file_exists(HELLO_RS_OUT)).to_equal(true)
 ```
 
 </details>
@@ -137,12 +142,12 @@ fs.exists(HELLO_RS_OUT).to_equal(true)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/port/rust/smoke_rustc_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS Rust cross-compile smoke.
 - SimpleOS Rust cross-compile smoke
 
 ## Scenario Summary
@@ -157,3 +162,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4c844c1ec3162cce039cff4f9ab73d1d3e38269333e8e8c655b7621ae8ffa454`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4c844c1ec3162cce039cff4f9ab73d1d3e38269333e8e8c655b7621ae8ffa454`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4c844c1ec3162cce039cff4f9ab73d1d3e38269333e8e8c655b7621ae8ffa454`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/02_integration/os/port/rust/smoke_rustc_spec.spl
+mirror: doc/06_spec/02_integration/os/port/rust/smoke_rustc_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/os/port/rust/smoke_rustc_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/os/port/rust/smoke_rustc_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/os/port/rust/smoke_rustc_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/os/port/rust/smoke_rustc_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'target JSON exists at src/os/toolchain/rust/x86_64-unknown-simpleos.json' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/os/port/rust/smoke_rustc_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rustc --print target-list contains simpleos when using forked rustc' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/os/port/rust/smoke_rustc_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'cargo +nightly build --target x86_64-unknown-simpleos exits 0' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

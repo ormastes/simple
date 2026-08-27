@@ -2,30 +2,6 @@
 
 > val output = "/tmp/test_hello.o"
 
-<!-- sdn-diagram:id=native_backend_e2e_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=native_backend_e2e_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-native_backend_e2e_spec -> app
-native_backend_e2e_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=native_backend_e2e_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -44,7 +20,7 @@ val output = "/tmp/test_hello.o"
 | Category | Compiler |
 | Status | Active |
 | Source | `test/02_integration/compiler/native_backend_e2e_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 val output = "/tmp/test_hello.o"
@@ -55,6 +31,7 @@ val output = "/tmp/test_hello.o"
                 file_delete(output)
 
         slow_it "produces valid ELF object":
+            step("produces valid ELF object")
             val source = """
             fn add(a: i64, b: i64) -> i64:
                 a + b
@@ -74,18 +51,19 @@ val output = "/tmp/test_hello.o"
 
 #### compiles hello world _(slow)_
 
-1. fn main
+- compiles hello world
    - Expected: success is true
-2. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles hello world")
 val source = """
 fn main():
     print "Hello, World!"
@@ -112,23 +90,23 @@ if file_exists(output):
 
 #### produces valid ELF object _(slow)_
 
-1. fn add
-2. fn main
+- produces valid ELF object
    - Expected: success is true
    - Expected: header[0] equals `0x7f`
    - Expected: header[1] equals `0x45`
    - Expected: header[2] equals `0x4c`
    - Expected: header[3] equals `0x46`
-3. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("produces valid ELF object")
 val source = """
 fn add(a: i64, b: i64) -> i64:
     a + b
@@ -168,21 +146,19 @@ if file_exists(output):
 
 #### respects layout phase attributes _(slow)_
 
-1. fn init system
-2. fn error handler
-3. fn main
-4. init system
+- respects layout phase attributes
    - Expected: success is true
-5. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("respects layout phase attributes")
 val source = """
 @layout(phase="startup")
 fn init_system():
@@ -221,20 +197,19 @@ if file_exists(output):
 
 #### orders hot functions before cold functions _(slow)_
 
-1. fn handle error
-2. fn process item
-3. fn main
+- orders hot functions before cold functions
    - Expected: success is true
-4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("orders hot functions before cold functions")
 val source = """
 # Cold function (error handling)
 fn handle_error():
@@ -278,24 +253,19 @@ if file_exists(output):
 
 #### adds reasonable padding for alignment _(slow)_
 
-1. fn func1
-2. fn func2
-3. fn func3
-4. fn main
-5. func1
-6. func2
-7. func3
+- adds reasonable padding for alignment
    - Expected: success is true
-8. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("adds reasonable padding for alignment")
 val source = """
 fn func1(): pass
 fn func2(): pass
@@ -333,24 +303,19 @@ if file_exists(output):
 
 #### handles multiple phase groups efficiently _(slow)_
 
-1. fn startup1
-2. fn startup2
-3. fn steady1
-4. fn cold1
-5. fn main
-6. startup1
-7. steady1
+- handles multiple phase groups efficiently
    - Expected: success is true
-8. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles multiple phase groups efficiently")
 val source = """
 @layout(phase="startup")
 fn startup1(): pass
@@ -396,22 +361,19 @@ if file_exists(output):
 
 #### exports all function symbols _(slow)_
 
-1. fn public func
-2. fn another func
-3. fn main
-4. public func
-5. another func
+- exports all function symbols
    - Expected: success is true
-6. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("exports all function symbols")
 val source = """
 fn public_func():
     print "Public"
@@ -451,20 +413,20 @@ if file_exists(output):
 
 #### generates correct relocations for function calls _(slow)_
 
-1. fn helper
-2. fn main
+- generates correct relocations for function calls
    - Expected: success is true
    - Expected: file_exists(output) is true
-3. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates correct relocations for function calls")
 val source = """
 fn helper() -> i64:
     return 42
@@ -500,19 +462,19 @@ if file_exists(output):
 
 #### handles recursive function calls _(slow)_
 
-1. fn factorial
-2. fn main
+- handles recursive function calls
    - Expected: success is true
-3. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles recursive function calls")
 val source = """
 fn factorial(n: i64) -> i64:
     if n <= 1:
@@ -545,20 +507,19 @@ if file_exists(output):
 
 #### handles mutually recursive functions _(slow)_
 
-1. fn is even
-2. fn is odd
-3. fn main
+- handles mutually recursive functions
    - Expected: success is true
-4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles mutually recursive functions")
 val source = """
 fn is_even(n: i64) -> bool:
     if n == 0:
@@ -598,18 +559,19 @@ if file_exists(output):
 
 #### generates x86_64 code _(slow)_
 
-1. fn main
+- generates x86_64 code
    - Expected: success is true
-2. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates x86_64 code")
 val source = """
 fn main():
     print "x86_64 test"
@@ -642,8 +604,7 @@ if file_exists(output):
 
 #### handles compilation errors gracefully _(slow)_
 
-1. fn main
-2. file delete
+- handles compilation errors gracefully
    - Expected: success is false
    - Expected: file_exists(output) is false
 
@@ -651,10 +612,12 @@ if file_exists(output):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles compilation errors gracefully")
 val source = """
 fn main():
     this is not valid syntax!
@@ -688,3 +651,51 @@ expect(file_exists(output)).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `60da89983da6aa6b8670dda64ef48420ed430d3eee971e73b6fdef6fdaeda298`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `60da89983da6aa6b8670dda64ef48420ed430d3eee971e73b6fdef6fdaeda298`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `60da89983da6aa6b8670dda64ef48420ed430d3eee971e73b6fdef6fdaeda298`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/compiler/native_backend_e2e_spec.spl
+mirror: doc/06_spec/02_integration/compiler/native_backend_e2e_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/compiler/native_backend_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/compiler/native_backend_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/compiler/native_backend_e2e_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles hello world' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/native_backend_e2e_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces valid ELF object' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/native_backend_e2e_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'respects layout phase attributes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

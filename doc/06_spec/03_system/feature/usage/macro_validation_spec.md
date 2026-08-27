@@ -1,30 +1,5 @@
 # Macro Validation Specification
 
-> 1. macro greet
-
-<!-- sdn-diagram:id=macro_validation_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=macro_validation_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-macro_validation_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=macro_validation_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -42,7 +17,7 @@ macro_validation_spec
 | Category | Infrastructure \| Macros |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/macro_validation_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Error Codes
@@ -58,17 +33,22 @@ macro_validation_spec
 
 #### succeeds when macro is defined before use
 
-1. macro greet
-2. greet!
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- succeeds when macro is defined before use
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("succeeds when macro is defined before use")
 macro greet(name: String) -> (
     intro result:
         enclosing.module.let greeting: String
@@ -85,13 +65,18 @@ expect true
 
 #### fails when macro is used before definition
 
+- fails when macro is used before definition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails when macro is used before definition")
 # This test verifies compile-time behavior
 # The following would produce E1401 error:
 # greet!("World")  # Error: macro not defined yet
@@ -105,13 +90,18 @@ expect true  # Compile-time check
 
 #### fails when intro shadows existing variable
 
+- fails when intro shadows existing variable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails when intro shadows existing variable")
 # This test verifies compile-time behavior
 # The following would produce E1403 error:
 # val counter = 0
@@ -129,13 +119,18 @@ expect true  # Compile-time check
 
 #### fails when intro shadows existing function
 
+- fails when intro shadows existing function
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails when intro shadows existing function")
 # This test verifies compile-time behavior
 # fn my_func() -> i64: return 42
 # macro define_func() -> (
@@ -152,13 +147,18 @@ expect true  # Compile-time check
 
 #### succeeds when intro introduces different symbol
 
+- succeeds when intro introduces different symbol
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("succeeds when intro introduces different symbol")
 # Interpreter limitation: macro intro/emit not executed at runtime.
 # Test the same concept: a new symbol can coexist with an existing one.
 val existing_var = 0
@@ -172,20 +172,18 @@ expect new_var == 42
 
 #### succeeds with const parameter in template
 
-1. macro define getter
-2. enclosing module fn "get {NAME}"
-3. fn "get {NAME}"
-4. define getter!
-5. expect get value
+- succeeds with const parameter in template
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("succeeds with const parameter in template")
 macro define_getter(NAME: String const) -> (
     intro result:
         enclosing.module.fn "get_{NAME}"() -> i64
@@ -202,13 +200,18 @@ expect get_value() == 42
 
 #### fails when template variable is not const
 
+- fails when template variable is not const
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails when template variable is not const")
 # This test verifies compile-time behavior
 # The following would produce E1406 error:
 # macro define_getter(NAME: String) -> (  # Not const!
@@ -227,13 +230,18 @@ expect true  # Compile-time check
 
 #### fails when intro let lacks type annotation
 
+- fails when intro let lacks type annotation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails when intro let lacks type annotation")
 # This test verifies compile-time behavior
 # The following would produce E1405 error:
 # macro init_var() -> (
@@ -250,13 +258,18 @@ expect true  # Compile-time check
 
 #### succeeds when intro let has type annotation
 
+- succeeds when intro let has type annotation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("succeeds when intro let has type annotation")
 # Interpreter limitation: macro intro/emit not executed at runtime.
 # Test the same concept: a typed variable can hold the expected value.
 val my_var: i64 = 42
@@ -269,13 +282,18 @@ expect my_var == 42
 
 #### allows using macros in any order after definition
 
+- allows using macros in any order after definition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows using macros in any order after definition")
 # Interpreter limitation: macro intro/emit not executed at runtime.
 # Test the same concept: multiple symbols introduced in any order hold correct values.
 val var1 = 1
@@ -289,13 +307,18 @@ expect var2 == 2
 
 #### allows single intro symbol
 
+- allows single intro symbol
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows single intro symbol")
 # Interpreter limitation: macro intro/emit not executed at runtime.
 # Test the same concept: a single introduced symbol holds the expected value.
 val single_var: i64 = 42
@@ -306,13 +329,18 @@ expect single_var == 42
 
 #### fails when macro introduces duplicate symbols
 
+- fails when macro introduces duplicate symbols
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails when macro introduces duplicate symbols")
 # This test verifies compile-time behavior
 # macro init_duplicate() -> (
 #     intro result1:
@@ -335,13 +363,18 @@ expect true  # Compile-time check
 
 #### generates symbols from const for loop
 
+- generates symbols from const for loop
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates symbols from const for loop")
 # Interpreter limitation: macro intro/emit not executed at runtime.
 # Test the same concept: a const-range for loop reaches the last index value.
 val COUNT: i64 = 3
@@ -360,13 +393,18 @@ expect last == 2
 
 #### selects symbols based on const condition
 
+- selects symbols based on const condition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects symbols based on const condition")
 # Interpreter limitation: macro intro/emit not executed at runtime.
 # Test the same concept: a const conditional selects the correct symbol/value.
 val FLAG = true
@@ -390,3 +428,51 @@ expect selected == 1
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3ae7a72d3838cc0934679b75aad2f8c34e8236557c511cd11d49ccbeeca1d282`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3ae7a72d3838cc0934679b75aad2f8c34e8236557c511cd11d49ccbeeca1d282`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3ae7a72d3838cc0934679b75aad2f8c34e8236557c511cd11d49ccbeeca1d282`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/macro_validation_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/macro_validation_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/macro_validation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/macro_validation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/macro_validation_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'succeeds when macro is defined before use' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/macro_validation_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails when macro is used before definition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/macro_validation_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails when intro shadows existing variable' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

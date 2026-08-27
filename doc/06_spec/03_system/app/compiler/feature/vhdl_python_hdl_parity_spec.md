@@ -1,30 +1,6 @@
 # Vhdl Python Hdl Parity Specification
 
-> _Acceptance smoke for the selected VHDL parity milestone._
-
-<!-- sdn-diagram:id=vhdl_python_hdl_parity_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=vhdl_python_hdl_parity_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-vhdl_python_hdl_parity_spec -> std
-vhdl_python_hdl_parity_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=vhdl_python_hdl_parity_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering VHDL Python-HDL parity acceptance.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -38,22 +14,21 @@ vhdl_python_hdl_parity_spec -> compiler
 ## Scenarios
 
 ### VHDL Python-HDL parity acceptance
-_Acceptance smoke for the selected VHDL parity milestone._
 
 #### renders deterministic one-DUT testbench assertions and source-map anchors
 
-1. VhdlTestbenchPort
-2. VhdlTestbenchPort
-3. VhdlTestbenchAssignment
+- renders deterministic one-DUT testbench assertions and source-map anchors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders deterministic one-DUT testbench assertions and source-map anchors")
 val artifact = render_vhdl_testbench(VhdlTestbenchCase(
     testbench_name: "parity_tb",
     dut_entity: "parity_gate",
@@ -91,10 +66,8 @@ expect(artifact.source_map_json).to_contain("\"expectationIndex\":0")
 
 #### renders supported ROM templates and rejects ambiguous RAM policy
 
-1. data type: "std logic vector
+- renders supported ROM templates and rejects ambiguous RAM policy
    - Expected: rom.is_ok() is true
-2. data type: "std logic vector
-3. read during write: VhdlReadDuringWritePolicy Ambiguous
    - Expected: ram.is_err() is true
    - Expected: ram.unwrap_err().code equals `VHDL-MEM-RDW-AMBIGUOUS`
 
@@ -102,10 +75,12 @@ expect(artifact.source_map_json).to_contain("\"expectationIndex\":0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders supported ROM templates and rejects ambiguous RAM policy")
 val rom = render_static_rom_template(VhdlStaticRomTemplate(
     name: "parity_rom",
     type_name: "parity_rom_t",
@@ -140,26 +115,19 @@ expect(ram.unwrap_err().code).to_equal("VHDL-MEM-RDW-AMBIGUOUS")
 
 #### renders ordered multi-DUT multi-phase source-test suites
 
-1. VhdlTestbenchAssignment
-2. VhdlTestbenchAssignment
-3. VhdlTestbenchAssertion
-4. VhdlTestbenchAssignment
-5. VhdlTestbenchAssertion
-6. VhdlTestbenchPort
-7. VhdlTestbenchPort
-8. VhdlTestbenchPort
-9. VhdlTestbenchPort
-10. VhdlTestbenchPort
+- renders ordered multi-DUT multi-phase source-test suites
    - Expected: result.is_ok() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 66 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders ordered multi-DUT multi-phase source-test suites")
 val drive = VhdlTestbenchPhase(
     name: "drive producer",
     source_line: 70,
@@ -230,16 +198,31 @@ expect(artifact.source_map_json).to_contain("\"phase\":\"consumer accepts\",\"ex
 
 #### keeps parity docs aligned with supported and deferred lanes
 
+- keeps parity docs aligned with supported and deferred lanes
+   - Expected: requirements does not contain `Anonymous hardware outputs are not a stable VHDL public API`
+   - Expected: pending does not contain `skip "`
+   - Expected: pending does not contain `pure Simple structured generic and clock-domain coverage replaces remaining c... (full value in folded executable source)`
+   - Expected: pending does not contain `implicit heap allocation and pointer-like addressing fail before VHDL emissio... (full value in folded executable source)`
+   - Expected: pending does not contain `payload enum matching and payload field projection`
+   - Expected: pending does not contain `anonymous same-type hardware outputs`
+   - Expected: pending does not contain `reset domain API accepts active-low asynchronous reset syntax`
+   - Expected: pending does not contain `interface bundles lower scalar fields to grouped flattened ports`
+   - Expected: pending does not contain `testbench conversion emits a standalone no-port VHDL testbench entity`
+   - Expected: pending does not contain `vendor synthesis smoke skips with clear reason when disabled`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps parity docs aligned with supported and deferred lanes")
 val requirements = rt_file_read_text("doc/02_requirements/feature/vhdl_python_hdl_parity.md") ?? ""
 val roadmap = rt_file_read_text("doc/03_plan/vhdl_python_hdl_parity_roadmap.md") ?? ""
-val matrix = rt_file_read_text("doc/04_architecture/vhdl_support_matrix.md") ?? ""
+val matrix = rt_file_read_text("doc/04_architecture/hardware/vhdl/vhdl_support_matrix.md") ?? ""
 val design = rt_file_read_text("doc/05_design/vhdl_python_hdl_parity.md") ?? ""
 val pending = rt_file_read_text("test/unit/compiler/vhdl_python_hdl_parity_spec.spl.skip") ?? ""
 
@@ -277,12 +260,12 @@ expect(pending.contains("vendor synthesis smoke skips with clear reason when dis
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering VHDL Python-HDL parity acceptance.
 - VHDL Python-HDL parity acceptance
 
 ## Scenario Summary
@@ -297,3 +280,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `aac96f820d085891f383690380a40b93262f64d4202031fbab44d3a415e9c5e3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `aac96f820d085891f383690380a40b93262f64d4202031fbab44d3a415e9c5e3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `aac96f820d085891f383690380a40b93262f64d4202031fbab44d3a415e9c5e3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.spl
+mirror: doc/06_spec/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders deterministic one-DUT testbench assertions and source-map anchors' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders supported ROM templates and rejects ambiguous RAM policy' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/vhdl_python_hdl_parity_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders ordered multi-DUT multi-phase source-test suites' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

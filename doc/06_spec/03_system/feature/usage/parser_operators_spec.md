@@ -1,30 +1,5 @@
 # Parser Operator Specification
 
-> <details>
-
-<!-- sdn-diagram:id=parser_operators_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=parser_operators_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-parser_operators_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=parser_operators_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 48 | 48 | 0 | 0 |
@@ -42,7 +17,7 @@ parser_operators_spec
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/parser_operators_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -62,13 +37,22 @@ parser_operators_spec
 
 #### parses addition
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- parses addition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses addition")
 expect 2 + 3 == 5
 ```
 
@@ -76,13 +60,18 @@ expect 2 + 3 == 5
 
 #### parses subtraction
 
+- parses subtraction
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses subtraction")
 expect 5 - 3 == 2
 ```
 
@@ -90,13 +79,18 @@ expect 5 - 3 == 2
 
 #### parses multiplication
 
+- parses multiplication
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses multiplication")
 expect 3 * 4 == 12
 ```
 
@@ -104,13 +98,18 @@ expect 3 * 4 == 12
 
 #### parses division
 
+- parses division
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses division")
 expect 10 / 2 == 5
 ```
 
@@ -118,13 +117,18 @@ expect 10 / 2 == 5
 
 #### parses modulo
 
+- parses modulo
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses modulo")
 expect 10 % 3 == 1
 ```
 
@@ -132,13 +136,18 @@ expect 10 % 3 == 1
 
 #### parses power
 
+- parses power
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses power")
 expect 2 ** 3 == 8
 ```
 
@@ -146,16 +155,18 @@ expect 2 ** 3 == 8
 
 #### parses integer division
 
-1. expect 7 fdiv
+- parses integer division
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses integer division")
 expect 7.fdiv(2) == 3
 ```
 
@@ -165,13 +176,18 @@ expect 7.fdiv(2) == 3
 
 #### parses less than
 
+- parses less than
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses less than")
 expect 1 < 2
 ```
 
@@ -179,13 +195,18 @@ expect 1 < 2
 
 #### parses greater than
 
+- parses greater than
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses greater than")
 expect 2 > 1
 ```
 
@@ -193,13 +214,18 @@ expect 2 > 1
 
 #### parses less than or equal
 
+- parses less than or equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses less than or equal")
 expect 2 <= 2
 expect 1 <= 2
 ```
@@ -208,13 +234,18 @@ expect 1 <= 2
 
 #### parses greater than or equal
 
+- parses greater than or equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses greater than or equal")
 expect 2 >= 2
 expect 3 >= 2
 ```
@@ -223,13 +254,18 @@ expect 3 >= 2
 
 #### parses equality
 
+- parses equality
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses equality")
 expect 2 == 2
 ```
 
@@ -237,13 +273,18 @@ expect 2 == 2
 
 #### parses inequality
 
+- parses inequality
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses inequality")
 expect 1 != 2
 ```
 
@@ -253,17 +294,18 @@ expect 1 != 2
 
 #### parses and
 
-1. expect
-2. expect
+- parses and
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses and")
 expect (true and true) == true
 expect (true and false) == false
 ```
@@ -272,17 +314,18 @@ expect (true and false) == false
 
 #### parses or
 
-1. expect
-2. expect
+- parses or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses or")
 expect (true or false) == true
 expect (false or false) == false
 ```
@@ -291,17 +334,18 @@ expect (false or false) == false
 
 #### parses not
 
-1. expect
-2. expect
+- parses not
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses not")
 expect (not false) == true
 expect (not true) == false
 ```
@@ -310,17 +354,18 @@ expect (not true) == false
 
 #### parses combined logical
 
-1. expect
-2. expect
+- parses combined logical
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses combined logical")
 expect (true and false or true) == true
 expect (not (true and false)) == true
 ```
@@ -331,16 +376,18 @@ expect (not (true and false)) == true
 
 #### parses bitwise and
 
-1. expect
+- parses bitwise and
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses bitwise and")
 expect (0b1100 & 0b1010) == 0b1000
 ```
 
@@ -348,16 +395,18 @@ expect (0b1100 & 0b1010) == 0b1000
 
 #### parses bitwise or
 
-1. expect
+- parses bitwise or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses bitwise or")
 expect (0b1100 | 0b1010) == 0b1110
 ```
 
@@ -365,16 +414,18 @@ expect (0b1100 | 0b1010) == 0b1110
 
 #### parses bitwise xor
 
-1. expect
+- parses bitwise xor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses bitwise xor")
 expect (5 xor 3) == 6
 ```
 
@@ -382,16 +433,18 @@ expect (5 xor 3) == 6
 
 #### parses bitwise not
 
-1. expect
+- parses bitwise not
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses bitwise not")
 expect (~0) == -1
 ```
 
@@ -399,16 +452,18 @@ expect (~0) == -1
 
 #### parses left shift
 
-1. expect
+- parses left shift
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses left shift")
 expect (1 << 4) == 16
 ```
 
@@ -416,16 +471,18 @@ expect (1 << 4) == 16
 
 #### parses right shift
 
-1. expect
+- parses right shift
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses right shift")
 expect (16 >> 2) == 4
 ```
 
@@ -435,104 +492,7 @@ expect (16 >> 2) == 4
 
 #### parses simple assignment
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var x = 0
-x = 42
-expect x == 42
-```
-
-</details>
-
-#### parses add-assign
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var x = 10
-x += 5
-expect x == 15
-```
-
-</details>
-
-#### parses sub-assign
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var x = 10
-x -= 3
-expect x == 7
-```
-
-</details>
-
-#### parses mul-assign
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var x = 5
-x *= 2
-expect x == 10
-```
-
-</details>
-
-#### parses div-assign
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var x = 20
-x /= 4
-expect x == 5
-```
-
-</details>
-
-#### parses mod-assign
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var x = 10
-x %= 3
-expect x == 1
-```
-
-</details>
-
-#### parses suspend-assign
-
-1. fn async val
-2. x ~= async val
+- parses simple assignment
 
 
 <details>
@@ -542,6 +502,134 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses simple assignment")
+var x = 0
+x = 42
+expect x == 42
+```
+
+</details>
+
+#### parses add-assign
+
+- parses add-assign
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses add-assign")
+var x = 10
+x += 5
+expect x == 15
+```
+
+</details>
+
+#### parses sub-assign
+
+- parses sub-assign
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses sub-assign")
+var x = 10
+x -= 3
+expect x == 7
+```
+
+</details>
+
+#### parses mul-assign
+
+- parses mul-assign
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses mul-assign")
+var x = 5
+x *= 2
+expect x == 10
+```
+
+</details>
+
+#### parses div-assign
+
+- parses div-assign
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses div-assign")
+var x = 20
+x /= 4
+expect x == 5
+```
+
+</details>
+
+#### parses mod-assign
+
+- parses mod-assign
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses mod-assign")
+var x = 10
+x %= 3
+expect x == 1
+```
+
+</details>
+
+#### parses suspend-assign
+
+- parses suspend-assign
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses suspend-assign")
 fn async_val() -> i64:
     42
 var x = 0
@@ -555,16 +643,18 @@ expect x == 42
 
 #### parses pipe forward
 
-1. fn double
+- parses pipe forward
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses pipe forward")
 fn double(x: i64) -> i64:
     x * 2
 val result = 21 |> double
@@ -577,16 +667,18 @@ expect result == 42
 
 #### parses optional chaining
 
-1. expect len == Some
+- parses optional chaining
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses optional chaining")
 val opt: Option<text> = Some("hello")
 val len = opt?.len()
 expect len == Some(5)
@@ -596,13 +688,18 @@ expect len == Some(5)
 
 #### parses null coalescing
 
+- parses null coalescing
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses null coalescing")
 val opt: Option<i64> = None
 val value = opt ?? 42
 expect value == 42
@@ -612,13 +709,18 @@ expect value == 42
 
 #### parses existence check
 
+- parses existence check
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses existence check")
 val opt = Some(42)
 expect opt.?
 ```
@@ -627,13 +729,18 @@ expect opt.?
 
 #### parses negated existence
 
+- parses negated existence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses negated existence")
 val opt: Option<i64> = None
 expect not opt.?
 ```
@@ -642,20 +749,18 @@ expect not opt.?
 
 #### parses try operator
 
-1. fn may fail
-2. Ok
-3. fn use result
-4. Ok
-5. expect use result
+- parses try operator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses try operator")
 fn may_fail() -> Result<i64, text>:
     Ok(42)
 fn use_result() -> Result<i64, text>:
@@ -670,13 +775,18 @@ expect use_result().unwrap() == 84
 
 #### parses exclusive range
 
+- parses exclusive range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses exclusive range")
 var sum = 0
 for i in 0..5:
     sum = sum + i
@@ -687,13 +797,18 @@ expect sum == 10
 
 #### parses inclusive range
 
+- parses inclusive range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses inclusive range")
 var sum = 0
 for i in 0..=5:
     sum = sum + i
@@ -704,16 +819,18 @@ expect sum == 15
 
 #### parses range in slice
 
-1. expect sliced len
+- parses range in slice
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses range in slice")
 val arr = [0, 1, 2, 3, 4]
 val sliced = arr[1..4]
 expect sliced.len() == 3
@@ -725,13 +842,18 @@ expect sliced.len() == 3
 
 #### power before multiplication
 
+- power before multiplication
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("power before multiplication")
 expect 2 ** 3 * 2 == 16
 ```
 
@@ -739,13 +861,18 @@ expect 2 ** 3 * 2 == 16
 
 #### multiplication before addition
 
+- multiplication before addition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplication before addition")
 expect 2 + 3 * 4 == 14
 ```
 
@@ -753,16 +880,18 @@ expect 2 + 3 * 4 == 14
 
 #### comparison after arithmetic
 
-1. expect
+- comparison after arithmetic
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("comparison after arithmetic")
 expect (2 + 3 < 10) == true
 ```
 
@@ -770,16 +899,18 @@ expect (2 + 3 < 10) == true
 
 #### logical after comparison
 
-1. expect
+- logical after comparison
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("logical after comparison")
 expect (1 < 2 and 3 < 4) == true
 ```
 
@@ -787,16 +918,18 @@ expect (1 < 2 and 3 < 4) == true
 
 #### parentheses override precedence
 
-1. expect
+- parentheses override precedence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parentheses override precedence")
 expect (2 + 3) * 4 == 20
 ```
 
@@ -804,13 +937,18 @@ expect (2 + 3) * 4 == 20
 
 #### complex expression precedence
 
+- complex expression precedence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("complex expression precedence")
 expect 2 + 3 * 4 ** 2 / 8 == 8
 ```
 
@@ -823,13 +961,18 @@ expect 2 + 3 * 4 ** 2 / 8 == 8
 
 #### parses matrix multiplication
 
+- parses matrix multiplication
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses matrix multiplication")
 # @ is matrix multiplication operator
 # Requires array/matrix support
 expect true  # Placeholder
@@ -842,13 +985,18 @@ expect true  # Placeholder
 
 #### parses broadcast operators
 
+- parses broadcast operators
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses broadcast operators")
 # .+ .- .* ./ are element-wise operators
 # Requires array support
 expect true  # Placeholder
@@ -858,13 +1006,18 @@ expect true  # Placeholder
 
 #### parses layer connect
 
+- parses layer connect
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses layer connect")
 # ~> connects neural network layers
 expect true  # Placeholder
 ```
@@ -883,3 +1036,51 @@ expect true  # Placeholder
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8a9707bf65e3bc64fb606a34d1ed3d78829c88e87e90f8d68384bf9b1704bce3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8a9707bf65e3bc64fb606a34d1ed3d78829c88e87e90f8d68384bf9b1704bce3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8a9707bf65e3bc64fb606a34d1ed3d78829c88e87e90f8d68384bf9b1704bce3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/parser_operators_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/parser_operators_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/parser_operators_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/parser_operators_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/parser_operators_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses addition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/parser_operators_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses subtraction' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/parser_operators_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses multiplication' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

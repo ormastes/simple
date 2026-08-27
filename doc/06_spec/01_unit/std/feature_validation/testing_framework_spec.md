@@ -1,29 +1,6 @@
-# Testing Framework Feature Validation
+# Testing Framework Specification
 
-> Validates the BDD testing framework features including describe blocks, context blocks, it examples, before/after hooks, and expect matchers. All features are implemented and working in the Simple runtime.
-
-<!-- sdn-diagram:id=testing_framework_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=testing_framework_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-testing_framework_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=testing_framework_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Feature #180 - Describe Blocks, Feature #181 - Context Blocks, Feature #182 - It Examples, Feature #183 - Before Each Hooks, Feature #184 - After Each Hooks, Feature #187 - Expect Matchers, Feature #192 - Doctest Support, Testing Framework Integration, nested describe blocks.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,26 +9,7 @@ testing_framework_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Testing Framework Feature Validation
-
-Validates the BDD testing framework features including describe blocks, context blocks, it examples, before/after hooks, and expect matchers. All features are implemented and working in the Simple runtime.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #180 Describe Blocks, #181 Context Blocks, #182 It Examples, |
-| Category | Testing Framework |
-| Status | Complete |
-| Source | `test/01_unit/std/feature_validation/testing_framework_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Validates the BDD testing framework features including describe blocks,
-context blocks, it examples, before/after hooks, and expect matchers.
-All features are implemented and working in the Simple runtime.
+# Testing Framework Specification
 
 ## Scenarios
 
@@ -59,13 +17,22 @@ All features are implemented and working in the Simple runtime.
 
 #### supports top-level describe
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- supports top-level describe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports top-level describe")
 val group_name = "Feature #180 - Describe Blocks"
 expect(group_name).to_contain("Describe")
 expect(group_name).to_end_with("Blocks")
@@ -75,13 +42,19 @@ expect(group_name).to_end_with("Blocks")
 
 #### supports multiple it blocks within describe
 
+- supports multiple it blocks within describe
+   - Expected: x equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports multiple it blocks within describe")
 val x = 1 + 1
 expect(x).to_equal(2)
 ```
@@ -90,13 +63,18 @@ expect(x).to_equal(2)
 
 #### supports string descriptions
 
+- supports string descriptions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports string descriptions")
 val msg = "describe blocks work"
 expect(msg).to_contain("describe")
 ```
@@ -109,13 +87,19 @@ expect(msg).to_contain("describe")
 
 #### runs tests inside context
 
+- runs tests inside context
+   - Expected: 42 equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("runs tests inside context")
 expect(42).to_equal(42)
 ```
 
@@ -123,13 +107,19 @@ expect(42).to_equal(42)
 
 #### supports multiple tests in context
 
+- supports multiple tests in context
+   - Expected: "hello" equals `hello`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports multiple tests in context")
 expect("hello").to_equal("hello")
 ```
 
@@ -139,13 +129,19 @@ expect("hello").to_equal("hello")
 
 #### provides logical grouping
 
+- provides logical grouping
+   - Expected: items.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("provides logical grouping")
 val items = [1, 2, 3]
 expect(items.len()).to_equal(3)
 ```
@@ -156,13 +152,18 @@ expect(items.len()).to_equal(3)
 
 #### handles positive scenario
 
+- handles positive scenario
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("handles positive scenario")
 val value = 10
 expect(value).to_be_greater_than(0)
 ```
@@ -171,13 +172,19 @@ expect(value).to_be_greater_than(0)
 
 #### handles zero scenario
 
+- handles zero scenario
+   - Expected: value equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("handles zero scenario")
 val value = 0
 expect(value).to_equal(0)
 ```
@@ -188,13 +195,19 @@ expect(value).to_equal(0)
 
 #### defines a single test case
 
+- defines a single test case
+   - Expected: 1 equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("defines a single test case")
 expect(1).to_equal(1)
 ```
 
@@ -202,13 +215,19 @@ expect(1).to_equal(1)
 
 #### supports descriptive names
 
+- supports descriptive names
+   - Expected: result equals `6`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports descriptive names")
 val result = 2 * 3
 expect(result).to_equal(6)
 ```
@@ -217,13 +236,18 @@ expect(result).to_equal(6)
 
 #### can contain multiple assertions
 
+- can contain multiple assertions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("can contain multiple assertions")
 val text_val = "hello world"
 expect(text_val).to_contain("hello")
 expect(text_val).to_contain("world")
@@ -235,13 +259,19 @@ expect(text_val).to_end_with("world")
 
 #### supports complex expressions
 
+- supports complex expressions
+   - Expected: sum equals `15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports complex expressions")
 val numbers = [1, 2, 3, 4, 5]
 val sum = numbers[0] + numbers[1] + numbers[2] + numbers[3] + numbers[4]
 expect(sum).to_equal(15)
@@ -253,13 +283,19 @@ expect(sum).to_equal(15)
 
 #### runs setup before first test
 
+- runs setup before first test
+   - Expected: counter equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("runs setup before first test")
 # before_each conceptually sets counter=10
 val counter = 10
 expect(counter).to_equal(10)
@@ -269,13 +305,19 @@ expect(counter).to_equal(10)
 
 #### runs setup before second test
 
+- runs setup before second test
+   - Expected: counter equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("runs setup before second test")
 # counter should be reset to 10 by before_each
 val counter = 10
 expect(counter).to_equal(10)
@@ -285,13 +327,18 @@ expect(counter).to_equal(10)
 
 #### runs setup before every test
 
+- runs setup before every test
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("runs setup before every test")
 # before_each ensures fresh state
 val counter = 10
 expect(counter).to_be_greater_than(0)
@@ -303,13 +350,19 @@ expect(counter).to_be_greater_than(0)
 
 #### runs test before cleanup
 
+- runs test before cleanup
+   - Expected: cleanup_flag is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("runs test before cleanup")
 expect(cleanup_flag).to_equal(false)
 ```
 
@@ -317,13 +370,19 @@ expect(cleanup_flag).to_equal(false)
 
 #### verifies after_each runs
 
+- verifies after_each runs
+   - Expected: cleanup_flag is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("verifies after_each runs")
 # after_each from previous test should have run
 expect(cleanup_flag).to_equal(true)
 ```
@@ -336,13 +395,19 @@ expect(cleanup_flag).to_equal(true)
 
 #### compares integers
 
+- compares integers
+   - Expected: 42 equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares integers")
 expect(42).to_equal(42)
 ```
 
@@ -350,13 +415,19 @@ expect(42).to_equal(42)
 
 #### compares strings
 
+- compares strings
+   - Expected: "hello" equals `hello`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares strings")
 expect("hello").to_equal("hello")
 ```
 
@@ -364,13 +435,20 @@ expect("hello").to_equal("hello")
 
 #### compares booleans
 
+- compares booleans
+   - Expected: enabled equals `not disabled`
+   - Expected: disabled equals `not enabled`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares booleans")
 val enabled = true
 val disabled = false
 expect(enabled).to_equal(not disabled)
@@ -381,13 +459,19 @@ expect(disabled).to_equal(not enabled)
 
 #### compares arrays
 
+- compares arrays
+   - Expected: [1, 2, 3] equals `[1, 2, 3]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares arrays")
 expect([1, 2, 3]).to_equal([1, 2, 3])
 ```
 
@@ -397,13 +481,18 @@ expect([1, 2, 3]).to_equal([1, 2, 3])
 
 #### is alias for to_equal
 
+- is alias for to_equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("is alias for to_equal")
 expect(10).to_be(10)
 ```
 
@@ -411,13 +500,18 @@ expect(10).to_be(10)
 
 #### compares string values
 
+- compares string values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares string values")
 expect("test").to_be("test")
 ```
 
@@ -427,13 +521,18 @@ expect("test").to_be("test")
 
 #### checks nil values
 
+- checks nil values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks nil values")
 expect(nil).to_be_nil()
 ```
 
@@ -441,13 +540,19 @@ expect(nil).to_be_nil()
 
 #### checks nil equality
 
+- checks nil equality
+   - Expected: nil equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks nil equality")
 expect(nil).to_equal(nil)
 ```
 
@@ -457,13 +562,18 @@ expect(nil).to_equal(nil)
 
 #### checks string containment
 
+- checks string containment
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks string containment")
 expect("hello world").to_contain("world")
 ```
 
@@ -471,13 +581,18 @@ expect("hello world").to_contain("world")
 
 #### checks substring
 
+- checks substring
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks substring")
 expect("Simple language").to_contain("Simple")
 ```
 
@@ -485,13 +600,18 @@ expect("Simple language").to_contain("Simple")
 
 #### checks array containment
 
+- checks array containment
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks array containment")
 expect([1, 2, 3]).to_contain(2)
 ```
 
@@ -499,13 +619,18 @@ expect([1, 2, 3]).to_contain(2)
 
 #### checks array element presence
 
+- checks array element presence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks array element presence")
 expect([10, 20, 30]).to_contain(20)
 ```
 
@@ -515,13 +640,18 @@ expect([10, 20, 30]).to_contain(20)
 
 #### checks string prefix
 
+- checks string prefix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks string prefix")
 expect("hello").to_start_with("hel")
 ```
 
@@ -529,13 +659,18 @@ expect("hello").to_start_with("hel")
 
 #### checks full string as prefix
 
+- checks full string as prefix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks full string as prefix")
 expect("test").to_start_with("test")
 ```
 
@@ -543,13 +678,18 @@ expect("test").to_start_with("test")
 
 #### checks single char prefix
 
+- checks single char prefix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks single char prefix")
 expect("abc").to_start_with("a")
 ```
 
@@ -559,13 +699,18 @@ expect("abc").to_start_with("a")
 
 #### checks string suffix
 
+- checks string suffix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks string suffix")
 expect("hello").to_end_with("llo")
 ```
 
@@ -573,13 +718,18 @@ expect("hello").to_end_with("llo")
 
 #### checks full string as suffix
 
+- checks full string as suffix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks full string as suffix")
 expect("test").to_end_with("test")
 ```
 
@@ -587,13 +737,18 @@ expect("test").to_end_with("test")
 
 #### checks single char suffix
 
+- checks single char suffix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("checks single char suffix")
 expect("abc").to_end_with("c")
 ```
 
@@ -603,13 +758,18 @@ expect("abc").to_end_with("c")
 
 #### compares integers
 
+- compares integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares integers")
 expect(10).to_be_greater_than(5)
 ```
 
@@ -617,13 +777,18 @@ expect(10).to_be_greater_than(5)
 
 #### compares with zero
 
+- compares with zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares with zero")
 expect(1).to_be_greater_than(0)
 ```
 
@@ -631,13 +796,18 @@ expect(1).to_be_greater_than(0)
 
 #### compares negative numbers
 
+- compares negative numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares negative numbers")
 expect(0).to_be_greater_than(-1)
 ```
 
@@ -647,13 +817,18 @@ expect(0).to_be_greater_than(-1)
 
 #### compares integers
 
+- compares integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares integers")
 expect(5).to_be_less_than(10)
 ```
 
@@ -661,13 +836,18 @@ expect(5).to_be_less_than(10)
 
 #### compares with zero
 
+- compares with zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares with zero")
 expect(-1).to_be_less_than(0)
 ```
 
@@ -675,13 +855,18 @@ expect(-1).to_be_less_than(0)
 
 #### compares negative numbers
 
+- compares negative numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("compares negative numbers")
 expect(-5).to_be_less_than(-1)
 ```
 
@@ -691,13 +876,18 @@ expect(-5).to_be_less_than(-1)
 
 #### supports triple-quote docstrings in describe
 
+- supports triple-quote docstrings in describe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports triple-quote docstrings in describe")
 val doctest_marker = "triple-quote docstrings in describe"
 expect(doctest_marker).to_contain("docstrings")
 expect(doctest_marker).to_start_with("triple-quote")
@@ -707,13 +897,19 @@ expect(doctest_marker).to_start_with("triple-quote")
 
 #### supports simple code examples in tests
 
+- supports simple code examples in tests
+   - Expected: greeting equals `Hello, Alice!`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports simple code examples in tests")
 # Validate that code patterns used in documentation work
 val name = "Alice"
 val greeting = "Hello, {name}!"
@@ -724,13 +920,19 @@ expect(greeting).to_equal("Hello, Alice!")
 
 #### validates documented patterns work
 
+- validates documented patterns work
+   - Expected: total equals `15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("validates documented patterns work")
 # Test a pattern that would appear in documentation
 val numbers = [1, 2, 3, 4, 5]
 var total = 0
@@ -749,13 +951,19 @@ expect(total).to_equal(15)
 
 #### supports deep nesting
 
+- supports deep nesting
+   - Expected: nesting_path.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports deep nesting")
 val nesting_path = ["Testing Framework Integration", "nested describe blocks", "with context inside nested describe"]
 expect(nesting_path.len()).to_equal(3)
 expect(nesting_path[2]).to_contain("context")
@@ -767,13 +975,19 @@ expect(nesting_path[2]).to_contain("context")
 
 #### combines hooks and matchers
 
+- combines hooks and matchers
+   - Expected: test_val equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("combines hooks and matchers")
 # NOTE: var mutation in before_each closures doesn't persist in interpreter.
 val test_val = 42
 expect(test_val).to_equal(42)
@@ -785,13 +999,18 @@ expect(test_val).to_be_less_than(100)
 
 #### supports multiple assertion types in one test
 
+- supports multiple assertion types in one test
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("supports multiple assertion types in one test")
 val msg = "testing framework"
 expect(msg).to_contain("testing")
 expect(msg).to_start_with("testing")
@@ -801,6 +1020,29 @@ expect(msg.len()).to_be_less_than(100)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/feature_validation/testing_framework_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Feature #180 - Describe Blocks, Feature #181 - Context Blocks, Feature #182 - It Examples, Feature #183 - Before Each Hooks, Feature #184 - After Each Hooks, Feature #187 - Expect Matchers, Feature #192 - Doctest Support, Testing Framework Integration, nested describe blocks.
+- Feature #180 - Describe Blocks
+- Feature #181 - Context Blocks
+- Feature #182 - It Examples
+- Feature #183 - Before Each Hooks
+- Feature #184 - After Each Hooks
+- Feature #187 - Expect Matchers
+- Feature #192 - Doctest Support
+- Testing Framework Integration
+- nested describe blocks
 
 ## Scenario Summary
 
@@ -814,3 +1056,60 @@ expect(msg.len()).to_be_less_than(100)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-STD`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `60d0528dc6406eaeae1e866d0bd19ab1b0f3dd896cb1e763764c814bd29c10be`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `60d0528dc6406eaeae1e866d0bd19ab1b0f3dd896cb1e763764c814bd29c10be`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `60d0528dc6406eaeae1e866d0bd19ab1b0f3dd896cb1e763764c814bd29c10be`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **84/100**; blockers: **0**.
+
+SSpec documentization score: 84/100
+source: test/01_unit/std/feature_validation/testing_framework_spec.spl
+mirror: doc/06_spec/01_unit/std/feature_validation/testing_framework_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=95 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=60
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/feature_validation/testing_framework_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/feature_validation/testing_framework_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/feature_validation/testing_framework_spec.spl:1:1: advice SSDOC-MNT-006 [maintainability] (-10): repeated setup is not expressed through a named helper
+  why: Named setup helpers keep scenarios concise and consistent.
+  improve: Extract a domain-named setup helper shared by the scenarios.
+test/01_unit/std/feature_validation/testing_framework_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/std/feature_validation/testing_framework_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports top-level describe' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/feature_validation/testing_framework_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports multiple it blocks within describe' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/feature_validation/testing_framework_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports string descriptions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/feature_validation/testing_framework_spec.spl:118:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can contain multiple assertions' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

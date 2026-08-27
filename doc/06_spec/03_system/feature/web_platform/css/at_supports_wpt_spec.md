@@ -20,7 +20,7 @@ Proves ASCII-insensitive admitted declaration and selector conditions through
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves ASCII-insensitive admitted declaration and selector conditions through
@@ -33,21 +33,7 @@ the compatibility renderer. Conditions deeper than 32 fail closed.
 
 #### should validate mixed-case properties values and selectors
 
-- "@supports
-   - Artifact capture: after_step
-- "@supports
-   - Artifact capture: after_step
-- "@supports selector
-   - Artifact capture: after_step
-- "@supports selector
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes by len
-   - Artifact capture: after_step
-- fail
+- should validate mixed-case properties values and selectors
    - Artifact capture: after_step
 - Resolve supported and rejected conditions in Web semantics
    - Artifact capture: after_step
@@ -56,13 +42,7 @@ the compatibility renderer. Conditions deeper than 32 fail closed.
    - Expected: inspected.hit_index.boxes.by[unsupported_node] equals `24`
 - Lower the exact condition winners through canonical Draw IR
    - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read identical exact pixels from Engine2D and compatibility
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -73,25 +53,27 @@ the compatibility renderer. Conditions deeper than 32 fail closed.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 140 lines folded for reproduction.
+Runnable source: 142 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should validate mixed-case properties values and selectors")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "div{width:12px;height:8px}" +
-    "#accepted{background:#dc2626}" +
-    "#rejected{background:#16a34a}" +
-    "#selector{background:#ea580c}" +
-    "#unsupported{background:#dc2626}" +
+    "#accepted{{background:#dc2626}}" +
+    "#rejected{{background:#16a34a}}" +
+    "#selector{{background:#ea580c}}" +
+    "#unsupported{{background:#dc2626}}" +
     "@supports ((DISPLAY:FlEx) and (WIDTH:12PX)){" +
-    "#accepted{background:#2563eb}}" +
+    "#accepted{{background:#2563eb}}}" +
     "@supports (display:definitely-not-css){\n" +
     "@layer guarded{\n#rejected{background:#9333ea}\n}\n}" +
     "@supports selector(div:has(.badge)){" +
-    "#selector{background:#0e7490}}" +
+    "#selector{{background:#0e7490}}}" +
     "@supports selector(div:popover-open){" +
-    "#unsupported{background:#9333ea}}" +
+    "#unsupported{{background:#9333ea}}}" +
     "@unknown guarded{\n#unsupported{background:#9333ea}\n}" +
     "</style>" +
     "<div id='accepted'></div><div id='rejected'></div>" +
@@ -223,48 +205,50 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 #### should distinguish unsupported conditions from malformed grammar
 
+- should distinguish unsupported conditions from malformed grammar
+   - Artifact capture: after_step
 - Reject malformed grammar while inverting valid unsupported forms
    - Artifact capture: after_step
-   - Evidence: malformed `not`, malformed chain operands, mixed top-level
-     operators, and malformed selectors are false; valid unsupported
-     declarations, selectors, and general-enclosed forms remain invertible
 - Apply only valid condition winners in Web semantics
    - Artifact capture: after_step
-   - Evidence: exact fallback and winning semantic colors are checked
 - Preserve validity-aware cascade results in canonical Draw IR
    - Artifact capture: after_step
-   - Evidence: exact computed Draw IR colors are checked
 - Read exact validity-aware pixels through both production paths
    - Artifact capture: after_step
-   - Evidence: exact Engine2D pixels equal compatibility-renderer pixels
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: rendered.skipped_command_count equals `0`
+   - Expected: rendered.pixels.len() equals `WIDTH * HEIGHT`
+   - Expected: compatibility_pixels equals `engine_pixels`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 167 lines folded for reproduction.
+Runnable source: 168 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should distinguish unsupported conditions from malformed grammar")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "div{width:12px;height:8px}" +
-    "#malformed{background:#16a34a}" +
-    "#mixed{background:#ea580c}" +
-    "#property{background:#dc2626}" +
-    "#selector-valid{background:#dc2626}" +
-    "#general{background:#dc2626}" +
+    "#malformed{{background:#16a34a}}" +
+    "#mixed{{background:#ea580c}}" +
+    "#property{{background:#dc2626}}" +
+    "#selector-valid{{background:#dc2626}}" +
+    "#general{{background:#dc2626}}" +
     "@supports not garbage{#malformed{background:#9333ea}}" +
     "@supports (display:flex) or garbage{" +
-    "#malformed{background:#9333ea}}" +
+    "#malformed{{background:#9333ea}}}" +
     "@supports garbage or (display:flex){" +
-    "#malformed{background:#9333ea}}" +
+    "#malformed{{background:#9333ea}}}" +
     "@supports (display:flex) and (width:12px) or " +
     "(position:fixed){#mixed{background:#9333ea}}" +
     "@supports not (future-property:value){" +
-    "#property{background:#2563eb}}" +
+    "#property{{background:#2563eb}}}" +
     "@supports not selector(div:popover-open){" +
-    "#selector-valid{background:#0e7490}}" +
+    "#selector-valid{{background:#0e7490}}}" +
     "@supports not future(foo){#general{background:#7c3aed}}" +
     "</style><div id='malformed'></div><div id='mixed'></div>" +
     "<div id='property'></div><div id='selector-valid'></div>" +
@@ -418,41 +402,15 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 #### should admit depth thirty-two and reject deeper malformed chains
 
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes bw len
-   - Artifact capture: after_step
-- fail
+- should admit depth thirty-two and reject deeper malformed chains
    - Artifact capture: after_step
 - Apply the boundary condition and reject every over-budget form
-   - Artifact capture: after_step
-- "
-   - Artifact capture: after_step
-- "not
-   - Artifact capture: after_step
-- "
-   - Artifact capture: after_step
-- "selector
-   - Artifact capture: after_step
-- "selector
-   - Artifact capture: after_step
-- "selector
-   - Artifact capture: after_step
-- "not not not not not
    - Artifact capture: after_step
 - Preserve boundary decisions in layout and canonical Draw IR
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: inspected.hit_index.boxes.bw[limit_node] equals `12`
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read exact boundary pixels through both production paths
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -463,16 +421,18 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 118 lines folded for reproduction.
+Runnable source: 120 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should admit depth thirty-two and reject deeper malformed chains")
 val admitted = _nested_supports_condition(31)
 val rejected = _nested_supports_condition(32)
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "div{width:12px;height:8px}" +
-    "#limit{background:#16a34a}#over{background:#ea580c}" +
+    "#limit{{background:#16a34a}}#over{{background:#ea580c}}" +
     "@supports " + admitted + "{#limit{background:#2563eb}}" +
     "@supports " + rejected + "{#over{background:#9333ea}}" +
     "</style><div id='limit'></div><div id='over'></div>"
@@ -601,3 +561,70 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fb26d76cdc5ae785207c8a3c13efb45916c2a32e4e3e484acffa9741f425b9cf`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fb26d76cdc5ae785207c8a3c13efb45916c2a32e4e3e484acffa9741f425b9cf`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fb26d76cdc5ae785207c8a3c13efb45916c2a32e4e3e484acffa9741f425b9cf`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/at_supports_wpt_spec.md (current)
+findings: 10 blockers: 1
+  narrative=100 structure=85 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=78; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/at_supports_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/at_supports_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:94:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate mixed-case properties values and selectors' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should validate mixed-case properties values and selectors' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:241:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should distinguish unsupported conditions from malformed grammar' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:241:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should distinguish unsupported conditions from malformed grammar' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:414:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit depth thirty-two and reject deeper malformed chains' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/at_supports_wpt_spec.spl:414:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should admit depth thirty-two and reject deeper malformed chains' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

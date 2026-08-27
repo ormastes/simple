@@ -1,29 +1,6 @@
 # Pattern Matching Specification
 
-> 1. expect match int
-
-<!-- sdn-diagram:id=pattern_matching_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=pattern_matching_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-pattern_matching_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=pattern_matching_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Pattern Matching, literal patterns, variable binding patterns, wildcard pattern, enum patterns, tuple patterns, struct field access, guard clauses, or patterns, range patterns, array patterns, if-val pattern, complex pattern combinations.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -44,16 +21,18 @@ pattern_matching_spec
 
 #### matches zero
 
-1. expect match int
+- matches zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches zero")
 expect match_int(0) == "zero"
 ```
 
@@ -61,16 +40,18 @@ expect match_int(0) == "zero"
 
 #### matches positive integers
 
-1. expect match int
+- matches positive integers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches positive integers")
 expect match_int(42) == "found"
 ```
 
@@ -78,16 +59,18 @@ expect match_int(42) == "found"
 
 #### matches larger integers
 
-1. expect match int
+- matches larger integers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches larger integers")
 expect match_int(100) == "hundred"
 ```
 
@@ -95,16 +78,18 @@ expect match_int(100) == "hundred"
 
 #### uses wildcard for unmatched
 
-1. expect match int
+- uses wildcard for unmatched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses wildcard for unmatched")
 expect match_int(999) == "other"
 ```
 
@@ -114,16 +99,18 @@ expect match_int(999) == "other"
 
 #### matches true
 
-1. expect match bool
+- matches true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches true")
 expect match_bool(true) == "yes"
 ```
 
@@ -131,16 +118,18 @@ expect match_bool(true) == "yes"
 
 #### matches false
 
-1. expect match bool
+- matches false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches false")
 expect match_bool(false) == "no"
 ```
 
@@ -150,16 +139,18 @@ expect match_bool(false) == "no"
 
 #### matches string values
 
-1. expect match string
+- matches string values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches string values")
 expect match_string("hello") == "greeting"
 ```
 
@@ -167,16 +158,18 @@ expect match_string("hello") == "greeting"
 
 #### matches empty string
 
-1. expect match string
+- matches empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches empty string")
 expect match_string("") == "empty"
 ```
 
@@ -184,16 +177,18 @@ expect match_string("") == "empty"
 
 #### uses wildcard for unmatched strings
 
-1. expect match string
+- uses wildcard for unmatched strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses wildcard for unmatched strings")
 expect match_string("other") == "unknown"
 ```
 
@@ -205,16 +200,18 @@ expect match_string("other") == "unknown"
 
 #### binds value to variable
 
-1. expect double via match
+- binds value to variable
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("binds value to variable")
 expect double_via_match(42) == 84
 ```
 
@@ -222,16 +219,18 @@ expect double_via_match(42) == 84
 
 #### binds and uses in expression
 
-1. expect add five via match
+- binds and uses in expression
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("binds and uses in expression")
 expect add_five_via_match(10) == 15
 ```
 
@@ -243,16 +242,18 @@ expect add_five_via_match(10) == 15
 
 #### matches anything
 
-1. expect wildcard match
+- matches anything
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches anything")
 expect wildcard_match(99) == "matched"
 ```
 
@@ -260,16 +261,18 @@ expect wildcard_match(99) == "matched"
 
 #### serves as catch-all
 
-1. expect catchall match
+- serves as catch-all
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("serves as catch-all")
 expect catchall_match(42) == "other"
 ```
 
@@ -277,17 +280,18 @@ expect catchall_match(42) == "other"
 
 #### matches specific values first
 
-1. expect catchall match
-2. expect catchall match
+- matches specific values first
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches specific values first")
 expect catchall_match(0) == "zero"
 expect catchall_match(1) == "one"
 ```
@@ -300,147 +304,7 @@ expect catchall_match(1) == "one"
 
 #### matches Red
 
-1. expect match color
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_color(Color.Red) == "red"
-```
-
-</details>
-
-#### matches Green
-
-1. expect match color
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_color(Color.Green) == "green"
-```
-
-</details>
-
-#### matches Blue
-
-1. expect match color
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_color(Color.Blue) == "blue"
-```
-
-</details>
-
-#### enum variants with payload
-
-#### matches Some and extracts value
-
-1. expect match option
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_option(MyOption.Some(42)) == 42
-```
-
-</details>
-
-#### matches None
-
-1. expect match option none default
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_option_none_default(MyOption.None) == 99
-```
-
-</details>
-
-#### matches Ok result
-
-1. expect match result ok
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_result_ok(MyResult.Ok(100)) == 100
-```
-
-</details>
-
-#### matches Err result
-
-1. expect match result err
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_result_err(MyResult.Err("failed")) == "failed"
-```
-
-</details>
-
-#### complex enum payloads
-
-#### matches Circle and extracts radius
-
-1. expect match shape
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect match_shape(Shape.Circle(5.0)) == 5.0
-```
-
-</details>
-
-#### matches Rectangle and extracts first dimension
-
-1. expect match shape
+- matches Red
 
 
 <details>
@@ -450,6 +314,164 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches Red")
+expect match_color(Color.Red) == "red"
+```
+
+</details>
+
+#### matches Green
+
+- matches Green
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Green")
+expect match_color(Color.Green) == "green"
+```
+
+</details>
+
+#### matches Blue
+
+- matches Blue
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Blue")
+expect match_color(Color.Blue) == "blue"
+```
+
+</details>
+
+#### enum variants with payload
+
+#### matches Some and extracts value
+
+- matches Some and extracts value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Some and extracts value")
+expect match_option(MyOption.Some(42)) == 42
+```
+
+</details>
+
+#### matches None
+
+- matches None
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches None")
+expect match_option_none_default(MyOption.None) == 99
+```
+
+</details>
+
+#### matches Ok result
+
+- matches Ok result
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Ok result")
+expect match_result_ok(MyResult.Ok(100)) == 100
+```
+
+</details>
+
+#### matches Err result
+
+- matches Err result
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Err result")
+expect match_result_err(MyResult.Err("failed")) == "failed"
+```
+
+</details>
+
+#### complex enum payloads
+
+#### matches Circle and extracts radius
+
+- matches Circle and extracts radius
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Circle and extracts radius")
+expect match_shape(Shape.Circle(5.0)) == 5.0
+```
+
+</details>
+
+#### matches Rectangle and extracts first dimension
+
+- matches Rectangle and extracts first dimension
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("matches Rectangle and extracts first dimension")
 # Multi-value enum variant: second binding not supported in interpreter.
 # Returns width (first value) only.
 expect match_shape(Shape.Rectangle(4.0, 3.0)) == 4.0
@@ -459,16 +481,18 @@ expect match_shape(Shape.Rectangle(4.0, 3.0)) == 4.0
 
 #### matches Point unit variant
 
-1. expect match shape
+- matches Point unit variant
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches Point unit variant")
 expect match_shape(Shape.Point) == 0.0
 ```
 
@@ -480,16 +504,18 @@ expect match_shape(Shape.Point) == 0.0
 
 #### destructures pair
 
-1. expect match pair
+- destructures pair
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("destructures pair")
 expect match_pair((1, 2)) == 3
 ```
 
@@ -497,16 +523,18 @@ expect match_pair((1, 2)) == 3
 
 #### destructures triple
 
-1. expect match triple
+- destructures triple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("destructures triple")
 expect match_triple((1, 2, 3)) == 6
 ```
 
@@ -514,16 +542,18 @@ expect match_triple((1, 2, 3)) == 6
 
 #### matches with partial wildcards
 
-1. expect match pair first
+- matches with partial wildcards
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches with partial wildcards")
 expect match_pair_first((10, 20)) == 10
 ```
 
@@ -531,16 +561,18 @@ expect match_pair_first((10, 20)) == 10
 
 #### matches with all wildcards
 
-1. expect match pair wildcard
+- matches with all wildcards
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches with all wildcards")
 expect match_pair_wildcard((1, 2)) == "matched"
 ```
 
@@ -550,16 +582,18 @@ expect match_pair_wildcard((1, 2)) == "matched"
 
 #### destructures nested tuples
 
-1. expect match nested tuple
+- destructures nested tuples
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("destructures nested tuples")
 expect match_nested_tuple(((1, 2), 3)) == 6
 ```
 
@@ -569,16 +603,18 @@ expect match_nested_tuple(((1, 2), 3)) == 6
 
 #### matches tuple with literal first element
 
-1. expect match tuple literal first
+- matches tuple with literal first element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches tuple with literal first element")
 expect match_tuple_literal_first((0, 42)) == 42
 ```
 
@@ -586,16 +622,18 @@ expect match_tuple_literal_first((0, 42)) == 42
 
 #### matches tuple with literal second element
 
-1. expect match tuple literal second
+- matches tuple with literal second element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches tuple with literal second element")
 expect match_tuple_literal_second((10, 0)) == 10
 ```
 
@@ -607,16 +645,18 @@ expect match_tuple_literal_second((10, 0)) == 10
 
 #### accesses Point2D fields
 
-1. expect match point
+- accesses Point2D fields
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("accesses Point2D fields")
 val p = Point2D { x: 3, y: 4 }
 expect match_point(p) == 7
 ```
@@ -625,16 +665,18 @@ expect match_point(p) == 7
 
 #### accesses Person fields
 
-1. expect match person age
+- accesses Person fields
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("accesses Person fields")
 val person = Person { name: "Alice", age: 30 }
 expect match_person_age(person) == 30
 ```
@@ -645,16 +687,18 @@ expect match_person_age(person) == 30
 
 #### matches origin point
 
-1. expect match point origin
+- matches origin point
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches origin point")
 val p = Point2D { x: 0, y: 0 }
 expect match_point_origin(p) == "origin"
 ```
@@ -663,16 +707,18 @@ expect match_point_origin(p) == "origin"
 
 #### matches non-origin point
 
-1. expect match point origin
+- matches non-origin point
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches non-origin point")
 val p = Point2D { x: 5, y: 5 }
 expect match_point_origin(p) == "not origin"
 ```
@@ -681,16 +727,18 @@ expect match_point_origin(p) == "not origin"
 
 #### matches point on x-axis
 
-1. expect match point axis
+- matches point on x-axis
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches point on x-axis")
 val p = Point2D { x: 5, y: 0 }
 expect match_point_axis(p) == "on x-axis"
 ```
@@ -699,16 +747,18 @@ expect match_point_axis(p) == "on x-axis"
 
 #### matches point on y-axis
 
-1. expect match point axis
+- matches point on y-axis
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches point on y-axis")
 val p = Point2D { x: 0, y: 5 }
 expect match_point_axis(p) == "on y-axis"
 ```
@@ -717,16 +767,18 @@ expect match_point_axis(p) == "on y-axis"
 
 #### matches point elsewhere
 
-1. expect match point axis
+- matches point elsewhere
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches point elsewhere")
 val p = Point2D { x: 3, y: 4 }
 expect match_point_axis(p) == "elsewhere"
 ```
@@ -739,16 +791,18 @@ expect match_point_axis(p) == "elsewhere"
 
 #### matches with true guard
 
-1. expect match with guard
+- matches with true guard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches with true guard")
 expect match_with_guard(10) == "big"
 ```
 
@@ -756,16 +810,18 @@ expect match_with_guard(10) == "big"
 
 #### skips when guard is false
 
-1. expect match with guard
+- skips when guard is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("skips when guard is false")
 expect match_with_guard(3) == "small"
 ```
 
@@ -775,16 +831,18 @@ expect match_with_guard(3) == "small"
 
 #### categorizes zero
 
-1. expect categorize number
+- categorizes zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("categorizes zero")
 expect categorize_number(0) == "zero"
 ```
 
@@ -792,16 +850,18 @@ expect categorize_number(0) == "zero"
 
 #### categorizes small numbers
 
-1. expect categorize number
+- categorizes small numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("categorizes small numbers")
 expect categorize_number(5) == "small"
 ```
 
@@ -809,16 +869,18 @@ expect categorize_number(5) == "small"
 
 #### categorizes medium numbers
 
-1. expect categorize number
+- categorizes medium numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("categorizes medium numbers")
 expect categorize_number(50) == "medium"
 ```
 
@@ -826,16 +888,18 @@ expect categorize_number(50) == "medium"
 
 #### categorizes large numbers
 
-1. expect categorize number
+- categorizes large numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("categorizes large numbers")
 expect categorize_number(150) == "large"
 ```
 
@@ -845,16 +909,18 @@ expect categorize_number(150) == "large"
 
 #### uses guard on enum payload - large
 
-1. expect match option with guard
+- uses guard on enum payload - large
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on enum payload - large")
 expect match_option_with_guard(MyOption.Some(150)) == "large"
 ```
 
@@ -862,16 +928,18 @@ expect match_option_with_guard(MyOption.Some(150)) == "large"
 
 #### uses guard on enum payload - medium
 
-1. expect match option with guard
+- uses guard on enum payload - medium
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on enum payload - medium")
 expect match_option_with_guard(MyOption.Some(50)) == "medium"
 ```
 
@@ -879,16 +947,18 @@ expect match_option_with_guard(MyOption.Some(50)) == "medium"
 
 #### uses guard on enum payload - small
 
-1. expect match option with guard
+- uses guard on enum payload - small
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on enum payload - small")
 expect match_option_with_guard(MyOption.Some(5)) == "small"
 ```
 
@@ -896,16 +966,18 @@ expect match_option_with_guard(MyOption.Some(5)) == "small"
 
 #### handles None
 
-1. expect match option with guard
+- handles None
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("handles None")
 expect match_option_with_guard(MyOption.None) == "none"
 ```
 
@@ -915,16 +987,18 @@ expect match_option_with_guard(MyOption.None) == "none"
 
 #### uses guard on tuple elements - sum is 7
 
-1. expect match tuple with guard
+- uses guard on tuple elements - sum is 7
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on tuple elements - sum is 7")
 expect match_tuple_with_guard((3, 4)) == "sum is 7"
 ```
 
@@ -932,16 +1006,18 @@ expect match_tuple_with_guard((3, 4)) == "sum is 7"
 
 #### uses guard on tuple elements - equal
 
-1. expect match tuple with guard
+- uses guard on tuple elements - equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on tuple elements - equal")
 expect match_tuple_with_guard((5, 5)) == "equal"
 ```
 
@@ -949,16 +1025,18 @@ expect match_tuple_with_guard((5, 5)) == "equal"
 
 #### uses guard on tuple elements - other
 
-1. expect match tuple with guard
+- uses guard on tuple elements - other
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on tuple elements - other")
 expect match_tuple_with_guard((1, 2)) == "other"
 ```
 
@@ -970,16 +1048,18 @@ expect match_tuple_with_guard((1, 2)) == "other"
 
 #### matches first alternative
 
-1. expect match or pattern
+- matches first alternative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches first alternative")
 expect match_or_pattern(1) == "small"
 ```
 
@@ -987,16 +1067,18 @@ expect match_or_pattern(1) == "small"
 
 #### matches middle alternative
 
-1. expect match or pattern
+- matches middle alternative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches middle alternative")
 expect match_or_pattern(2) == "small"
 ```
 
@@ -1004,16 +1086,18 @@ expect match_or_pattern(2) == "small"
 
 #### matches last alternative
 
-1. expect match or pattern
+- matches last alternative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches last alternative")
 expect match_or_pattern(3) == "small"
 ```
 
@@ -1021,16 +1105,18 @@ expect match_or_pattern(3) == "small"
 
 #### falls through when no match
 
-1. expect match or pattern
+- falls through when no match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("falls through when no match")
 expect match_or_pattern(5) == "other"
 ```
 
@@ -1040,16 +1126,18 @@ expect match_or_pattern(5) == "other"
 
 #### matches Red in or pattern
 
-1. expect match color or
+- matches Red in or pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches Red in or pattern")
 expect match_color_or(Color.Red) == "primary"
 ```
 
@@ -1057,16 +1145,18 @@ expect match_color_or(Color.Red) == "primary"
 
 #### matches Blue in or pattern
 
-1. expect match color or
+- matches Blue in or pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches Blue in or pattern")
 expect match_color_or(Color.Blue) == "primary"
 ```
 
@@ -1074,16 +1164,18 @@ expect match_color_or(Color.Blue) == "primary"
 
 #### matches Green separately
 
-1. expect match color or
+- matches Green separately
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches Green separately")
 expect match_color_or(Color.Green) == "secondary"
 ```
 
@@ -1095,16 +1187,18 @@ expect match_color_or(Color.Green) == "secondary"
 
 #### matches within range
 
-1. expect match range
+- matches within range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches within range")
 expect match_range(5) == "in range"
 ```
 
@@ -1112,16 +1206,18 @@ expect match_range(5) == "in range"
 
 #### matches at lower bound
 
-1. expect match range
+- matches at lower bound
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches at lower bound")
 expect match_range(1) == "in range"
 ```
 
@@ -1129,16 +1225,18 @@ expect match_range(1) == "in range"
 
 #### matches at upper bound
 
-1. expect match range
+- matches at upper bound
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches at upper bound")
 expect match_range(10) == "in range"
 ```
 
@@ -1146,16 +1244,18 @@ expect match_range(10) == "in range"
 
 #### does not match outside range
 
-1. expect match range
+- does not match outside range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("does not match outside range")
 expect match_range(11) == "out of range"
 ```
 
@@ -1165,16 +1265,18 @@ expect match_range(11) == "out of range"
 
 #### grades A
 
-1. expect grade score
+- grades A
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("grades A")
 expect grade_score(95) == "A"
 ```
 
@@ -1182,16 +1284,18 @@ expect grade_score(95) == "A"
 
 #### grades B
 
-1. expect grade score
+- grades B
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("grades B")
 expect grade_score(85) == "B"
 ```
 
@@ -1199,16 +1303,18 @@ expect grade_score(85) == "B"
 
 #### grades C
 
-1. expect grade score
+- grades C
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("grades C")
 expect grade_score(75) == "C"
 ```
 
@@ -1216,16 +1322,18 @@ expect grade_score(75) == "C"
 
 #### grades D
 
-1. expect grade score
+- grades D
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("grades D")
 expect grade_score(65) == "D"
 ```
 
@@ -1233,16 +1341,18 @@ expect grade_score(65) == "D"
 
 #### grades F
 
-1. expect grade score
+- grades F
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("grades F")
 expect grade_score(55) == "F"
 ```
 
@@ -1254,16 +1364,18 @@ expect grade_score(55) == "F"
 
 #### matches single element
 
-1. expect match single array
+- matches single element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches single element")
 expect match_single_array([42]) == 42
 ```
 
@@ -1271,16 +1383,18 @@ expect match_single_array([42]) == 42
 
 #### matches two elements
 
-1. expect match pair array
+- matches two elements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches two elements")
 expect match_pair_array([1, 2]) == 3
 ```
 
@@ -1288,16 +1402,18 @@ expect match_pair_array([1, 2]) == 3
 
 #### returns default for wrong length
 
-1. expect match single array
+- returns default for wrong length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns default for wrong length")
 expect match_single_array([1, 2]) == 0
 ```
 
@@ -1309,13 +1425,18 @@ expect match_single_array([1, 2]) == 0
 
 #### executes when pattern matches
 
+- executes when pattern matches
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("executes when pattern matches")
 val opt = MyOption.Some(42)
 var result = 0
 if val MyOption.Some(v) = opt:
@@ -1327,13 +1448,18 @@ expect result == 42
 
 #### skips when pattern does not match
 
+- skips when pattern does not match
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("skips when pattern does not match")
 val opt = MyOption.None
 var result = 0
 if val MyOption.Some(v) = opt:
@@ -1347,13 +1473,18 @@ expect result == 0
 
 #### executes else when no match
 
+- executes else when no match
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("executes else when no match")
 val opt = MyOption.None
 var result = 0
 if val MyOption.Some(v) = opt:
@@ -1367,13 +1498,18 @@ expect result == 99
 
 #### executes then when matches
 
+- executes then when matches
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("executes then when matches")
 val opt = MyOption.Some(100)
 var result = 0
 if val MyOption.Some(v) = opt:
@@ -1389,13 +1525,18 @@ expect result == 100
 
 #### destructures tuple in if-val
 
+- destructures tuple in if-val
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("destructures tuple in if-val")
 val pair = (10, 20)
 var result = 0
 if val (a, b) = pair:
@@ -1411,16 +1552,18 @@ expect result == 30
 
 #### matches nested enum in tuple
 
-1. expect match nested enum tuple
+- matches nested enum in tuple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches nested enum in tuple")
 expect match_nested_enum_tuple((MyOption.Some(42), "label")) == 42
 ```
 
@@ -1428,16 +1571,18 @@ expect match_nested_enum_tuple((MyOption.Some(42), "label")) == 42
 
 #### matches None in tuple
 
-1. expect match nested enum tuple
+- matches None in tuple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches None in tuple")
 expect match_nested_enum_tuple((MyOption.None, "label")) == 0
 ```
 
@@ -1447,16 +1592,18 @@ expect match_nested_enum_tuple((MyOption.None, "label")) == 0
 
 #### uses guard on tuple values - large
 
-1. expect match tuple guard complex
+- uses guard on tuple values - large
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on tuple values - large")
 expect match_tuple_guard_complex((10, 20)) == "large sum"
 ```
 
@@ -1464,16 +1611,18 @@ expect match_tuple_guard_complex((10, 20)) == "large sum"
 
 #### uses guard on tuple values - small
 
-1. expect match tuple guard complex
+- uses guard on tuple values - small
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses guard on tuple values - small")
 expect match_tuple_guard_complex((1, 2)) == "small sum"
 ```
 
@@ -1486,12 +1635,12 @@ expect match_tuple_guard_complex((1, 2)) == "small sum"
 | Category | Other |
 | Status | Active |
 | Source | `test/shared/types/pattern_matching_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Pattern Matching, literal patterns, variable binding patterns, wildcard pattern, enum patterns, tuple patterns, struct field access, guard clauses, or patterns, range patterns, array patterns, if-val pattern, complex pattern combinations.
 - Pattern Matching
 - literal patterns
 - variable binding patterns
@@ -1518,3 +1667,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SHARED`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `455aeed76e704224cfaddccf5a4a09860ba7c8386982ef702e10bf365a67c19c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `455aeed76e704224cfaddccf5a4a09860ba7c8386982ef702e10bf365a67c19c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `455aeed76e704224cfaddccf5a4a09860ba7c8386982ef702e10bf365a67c19c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/shared/types/pattern_matching_spec.spl
+mirror: doc/06_spec/shared/types/pattern_matching_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/shared/types/pattern_matching_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/shared/types/pattern_matching_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/shared/types/pattern_matching_spec.spl:331:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/types/pattern_matching_spec.spl:336:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches positive integers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/types/pattern_matching_spec.spl:341:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches larger integers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Widget Menubar Statusbar Specification
 
-> <details>
-
-<!-- sdn-diagram:id=widget_menubar_statusbar_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=widget_menubar_statusbar_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-widget_menubar_statusbar_spec -> common
-widget_menubar_statusbar_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=widget_menubar_statusbar_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering MenuBar creation, MenuBar children, MenuBar layout, MenuBar HTML rendering, StatusBar creation, StatusBar properties, StatusBar layout, StatusBar HTML rendering, StatusBar template expansion, MenuBar and StatusBar combined.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,22 @@ widget_menubar_statusbar_spec -> app
 
 #### creates a menubar with correct kind
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates a menubar with correct kind
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a menubar with correct kind")
 val bar = menubar("menu_create_1", ["File", "Edit", "View"])
 expect bar.kind to_equal "menubar"
 ```
@@ -56,13 +41,18 @@ expect bar.kind to_equal "menubar"
 
 #### creates a menubar with correct id
 
+- creates a menubar with correct id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a menubar with correct id")
 val bar = menubar("menu_create_2", ["File", "Edit", "View"])
 expect bar.id to_equal "menu_create_2"
 ```
@@ -71,13 +61,18 @@ expect bar.id to_equal "menu_create_2"
 
 #### defaults visible to true
 
+- defaults visible to true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("defaults visible to true")
 val bar = menubar("menu_create_3", ["File"])
 expect bar.visible to_equal true
 ```
@@ -86,13 +81,18 @@ expect bar.visible to_equal true
 
 #### defaults focused to false
 
+- defaults focused to false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("defaults focused to false")
 val bar = menubar("menu_create_4", ["File"])
 expect bar.focused to_equal false
 ```
@@ -103,25 +103,7 @@ expect bar.focused to_equal false
 
 #### has correct child count for three items
 
-1. expect bar child count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val bar = menubar("menu_child_1", ["File", "Edit", "View"])
-expect bar.child_count() to_equal 3
-```
-
-</details>
-
-#### first child has label File
-
-1. expect first get prop
+- has correct child count for three items
 
 
 <details>
@@ -131,6 +113,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has correct child count for three items")
+val bar = menubar("menu_child_1", ["File", "Edit", "View"])
+expect bar.child_count() to_equal 3
+```
+
+</details>
+
+#### first child has label File
+
+- first child has label File
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("first child has label File")
 val bar = menubar("menu_child_2", ["File", "Edit", "View"])
 val first = bar.child_at(0)
 expect first != nil to_equal true
@@ -141,16 +145,18 @@ expect first.get_prop("label") to_equal "File"
 
 #### second child has label Edit
 
-1. expect second get prop
+- second child has label Edit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("second child has label Edit")
 val bar = menubar("menu_child_3", ["File", "Edit", "View"])
 val second = bar.child_at(1)
 expect second != nil to_equal true
@@ -161,16 +167,18 @@ expect second.get_prop("label") to_equal "Edit"
 
 #### third child has label View
 
-1. expect third get prop
+- third child has label View
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("third child has label View")
 val bar = menubar("menu_child_4", ["File", "Edit", "View"])
 val third = bar.child_at(2)
 expect third != nil to_equal true
@@ -181,13 +189,18 @@ expect third.get_prop("label") to_equal "View"
 
 #### children are text widgets
 
+- children are text widgets
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("children are text widgets")
 val bar = menubar("menu_child_5", ["File", "Edit"])
 val first = bar.child_at(0)
 expect first.kind to_equal "text"
@@ -197,13 +210,18 @@ expect first.kind to_equal "text"
 
 #### child ids follow naming convention
 
+- child ids follow naming convention
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("child ids follow naming convention")
 val bar = menubar("menu_child_6", ["File", "Edit"])
 val first = bar.child_at(0)
 expect first.id to_equal "menu_child_6_menu_0"
@@ -213,13 +231,18 @@ expect first.id to_equal "menu_child_6_menu_0"
 
 #### second child id has index 1
 
+- second child id has index 1
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("second child id has index 1")
 val bar = menubar("menu_child_7", ["File", "Edit"])
 val second = bar.child_at(1)
 expect second.id to_equal "menu_child_7_menu_1"
@@ -229,16 +252,18 @@ expect second.id to_equal "menu_child_7_menu_1"
 
 #### empty menubar has zero children
 
-1. expect bar child count
+- empty menubar has zero children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty menubar has zero children")
 val bar = menubar("menu_child_8", [])
 expect bar.child_count() to_equal 0
 ```
@@ -247,16 +272,18 @@ expect bar.child_count() to_equal 0
 
 #### single item menubar has one child
 
-1. expect bar child count
+- single item menubar has one child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("single item menubar has one child")
 val bar = menubar("menu_child_9", ["Help"])
 expect bar.child_count() to_equal 1
 ```
@@ -265,16 +292,18 @@ expect bar.child_count() to_equal 1
 
 #### single item child has correct label
 
-1. expect first get prop
+- single item child has correct label
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("single item child has correct label")
 val bar = menubar("menu_child_10", ["Help"])
 val first = bar.child_at(0)
 expect first.get_prop("label") to_equal "Help"
@@ -284,16 +313,18 @@ expect first.get_prop("label") to_equal "Help"
 
 #### children list matches child_count
 
-1. expect kids len
+- children list matches child_count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("children list matches child_count")
 val bar = menubar("menu_child_11", ["A", "B", "C", "D"])
 val kids = bar.children()
 expect kids.len() to_equal 4
@@ -303,13 +334,18 @@ expect kids.len() to_equal 4
 
 #### child_at out of range returns nil
 
+- child_at out of range returns nil
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("child_at out of range returns nil")
 val bar = menubar("menu_child_12", ["File"])
 val oob = bar.child_at(5)
 expect oob to_be_nil
@@ -321,13 +357,18 @@ expect oob to_be_nil
 
 #### gets fixed height of 1 by default
 
+- gets fixed height of 1 by default
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets fixed height of 1 by default")
 val bar = menubar("menu_layout_1", ["File", "Edit"])
 val h = get_fixed_height(bar)
 expect h to_equal 1
@@ -337,16 +378,18 @@ expect h to_equal 1
 
 #### compute_layout assigns correct rect
 
-1. expect rects len
+- compute_layout assigns correct rect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compute_layout assigns correct rect")
 val bar = menubar("menu_layout_2", ["File"])
 val rects = compute_layout(bar, 0, 0, 80, 1)
 expect rects.len() to_be_greater_than 0
@@ -362,13 +405,18 @@ expect first_rect.h to_equal 1
 
 #### menubar height consumed in vbox layout
 
+- menubar height consumed in vbox layout
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("menubar height consumed in vbox layout")
 val bar = menubar("menu_layout_3", ["File"])
 val content = WidgetNode.new("menu_layout_3_content", "panel")
 val root = column("menu_layout_3_root", [bar, content])
@@ -388,13 +436,18 @@ expect bar_rect.h to_equal 1
 
 #### output contains widget-menubar class
 
+- output contains widget-menubar class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains widget-menubar class")
 val bar = menubar("menu_html_1", ["File", "Edit"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -406,13 +459,18 @@ expect html to_contain "widget-menubar"
 
 #### output contains the menubar id
 
+- output contains the menubar id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains the menubar id")
 val bar = menubar("menu_html_2", ["File"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -424,13 +482,18 @@ expect html to_contain "menu_html_2"
 
 #### output contains menu-item span for each item
 
+- output contains menu-item span for each item
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains menu-item span for each item")
 val bar = menubar("menu_html_3", ["File", "Edit", "View"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -442,13 +505,18 @@ expect html to_contain "menu-item"
 
 #### output contains label text File
 
+- output contains label text File
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains label text File")
 val bar = menubar("menu_html_4", ["File", "Edit"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -460,13 +528,18 @@ expect html to_contain "File"
 
 #### output contains label text Edit
 
+- output contains label text Edit
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains label text Edit")
 val bar = menubar("menu_html_5", ["File", "Edit"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -478,13 +551,18 @@ expect html to_contain "Edit"
 
 #### output is a div element
 
+- output is a div element
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output is a div element")
 val bar = menubar("menu_html_6", ["File"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -497,13 +575,18 @@ expect html to_end_with "</div>"
 
 #### empty menubar renders with no menu-item spans
 
+- empty menubar renders with no menu-item spans
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty menubar renders with no menu-item spans")
 val bar = menubar("menu_html_7", [])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -515,13 +598,18 @@ expect html to_contain "widget-menubar"
 
 #### renders span elements for each menu item
 
+- renders span elements for each menu item
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders span elements for each menu item")
 val bar = menubar("menu_html_8", ["Help"])
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -537,13 +625,18 @@ expect html to_contain "</span>"
 
 #### creates a statusbar with correct kind
 
+- creates a statusbar with correct kind
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a statusbar with correct kind")
 val bar = statusbar("status_create_1", "MODE: Normal", "My App")
 expect bar.kind to_equal "statusbar"
 ```
@@ -552,13 +645,18 @@ expect bar.kind to_equal "statusbar"
 
 #### creates a statusbar with correct id
 
+- creates a statusbar with correct id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a statusbar with correct id")
 val bar = statusbar("status_create_2", "left text", "right text")
 expect bar.id to_equal "status_create_2"
 ```
@@ -567,13 +665,18 @@ expect bar.id to_equal "status_create_2"
 
 #### defaults visible to true
 
+- defaults visible to true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("defaults visible to true")
 val bar = statusbar("status_create_3", "left", "right")
 expect bar.visible to_equal true
 ```
@@ -582,13 +685,18 @@ expect bar.visible to_equal true
 
 #### defaults focused to false
 
+- defaults focused to false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("defaults focused to false")
 val bar = statusbar("status_create_4", "left", "right")
 expect bar.focused to_equal false
 ```
@@ -599,16 +707,18 @@ expect bar.focused to_equal false
 
 #### left prop returns left text
 
-1. expect bar get prop
+- left prop returns left text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("left prop returns left text")
 val bar = statusbar("status_prop_1", "MODE: Normal", "My App")
 expect bar.get_prop("left") to_equal "MODE: Normal"
 ```
@@ -617,16 +727,18 @@ expect bar.get_prop("left") to_equal "MODE: Normal"
 
 #### right prop returns right text
 
-1. expect bar get prop
+- right prop returns right text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("right prop returns right text")
 val bar = statusbar("status_prop_2", "MODE: Normal", "My App")
 expect bar.get_prop("right") to_equal "My App"
 ```
@@ -635,16 +747,18 @@ expect bar.get_prop("right") to_equal "My App"
 
 #### empty left is preserved
 
-1. expect bar get prop
+- empty left is preserved
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty left is preserved")
 val bar = statusbar("status_prop_3", "", "right side")
 expect bar.get_prop("left") to_equal ""
 ```
@@ -653,16 +767,18 @@ expect bar.get_prop("left") to_equal ""
 
 #### empty right is preserved
 
-1. expect bar get prop
+- empty right is preserved
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty right is preserved")
 val bar = statusbar("status_prop_4", "left side", "")
 expect bar.get_prop("right") to_equal ""
 ```
@@ -671,17 +787,18 @@ expect bar.get_prop("right") to_equal ""
 
 #### both empty strings are valid
 
-1. expect bar get prop
-2. expect bar get prop
+- both empty strings are valid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("both empty strings are valid")
 val bar = statusbar("status_prop_5", "", "")
 expect bar.get_prop("left") to_equal ""
 expect bar.get_prop("right") to_equal ""
@@ -691,16 +808,18 @@ expect bar.get_prop("right") to_equal ""
 
 #### has_prop returns true for left
 
-1. expect bar has prop
+- has_prop returns true for left
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has_prop returns true for left")
 val bar = statusbar("status_prop_6", "L", "R")
 expect bar.has_prop("left") to_equal true
 ```
@@ -709,16 +828,18 @@ expect bar.has_prop("left") to_equal true
 
 #### has_prop returns true for right
 
-1. expect bar has prop
+- has_prop returns true for right
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has_prop returns true for right")
 val bar = statusbar("status_prop_7", "L", "R")
 expect bar.has_prop("right") to_equal true
 ```
@@ -727,16 +848,18 @@ expect bar.has_prop("right") to_equal true
 
 #### has_prop returns false for unknown key
 
-1. expect bar has prop
+- has_prop returns false for unknown key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has_prop returns false for unknown key")
 val bar = statusbar("status_prop_8", "L", "R")
 expect bar.has_prop("center") to_equal false
 ```
@@ -745,16 +868,18 @@ expect bar.has_prop("center") to_equal false
 
 #### statusbar has no children
 
-1. expect bar child count
+- statusbar has no children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("statusbar has no children")
 val bar = statusbar("status_prop_9", "left", "right")
 expect bar.child_count() to_equal 0
 ```
@@ -765,13 +890,18 @@ expect bar.child_count() to_equal 0
 
 #### gets fixed height of 1 by default
 
+- gets fixed height of 1 by default
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets fixed height of 1 by default")
 val bar = statusbar("status_layout_1", "left", "right")
 val h = get_fixed_height(bar)
 expect h to_equal 1
@@ -781,16 +911,18 @@ expect h to_equal 1
 
 #### compute_layout assigns correct rect
 
-1. expect rects len
+- compute_layout assigns correct rect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compute_layout assigns correct rect")
 val bar = statusbar("status_layout_2", "left", "right")
 val rects = compute_layout(bar, 0, 23, 80, 1)
 expect rects.len() to_be_greater_than 0
@@ -806,13 +938,18 @@ expect first_rect.h to_equal 1
 
 #### statusbar height consumed in vbox layout
 
+- statusbar height consumed in vbox layout
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("statusbar height consumed in vbox layout")
 val content = WidgetNode.new("status_layout_3_content", "panel")
 val bar = statusbar("status_layout_3", "left", "right")
 val root = column("status_layout_3_root", [content, bar])
@@ -831,13 +968,18 @@ expect bar_rect.h to_equal 1
 
 #### output contains widget-statusbar class
 
+- output contains widget-statusbar class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains widget-statusbar class")
 val bar = statusbar("status_html_1", "Left", "Right")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -849,13 +991,18 @@ expect html to_contain "widget-statusbar"
 
 #### output contains the statusbar id
 
+- output contains the statusbar id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains the statusbar id")
 val bar = statusbar("status_html_2", "Left", "Right")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -867,13 +1014,18 @@ expect html to_contain "status_html_2"
 
 #### output contains status-left span
 
+- output contains status-left span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains status-left span")
 val bar = statusbar("status_html_3", "Left Text", "Right Text")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -885,13 +1037,18 @@ expect html to_contain "status-left"
 
 #### output contains status-right span
 
+- output contains status-right span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains status-right span")
 val bar = statusbar("status_html_4", "Left Text", "Right Text")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -903,13 +1060,18 @@ expect html to_contain "status-right"
 
 #### output contains left text content
 
+- output contains left text content
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains left text content")
 val bar = statusbar("status_html_5", "MODE: Normal", "My App")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -921,13 +1083,18 @@ expect html to_contain "MODE: Normal"
 
 #### output contains right text content
 
+- output contains right text content
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output contains right text content")
 val bar = statusbar("status_html_6", "MODE: Normal", "My App")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -939,13 +1106,18 @@ expect html to_contain "My App"
 
 #### output is a div element
 
+- output is a div element
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output is a div element")
 val bar = statusbar("status_html_7", "left", "right")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -958,13 +1130,18 @@ expect html to_end_with "</div>"
 
 #### renders both span elements
 
+- renders both span elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders both span elements")
 val bar = statusbar("status_html_8", "L", "R")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -979,13 +1156,18 @@ expect html to_contain "<span class=\"status-right\">"
 
 #### expands app.mode to NORMAL in left text
 
+- expands app.mode to NORMAL in left text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expands app.mode to NORMAL in left text")
 val ph_mode = "{" + "app.mode" + "}"
 val bar = statusbar("status_tpl_1", ph_mode, "Title")
 val tree = build_tree(bar)
@@ -998,13 +1180,18 @@ expect html to_contain "NORMAL"
 
 #### expands app.title to tree title in right text
 
+- expands app.title to tree title in right text
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expands app.title to tree title in right text")
 val ph_title = "{" + "app.title" + "}"
 val bar = statusbar("status_tpl_2", "Mode", ph_title)
 val root = bar
@@ -1018,13 +1205,18 @@ expect html to_contain "My Editor"
 
 #### expands both placeholders simultaneously
 
+- expands both placeholders simultaneously
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expands both placeholders simultaneously")
 val ph_mode = "{" + "app.mode" + "}"
 val ph_title = "{" + "app.title" + "}"
 val bar = statusbar("status_tpl_3", ph_mode, ph_title)
@@ -1039,13 +1231,18 @@ expect html to_contain "Test App"
 
 #### leaves plain text unchanged
 
+- leaves plain text unchanged
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("leaves plain text unchanged")
 val bar = statusbar("status_tpl_4", "static left", "static right")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -1058,13 +1255,18 @@ expect html to_contain "static right"
 
 #### expand_template returns NORMAL for app.mode
 
+- expand_template returns NORMAL for app.mode
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expand_template returns NORMAL for app.mode")
 val ph_mode = "{" + "app.mode" + "}"
 val bar = statusbar("status_tpl_5", "x", "y")
 val tree = build_tree(bar)
@@ -1077,13 +1279,18 @@ expect result to_equal "NORMAL"
 
 #### expand_template returns tree title for app.title
 
+- expand_template returns tree title for app.title
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expand_template returns tree title for app.title")
 val ph_title = "{" + "app.title" + "}"
 val bar = statusbar("status_tpl_6", "x", "y")
 val tree = build_tree_with_title(bar, "Code Editor", "dark")
@@ -1096,13 +1303,18 @@ expect result to_equal "Code Editor"
 
 #### expand_template returns empty string for empty input
 
+- expand_template returns empty string for empty input
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expand_template returns empty string for empty input")
 val bar = statusbar("status_tpl_7", "x", "y")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -1114,13 +1326,18 @@ expect result to_equal ""
 
 #### expand_template preserves text without placeholders
 
+- expand_template preserves text without placeholders
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expand_template preserves text without placeholders")
 val bar = statusbar("status_tpl_8", "x", "y")
 val tree = build_tree(bar)
 val state = init_state(tree)
@@ -1132,13 +1349,18 @@ expect result to_equal "hello world"
 
 #### renders expanded mode in status-left span
 
+- renders expanded mode in status-left span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders expanded mode in status-left span")
 val ph_mode = "{" + "app.mode" + "}"
 val bar = statusbar("status_tpl_9", ph_mode, "right")
 val tree = build_tree(bar)
@@ -1151,13 +1373,18 @@ expect html to_contain "<span class=\"status-left\">NORMAL</span>"
 
 #### renders expanded title in status-right span
 
+- renders expanded title in status-right span
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders expanded title in status-right span")
 val ph_title = "{" + "app.title" + "}"
 val bar = statusbar("status_tpl_10", "left", ph_title)
 val tree = build_tree_with_title(bar, "My Title", "dark")
@@ -1172,13 +1399,18 @@ expect html to_contain "<span class=\"status-right\">My Title</span>"
 
 #### both widgets coexist in a column layout
 
+- both widgets coexist in a column layout
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("both widgets coexist in a column layout")
 val menu = menubar("combined_menu_1", ["File", "Edit"])
 val content = WidgetNode.new("combined_content_1", "panel")
 val status = statusbar("combined_status_1", "NORMAL", "App")
@@ -1201,13 +1433,18 @@ expect status_rect.h to_equal 1
 
 #### menubar is above statusbar in vbox order
 
+- menubar is above statusbar in vbox order
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("menubar is above statusbar in vbox order")
 val menu = menubar("combined_menu_2", ["File"])
 val content = WidgetNode.new("combined_content_2", "panel")
 val status = statusbar("combined_status_2", "L", "R")
@@ -1227,13 +1464,18 @@ expect menu_y to_be_less_than status_y
 
 #### tree finds both widgets by id
 
+- tree finds both widgets by id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tree finds both widgets by id")
 val menu = menubar("combined_menu_3", ["File"])
 val status = statusbar("combined_status_3", "L", "R")
 val root = column("combined_root_3", [menu, status])
@@ -1255,12 +1497,12 @@ expect found_status.kind to_equal "statusbar"
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/widget_menubar_statusbar_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering MenuBar creation, MenuBar children, MenuBar layout, MenuBar HTML rendering, StatusBar creation, StatusBar properties, StatusBar layout, StatusBar HTML rendering, StatusBar template expansion, MenuBar and StatusBar combined.
 - MenuBar creation
 - MenuBar children
 - MenuBar layout
@@ -1284,3 +1526,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `46e56ed786353c70ccf44b546d70dca96de0847f988bda4f20c5e92e36971ba9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `46e56ed786353c70ccf44b546d70dca96de0847f988bda4f20c5e92e36971ba9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `46e56ed786353c70ccf44b546d70dca96de0847f988bda4f20c5e92e36971ba9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/widget_menubar_statusbar_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/widget_menubar_statusbar_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/widget_menubar_statusbar_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/widget_menubar_statusbar_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/widget_menubar_statusbar_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a menubar with correct kind' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/widget_menubar_statusbar_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a menubar with correct id' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/widget_menubar_statusbar_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defaults visible to true' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

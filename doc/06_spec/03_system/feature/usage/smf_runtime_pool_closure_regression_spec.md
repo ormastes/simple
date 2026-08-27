@@ -2,29 +2,6 @@
 
 > This SSpec pins the wrapper-shaped SMF runtime-pool regression for `multicore_green_spawn`. Profile-generated workloads call a helper such as `spawn_worker() -> multicore_green_spawn(\: worker())`; that helper must compile into the SMF module instead of falling back to `rt_interp_call`.
 
-<!-- sdn-diagram:id=smf_runtime_pool_closure_regression_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=smf_runtime_pool_closure_regression_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-smf_runtime_pool_closure_regression_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=smf_runtime_pool_closure_regression_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
@@ -48,7 +25,7 @@ This SSpec pins the wrapper-shaped SMF runtime-pool regression for `multicore_gr
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -96,6 +73,8 @@ The checked profile script generates wrapper helpers so the benchmark can keep
 the spawn expression compact and comparable across parallel/fanout sections:
 
 ```simple
+use std.spec.step
+
 fn worker() -> i64:
     42
 
@@ -133,7 +112,7 @@ function not found: spawn_worker
 ## TUI Capture
 
 ```text
-Simple Test Runner v1.0.0-beta
+Simple Test Runner v1.0.0-RC
 Running: test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl
 SMF runtime-pool closure regression PASSED
 Files: 1
@@ -155,6 +134,11 @@ Failed: 0
 
 #### keeps the wrapper-shaped multicore-green SMF path executable
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- keeps the wrapper-shaped multicore-green SMF path executable
 - Write the minimal wrapper-shaped multicore-green fixture
    - Expected: mkdir_code equals `0`
    - Expected: rt_file_write_text(SOURCE_PATH, regression_fixture_source()) is true
@@ -169,10 +153,12 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the wrapper-shaped multicore-green SMF path executable")
 step("Write the minimal wrapper-shaped multicore-green fixture")
 val (_mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
 expect(mkdir_code).to_equal(0)
@@ -214,10 +200,58 @@ expect(blocker).to_contain("wrapper_smf_pool_pass=true")
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
-- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
-- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
-- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
+- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
+- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
+- **Design:** `doc/05_design/multicore_green.md`
+- **Research:** `doc/01_research/local/multicore_green.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c54c0b288e60ef25e7e5bf754bb4da1aabadf935bba8a221b5f9d38dfed1c5ca`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c54c0b288e60ef25e7e5bf754bb4da1aabadf935bba8a221b5f9d38dfed1c5ca`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c54c0b288e60ef25e7e5bf754bb4da1aabadf935bba8a221b5f9d38dfed1c5ca`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=80 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl:1:1: advice SSDOC-COV-001 [coverage] (-20): the authored requirement defines adverse behavior but no adverse scenario is named
+  why: Specifications should explain behavior outside the happy path.
+  improve: Add adverse-path scenarios required by the source, or record a reasoned suppression.
+test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl:163:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the wrapper-shaped multicore-green SMF path executable' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -17,18 +17,24 @@
 
 #### mints a deterministic public-only CUDA qualification
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- mints a deterministic public-only CUDA qualification
 - Re-admit all seven source rows inside the qualification owner
    - Expected: receipt.qualification_sha256.len() equals `64`
-- x25519 mlkem768 render measurement qualification
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("mints a deterministic public-only CUDA qualification")
 step("Re-admit all seven source rows inside the qualification owner")
 val rows = _qualification_rows()
 val target = _qualification_target(
@@ -41,7 +47,7 @@ match result:
             receipt)).to_be(true)
         expect(receipt.qualification_sha256.len()).to_equal(64)
         expect(receipt.target.matrix_row_set_sha256).to_equal(
-            x25519_mlkem768_admit_full_backend_matrix(
+            x25519_mlkem768_admit_source_backend_matrix(
                 rows).row_set_sha256)
         val rendered =
             x25519_mlkem768_render_measurement_qualification(receipt)
@@ -56,13 +62,18 @@ match result:
 
 #### requires an exact lower-hex build binding only for GPU targets
 
+- requires an exact lower-hex build binding only for GPU targets
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires an exact lower-hex build binding only for GPU targets")
 val rows = _qualification_rows()
 var missing = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Cuda)
@@ -87,13 +98,18 @@ expect(_qualification_admit(rows, unexpected).unwrap_err()).to_equal(
 
 #### binds the GPU build binding into the qualification hash
 
+- binds the GPU build binding into the qualification hash
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("binds the GPU build binding into the qualification hash")
 val rows = _qualification_rows()
 val target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Metal)
@@ -110,21 +126,18 @@ expect(x25519_mlkem768_measurement_qualification_valid(
 
 #### rejects every live observation binding mismatch
 
-- wrong host =  qualification rehash observation
-- wrong arch =  qualification rehash observation
-- wrong session =  qualification rehash observation
-- wrong artifact =  qualification rehash observation
-- wrong clock =  qualification rehash observation
-- guest heap =  qualification rehash observation
+- rejects every live observation binding mismatch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects every live observation binding mismatch")
 val rows = _qualification_rows()
 val target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Cuda)
@@ -178,13 +191,18 @@ expect(x25519_mlkem768_qualify_measurement(
 
 #### rejects scalar and non-physical capture targets
 
+- rejects scalar and non-physical capture targets
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects scalar and non-physical capture targets")
 val rows = _qualification_rows()
 var scalar_target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Cuda)
@@ -204,13 +222,18 @@ expect(_qualification_admit(
 
 #### rejects stale row-set and exact target binding
 
+- rejects stale row-set and exact target binding
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects stale row-set and exact target binding")
 val rows = _qualification_rows()
 var stale = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Rvv)
@@ -239,13 +262,18 @@ expect(_qualification_admit(
 
 #### rejects malformed session identity before matrix admission
 
+- rejects malformed session identity before matrix admission
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects malformed session identity before matrix admission")
 val rows = _qualification_rows()
 var target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Neon)
@@ -262,18 +290,18 @@ expect(_qualification_admit(
 
 #### rejects a mutated typed public set during internal re-admission
 
-- var rows =  qualification rows
-- var changed =  qualification set b
-- rows[4] set b = Some
+- rejects a mutated typed public set during internal re-admission
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects a mutated typed public set during internal re-admission")
 var rows = _qualification_rows()
 val target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Cuda)
@@ -289,16 +317,18 @@ expect(_qualification_admit(
 
 #### invalidates qualification after any retained field mutation
 
-- rows, target) unwrap
+- invalidates qualification after any retained field mutation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("invalidates qualification after any retained field mutation")
 val rows = _qualification_rows()
 val target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Metal)
@@ -314,19 +344,18 @@ expect(x25519_mlkem768_measurement_qualification_valid(
 
 #### rejects semantically invalid qualification even after canonical rehash
 
-- rows, target) unwrap
-- x25519 mlkem768 measurement qualification sha256
-- x25519 mlkem768 measurement qualification sha256
-- x25519 mlkem768 measurement qualification sha256
+- rejects semantically invalid qualification even after canonical rehash
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects semantically invalid qualification even after canonical rehash")
 val rows = _qualification_rows()
 val target = _qualification_target(
     rows, X25519MlKem768EvidenceBackend.Avx2)
@@ -363,7 +392,7 @@ expect(x25519_mlkem768_measurement_qualification_valid(
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -383,3 +412,64 @@ Tests covering X25519MLKEM768 matrix-bound measurement qualification.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-008`
+- `REQ-009`
+- `REQ-010`
+- `REQ-012`
+- `REQ-015`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3dff36039ef2890fe4bb0da9c8a038cd4f60d4bf0b95cd7cab2687bef52d0e50`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3dff36039ef2890fe4bb0da9c8a038cd4f60d4bf0b95cd7cab2687bef52d0e50`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3dff36039ef2890fe4bb0da9c8a038cd4f60d4bf0b95cd7cab2687bef52d0e50`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl
+mirror: doc/06_spec/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=90
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 6 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl:241:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mints a deterministic public-only CUDA qualification' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl:266:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires an exact lower-hex build binding only for GPU targets' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/crypto/x25519mlkem768_measurement_qualification_spec.spl:288:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'binds the GPU build binding into the qualification hash' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

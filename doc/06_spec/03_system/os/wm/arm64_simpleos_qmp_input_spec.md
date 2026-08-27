@@ -1,19 +1,6 @@
-# Arm64 Simpleos Qmp Input Specification
+# ARM64 SimpleOS QMP input
 
-> This manual documents the fail-closed source and evidence contract. Reading
-> it, or passing its static source assertions, is not live QEMU, SIMD,
-> rendering, capture, or input-delivery evidence. Only a successful canonical
-> live checker run can produce that evidence.
-
-Requirement traceability: `REQ-AQMP-001` binds the selected compiler to the
-clean Stage 2/Stage 3 provenance manifest and its sanity evidence;
-`REQ-AQMP-002` requires zero fabricated freestanding stubs with fallback
-disabled; `REQ-AQMP-003` requires one same-run chain across admitted artifact
-identities, serial receipts, ordered QMP input, guest frame/RAMFB commits, and
-distinct QEMU screendumps.  The executable source-contract scenario checks the
-fail-closed producers for all three requirements.  Only its live scenario can
-produce runtime evidence, and that diagnostic evidence never substitutes for
-physical-input `REQ-QRS` rows.
+> The canonical ARM64 Engine2D desktop already owns the real VirtIO-MMIO input
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -22,7 +9,24 @@ physical-input `REQ-QRS` rows.
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Arm64 Simpleos Qmp Input Specification
+# ARM64 SimpleOS QMP input
+
+The canonical ARM64 Engine2D desktop already owns the real VirtIO-MMIO input
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/wm/arm64_simpleos_qmp_input_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+The canonical ARM64 Engine2D desktop already owns the real VirtIO-MMIO input
+transport. Production admission remains fail-closed only until a host-green
+live QMP run correlates device, WM, frame, and distinct RAMFB capture evidence.
+PL011 character actions are explicitly excluded from that evidence.
 
 ## Scenarios
 
@@ -30,29 +34,23 @@ physical-input `REQ-QRS` rows.
 
 #### wires capability-discovered VirtIO-MMIO keyboard and pointer event queues
 
-- Inspect the canonical ARM64 desktop, input runtime owner, QEMU target,
-  attested builder, and live evidence wrapper.
-- Verify source admission uses byte-safe, NUL-delimited path enumeration and
-  binds the complete guest source fingerprint.
-- Verify compiler admission rejects `compiler_rust`/debug paths and embedded
-  `Rust-built`, `bootstrap seed only`, or `debug build` classifiers before the
-  attested build starts; `--self-test` must admit a clean host-format fixture
-  and reject seed/debug fixtures.
-- Verify the guest emits the exact AArch64/NEON SIMD receipt with positive
-  native fill hits, positive vector chunks, and bit-exact scalar parity.
-- Verify the live wrapper rejects missing, duplicate, fallback, mismatched, or
-  zero-execution SIMD receipts before input injection.
-- Verify the final transcript repeats the uniqueness check and binds normalized
-  SIMD fields into the evidence environment and human-readable report.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- wires capability-discovered VirtIO-MMIO keyboard and pointer event queues
+- Inspect the canonical ARM64 desktop, runtime owner, and QEMU target
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 352 lines folded for reproduction.
+Runnable source: 470 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("wires capability-discovered VirtIO-MMIO keyboard and pointer event queues")
 step("Inspect the canonical ARM64 desktop, runtime owner, and QEMU target")
 val entry = file_read_text(
     "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
@@ -76,6 +74,9 @@ val live_wrapper = file_read_text(
 )
 val build_wrapper = file_read_text(
     "scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
+)
+val bootstrap_manifest_writer = file_read_text(
+    "scripts/check/lib/bootstrap-stage3/manifest-write.shs"
 )
 val source_fingerprint = file_read_text(
     "scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs"
@@ -118,10 +119,10 @@ expect(runtime).to_contain("arm64_virtio_event_length_valid")
 expect(runtime).to_contain("arm64_virtio_queue_shape_valid")
 expect(runtime).to_contain("VIRTIO_STATUS_DEVICE_NEEDS_RESET")
 expect(runtime).to_contain("arm64_virtio_status_rejected(")
-val features_status = runtime.index_of("status = mmio[VMMIO_STATUS / 4U];", runtime.index_of("VIRTIO_STATUS_FEATURES_OK")) ?? -1
-val features_reject = runtime.index_of("arm64_virtio_status_rejected(", features_status) ?? -1
-val driver_status = runtime.index_of("status = mmio[VMMIO_STATUS / 4U];", runtime.index_of("VIRTIO_STATUS_DRIVER_OK", features_reject)) ?? -1
-val driver_reject = runtime.index_of("arm64_virtio_status_rejected(", driver_status) ?? -1
+val features_status = runtime.index_of("status = mmio[VMMIO_STATUS / 4U];", runtime.index_of("VIRTIO_STATUS_FEATURES_OK"))
+val features_reject = runtime.index_of("arm64_virtio_status_rejected(", features_status)
+val driver_status = runtime.index_of("status = mmio[VMMIO_STATUS / 4U];", runtime.index_of("VIRTIO_STATUS_DRIVER_OK", features_reject))
+val driver_reject = runtime.index_of("arm64_virtio_status_rejected(", driver_status)
 expect(features_reject).to_be_greater_than(features_status)
 expect(driver_reject).to_be_greater_than(driver_status)
 expect(runtime).to_contain("VMMIO_QUEUE_NOTIFY")
@@ -146,6 +147,24 @@ expect(live_wrapper).to_contain(
 )
 expect(live_wrapper).to_contain(
     "canonical-kernel-launch-sha256-mismatch"
+)
+expect(live_wrapper).to_contain(
+    "canonical-desktop-disk-missing"
+)
+expect(live_wrapper).to_contain(
+    "canonical-disk-launch-sha256-mismatch"
+)
+expect(live_wrapper).to_contain(
+    "canonical-build-manifest-font-bundle-sha256-mismatch"
+)
+expect(live_wrapper).to_contain(
+    "canonical-font-bundle-manifest-launch-sha256-mismatch"
+)
+expect(live_wrapper).to_contain(
+    "canonical-font-bundle-manifest-mutated-during-run"
+)
+expect(live_wrapper).to_contain(
+    "file=$DISK,if=none,id=armdesktop,format=raw,readonly=on"
 )
 expect(live_wrapper).to_contain(
     "guest-source-fingerprint-manifest-mismatch"
@@ -213,13 +232,13 @@ expect(live_wrapper).to_contain(
     "pointer relative-motion receipt mismatch"
 )
 expect(live_wrapper).to_contain(
-    "Tab key-down did not change focused window"
+    "WM modifier state does not match raw producer edge"
 )
 expect(entry).to_contain(
     "fatal reason=multi-input-frame-attribution"
 )
 expect(live_wrapper).to_contain(
-    "sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+    "sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,"
 )
 expect(live_wrapper.contains("SIMPLEOS_ARM64_QMP_KERNEL")).to_be(false)
 expect(live_wrapper.contains("SIMPLEOS_ARM64_QMP_DISK")).to_be(false)
@@ -245,6 +264,20 @@ expect(build_wrapper).to_contain(
 )
 expect(build_wrapper).to_contain(
     "compiler-changed-during-build"
+)
+expect(build_wrapper).to_contain(
+    "canonical-font-bundle-manifest-missing"
+)
+expect(build_wrapper).to_contain(
+    "font-bundle-manifest-replaced-during-build"
+)
+expect(build_wrapper).to_contain(
+    "font-bundle-manifest-changed-during-build"
+)
+expect(build_wrapper).to_contain("disk_profile=$DISK_PROFILE")
+expect(build_wrapper).to_contain("disk_access=$DISK_ACCESS")
+expect(build_wrapper).to_contain(
+    "font_bundle_manifest_sha256=$POST_FONT_BUNDLE_MANIFEST_SHA256"
 )
 expect(build_wrapper).to_contain(
     "source_fingerprint=$PRE_SOURCE_FINGERPRINT"
@@ -276,11 +309,12 @@ expect(source_fingerprint).to_contain(
     "ARM64_GUEST_COMPILER_ADMISSION_REASON"
 )
 expect(source_fingerprint).to_contain(
-    "Rust-built|bootstrap seed only|debug build"
+    "arm64_guest_validate_compiler_version_output"
 )
 expect(source_fingerprint).to_contain(
-    "rust-seed-or-debug-forbidden"
+    "^(Simple v|simple-bootstrap )"
 )
+expect(source_fingerprint.contains("grep -a -Eiq")).to_be(false)
 expect(source_fingerprint).to_contain(
     "arm64_guest_compiler_magic"
 )
@@ -302,8 +336,75 @@ expect(build_wrapper).to_contain(
 expect(build_wrapper).to_contain(
     "arm64_compiler_admission_self_test_status=pass"
 )
+expect(bootstrap_manifest_writer).to_contain("status=pass")
+expect(bootstrap_manifest_writer).to_contain("stage2_sha256=")
+expect(bootstrap_manifest_writer).to_contain(
+    "stage2_admitted_sha256="
+)
+expect(bootstrap_manifest_writer).to_contain(
+    "stage2_sanity_status=pass"
+)
+expect(bootstrap_manifest_writer).to_contain("stage3_sha256=")
+expect(bootstrap_manifest_writer).to_contain(
+    "stage3_sanity_status=pass"
+)
+expect(bootstrap_manifest_writer).to_contain("output_sha256=")
+expect(build_wrapper).to_contain(
+    "Fabricated freestanding stubs: 0 symbol(s)"
+)
+expect(build_wrapper).to_contain(
+    "SIMPLE_NO_STUB_FALLBACK=1"
+)
+expect(build_wrapper).to_contain(
+    "SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1"
+)
+expect(build_wrapper).to_contain(
+    "fabricated-stub-attestation-rejected"
+)
 expect(build_wrapper).to_contain(
     "COMPILER_REJECTION_REASON"
+)
+expect(build_wrapper).to_contain(
+    "SIMPLEOS_ARM64_ATTESTED_COMPILER"
+)
+expect(build_wrapper).to_contain(
+    "SIMPLEOS_ARM64_COMPILER_RECEIPT"
+)
+expect(build_wrapper).to_contain(
+    "SIMPLEOS_ARM64_STAGE3_PROVENANCE"
+)
+expect(build_wrapper).to_contain(
+    "bootstrap_stage3_verify_manifest"
+)
+expect(build_wrapper).to_contain(
+    "stage3-provenance-changed-during-build"
+)
+expect(build_wrapper).to_contain(
+    "simpleos-arm64-compiler-receipt-v1"
+)
+expect(build_wrapper).to_contain("native_smoke_status")
+expect(build_wrapper).to_contain("stub_fallback")
+expect(build_wrapper).to_contain("fabricated_stub_status")
+expect(build_wrapper).to_contain("measurement_status")
+expect(build_wrapper).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+expect(build_wrapper).to_contain(
+    "SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1"
+)
+expect(evidence_wrapper).to_contain("compiler_receipt_path")
+expect(evidence_wrapper).to_contain(
+    "canonical-build-manifest-stage3-provenance-invalid"
+)
+expect(evidence_wrapper).to_contain("native_smoke_status=pass")
+expect(evidence_wrapper).to_contain("fabricated_stub_status=none")
+expect(evidence_wrapper).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+expect(build_wrapper).to_contain(
+    "simpleos_arm64_desktop_engine2d.build.log"
+)
+expect(build_wrapper).to_contain("FABRICATED(-NEW)?")
+expect(build_wrapper).to_contain("Fabricated freestanding stubs:")
+expect(build_wrapper).to_contain("weak bodies that RETURN 0")
+expect(build_wrapper).to_contain(
+    "fabricated-or-unmeasured-stub-receipt-rejected"
 )
 expect(live_wrapper).to_contain(
     "canonical-build-manifest-compiler-format-arch-invalid"
@@ -329,6 +430,19 @@ expect(live_wrapper).to_contain(
 expect(live_wrapper).to_contain(
     "P6 requires one whitespace delimiter after maxval"
 )
+expect(live_wrapper).to_contain("SERIAL_LOG=")
+expect(live_wrapper).to_contain("QMP_LOG=")
+expect(live_wrapper).to_contain("BEFORE_PPM=")
+expect(live_wrapper).to_contain("AFTER_PPM=")
+expect(live_wrapper).to_contain(
+    "qmp_transport=input-send-event"
+)
+expect(live_wrapper).to_contain(
+    "capture_origin=qemu-ramfb-screendump"
+)
+expect(live_wrapper).to_contain(
+    "input frame does not match RAMFB render provenance"
+)
 expect(build_wrapper).to_contain(
     "guest-source-git-status-failed"
 )
@@ -345,12 +459,12 @@ expect(arm64_guide).to_contain(
     "[ramfb-visual-commit]"
 )
 
-val used_observe = runtime.index_of("ARM64_DMA_READ_ONCE(dev->used.idx)") ?? -1
-val used_acquire = runtime.index_of("arm64_virtio_dma_acquire()", used_observe) ?? -1
-val payload_read = runtime.index_of("ARM64_DMA_READ_ONCE(dev->events[used_id].type)") ?? -1
-val avail_ring = runtime.index_of("ARM64_DMA_WRITE_ONCE(dev->avail.ring") ?? -1
-val avail_release = runtime.index_of("arm64_virtio_dma_release()", avail_ring) ?? -1
-val avail_publish = runtime.index_of("ARM64_DMA_WRITE_ONCE(dev->avail.idx", avail_release) ?? -1
+val used_observe = runtime.index_of("ARM64_DMA_READ_ONCE(dev->used.idx)")
+val used_acquire = runtime.index_of("arm64_virtio_dma_acquire()", used_observe)
+val payload_read = runtime.index_of("ARM64_DMA_READ_ONCE(dev->events[used_id].type)")
+val avail_ring = runtime.index_of("ARM64_DMA_WRITE_ONCE(dev->avail.ring")
+val avail_release = runtime.index_of("arm64_virtio_dma_release()", avail_ring)
+val avail_publish = runtime.index_of("ARM64_DMA_WRITE_ONCE(dev->avail.idx", avail_release)
 expect(used_acquire).to_be_greater_than(used_observe)
 expect(payload_read).to_be_greater_than(used_acquire)
 expect(avail_release).to_be_greater_than(avail_ring)
@@ -365,12 +479,12 @@ expect(backend).to_contain("delivered_pointer_left_edge")
 expect(backend).to_contain("delivered_pointer_right_edge")
 expect(backend).to_contain("delivered_pointer_middle_edge")
 expect(entry).to_contain("input_compositor.input_sequence = pointer_sequence")
-val rel_x_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_REL}} code={{REL_X}} value={{input_backend.delivered_pointer_rel_x}} frame=raw-summary") ?? -1
-val rel_y_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_REL}} code={{REL_Y}} value={{input_backend.delivered_pointer_rel_y}} frame=raw-summary") ?? -1
-val left_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_KEY}} code={{BTN_LEFT}} value={{input_backend.delivered_pointer_left_value}} frame=raw-edge") ?? -1
-val right_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_KEY}} code={{BTN_RIGHT}} value={{input_backend.delivered_pointer_right_value}} frame=raw-edge") ?? -1
-val middle_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_KEY}} code={{BTN_MIDDLE}} value={{input_backend.delivered_pointer_middle_value}} frame=raw-edge") ?? -1
-val syn_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{input_backend.delivered_pointer_type}} code={{input_backend.delivered_pointer_code}} value={{input_backend.delivered_pointer_value}} frame=syn-report") ?? -1
+val rel_x_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_REL}} code={{REL_X}} value={{input_backend.delivered_pointer_rel_x}} frame=raw-summary")
+val rel_y_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_REL}} code={{REL_Y}} value={{input_backend.delivered_pointer_rel_y}} frame=raw-summary")
+val left_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_KEY}} code={{BTN_LEFT}} value={{input_backend.delivered_pointer_left_value}} frame=raw-edge")
+val right_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_KEY}} code={{BTN_RIGHT}} value={{input_backend.delivered_pointer_right_value}} frame=raw-edge")
+val middle_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{EV_KEY}} code={{BTN_MIDDLE}} value={{input_backend.delivered_pointer_middle_value}} frame=raw-edge")
+val syn_receipt = entry.index_of("input_seq={{pointer_sequence}} device=pointer type={{input_backend.delivered_pointer_type}} code={{input_backend.delivered_pointer_code}} value={{input_backend.delivered_pointer_value}} frame=syn-report")
 expect(rel_x_receipt).to_be_greater_than(-1)
 expect(rel_y_receipt).to_be_greater_than(-1)
 expect(left_receipt).to_be_greater_than(-1)
@@ -411,11 +525,13 @@ expect(entry.contains("[wm-pointer-irq]")).to_be(false)
 
 #### correlates QMP key edges and pointer events with guest state and frames
 
+- correlates QMP key edges and pointer events with guest state and frames
+   - Artifact capture: after_step
 - Boot the canonical ARM64 Engine2D production desktop
    - Artifact capture: after_step
-- Inject keyboard down and up through QMP VirtIO input
+- Inject left/right Ctrl and Alt press/release edges through QMP VirtIO input
    - Artifact capture: after_step
-- Inject pointer move and button down and up through QMP VirtIO input
+- Inject pointer move, down, drag, up, and wheel through QMP VirtIO input
    - Artifact capture: after_step
 - Observe guest-owned device receipt sequences
    - Artifact capture: after_step
@@ -425,21 +541,20 @@ expect(entry.contains("[wm-pointer-irq]")).to_be(false)
    - Artifact capture: after_step
 - Capture baseline and post-input RAMFB images
    - Artifact capture: after_step
-- Run the canonical live evidence checker and require its explicit PASS record;
-  these manual steps alone do not satisfy the live gate.
-   - Artifact capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("correlates QMP key edges and pointer events with guest state and frames")
 step("Boot the canonical ARM64 Engine2D production desktop")
-step("Inject keyboard down and up through QMP VirtIO input")
-step("Inject pointer move and button down and up through QMP VirtIO input")
+step("Inject left/right Ctrl and Alt press/release edges through QMP VirtIO input")
+step("Inject pointer move, down, drag, up, and wheel through QMP VirtIO input")
 step("Observe guest-owned device receipt sequences")
 step("Require distinct press and release state/frame correlations")
 step("Correlate handled input with WM state and later framebuffer revisions")
@@ -448,21 +563,6 @@ require_arm64_live_qmp_input_evidence()
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/wm/arm64_simpleos_qmp_input_spec.spl` |
-| Updated | 2026-07-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- ARM64 SimpleOS QMP input
 
 ## Scenario Summary
 
@@ -476,3 +576,50 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-007`
+- `REQ-AQMP-001`
+- `REQ-AQMP-002`
+- `REQ-AQMP-003`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `541a6dd1abc7a43760ab2c1c5b5fe0744b2d6a2eeb0a59a0478dc8f82cc84782`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `541a6dd1abc7a43760ab2c1c5b5fe0744b2d6a2eeb0a59a0478dc8f82cc84782`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `541a6dd1abc7a43760ab2c1c5b5fe0744b2d6a2eeb0a59a0478dc8f82cc84782`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/os/wm/arm64_simpleos_qmp_input_spec.spl
+mirror: doc/06_spec/03_system/os/wm/arm64_simpleos_qmp_input_spec.md (current)
+findings: 3 blockers: 1
+  narrative=100 structure=100 oracle=100
+  traceability=60 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=91; blocker cap makes effective=49
+doc/06_spec/03_system/os/wm/arm64_simpleos_qmp_input_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/wm/arm64_simpleos_qmp_input_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/wm/arm64_simpleos_qmp_input_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 4 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Database E2e Specification
 
-> <details>
-
-<!-- sdn-diagram:id=database_e2e_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=database_e2e_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-database_e2e_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=database_e2e_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering End-to-End Bug Database Workflow, Database File Format.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,29 +20,23 @@ database_e2e_spec -> std
 
 #### creates, populates, saves, and reloads database _(slow)_
 
-1. file delete
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. var bugdb = create bug database
 
-3. bugdb add bug
-
-4. bugdb add bug
-
-5. check
-
-6. check
+- creates, populates, saves, and reloads database
    - Expected: b.title equals `Critical bug`
-
-7. file delete
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 71 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("creates, populates, saves, and reloads database")
 val tmp = get_temp_dir()
 val db_path = "{tmp}/test_e2e_bugdb.sdn"
 
@@ -149,13 +120,18 @@ if file_exists(db_path):
 
 #### updates bug and persists changes _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- updates bug and persists changes
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("updates bug and persists changes")
 # SKIP: load_bug_database returns Option and ? on nil causes runtime error
 # Also update_bug + re-save + re-load chain has multiple runtime limitations
 print "SKIP: update-and-persist chain has runtime limitations with load_bug_database"
@@ -171,32 +147,18 @@ print "SKIP: update-and-persist chain has runtime limitations with load_bug_data
 
 #### handles concurrent database access _(slow)_
 
-1. var bugdb1 = create bug database
-
-2. bugdb1 save
-
-3. var bugdb2 = load bug database
-
-4. var bugdb3 = load bug database
-
-5. bugdb2 save
-
-6. bugdb3 save
-
-7. var final db = load bug database
-
-8. check
-
-9. file delete
+- handles concurrent database access
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles concurrent database access")
 val tmp = get_temp_dir()
 val db_path = "{tmp}/test_e2e_concurrent.sdn"
 
@@ -282,13 +244,18 @@ file_delete(db_path)
 
 #### queries bugs across multiple criteria _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- queries bugs across multiple criteria
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("queries bugs across multiple criteria")
 # SKIP: load_bug_database? chain + critical_bugs/bugs_by_severity/bugs_by_status
 # methods have runtime type errors (enum comparison, stats struct access)
 print "SKIP: multi-criteria query requires load_bug_database and advanced query methods with runtime limitations"
@@ -304,13 +271,18 @@ print "SKIP: multi-criteria query requires load_bug_database and advanced query 
 
 #### validates bug data integrity _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- validates bug data integrity
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("validates bug data integrity")
 # SKIP: load_bug_database? + validate_test_links/validate_fix_strategy
 # methods have runtime limitations
 print "SKIP: validation methods require load_bug_database chain with runtime limitations"
@@ -328,26 +300,18 @@ print "SKIP: validation methods require load_bug_database chain with runtime lim
 
 #### saves in SDN format _(slow)_
 
-1. var bugdb = create bug database
-
-2. bugdb save
-
-3. check
-
-4. check
-
-5. check
-
-6. file delete
+- saves in SDN format
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("saves in SDN format")
 val tmp = get_temp_dir()
 val db_path = "{tmp}/test_e2e_format.sdn"
 var bugdb = create_bug_database(db_path)
@@ -392,30 +356,18 @@ file_delete(db_path)
 
 #### handles special characters in data _(slow)_
 
-1. var bugdb = create bug database
-
-2. bugdb add bug
-
-3. bugdb save
-
-4. var loaded db = load bug database
-
-5. check
-
-6. check
-
-7. check
-
-8. file delete
+- handles special characters in data
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles special characters in data")
 val tmp = get_temp_dir()
 val db_path = "{tmp}/test_e2e_special.sdn"
 var bugdb = create_bug_database(db_path)
@@ -463,12 +415,12 @@ file_delete(db_path)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/database_e2e_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering End-to-End Bug Database Workflow, Database File Format.
 - End-to-End Bug Database Workflow
 - Database File Format
 
@@ -484,3 +436,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0520cfc1ac15b750c89fc499a6abaa818b9ad9c9d79e219d4aba3f6b8aeac5b5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0520cfc1ac15b750c89fc499a6abaa818b9ad9c9d79e219d4aba3f6b8aeac5b5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0520cfc1ac15b750c89fc499a6abaa818b9ad9c9d79e219d4aba3f6b8aeac5b5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/lib/database_e2e_spec.spl
+mirror: doc/06_spec/02_integration/lib/database_e2e_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/database_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/database_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/database_e2e_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates, populates, saves, and reloads database' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_e2e_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'updates bug and persists changes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_e2e_spec.spl:130:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles concurrent database access' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

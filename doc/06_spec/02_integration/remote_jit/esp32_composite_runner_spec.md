@@ -1,30 +1,5 @@
 # ESP32 Remote Execution Lane — Composite Runner
 
-> 1. print
-
-<!-- sdn-diagram:id=esp32_composite_runner_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=esp32_composite_runner_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-esp32_composite_runner_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=esp32_composite_runner_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -41,7 +16,7 @@ esp32_composite_runner_spec -> std
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/remote_jit/esp32_composite_runner_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 #
@@ -54,23 +29,24 @@ esp32_composite_runner_spec -> std
 
 #### adapter connects via USB JTAG
 
-1. print
-2. var adapter = Esp32Adapter new
-3. Ok
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- adapter connects via USB JTAG
    - Expected: adapter.connected is true
-4. adapter disconnect
    - Expected: adapter.connected is false
-5. Err
-6. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("adapter connects via USB JTAG")
 if not probe_command("openocd"):
     print("SKIP: openocd not available")
     return
@@ -89,31 +65,22 @@ match conn:
 
 #### DRAM write and readback
 
-1. print
-2. var adapter = Esp32Adapter new
-3. Ok
-4. Ok
-5. Ok
+- DRAM write and readback
    - Expected: read_bytes[0] equals `0x11`
    - Expected: read_bytes[1] equals `0x22`
    - Expected: read_bytes[2] equals `0x33`
    - Expected: read_bytes[3] equals `0x44`
-6. Err
-7. print
-8. Err
-9. print
-10. adapter disconnect
-11. Err
-12. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("DRAM write and readback")
 if not probe_command("openocd"):
     print("SKIP: openocd not available")
     return
@@ -145,28 +112,19 @@ match conn:
 
 #### register write and readback
 
-1. print
-2. var adapter = Esp32Adapter new
-3. Ok
-4. Ok
-5. Ok
+- register write and readback
    - Expected: value equals `0xDEADBEEF`
-6. Err
-7. print
-8. Err
-9. print
-10. adapter disconnect
-11. Err
-12. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("register write and readback")
 if not probe_command("openocd"):
     print("SKIP: openocd not available")
     return
@@ -194,25 +152,19 @@ match conn:
 
 #### creates execution manager
 
-1. print
-2. var adapter = Esp32Adapter new
-3. Ok
-4. Ok
+- creates execution manager
    - Expected: adapter.connected is true
-5. Err
-6. print
-7. adapter disconnect
-8. Err
-9. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("creates execution manager")
 if not probe_command("openocd"):
     print("SKIP: openocd not available")
     return
@@ -245,3 +197,51 @@ match conn:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `62fd830092f30246fb99f38c5aaee0655f36da24ec85949754c540f7b34784be`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `62fd830092f30246fb99f38c5aaee0655f36da24ec85949754c540f7b34784be`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `62fd830092f30246fb99f38c5aaee0655f36da24ec85949754c540f7b34784be`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/remote_jit/esp32_composite_runner_spec.spl
+mirror: doc/06_spec/02_integration/remote_jit/esp32_composite_runner_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/remote_jit/esp32_composite_runner_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/remote_jit/esp32_composite_runner_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/remote_jit/esp32_composite_runner_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adapter connects via USB JTAG' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/remote_jit/esp32_composite_runner_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'DRAM write and readback' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/remote_jit/esp32_composite_runner_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'register write and readback' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

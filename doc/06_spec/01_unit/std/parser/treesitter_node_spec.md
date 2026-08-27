@@ -2,29 +2,6 @@
 
 > Tests for TreeSitter Node API wrapper (Features 1-2 from Phase 2.3):
 
-<!-- sdn-diagram:id=treesitter_node_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=treesitter_node_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-treesitter_node_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=treesitter_node_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 26 | 26 | 0 | 0 |
@@ -44,7 +21,7 @@ Tests for TreeSitter Node API wrapper (Features 1-2 from Phase 2.3):
 | Category | Parser \| TreeSitter |
 | Status | In Development |
 | Source | `test/01_unit/std/parser/treesitter_node_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests for TreeSitter Node API wrapper (Features 1-2 from Phase 2.3):
@@ -57,13 +34,18 @@ Tests for TreeSitter Node API wrapper (Features 1-2 from Phase 2.3):
 
 #### has start_byte method that returns i64
 
+- has start_byte method that returns i64
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has start_byte method that returns i64")
 val node = create_mock_node(1)
 # The actual value depends on FFI, but method should be callable
 val result = node.start_byte()
@@ -74,13 +56,18 @@ expect result.to_be_greater_than(-1) or result.to_equal(-1)
 
 #### has end_byte method that returns i64
 
+- has end_byte method that returns i64
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has end_byte method that returns i64")
 val node = create_mock_node(1)
 val result = node.end_byte()
 expect result.to_be_greater_than(-1) or result.to_equal(-1)
@@ -90,13 +77,18 @@ expect result.to_be_greater_than(-1) or result.to_equal(-1)
 
 #### has start_point method that returns Point
 
+- has start_point method that returns Point
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has start_point method that returns Point")
 val node = create_mock_node(1)
 val pt = node.start_point()
 # Point should have row and column fields
@@ -109,13 +101,18 @@ expect has_row and has_col
 
 #### has end_point method that returns Point
 
+- has end_point method that returns Point
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has end_point method that returns Point")
 val node = create_mock_node(1)
 val pt = node.end_point()
 val has_row = pt.row >= 0 or pt.row < 0
@@ -129,13 +126,18 @@ expect has_row and has_col
 
 #### has parent method that returns Node?
 
+- has parent method that returns Node?
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has parent method that returns Node?")
 val node = create_mock_node(1)
 val parent = node.parent()
 # Result can be nil or Node
@@ -147,13 +149,18 @@ expect is_valid_result
 
 #### has next_sibling method that returns Node?
 
+- has next_sibling method that returns Node?
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has next_sibling method that returns Node?")
 val node = create_mock_node(1)
 val sibling = node.next_sibling()
 val is_valid_result = sibling == nil or sibling != nil
@@ -164,13 +171,18 @@ expect is_valid_result
 
 #### has prev_sibling method that returns Node?
 
+- has prev_sibling method that returns Node?
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has prev_sibling method that returns Node?")
 val node = create_mock_node(1)
 val sibling = node.prev_sibling()
 val is_valid_result = sibling == nil or sibling != nil
@@ -183,16 +195,18 @@ expect is_valid_result
 
 #### has kind method
 
-1. expect k len
+- has kind method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has kind method")
 val node = create_mock_node(1)
 val k = node.kind()
 # Should return text (possibly empty)
@@ -203,13 +217,18 @@ expect k.len() >= 0
 
 #### has child_count method
 
+- has child_count method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has child_count method")
 val node = create_mock_node(1)
 val count = node.child_count()
 expect count >= 0
@@ -219,13 +238,18 @@ expect count >= 0
 
 #### has child method
 
+- has child method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has child method")
 val node = create_mock_node(1)
 val c = node.child(0)
 expect c == nil or c != nil
@@ -235,13 +259,18 @@ expect c == nil or c != nil
 
 #### has named_child_count method
 
+- has named_child_count method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has named_child_count method")
 val node = create_mock_node(1)
 val count = node.named_child_count()
 expect count >= 0
@@ -251,13 +280,18 @@ expect count >= 0
 
 #### has named_child method
 
+- has named_child method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has named_child method")
 val node = create_mock_node(1)
 val c = node.named_child(0)
 expect c == nil or c != nil
@@ -267,13 +301,18 @@ expect c == nil or c != nil
 
 #### has is_named method
 
+- has is_named method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has is_named method")
 val node = create_mock_node(1)
 val result = node.is_named()
 expect result.to_equal(true) or result.to_equal(false)
@@ -283,13 +322,18 @@ expect result.to_equal(true) or result.to_equal(false)
 
 #### has is_missing method
 
+- has is_missing method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has is_missing method")
 val node = create_mock_node(1)
 val result = node.is_missing()
 expect result.to_equal(true) or result.to_equal(false)
@@ -299,13 +343,18 @@ expect result.to_equal(true) or result.to_equal(false)
 
 #### has is_extra method
 
+- has is_extra method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has is_extra method")
 val node = create_mock_node(1)
 val result = node.is_extra()
 expect result.to_equal(true) or result.to_equal(false)
@@ -315,13 +364,18 @@ expect result.to_equal(true) or result.to_equal(false)
 
 #### has has_error method
 
+- has has_error method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has has_error method")
 val node = create_mock_node(1)
 val result = node.has_error()
 expect result.to_equal(true) or result.to_equal(false)
@@ -331,13 +385,18 @@ expect result.to_equal(true) or result.to_equal(false)
 
 #### has is_null method
 
+- has is_null method
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("has is_null method")
 val node = create_mock_node(1)
 val result = node.is_null()
 expect result.to_equal(true) or result.to_equal(false)
@@ -349,20 +408,8 @@ expect result.to_equal(true) or result.to_equal(false)
 
 #### node_is_valid returns false for nil
 
-<details>
-<summary>Executable SSpec</summary>
+- node_is_valid returns false for nil
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = node_is_valid(nil)
-expect result.to_equal(false)
-```
-
-</details>
-
-#### node_is_valid returns bool for non-nil node
 
 <details>
 <summary>Executable SSpec</summary>
@@ -371,6 +418,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("node_is_valid returns false for nil")
+val result = node_is_valid(nil)
+expect result.to_equal(false)
+```
+
+</details>
+
+#### node_is_valid returns bool for non-nil node
+
+- node_is_valid returns bool for non-nil node
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-STD
+step("node_is_valid returns bool for non-nil node")
 val node = create_mock_node(1)
 val result = node_is_valid(node)
 # Should return true or false based on is_null check
@@ -381,13 +450,18 @@ expect result.to_equal(true) or result.to_equal(false)
 
 #### node_byte_range returns tuple
 
+- node_byte_range returns tuple
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("node_byte_range returns tuple")
 val node = create_mock_node(1)
 val range = node_byte_range(node)
 # Should be (start, end) tuple
@@ -400,13 +474,18 @@ expect has_start and has_end
 
 #### node_line_range returns tuple
 
+- node_line_range returns tuple
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("node_line_range returns tuple")
 val node = create_mock_node(1)
 val range = node_line_range(node)
 val has_start = range.0 >= 0 or range.0 < 0
@@ -420,13 +499,18 @@ expect has_start and has_end
 
 #### can create Point with row and column
 
+- can create Point with row and column
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("can create Point with row and column")
 val pt = Point(row: 5, column: 10)
 expect pt.row.to_equal(5)
 expect pt.column.to_equal(10)
@@ -436,13 +520,18 @@ expect pt.column.to_equal(10)
 
 #### Point row can be zero
 
+- Point row can be zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("Point row can be zero")
 val pt = Point(row: 0, column: 0)
 expect pt.row.to_equal(0)
 ```
@@ -451,13 +540,18 @@ expect pt.row.to_equal(0)
 
 #### Point column can be zero
 
+- Point column can be zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("Point column can be zero")
 val pt = Point(row: 0, column: 0)
 expect pt.column.to_equal(0)
 ```
@@ -468,13 +562,18 @@ expect pt.column.to_equal(0)
 
 #### navigation methods return Optional nodes (nil or Node)
 
+- navigation methods return Optional nodes (nil or Node)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("navigation methods return Optional nodes (nil or Node)")
 val node = create_mock_node(1)
 val parent = node.parent()
 val next = node.next_sibling()
@@ -490,13 +589,18 @@ expect parent_valid and next_valid and prev_valid
 
 #### position methods return concrete values (i64 or Point)
 
+- position methods return concrete values (i64 or Point)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-STD
+step("position methods return concrete values (i64 or Point)")
 val node = create_mock_node(1)
 # These should never be nil
 val start_b = node.start_byte()
@@ -525,3 +629,54 @@ expect valid_start and valid_end and valid_sp and valid_ep
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-STD`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `76926c0f2ad1623f65936bd296a0401d920653644415efbc1c2ef0d99080e88b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `76926c0f2ad1623f65936bd296a0401d920653644415efbc1c2ef0d99080e88b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `76926c0f2ad1623f65936bd296a0401d920653644415efbc1c2ef0d99080e88b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/01_unit/std/parser/treesitter_node_spec.spl
+mirror: doc/06_spec/01_unit/std/parser/treesitter_node_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/parser/treesitter_node_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/parser/treesitter_node_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/parser/treesitter_node_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has start_byte method that returns i64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/parser/treesitter_node_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has end_byte method that returns i64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/parser/treesitter_node_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has start_point method that returns Point' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/parser/treesitter_node_spec.spl:244:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can create Point with row and column' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

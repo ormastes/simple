@@ -2,29 +2,6 @@
 
 > Property Testing Framework - Shrinking Tests
 
-<!-- sdn-diagram:id=shrinking_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=shrinking_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-shrinking_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=shrinking_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -43,7 +20,7 @@ Property Testing Framework - Shrinking Tests
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/generated/shrinking_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Property Testing Framework - Shrinking Tests
@@ -57,19 +34,18 @@ Feature: Automatic input minimization to find minimal failing test cases
 
 #### shrinks positive integers towards zero
 
-1. expect candidates contains
-2. expect candidates contains
-3. expect candidates contains
-4. expect c abs
+- shrinks positive integers towards zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks positive integers towards zero")
 val candidates = shrink_i64(100)
 # Should include 0
 expect candidates.contains(0)
@@ -86,19 +62,18 @@ for c in candidates:
 
 #### shrinks negative integers towards zero
 
-1. expect candidates contains
-2. expect candidates contains
-3. expect candidates contains
-4. expect c abs
+- shrinks negative integers towards zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks negative integers towards zero")
 val candidates = shrink_i64(-100)
 # Should include 0
 expect candidates.contains(0)
@@ -115,16 +90,18 @@ for c in candidates:
 
 #### cannot shrink zero
 
-1. expect len
+- cannot shrink zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("cannot shrink zero")
 val candidates = shrink_i64(0)
 # Zero cannot be shrunk further
 expect len(candidates) == 0
@@ -136,27 +113,7 @@ expect len(candidates) == 0
 
 #### shrinks to empty list
 
-1. expect candidates contains
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val candidates = shrink_list([1, 2, 3, 4, 5])
-# Should include empty list as candidate
-expect candidates.contains([])
-```
-
-</details>
-
-#### shrinks by removing half
-
-1. expect candidates contains
-2. expect candidates contains
+- shrinks to empty list
 
 
 <details>
@@ -166,6 +123,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks to empty list")
+val candidates = shrink_list([1, 2, 3, 4, 5])
+# Should include empty list as candidate
+expect candidates.contains([])
+```
+
+</details>
+
+#### shrinks by removing half
+
+- shrinks by removing half
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks by removing half")
 val candidates = shrink_list([1, 2, 3, 4, 5, 6])
 # Should include first half [1, 2, 3]
 expect candidates.contains([1, 2, 3])
@@ -177,16 +157,18 @@ expect candidates.contains([4, 5, 6])
 
 #### shrinks by removing first element
 
-1. expect candidates contains
+- shrinks by removing first element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks by removing first element")
 val candidates = shrink_list([1, 2, 3])
 # Should include list with first element removed
 expect candidates.contains([2, 3])
@@ -196,16 +178,18 @@ expect candidates.contains([2, 3])
 
 #### shrinks by removing last element
 
-1. expect candidates contains
+- shrinks by removing last element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks by removing last element")
 val candidates = shrink_list([1, 2, 3])
 # Should include list with last element removed
 expect candidates.contains([1, 2])
@@ -215,16 +199,18 @@ expect candidates.contains([1, 2])
 
 #### cannot shrink empty list
 
-1. expect len
+- cannot shrink empty list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("cannot shrink empty list")
 val candidates = shrink_list([])
 # Empty list cannot be shrunk
 expect len(candidates) == 0
@@ -236,16 +222,18 @@ expect len(candidates) == 0
 
 #### shrinks to empty string
 
-1. expect candidates contains
+- shrinks to empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks to empty string")
 val candidates = shrink_string("hello")
 # Should include empty string
 expect candidates.contains("")
@@ -255,18 +243,18 @@ expect candidates.contains("")
 
 #### shrinks by removing characters
 
-1. expect len
-2. expect candidates contains
-3. expect candidates contains
+- shrinks by removing characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shrinks by removing characters")
 val candidates = shrink_string("hello")
 # Should have multiple candidates
 expect len(candidates) > 1
@@ -280,16 +268,18 @@ expect candidates.contains("ello")
 
 #### cannot shrink empty string
 
-1. expect len
+- cannot shrink empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("cannot shrink empty string")
 val candidates = shrink_string("")
 # Empty string cannot be shrunk
 expect len(candidates) == 0
@@ -301,13 +291,18 @@ expect len(candidates) == 0
 
 #### finds minimal failing case for integers
 
+- finds minimal failing case for integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds minimal failing case for integers")
 # Property: value must be < 50
 val test_fn = |x| x < 50
 
@@ -329,16 +324,18 @@ expect result.shrinks > 0
 
 #### finds minimal failing case for lists
 
-1. expect list sum
+- finds minimal failing case for lists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds minimal failing case for lists")
 # Property: list sum must be < 10
 val test_fn = |list| list_sum(list) < 10
 
@@ -359,13 +356,18 @@ expect list_sum(value) >= 10
 
 #### handles max_shrinks limit
 
+- handles max_shrinks limit
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles max_shrinks limit")
 # Property that always fails
 val test_fn = |x| false
 
@@ -384,13 +386,18 @@ expect result.shrinks <= 5
 
 #### handles max_depth limit
 
+- handles max_depth limit
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles max_depth limit")
 # Property that always fails
 val test_fn = |x| false
 
@@ -411,13 +418,18 @@ expect result.result_type == ShrinkResultType.MinimalFailure or result.result_ty
 
 #### handles no shrink possible
 
+- handles no shrink possible
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles no shrink possible")
 # Zero cannot be shrunk
 val test_fn = |x| x > 0
 
@@ -437,13 +449,18 @@ expect result.shrinks == 0
 
 #### handles all shrinks passing
 
+- handles all shrinks passing
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles all shrinks passing")
 # Property: value must be exactly 42
 val test_fn = |x| x == 42
 
@@ -474,3 +491,51 @@ expect result.value != 42
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `98efed374696a8afea9410f1bdf1a0a7a8b24668c1b34e46c82c3dfd142cc1c3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `98efed374696a8afea9410f1bdf1a0a7a8b24668c1b34e46c82c3dfd142cc1c3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `98efed374696a8afea9410f1bdf1a0a7a8b24668c1b34e46c82c3dfd142cc1c3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/generated/shrinking_spec.spl
+mirror: doc/06_spec/03_system/generated/shrinking_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/generated/shrinking_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/generated/shrinking_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/generated/shrinking_spec.spl:169:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shrinks positive integers towards zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/generated/shrinking_spec.spl:183:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shrinks negative integers towards zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/generated/shrinking_spec.spl:197:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'cannot shrink zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Css Specification
 
-> <details>
-
-<!-- sdn-diagram:id=css_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=css_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-css_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=css_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Chromium CSS subset — flex-flow shorthand, Chromium CSS subset — hsl/hsla color parsing, Chromium CSS subset — currentColor keyword, Chromium CSS subset — DesktopShell glass-theme properties.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,22 @@ css_spec -> std
 
 #### expands 'row wrap' into flex-direction=row + flex-wrap=wrap
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- expands 'row wrap' into flex-direction=row + flex-wrap=wrap
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expands 'row wrap' into flex-direction=row + flex-wrap=wrap")
 val out = expand_flex_flow("row wrap")
 expect(out.len() == 2).to_be_true()
 expect(css_decls_contain(out, "flex-direction", "row")).to_be_true()
@@ -57,13 +43,18 @@ expect(css_decls_contain(out, "flex-wrap", "wrap")).to_be_true()
 
 #### expands bare 'column-reverse' with default nowrap
 
+- expands bare 'column-reverse' with default nowrap
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expands bare 'column-reverse' with default nowrap")
 val out = expand_flex_flow("column-reverse")
 expect(out.len() == 2).to_be_true()
 expect(css_decls_contain(out, "flex-direction", "column-reverse")).to_be_true()
@@ -74,13 +65,18 @@ expect(css_decls_contain(out, "flex-wrap", "nowrap")).to_be_true()
 
 #### expands 'wrap-reverse row' (order-independent)
 
+- expands 'wrap-reverse row' (order-independent)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("expands 'wrap-reverse row' (order-independent)")
 val out = expand_flex_flow("wrap-reverse row")
 expect(out.len() == 2).to_be_true()
 expect(css_decls_contain(out, "flex-direction", "row")).to_be_true()
@@ -93,13 +89,18 @@ expect(css_decls_contain(out, "flex-wrap", "wrap-reverse")).to_be_true()
 
 #### parses hsl(0, 100%, 50%) as pure red
 
+- parses hsl(0, 100%, 50%) as pure red
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hsl(0, 100%, 50%) as pure red")
 val c = parse_color_value("hsl(0, 100%, 50%)")
 # RGBA packed as 0xRRGGBBAA — red = 0xFF0000FF
 expect(c == 0xFF0000FF).to_be_true()
@@ -109,13 +110,18 @@ expect(c == 0xFF0000FF).to_be_true()
 
 #### parses hsl(120, 100%, 50%) as pure green
 
+- parses hsl(120, 100%, 50%) as pure green
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hsl(120, 100%, 50%) as pure green")
 val c = parse_color_value("hsl(120, 100%, 50%)")
 expect(c == 0x00FF00FF).to_be_true()
 ```
@@ -124,13 +130,18 @@ expect(c == 0x00FF00FF).to_be_true()
 
 #### parses hsl(240, 100%, 50%) as pure blue
 
+- parses hsl(240, 100%, 50%) as pure blue
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hsl(240, 100%, 50%) as pure blue")
 val c = parse_color_value("hsl(240, 100%, 50%)")
 expect(c == 0x0000FFFF).to_be_true()
 ```
@@ -139,13 +150,18 @@ expect(c == 0x0000FFFF).to_be_true()
 
 #### parses hsla(0, 0%, 0%, 1.0) as opaque black
 
+- parses hsla(0, 0%, 0%, 1.0) as opaque black
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hsla(0, 0%, 0%, 1.0) as opaque black")
 val c = parse_color_value("hsla(0, 0%, 0%, 1.0)")
 expect(c == 0x000000FF).to_be_true()
 ```
@@ -154,13 +170,18 @@ expect(c == 0x000000FF).to_be_true()
 
 #### parses hsl(0, 0%, 100%) as white
 
+- parses hsl(0, 0%, 100%) as white
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses hsl(0, 0%, 100%) as white")
 val c = parse_color_value("hsl(0, 0%, 100%)")
 expect(c == 0xFFFFFFFF).to_be_true()
 ```
@@ -171,19 +192,18 @@ expect(c == 0xFFFFFFFF).to_be_true()
 
 #### resolves border-color: currentColor to the element's color
 
-1. var node = BeDomNode element
-2. node set style
-3. node set style
-4. node set style
+- resolves border-color: currentColor to the element's color
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resolves border-color: currentColor to the element's color")
 var node = BeDomNode.element("div")
 # Establish the element's color first.
 node.set_style("color", "#FF00FFFF")  # magenta
@@ -196,18 +216,18 @@ expect(be_dom_get_border_color(node).value == 0xFF00FFFF).to_be_true()
 
 #### accepts the mixed-case spelling 'currentColor'
 
-1. var node = BeDomNode element
-2. node set style
-3. node set style
+- accepts the mixed-case spelling 'currentColor'
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("accepts the mixed-case spelling 'currentColor'")
 var node = BeDomNode.element("div")
 node.set_style("color", "#112233FF")
 node.set_style("border-color", "currentColor")
@@ -220,25 +240,18 @@ expect(be_dom_get_border_color(node).value == 0x112233FF).to_be_true()
 
 #### accepts the full panel property set without losing values
 
-1. var node = BeDomNode element
-2. node set style
-3. node set style
-4. node set style
-5. node set style
-6. node set style
-7. node set style
-8. node set style
-9. node set style
-10. node set style
+- accepts the full panel property set without losing values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("accepts the full panel property set without losing values")
 var node = BeDomNode.element("div")
 node.set_style("display", "flex")
 node.set_style("flex-direction", "column")
@@ -263,19 +276,18 @@ expect(be_dom_get_border_radius(node).value == 20).to_be_true()
 
 #### stores display: flow-root and display: contents as freeform values
 
-1. var node1 = BeDomNode element
-2. node1 set style
-3. var node2 = BeDomNode element
-4. node2 set style
+- stores display: flow-root and display: contents as freeform values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("stores display: flow-root and display: contents as freeform values")
 # These are not emitted by widget_to_dom for DesktopShell today
 # (waived per M3 acceptance), but set_style must not panic if a
 # future widget set-style path feeds them in.
@@ -297,12 +309,12 @@ expect(be_dom_get_display(node2) == "contents").to_be_true()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui.chromium/css_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Chromium CSS subset — flex-flow shorthand, Chromium CSS subset — hsl/hsla color parsing, Chromium CSS subset — currentColor keyword, Chromium CSS subset — DesktopShell glass-theme properties.
 - Chromium CSS subset — flex-flow shorthand
 - Chromium CSS subset — hsl/hsla color parsing
 - Chromium CSS subset — currentColor keyword
@@ -320,3 +332,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `36a814e9bd2566caf43006fb6aaae25b232a655785c892f690367ca9593798e2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `36a814e9bd2566caf43006fb6aaae25b232a655785c892f690367ca9593798e2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `36a814e9bd2566caf43006fb6aaae25b232a655785c892f690367ca9593798e2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui.chromium/css_spec.spl
+mirror: doc/06_spec/01_unit/app/ui.chromium/css_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui.chromium/css_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui.chromium/css_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui.chromium/css_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'expands 'row wrap' into flex-direction=row + flex-wrap=wrap' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui.chromium/css_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'expands bare 'column-reverse' with default nowrap' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui.chromium/css_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'expands 'wrap-reverse row' (order-independent)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

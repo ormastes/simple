@@ -1,29 +1,6 @@
 # If Else Implicit Return Specification
 
-> 1. fn get sign
-
-<!-- sdn-diagram:id=if_else_implicit_return_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=if_else_implicit_return_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-if_else_implicit_return_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=if_else_implicit_return_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering If-else implicit return, basic if-else, if-elif-else chain, nested if-else, with other statements before, return type inference, mixed with explicit return, with function calls.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,18 +19,18 @@ if_else_implicit_return_spec
 
 #### returns value from if branch
 
-1. fn get sign
-2. expect get sign
-3. expect get sign
+- returns value from if branch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns value from if branch")
 fn get_sign(x: i64) -> text:
     if x >= 0:
         "positive"
@@ -68,18 +45,18 @@ expect get_sign(-5) == "negative"
 
 #### returns value from else branch
 
-1. fn is even
-2. expect is even
-3. expect is even
+- returns value from else branch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns value from else branch")
 fn is_even(x: i64) -> bool:
     if x % 2 == 0:
         true
@@ -94,18 +71,18 @@ expect is_even(3) == false
 
 #### returns complex expressions
 
-1. fn double or triple
-2. expect double or triple
-3. expect double or triple
+- returns complex expressions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns complex expressions")
 fn double_or_triple(x: i64, double: bool) -> i64:
     if double:
         x * 2
@@ -122,19 +99,18 @@ expect double_or_triple(5, false) == 15
 
 #### returns from elif branch
 
-1. fn classify
-2. expect classify
-3. expect classify
-4. expect classify
+- returns from elif branch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns from elif branch")
 fn classify(x: i64) -> text:
     if x < 0:
         "negative"
@@ -152,21 +128,18 @@ expect classify(5) == "positive"
 
 #### returns from multiple elif branches
 
-1. fn grade
-2. expect grade
-3. expect grade
-4. expect grade
-5. expect grade
-6. expect grade
+- returns from multiple elif branches
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns from multiple elif branches")
 fn grade(score: i64) -> text:
     if score >= 90:
         "A"
@@ -192,20 +165,18 @@ expect grade(55) == "F"
 
 #### returns from nested if-else
 
-1. fn nested check
-2. expect nested check
-3. expect nested check
-4. expect nested check
-5. expect nested check
+- returns from nested if-else
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns from nested if-else")
 fn nested_check(a: bool, b: bool) -> text:
     if a:
         if b:
@@ -230,18 +201,18 @@ expect nested_check(false, false) == "neither"
 
 #### returns after variable declaration
 
-1. fn add with check
-2. expect add with check
-3. expect add with check
+- returns after variable declaration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns after variable declaration")
 fn add_with_check(a: i64, b: i64) -> i64:
     val sum = a + b
     if sum > 100:
@@ -260,18 +231,18 @@ expect add_with_check(80, 50) == 100
 
 #### returns after loop
 
-1. fn sum until
-2. expect sum until
-3. expect sum until
+- returns after loop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns after loop")
 fn sum_until(limit: i64) -> i64:
     var total = 0
     var i = 1
@@ -296,18 +267,18 @@ expect sum_until(20) == 100
 
 #### works with integer return
 
-1. fn max val
-2. expect max val
-3. expect max val
+- works with integer return
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works with integer return")
 fn max_val(a: i64, b: i64) -> i64:
     if a > b:
         a
@@ -322,18 +293,18 @@ expect max_val(5, 10) == 10
 
 #### works with text return
 
-1. fn greeting
-2. expect greeting
-3. expect greeting
+- works with text return
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works with text return")
 fn greeting(formal: bool) -> text:
     if formal:
         "Good day"
@@ -348,18 +319,18 @@ expect greeting(false) == "Hi"
 
 #### works with boolean return
 
-1. fn both positive
-2. expect both positive
-3. expect both positive
+- works with boolean return
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works with boolean return")
 fn both_positive(a: i64, b: i64) -> bool:
     if a > 0 and b > 0:
         true
@@ -376,18 +347,18 @@ expect both_positive(-1, 2) == false
 
 #### works with early return and implicit else
 
-1. fn absolute
-2. expect absolute
-3. expect absolute
+- works with early return and implicit else
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works with early return and implicit else")
 fn absolute(x: i64) -> i64:
     if x < 0:
         return -x
@@ -401,19 +372,18 @@ expect absolute(5) == 5
 
 #### works with guard clause pattern
 
-1. fn safe divide
-2. expect safe divide
-3. expect safe divide
-4. expect safe divide
+- works with guard clause pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works with guard clause pattern")
 fn safe_divide(a: i64, b: i64) -> i64:
     if b == 0:
         return 0
@@ -433,20 +403,18 @@ expect safe_divide(-10, 2) == -1
 
 #### returns function call result
 
-1. fn double
-2. fn conditional double
-3. double
-4. expect conditional double
-5. expect conditional double
+- returns function call result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns function call result")
 fn double(x: i64) -> i64:
     x * 2
 
@@ -469,12 +437,12 @@ expect conditional_double(5, false) == 5
 | Category | Other |
 | Status | Active |
 | Source | `test/shared/control_flow/if_else_implicit_return_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering If-else implicit return, basic if-else, if-elif-else chain, nested if-else, with other statements before, return type inference, mixed with explicit return, with function calls.
 - If-else implicit return
 - basic if-else
 - if-elif-else chain
@@ -496,3 +464,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SHARED`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7aaca9acf1331c5e9ae821bbebe0e62c6c0df23a8aa9ed1f049f2aea2464a157`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7aaca9acf1331c5e9ae821bbebe0e62c6c0df23a8aa9ed1f049f2aea2464a157`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7aaca9acf1331c5e9ae821bbebe0e62c6c0df23a8aa9ed1f049f2aea2464a157`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/shared/control_flow/if_else_implicit_return_spec.spl
+mirror: doc/06_spec/shared/control_flow/if_else_implicit_return_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/shared/control_flow/if_else_implicit_return_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/shared/control_flow/if_else_implicit_return_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/shared/control_flow/if_else_implicit_return_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns value from if branch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/control_flow/if_else_implicit_return_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns value from else branch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/control_flow/if_else_implicit_return_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns complex expressions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Base64 Utils Specification
 
-> 1. expect alphabet len
-
-<!-- sdn-diagram:id=base64_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=base64_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-base64_utils_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=base64_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Base64 Utilities, Alphabet, Character Conversion, Find Index, Encoding, Decoding, URL-Safe Encoding, Validation, Round-trip.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,16 +19,18 @@ base64_utils_spec
 
 #### has 64 characters
 
-1. expect alphabet len
+- has 64 characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has 64 characters")
 val alphabet = base64_alphabet()
 expect alphabet.len() == 64
 ```
@@ -60,16 +39,18 @@ expect alphabet.len() == 64
 
 #### starts with ABC
 
-1. expect alphabet starts with
+- starts with ABC
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts with ABC")
 val alphabet = base64_alphabet()
 expect alphabet.starts_with("ABC")
 ```
@@ -78,16 +59,18 @@ expect alphabet.starts_with("ABC")
 
 #### ends with +/
 
-1. expect alphabet ends with
+- ends with +/
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ends with +/")
 val alphabet = base64_alphabet()
 expect alphabet.ends_with("+/")
 ```
@@ -98,19 +81,18 @@ expect alphabet.ends_with("+/")
 
 #### converts letters to bytes
 
-1. expect char to byte
-2. expect char to byte
-3. expect char to byte
-4. expect char to byte
+- converts letters to bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts letters to bytes")
 expect char_to_byte("A") == 65
 expect char_to_byte("B") == 66
 expect char_to_byte("a") == 97
@@ -121,18 +103,18 @@ expect char_to_byte("b") == 98
 
 #### converts digits to bytes
 
-1. expect char to byte
-2. expect char to byte
-3. expect char to byte
+- converts digits to bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts digits to bytes")
 expect char_to_byte("0") == 48
 expect char_to_byte("1") == 49
 expect char_to_byte("2") == 50
@@ -142,17 +124,18 @@ expect char_to_byte("2") == 50
 
 #### converts special chars to bytes
 
-1. expect char to byte
-2. expect char to byte
+- converts special chars to bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts special chars to bytes")
 expect char_to_byte(" ") == 32
 expect char_to_byte("!") == 33
 ```
@@ -161,18 +144,18 @@ expect char_to_byte("!") == 33
 
 #### converts bytes to letters
 
-1. expect byte to char
-2. expect byte to char
-3. expect byte to char
+- converts bytes to letters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts bytes to letters")
 expect byte_to_char(65) == "A"
 expect byte_to_char(66) == "B"
 expect byte_to_char(97) == "a"
@@ -182,17 +165,18 @@ expect byte_to_char(97) == "a"
 
 #### converts bytes to digits
 
-1. expect byte to char
-2. expect byte to char
+- converts bytes to digits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts bytes to digits")
 expect byte_to_char(48) == "0"
 expect byte_to_char(49) == "1"
 ```
@@ -201,16 +185,18 @@ expect byte_to_char(49) == "1"
 
 #### returns ? for unknown bytes
 
-1. expect byte to char
+- returns ? for unknown bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns ? for unknown bytes")
 expect byte_to_char(255) == "?"
 ```
 
@@ -220,13 +206,18 @@ expect byte_to_char(255) == "?"
 
 #### finds A at index 0
 
+- finds A at index 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds A at index 0")
 val alphabet = base64_alphabet()
 match find_base64_index(c = "A", alphabet = alphabet):
     case Some(idx): expect idx == 0
@@ -237,13 +228,18 @@ match find_base64_index(c = "A", alphabet = alphabet):
 
 #### finds a at index 26
 
+- finds a at index 26
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds a at index 26")
 val alphabet = base64_alphabet()
 match find_base64_index(c = "a", alphabet = alphabet):
     case Some(idx): expect idx == 26
@@ -254,13 +250,18 @@ match find_base64_index(c = "a", alphabet = alphabet):
 
 #### finds / at index 63
 
+- finds / at index 63
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds / at index 63")
 val alphabet = base64_alphabet()
 match find_base64_index(c = "/", alphabet = alphabet):
     case Some(idx): expect idx == 63
@@ -271,13 +272,18 @@ match find_base64_index(c = "/", alphabet = alphabet):
 
 #### returns nil for not found
 
+- returns nil for not found
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for not found")
 val alphabet = base64_alphabet()
 match find_base64_index(c = "@", alphabet = alphabet):
     case Some(_): expect false
@@ -290,17 +296,18 @@ match find_base64_index(c = "@", alphabet = alphabet):
 
 #### encodes single char with padding
 
-1. expect result len
-2. expect result contains
+- encodes single char with padding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes single char with padding")
 val result = encode_base64("A")
 expect result.len() > 0
 expect result.contains("=")
@@ -310,17 +317,18 @@ expect result.contains("=")
 
 #### encodes two chars with one padding
 
-1. expect result len
-2. expect result ends with
+- encodes two chars with one padding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes two chars with one padding")
 val result = encode_base64("AB")
 expect result.len() == 4
 expect result.ends_with("=")
@@ -330,17 +338,18 @@ expect result.ends_with("=")
 
 #### encodes three chars without padding
 
-1. expect result len
-2. expect not result contains
+- encodes three chars without padding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes three chars without padding")
 val result = encode_base64("ABC")
 expect result.len() == 4
 expect not result.contains("=")
@@ -350,16 +359,18 @@ expect not result.contains("=")
 
 #### encodes empty string
 
-1. expect encode base64
+- encodes empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes empty string")
 expect encode_base64("") == ""
 ```
 
@@ -369,13 +380,18 @@ expect encode_base64("") == ""
 
 #### decodes valid base64
 
+- decodes valid base64
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes valid base64")
 val encoded = encode_base64("ABC")
 match decode_base64(encoded):
     case Some(decoded): expect decoded == "ABC"
@@ -386,13 +402,18 @@ match decode_base64(encoded):
 
 #### decodes with padding
 
+- decodes with padding
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes with padding")
 val encoded = encode_base64("AB")
 match decode_base64(encoded):
     case Some(decoded): expect decoded == "AB"
@@ -403,13 +424,18 @@ match decode_base64(encoded):
 
 #### decodes empty string
 
+- decodes empty string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes empty string")
 match decode_base64(""):
     case Some(decoded): expect decoded == ""
     case nil: expect false
@@ -419,13 +445,18 @@ match decode_base64(""):
 
 #### returns nil for invalid chars
 
+- returns nil for invalid chars
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for invalid chars")
 match decode_base64("@#$%"):
     case Some(_): expect false
     case nil: expect true
@@ -435,13 +466,18 @@ match decode_base64("@#$%"):
 
 #### returns nil for incomplete input
 
+- returns nil for incomplete input
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for incomplete input")
 match decode_base64("A"):
     case Some(_): expect false
     case nil: expect true
@@ -453,18 +489,18 @@ match decode_base64("A"):
 
 #### encodes without + / =
 
-1. expect not result contains
-2. expect not result contains
-3. expect not result contains
+- encodes without + / =
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes without + / =")
 val result = encode_base64_url("ABC")
 expect not result.contains("+")
 expect not result.contains("/")
@@ -475,13 +511,18 @@ expect not result.contains("=")
 
 #### decodes url-safe encoding
 
+- decodes url-safe encoding
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("decodes url-safe encoding")
 val original = "ABC"
 val encoded = encode_base64_url(original)
 match decode_base64_url(encoded):
@@ -495,16 +536,18 @@ match decode_base64_url(encoded):
 
 #### validates simple base64
 
-1. expect is valid base64
+- validates simple base64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates simple base64")
 expect is_valid_base64("ABCD")
 ```
 
@@ -512,16 +555,18 @@ expect is_valid_base64("ABCD")
 
 #### validates with padding
 
-1. expect is valid base64
+- validates with padding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates with padding")
 expect is_valid_base64("AB==")
 ```
 
@@ -529,16 +574,18 @@ expect is_valid_base64("AB==")
 
 #### validates with numbers
 
-1. expect is valid base64
+- validates with numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates with numbers")
 expect is_valid_base64("ABC123")
 ```
 
@@ -546,16 +593,18 @@ expect is_valid_base64("ABC123")
 
 #### validates with special chars
 
-1. expect is valid base64
+- validates with special chars
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates with special chars")
 expect is_valid_base64("AB+/")
 ```
 
@@ -563,16 +612,18 @@ expect is_valid_base64("AB+/")
 
 #### validates empty string
 
-1. expect is valid base64
+- validates empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates empty string")
 expect is_valid_base64("")
 ```
 
@@ -580,16 +631,18 @@ expect is_valid_base64("")
 
 #### rejects invalid chars
 
-1. expect not is valid base64
+- rejects invalid chars
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid chars")
 expect not is_valid_base64("ABC@")
 ```
 
@@ -597,16 +650,18 @@ expect not is_valid_base64("ABC@")
 
 #### rejects too much padding
 
-1. expect not is valid base64
+- rejects too much padding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects too much padding")
 expect not is_valid_base64("A===")
 ```
 
@@ -616,13 +671,18 @@ expect not is_valid_base64("A===")
 
 #### encodes and decodes single char
 
+- encodes and decodes single char
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes and decodes single char")
 val original = "A"
 val encoded = encode_base64(original)
 match decode_base64(encoded):
@@ -634,13 +694,18 @@ match decode_base64(encoded):
 
 #### encodes and decodes three chars
 
+- encodes and decodes three chars
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes and decodes three chars")
 val original = "ABC"
 val encoded = encode_base64(original)
 match decode_base64(encoded):
@@ -652,13 +717,18 @@ match decode_base64(encoded):
 
 #### encodes and decodes lowercase
 
+- encodes and decodes lowercase
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes and decodes lowercase")
 val original = "abc"
 val encoded = encode_base64(original)
 match decode_base64(encoded):
@@ -670,13 +740,18 @@ match decode_base64(encoded):
 
 #### encodes and decodes digits
 
+- encodes and decodes digits
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes and decodes digits")
 val original = "012"
 val encoded = encode_base64(original)
 match decode_base64(encoded):
@@ -693,12 +768,12 @@ match decode_base64(encoded):
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/base64_utils_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Base64 Utilities, Alphabet, Character Conversion, Find Index, Encoding, Decoding, URL-Safe Encoding, Validation, Round-trip.
 - Base64 Utilities
 - Alphabet
 - Character Conversion
@@ -721,3 +796,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b02051e5ed1fdfd37ff1ce93acfab2168e3eb1228c37b851e1c0f298e3fa633d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b02051e5ed1fdfd37ff1ce93acfab2168e3eb1228c37b851e1c0f298e3fa633d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b02051e5ed1fdfd37ff1ce93acfab2168e3eb1228c37b851e1c0f298e3fa633d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/base64_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/base64_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/base64_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/base64_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/base64_utils_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has 64 characters' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/base64_utils_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts with ABC' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/base64_utils_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ends with +/' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

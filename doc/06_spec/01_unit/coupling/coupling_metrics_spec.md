@@ -1,30 +1,6 @@
 # Coupling Metrics Specification
 
-> <details>
-
-<!-- sdn-diagram:id=coupling_metrics_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=coupling_metrics_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-coupling_metrics_spec -> std
-coupling_metrics_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=coupling_metrics_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering compute_fan_out, compute_fan_in, compute_all_metrics, find_cycles, find_instability_inversions, extract_layer_number, is_digit, find_layer_violations, fields_share_access, find_method_index, sort_descending, compute_lcom4, compute_pss, compute_public_ratio, compute_avg_param_count, compute_max_param_count, compute_overload_groups, compute_eur, compute_entropy, type_set_edit_distance, generate_deletion_variants, compute_type_hash, build_dsm, token_kind_ordinal, to_relaxed_tokens.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,9 +17,11 @@ coupling_metrics_spec -> compiler
 
 #### returns correct fan-out for a linear chain
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- returns correct fan-out for a linear chain
    - Expected: result.get("A") equals `1`
    - Expected: result.get("B") equals `1`
    - Expected: result.get("C") equals `0`
@@ -52,14 +30,16 @@ coupling_metrics_spec -> compiler
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns correct fan-out for a linear chain")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["C"])
-edges = edges.set("C", [])
+edges["A"] = ["B"]
+edges["B"] = ["C"]
+edges["C"] = []
 val graph = make_graph(edges)
 val result = compute_fan_out(graph)
 expect(result.get("A")).to_equal(1)
@@ -71,25 +51,24 @@ expect(result.get("C")).to_equal(0)
 
 #### returns correct fan-out for a module with multiple deps
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- returns correct fan-out for a module with multiple deps
    - Expected: result.get("A") equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns correct fan-out for a module with multiple deps")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B", "C", "D"])
-edges = edges.set("B", [])
-edges = edges.set("C", [])
-edges = edges.set("D", [])
+edges["A"] = ["B", "C", "D"]
+edges["B"] = []
+edges["C"] = []
+edges["D"] = []
 val graph = make_graph(edges)
 val result = compute_fan_out(graph)
 expect(result.get("A")).to_equal(3)
@@ -99,8 +78,7 @@ expect(result.get("A")).to_equal(3)
 
 #### returns zero fan-out for isolated modules
 
-- edges = edges set
-- edges = edges set
+- returns zero fan-out for isolated modules
    - Expected: result.get("X") equals `0`
    - Expected: result.get("Y") equals `0`
 
@@ -108,13 +86,15 @@ expect(result.get("A")).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns zero fan-out for isolated modules")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("X", [])
-edges = edges.set("Y", [])
+edges["X"] = []
+edges["Y"] = []
 val graph = make_graph(edges)
 val result = compute_fan_out(graph)
 expect(result.get("X")).to_equal(0)
@@ -125,13 +105,19 @@ expect(result.get("Y")).to_equal(0)
 
 #### handles empty graph
 
+- handles empty graph
+   - Expected: result.keys().len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles empty graph")
 var edges: Dict<text, [text]> = {}
 val graph = make_graph(edges)
 val result = compute_fan_out(graph)
@@ -144,9 +130,7 @@ expect(result.keys().len()).to_equal(0)
 
 #### returns correct fan-in for a linear chain
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- returns correct fan-in for a linear chain
    - Expected: result.get("A") equals `0`
    - Expected: result.get("B") equals `1`
    - Expected: result.get("C") equals `1`
@@ -155,14 +139,16 @@ expect(result.keys().len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns correct fan-in for a linear chain")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["C"])
-edges = edges.set("C", [])
+edges["A"] = ["B"]
+edges["B"] = ["C"]
+edges["C"] = []
 val graph = make_graph(edges)
 val result = compute_fan_in(graph)
 expect(result.get("A")).to_equal(0)
@@ -174,9 +160,7 @@ expect(result.get("C")).to_equal(1)
 
 #### counts multiple incomers correctly
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- counts multiple incomers correctly
    - Expected: result.get("C") equals `2`
    - Expected: result.get("A") equals `0`
    - Expected: result.get("B") equals `0`
@@ -185,14 +169,16 @@ expect(result.get("C")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("counts multiple incomers correctly")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["C"])
-edges = edges.set("B", ["C"])
-edges = edges.set("C", [])
+edges["A"] = ["C"]
+edges["B"] = ["C"]
+edges["C"] = []
 val graph = make_graph(edges)
 val result = compute_fan_in(graph)
 expect(result.get("C")).to_equal(2)
@@ -204,13 +190,19 @@ expect(result.get("B")).to_equal(0)
 
 #### handles empty graph
 
+- handles empty graph
+   - Expected: result.keys().len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles empty graph")
 var edges: Dict<text, [text]> = {}
 val graph = make_graph(edges)
 val result = compute_fan_in(graph)
@@ -221,19 +213,21 @@ expect(result.keys().len()).to_equal(0)
 
 #### handles single node with no edges
 
-- edges = edges set
+- handles single node with no edges
    - Expected: result.get("Solo") equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles single node with no edges")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("Solo", [])
+edges["Solo"] = []
 val graph = make_graph(edges)
 val result = compute_fan_in(graph)
 expect(result.get("Solo")).to_equal(0)
@@ -245,10 +239,7 @@ expect(result.get("Solo")).to_equal(0)
 
 #### computes instability for a hub-and-spoke graph
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- computes instability for a hub-and-spoke graph
    - Expected: hub.fan_out equals `3`
    - Expected: hub.fan_in equals `0`
    - Expected: hub.instability equals `1.0`
@@ -257,15 +248,17 @@ expect(result.get("Solo")).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("computes instability for a hub-and-spoke graph")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("hub", ["a", "b", "c"])
-edges = edges.set("a", [])
-edges = edges.set("b", [])
-edges = edges.set("c", [])
+edges["hub"] = ["a", "b", "c"]
+edges["a"] = []
+edges["b"] = []
+edges["c"] = []
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val hub = find_metric_by_name(metrics, "hub")
@@ -279,8 +272,7 @@ expect(hub.instability).to_equal(1.0)
 
 #### leaf modules have instability 0
 
-- edges = edges set
-- edges = edges set
+- leaf modules have instability 0
    - Expected: leaf.fan_out equals `0`
    - Expected: leaf.instability equals `0.0`
 
@@ -288,13 +280,15 @@ expect(hub.instability).to_equal(1.0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("leaf modules have instability 0")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("hub", ["leaf"])
-edges = edges.set("leaf", [])
+edges["hub"] = ["leaf"]
+edges["leaf"] = []
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val leaf = find_metric_by_name(metrics, "leaf")
@@ -307,7 +301,7 @@ expect(leaf.instability).to_equal(0.0)
 
 #### isolated node has instability 0
 
-- edges = edges set
+- isolated node has instability 0
    - Expected: solo.instability equals `0.0`
    - Expected: solo.distance equals `1.0`
 
@@ -315,12 +309,14 @@ expect(leaf.instability).to_equal(0.0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("isolated node has instability 0")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("solo", [])
+edges["solo"] = []
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val solo = find_metric_by_name(metrics, "solo")
@@ -332,23 +328,23 @@ expect(solo.distance).to_equal(1.0)
 
 #### cbo equals fan_out
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- cbo equals fan_out
    - Expected: x.cbo equals `x.fan_out`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("cbo equals fan_out")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("X", ["Y", "Z"])
-edges = edges.set("Y", [])
-edges = edges.set("Z", [])
+edges["X"] = ["Y", "Z"]
+edges["Y"] = []
+edges["Z"] = []
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val x = find_metric_by_name(metrics, "X")
@@ -359,8 +355,7 @@ expect(x.cbo).to_equal(x.fan_out)
 
 #### distance from main sequence is computed correctly
 
-- edges = edges set
-- edges = edges set
+- distance from main sequence is computed correctly
    - Expected: m.instability equals `0.5`
    - Expected: m.distance equals `0.5`
 
@@ -368,14 +363,16 @@ expect(x.cbo).to_equal(x.fan_out)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("distance from main sequence is computed correctly")
 # Module with instability=0.5, abstractness=0 -> distance = |0+0.5-1| = 0.5
 var edges: Dict<text, [text]> = {}
-edges = edges.set("M", ["N"])
-edges = edges.set("N", ["M"])
+edges["M"] = ["N"]
+edges["N"] = ["M"]
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val m = find_metric_by_name(metrics, "M")
@@ -390,8 +387,7 @@ expect(m.distance).to_equal(0.5)
 
 #### detects a simple 2-node cycle
 
-- edges = edges set
-- edges = edges set
+- detects a simple 2-node cycle
    - Expected: cycles.len() equals `1`
    - Expected: cycles.get(0).len() equals `2`
 
@@ -399,13 +395,15 @@ expect(m.distance).to_equal(0.5)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("detects a simple 2-node cycle")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["A"])
+edges["A"] = ["B"]
+edges["B"] = ["A"]
 val graph = make_graph(edges)
 val cycles = find_cycles(graph)
 expect(cycles.len()).to_equal(1)
@@ -416,9 +414,7 @@ expect(cycles.get(0).len()).to_equal(2)
 
 #### detects a 3-node cycle
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- detects a 3-node cycle
    - Expected: cycles.len() equals `1`
    - Expected: cycles.get(0).len() equals `3`
 
@@ -426,14 +422,16 @@ expect(cycles.get(0).len()).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("detects a 3-node cycle")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["C"])
-edges = edges.set("C", ["A"])
+edges["A"] = ["B"]
+edges["B"] = ["C"]
+edges["C"] = ["A"]
 val graph = make_graph(edges)
 val cycles = find_cycles(graph)
 expect(cycles.len()).to_equal(1)
@@ -444,23 +442,23 @@ expect(cycles.get(0).len()).to_equal(3)
 
 #### returns empty for an acyclic graph
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- returns empty for an acyclic graph
    - Expected: cycles.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty for an acyclic graph")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["C"])
-edges = edges.set("C", [])
+edges["A"] = ["B"]
+edges["B"] = ["C"]
+edges["C"] = []
 val graph = make_graph(edges)
 val cycles = find_cycles(graph)
 expect(cycles.len()).to_equal(0)
@@ -470,13 +468,19 @@ expect(cycles.len()).to_equal(0)
 
 #### returns empty for an empty graph
 
+- returns empty for an empty graph
+   - Expected: cycles.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty for an empty graph")
 var edges: Dict<text, [text]> = {}
 val graph = make_graph(edges)
 val cycles = find_cycles(graph)
@@ -487,19 +491,21 @@ expect(cycles.len()).to_equal(0)
 
 #### returns empty for a single node
 
-- edges = edges set
+- returns empty for a single node
    - Expected: cycles.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty for a single node")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", [])
+edges["A"] = []
 val graph = make_graph(edges)
 val cycles = find_cycles(graph)
 expect(cycles.len()).to_equal(0)
@@ -511,30 +517,28 @@ expect(cycles.len()).to_equal(0)
 
 #### detects inversion when stable depends on unstable
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- detects inversion when stable depends on unstable
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("detects inversion when stable depends on unstable")
 # A has fan_in=1, fan_out=1 => instability=0.5
 # B has fan_in=0, fan_out=1 => instability=1.0
 # A depends on B: A (stable=0.5) -> B (unstable=1.0) = inversion
 # But we also need B depending on something so B has fan_out
 var edges: Dict<text, [text]> = {}
-edges = edges.set("stable", ["unstable"])
-edges = edges.set("unstable", ["leaf1", "leaf2"])
-edges = edges.set("other", ["stable"])
-edges = edges.set("leaf1", [])
-edges = edges.set("leaf2", [])
+edges["stable"] = ["unstable"]
+edges["unstable"] = ["leaf1", "leaf2"]
+edges["other"] = ["stable"]
+edges["leaf1"] = []
+edges["leaf2"] = []
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val inversions = find_instability_inversions(metrics, graph)
@@ -546,22 +550,23 @@ expect(inversions.len()).to_be_greater_than(0)
 
 #### returns empty when no inversions exist
 
-- edges = edges set
-- edges = edges set
+- returns empty when no inversions exist
    - Expected: inversions.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty when no inversions exist")
 # Linear: unstable -> stable -> leaf
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", [])
+edges["A"] = ["B"]
+edges["B"] = []
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
 val inversions = find_instability_inversions(metrics, graph)
@@ -573,13 +578,19 @@ expect(inversions.len()).to_equal(0)
 
 #### returns empty for empty graph
 
+- returns empty for empty graph
+   - Expected: inversions.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty for empty graph")
 var edges: Dict<text, [text]> = {}
 val graph = make_graph(edges)
 val metrics = compute_all_metrics(graph)
@@ -593,13 +604,19 @@ expect(inversions.len()).to_equal(0)
 
 #### extracts layer from slash-separated path
 
+- extracts layer from slash-separated path
+   - Expected: result equals `30`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("extracts layer from slash-separated path")
 val result = extract_layer_number("compiler/30.types/foo")
 expect(result).to_equal(30)
 ```
@@ -608,13 +625,19 @@ expect(result).to_equal(30)
 
 #### extracts layer 00 from common
 
+- extracts layer 00 from common
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("extracts layer 00 from common")
 val result = extract_layer_number("compiler/00.common/bar")
 expect(result).to_equal(0)
 ```
@@ -623,13 +646,18 @@ expect(result).to_equal(0)
 
 #### returns nil for non-layer path
 
+- returns nil for non-layer path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns nil for non-layer path")
 val result = extract_layer_number("std/text/utils")
 expect(result).to_be_nil()
 ```
@@ -638,13 +666,19 @@ expect(result).to_be_nil()
 
 #### extracts layer from dot-separated path
 
+- extracts layer from dot-separated path
+   - Expected: result equals `70`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("extracts layer from dot-separated path")
 val result = extract_layer_number("compiler.70.backend.llvm")
 expect(result).to_equal(70)
 ```
@@ -653,13 +687,18 @@ expect(result).to_equal(70)
 
 #### returns nil for single character segment
 
+- returns nil for single character segment
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns nil for single character segment")
 val result = extract_layer_number("a/b/c")
 expect(result).to_be_nil()
 ```
@@ -670,13 +709,21 @@ expect(result).to_be_nil()
 
 #### returns true for digit characters
 
+- returns true for digit characters
+   - Expected: is_digit("0") is true
+   - Expected: is_digit("5") is true
+   - Expected: is_digit("9") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns true for digit characters")
 expect(is_digit("0")).to_equal(true)
 expect(is_digit("5")).to_equal(true)
 expect(is_digit("9")).to_equal(true)
@@ -686,13 +733,21 @@ expect(is_digit("9")).to_equal(true)
 
 #### returns false for non-digit characters
 
+- returns false for non-digit characters
+   - Expected: is_digit("a") is false
+   - Expected: is_digit("Z") is false
+   - Expected: is_digit(" ") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns false for non-digit characters")
 expect(is_digit("a")).to_equal(false)
 expect(is_digit("Z")).to_equal(false)
 expect(is_digit(" ")).to_equal(false)
@@ -704,8 +759,7 @@ expect(is_digit(" ")).to_equal(false)
 
 #### detects violation when lower layer imports higher layer
 
-- edges = edges set
-- edges = edges set
+- detects violation when lower layer imports higher layer
    - Expected: violations[0].from_layer equals `10`
    - Expected: violations[0].to_layer equals `30`
 
@@ -713,13 +767,15 @@ expect(is_digit(" ")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("detects violation when lower layer imports higher layer")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("compiler/10.frontend/foo", ["compiler/30.types/bar"])
-edges = edges.set("compiler/30.types/bar", [])
+edges["compiler/10.frontend/foo"] = ["compiler/30.types/bar"]
+edges["compiler/30.types/bar"] = []
 val graph = make_graph(edges)
 val violations = find_layer_violations(graph)
 expect(violations.len()).to_be_greater_than(0)
@@ -732,21 +788,22 @@ if violations.len() > 0:
 
 #### allows higher layer importing lower layer
 
-- edges = edges set
-- edges = edges set
+- allows higher layer importing lower layer
    - Expected: violations.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("allows higher layer importing lower layer")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("compiler/30.types/bar", ["compiler/00.common/foo"])
-edges = edges.set("compiler/00.common/foo", [])
+edges["compiler/30.types/bar"] = ["compiler/00.common/foo"]
+edges["compiler/00.common/foo"] = []
 val graph = make_graph(edges)
 val violations = find_layer_violations(graph)
 expect(violations.len()).to_equal(0)
@@ -756,8 +813,32 @@ expect(violations.len()).to_equal(0)
 
 #### no violations for non-layer modules
 
-- edges = edges set
-- edges = edges set
+- no violations for non-layer modules
+   - Expected: violations.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COUPLING
+step("no violations for non-layer modules")
+var edges: Dict<text, [text]> = {}
+edges["std/text/utils"] = ["std/math/ops"]
+edges["std/math/ops"] = []
+val graph = make_graph(edges)
+val violations = find_layer_violations(graph)
+expect(violations.len()).to_equal(0)
+```
+
+</details>
+
+#### returns empty for empty graph
+
+- returns empty for empty graph
    - Expected: violations.len() equals `0`
 
 
@@ -768,25 +849,8 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var edges: Dict<text, [text]> = {}
-edges = edges.set("std/text/utils", ["std/math/ops"])
-edges = edges.set("std/math/ops", [])
-val graph = make_graph(edges)
-val violations = find_layer_violations(graph)
-expect(violations.len()).to_equal(0)
-```
-
-</details>
-
-#### returns empty for empty graph
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty for empty graph")
 var edges: Dict<text, [text]> = {}
 val graph = make_graph(edges)
 val violations = find_layer_violations(graph)
@@ -797,7 +861,7 @@ expect(violations.len()).to_equal(0)
 
 #### uses detailed_edges when available
 
-- make edge
+- uses detailed_edges when available
    - Expected: violations[0].from_layer equals `10`
    - Expected: violations[0].to_layer equals `30`
 
@@ -805,10 +869,12 @@ expect(violations.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("uses detailed_edges when available")
 var edges: Dict<text, [text]> = {}
 val detailed = [
     make_edge("compiler/10.frontend/parser", "compiler/30.types/checker")
@@ -827,13 +893,19 @@ if violations.len() > 0:
 
 #### returns true when lists share a field
 
+- returns true when lists share a field
+   - Expected: result is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns true when lists share a field")
 val result = fields_share_access(["x", "y"], ["y", "z"])
 expect(result).to_equal(true)
 ```
@@ -842,13 +914,19 @@ expect(result).to_equal(true)
 
 #### returns false when lists share no field
 
+- returns false when lists share no field
+   - Expected: result is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns false when lists share no field")
 val result = fields_share_access(["x", "y"], ["z", "w"])
 expect(result).to_equal(false)
 ```
@@ -857,13 +935,19 @@ expect(result).to_equal(false)
 
 #### returns false for empty lists
 
+- returns false for empty lists
+   - Expected: result is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns false for empty lists")
 val result = fields_share_access([], [])
 expect(result).to_equal(false)
 ```
@@ -872,13 +956,19 @@ expect(result).to_equal(false)
 
 #### returns false when one list is empty
 
+- returns false when one list is empty
+   - Expected: result is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns false when one list is empty")
 val result = fields_share_access(["x"], [])
 expect(result).to_equal(false)
 ```
@@ -889,19 +979,19 @@ expect(result).to_equal(false)
 
 #### finds existing method by name
 
-- make method
-- make method
-- make method
+- finds existing method by name
    - Expected: find_method_index(methods, "beta") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("finds existing method by name")
 val methods = [
     make_method("alpha", [], []),
     make_method("beta", [], []),
@@ -914,13 +1004,19 @@ expect(find_method_index(methods, "beta")).to_equal(1)
 
 #### returns -1 for missing method
 
+- returns -1 for missing method
+   - Expected: find_method_index(methods, "missing") equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns -1 for missing method")
 val methods = [make_method("alpha", [], [])]
 expect(find_method_index(methods, "missing")).to_equal(-1)
 ```
@@ -929,13 +1025,19 @@ expect(find_method_index(methods, "missing")).to_equal(-1)
 
 #### returns -1 for empty list
 
+- returns -1 for empty list
+   - Expected: find_method_index(methods, "any") equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns -1 for empty list")
 var methods: [MethodFieldAccess] = []
 expect(find_method_index(methods, "any")).to_equal(-1)
 ```
@@ -946,13 +1048,21 @@ expect(find_method_index(methods, "any")).to_equal(-1)
 
 #### sorts integers in descending order
 
+- sorts integers in descending order
+   - Expected: result.get(0) equals `5`
+   - Expected: result.get(1) equals `4`
+   - Expected: result.get(2) equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("sorts integers in descending order")
 val result = sort_descending([1, 3, 2, 5, 4])
 expect(result.get(0)).to_equal(5)
 expect(result.get(1)).to_equal(4)
@@ -963,13 +1073,19 @@ expect(result.get(2)).to_equal(3)
 
 #### handles single element
 
+- handles single element
+   - Expected: result.get(0) equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles single element")
 val result = sort_descending([42])
 expect(result.get(0)).to_equal(42)
 ```
@@ -978,13 +1094,19 @@ expect(result.get(0)).to_equal(42)
 
 #### handles empty list
 
+- handles empty list
+   - Expected: result.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles empty list")
 val result = sort_descending([])
 expect(result.len()).to_equal(0)
 ```
@@ -993,13 +1115,20 @@ expect(result.len()).to_equal(0)
 
 #### handles already sorted input
 
+- handles already sorted input
+   - Expected: result.get(0) equals `5`
+   - Expected: result.get(4) equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles already sorted input")
 val result = sort_descending([5, 4, 3, 2, 1])
 expect(result.get(0)).to_equal(5)
 expect(result.get(4)).to_equal(1)
@@ -1011,13 +1140,20 @@ expect(result.get(4)).to_equal(1)
 
 #### returns 0 for class with no methods
 
+- returns 0 for class with no methods
+   - Expected: result.lcom4 equals `0`
+   - Expected: result.method_count equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for class with no methods")
 var methods: [MethodFieldAccess] = []
 val result = compute_lcom4("Empty", methods)
 expect(result.lcom4).to_equal(0)
@@ -1028,13 +1164,20 @@ expect(result.method_count).to_equal(0)
 
 #### returns 1 for class with a single method
 
+- returns 1 for class with a single method
+   - Expected: result.lcom4 equals `1`
+   - Expected: result.method_count equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1 for class with a single method")
 val methods = [make_method("do_thing", ["x"], [])]
 val result = compute_lcom4("Single", methods)
 expect(result.lcom4).to_equal(1)
@@ -1045,9 +1188,7 @@ expect(result.method_count).to_equal(1)
 
 #### returns 1 for cohesive class (shared fields)
 
-- make method
-- make method
-- make method
+- returns 1 for cohesive class (shared fields)
    - Expected: result.lcom4 equals `1`
    - Expected: result.method_count equals `3`
 
@@ -1055,10 +1196,12 @@ expect(result.method_count).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1 for cohesive class (shared fields)")
 val methods = [
     make_method("get_x", ["x"], []),
     make_method("set_x", ["x"], []),
@@ -1073,18 +1216,19 @@ expect(result.method_count).to_equal(3)
 
 #### returns 2 for non-cohesive class (disjoint methods)
 
-- make method
-- make method
+- returns 2 for non-cohesive class (disjoint methods)
    - Expected: result.lcom4 equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 2 for non-cohesive class (disjoint methods)")
 val methods = [
     make_method("get_x", ["x"], []),
     make_method("get_y", ["y"], [])
@@ -1097,18 +1241,19 @@ expect(result.lcom4).to_equal(2)
 
 #### connects methods through method calls
 
-- make method
-- make method
+- connects methods through method calls
    - Expected: result.lcom4 equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("connects methods through method calls")
 val methods = [
     make_method("alpha", ["x"], []),
     make_method("beta", ["y"], ["alpha"])
@@ -1122,18 +1267,19 @@ expect(result.lcom4).to_equal(1)
 
 #### counts fields correctly
 
-- make method
-- make method
+- counts fields correctly
    - Expected: result.field_count equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("counts fields correctly")
 val methods = [
     make_method("m1", ["a", "b"], []),
     make_method("m2", ["b", "c"], [])
@@ -1146,21 +1292,20 @@ expect(result.field_count).to_equal(3)
 
 #### produces component_sizes that sum to method_count
 
-- make method
-- make method
-- make method
+- produces component_sizes that sum to method_count
    - Expected: result.lcom4 equals `2`
-- total = total + result component sizes get
    - Expected: total equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("produces component_sizes that sum to method_count")
 val methods = [
     make_method("m1", ["a"], []),
     make_method("m2", ["a"], []),
@@ -1182,13 +1327,19 @@ expect(total).to_equal(3)
 
 #### sums public methods and fields
 
+- sums public methods and fields
+   - Expected: compute_pss(5, 3) equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("sums public methods and fields")
 expect(compute_pss(5, 3)).to_equal(8)
 ```
 
@@ -1196,13 +1347,19 @@ expect(compute_pss(5, 3)).to_equal(8)
 
 #### returns 0 when both are 0
 
+- returns 0 when both are 0
+   - Expected: compute_pss(0, 0) equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 when both are 0")
 expect(compute_pss(0, 0)).to_equal(0)
 ```
 
@@ -1210,13 +1367,19 @@ expect(compute_pss(0, 0)).to_equal(0)
 
 #### handles methods only
 
+- handles methods only
+   - Expected: compute_pss(10, 0) equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles methods only")
 expect(compute_pss(10, 0)).to_equal(10)
 ```
 
@@ -1224,13 +1387,19 @@ expect(compute_pss(10, 0)).to_equal(10)
 
 #### handles fields only
 
+- handles fields only
+   - Expected: compute_pss(0, 7) equals `7`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles fields only")
 expect(compute_pss(0, 7)).to_equal(7)
 ```
 
@@ -1240,13 +1409,19 @@ expect(compute_pss(0, 7)).to_equal(7)
 
 #### returns correct ratio
 
+- returns correct ratio
+   - Expected: result equals `0.5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns correct ratio")
 val result = compute_public_ratio(5, 10)
 expect(result).to_equal(0.5)
 ```
@@ -1255,13 +1430,19 @@ expect(result).to_equal(0.5)
 
 #### returns 0 when total is 0
 
+- returns 0 when total is 0
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 when total is 0")
 val result = compute_public_ratio(0, 0)
 expect(result).to_equal(0.0)
 ```
@@ -1270,13 +1451,19 @@ expect(result).to_equal(0.0)
 
 #### returns 1.0 when all are public
 
+- returns 1.0 when all are public
+   - Expected: result equals `1.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1.0 when all are public")
 val result = compute_public_ratio(4, 4)
 expect(result).to_equal(1.0)
 ```
@@ -1287,13 +1474,19 @@ expect(result).to_equal(1.0)
 
 #### computes average correctly
 
+- computes average correctly
+   - Expected: result equals `4.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("computes average correctly")
 val result = compute_avg_param_count([2, 4, 6])
 expect(result).to_equal(4.0)
 ```
@@ -1302,13 +1495,19 @@ expect(result).to_equal(4.0)
 
 #### returns 0 for empty list
 
+- returns 0 for empty list
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for empty list")
 val result = compute_avg_param_count([])
 expect(result).to_equal(0.0)
 ```
@@ -1317,13 +1516,19 @@ expect(result).to_equal(0.0)
 
 #### handles single element
 
+- handles single element
+   - Expected: result equals `3.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles single element")
 val result = compute_avg_param_count([3])
 expect(result).to_equal(3.0)
 ```
@@ -1334,13 +1539,19 @@ expect(result).to_equal(3.0)
 
 #### finds maximum
 
+- finds maximum
+   - Expected: result equals `5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("finds maximum")
 val result = compute_max_param_count([1, 5, 3, 2])
 expect(result).to_equal(5)
 ```
@@ -1349,13 +1560,19 @@ expect(result).to_equal(5)
 
 #### returns 0 for empty list
 
+- returns 0 for empty list
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for empty list")
 val result = compute_max_param_count([])
 expect(result).to_equal(0)
 ```
@@ -1366,13 +1583,19 @@ expect(result).to_equal(0)
 
 #### counts groups with duplicate names
 
+- counts groups with duplicate names
+   - Expected: result equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("counts groups with duplicate names")
 val result = compute_overload_groups(["foo", "bar", "foo", "baz", "bar"])
 expect(result).to_equal(2)
 ```
@@ -1381,13 +1604,19 @@ expect(result).to_equal(2)
 
 #### returns 0 for all unique names
 
+- returns 0 for all unique names
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for all unique names")
 val result = compute_overload_groups(["a", "b", "c"])
 expect(result).to_equal(0)
 ```
@@ -1396,13 +1625,19 @@ expect(result).to_equal(0)
 
 #### returns 0 for empty list
 
+- returns 0 for empty list
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for empty list")
 val result = compute_overload_groups([])
 expect(result).to_equal(0)
 ```
@@ -1413,18 +1648,18 @@ expect(result).to_equal(0)
 
 #### returns fraction of used methods
 
-- make usage
-- make usage
-- make usage
+- returns fraction of used methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns fraction of used methods")
 val usages = [
     make_usage("a", 5),
     make_usage("b", 0),
@@ -1440,13 +1675,19 @@ expect(result).to_be_less_than(0.7)
 
 #### returns 0 when no methods are used
 
+- returns 0 when no methods are used
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 when no methods are used")
 val usages = [make_usage("a", 0), make_usage("b", 0)]
 val result = compute_eur(usages, 2)
 expect(result).to_equal(0.0)
@@ -1456,13 +1697,19 @@ expect(result).to_equal(0.0)
 
 #### returns 0 when total_public is 0
 
+- returns 0 when total_public is 0
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 when total_public is 0")
 val usages = [make_usage("a", 5)]
 val result = compute_eur(usages, 0)
 expect(result).to_equal(0.0)
@@ -1472,13 +1719,19 @@ expect(result).to_equal(0.0)
 
 #### returns 1.0 when all methods used
 
+- returns 1.0 when all methods used
+   - Expected: result equals `1.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1.0 when all methods used")
 val usages = [make_usage("a", 1), make_usage("b", 1)]
 val result = compute_eur(usages, 2)
 expect(result).to_equal(1.0)
@@ -1490,18 +1743,18 @@ expect(result).to_equal(1.0)
 
 #### returns 1.0 for perfectly uniform usage
 
-- make usage
-- make usage
-- make usage
+- returns 1.0 for perfectly uniform usage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1.0 for perfectly uniform usage")
 val usages = [
     make_usage("a", 10),
     make_usage("b", 10),
@@ -1515,13 +1768,19 @@ expect(result).to_be_greater_than(0.99)
 
 #### returns 0 for no usage
 
+- returns 0 for no usage
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for no usage")
 val usages = [make_usage("a", 0), make_usage("b", 0)]
 val result = compute_entropy(usages)
 expect(result).to_equal(0.0)
@@ -1531,13 +1790,19 @@ expect(result).to_equal(0.0)
 
 #### returns 0 for single used method
 
+- returns 0 for single used method
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for single used method")
 val usages = [make_usage("a", 10)]
 val result = compute_entropy(usages)
 expect(result).to_equal(0.0)
@@ -1547,17 +1812,18 @@ expect(result).to_equal(0.0)
 
 #### returns less than 1 for skewed usage
 
-- make usage
-- make usage
+- returns less than 1 for skewed usage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns less than 1 for skewed usage")
 val usages = [
     make_usage("a", 100),
     make_usage("b", 1)
@@ -1571,13 +1837,19 @@ expect(result).to_be_greater_than(0.0)
 
 #### handles empty list
 
+- handles empty list
+   - Expected: result equals `0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles empty list")
 var usages: [MethodUsage] = []
 val result = compute_entropy(usages)
 expect(result).to_equal(0.0)
@@ -1589,13 +1861,19 @@ expect(result).to_equal(0.0)
 
 #### returns 0 for identical sorted sets
 
+- returns 0 for identical sorted sets
+   - Expected: dist equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for identical sorted sets")
 val dist = type_set_edit_distance(["i64", "text"], ["i64", "text"])
 expect(dist).to_equal(0)
 ```
@@ -1604,13 +1882,19 @@ expect(dist).to_equal(0)
 
 #### returns 1 for single addition
 
+- returns 1 for single addition
+   - Expected: dist equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1 for single addition")
 val dist = type_set_edit_distance(["i64"], ["i64", "text"])
 expect(dist).to_equal(1)
 ```
@@ -1619,13 +1903,19 @@ expect(dist).to_equal(1)
 
 #### returns 1 for single removal
 
+- returns 1 for single removal
+   - Expected: dist equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 1 for single removal")
 val dist = type_set_edit_distance(["i64", "text"], ["text"])
 expect(dist).to_equal(1)
 ```
@@ -1634,13 +1924,19 @@ expect(dist).to_equal(1)
 
 #### returns sum of lengths for completely disjoint sets
 
+- returns sum of lengths for completely disjoint sets
+   - Expected: dist equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns sum of lengths for completely disjoint sets")
 val dist = type_set_edit_distance(["a", "b"], ["c", "d"])
 expect(dist).to_equal(4)
 ```
@@ -1649,13 +1945,19 @@ expect(dist).to_equal(4)
 
 #### returns 0 for two empty sets
 
+- returns 0 for two empty sets
+   - Expected: dist equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for two empty sets")
 val dist = type_set_edit_distance([], [])
 expect(dist).to_equal(0)
 ```
@@ -1664,13 +1966,19 @@ expect(dist).to_equal(0)
 
 #### returns length when one set is empty
 
+- returns length when one set is empty
+   - Expected: dist equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns length when one set is empty")
 val dist = type_set_edit_distance(["a", "b", "c"], [])
 expect(dist).to_equal(3)
 ```
@@ -1679,13 +1987,19 @@ expect(dist).to_equal(3)
 
 #### handles swap correctly
 
+- handles swap correctly
+   - Expected: dist equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles swap correctly")
 # ["a", "c"] vs ["b", "c"] => remove a, add b = 2
 val dist = type_set_edit_distance(["a", "c"], ["b", "c"])
 expect(dist).to_equal(2)
@@ -1697,13 +2011,19 @@ expect(dist).to_equal(2)
 
 #### generates N variants for list of length N
 
+- generates N variants for list of length N
+   - Expected: variants.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("generates N variants for list of length N")
 val variants = generate_deletion_variants(["a", "b", "c"])
 expect(variants.len()).to_equal(3)
 ```
@@ -1712,13 +2032,19 @@ expect(variants.len()).to_equal(3)
 
 #### each variant has length N-1
 
+- each variant has length N-1
+   - Expected: variants.get(i).len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("each variant has length N-1")
 val variants = generate_deletion_variants(["x", "y", "z"])
 var i = 0
 while i < variants.len():
@@ -1730,13 +2056,19 @@ while i < variants.len():
 
 #### first variant removes first element
 
+- first variant removes first element
+   - Expected: variants.get(0) equals `["b", "c"]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("first variant removes first element")
 val variants = generate_deletion_variants(["a", "b", "c"])
 expect(variants.get(0)).to_equal(["b", "c"])
 ```
@@ -1745,13 +2077,19 @@ expect(variants.get(0)).to_equal(["b", "c"])
 
 #### last variant removes last element
 
+- last variant removes last element
+   - Expected: variants.get(2) equals `["a", "b"]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("last variant removes last element")
 val variants = generate_deletion_variants(["a", "b", "c"])
 expect(variants.get(2)).to_equal(["a", "b"])
 ```
@@ -1760,13 +2098,19 @@ expect(variants.get(2)).to_equal(["a", "b"])
 
 #### returns empty list for empty input
 
+- returns empty list for empty input
+   - Expected: variants.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty list for empty input")
 val variants = generate_deletion_variants([])
 expect(variants.len()).to_equal(0)
 ```
@@ -1775,13 +2119,20 @@ expect(variants.len()).to_equal(0)
 
 #### returns one empty variant for single element
 
+- returns one empty variant for single element
+   - Expected: variants.len() equals `1`
+   - Expected: variants.get(0).len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns one empty variant for single element")
 val variants = generate_deletion_variants(["only"])
 expect(variants.len()).to_equal(1)
 expect(variants.get(0).len()).to_equal(0)
@@ -1793,13 +2144,19 @@ expect(variants.get(0).len()).to_equal(0)
 
 #### returns same hash for same input
 
+- returns same hash for same input
+   - Expected: h1 equals `h2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns same hash for same input")
 val h1 = compute_type_hash(["i64", "text"])
 val h2 = compute_type_hash(["i64", "text"])
 expect(h1).to_equal(h2)
@@ -1809,6 +2166,32 @@ expect(h1).to_equal(h2)
 
 #### returns different hash for different input
 
+- returns different hash for different input
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COUPLING
+step("returns different hash for different input")
+val h1 = compute_type_hash(["i64"])
+val h2 = compute_type_hash(["text"])
+# Very unlikely to collide
+expect(h1).to_not_equal(h2)
+```
+
+</details>
+
+#### returns 0 for empty list
+
+- returns 0 for empty list
+   - Expected: h equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -1816,23 +2199,8 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val h1 = compute_type_hash(["i64"])
-val h2 = compute_type_hash(["text"])
-# Very unlikely to collide
-expect(h1 == h2).to_equal(false)
-```
-
-</details>
-
-#### returns 0 for empty list
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
+# @req REQ-SSPEC-COUPLING
+step("returns 0 for empty list")
 val h = compute_type_hash([])
 expect(h).to_equal(0)
 ```
@@ -1846,9 +2214,7 @@ expect(h).to_equal(0)
 
 #### builds NxN matrix for N modules
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- builds NxN matrix for N modules
    - Expected: dsm.modules.len() equals `3`
    - Expected: dsm.matrix.len() equals `3`
 
@@ -1856,14 +2222,16 @@ expect(h).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("builds NxN matrix for N modules")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["C"])
-edges = edges.set("C", [])
+edges["A"] = ["B"]
+edges["B"] = ["C"]
+edges["C"] = []
 val graph = make_graph(edges)
 val dsm = build_dsm(graph)
 expect(dsm.modules.len()).to_equal(3)
@@ -1877,8 +2245,7 @@ expect(dsm.matrix.len()).to_equal(3)
 
 #### records dependency in correct cell
 
-- edges = edges set
-- edges = edges set
+- records dependency in correct cell
    - Expected: dsm.modules.len() equals `2`
    - Expected: dsm.matrix.len() equals `2`
 
@@ -1886,13 +2253,15 @@ expect(dsm.matrix.len()).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("records dependency in correct cell")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", [])
+edges["A"] = ["B"]
+edges["B"] = []
 val graph = make_graph(edges)
 val dsm = build_dsm(graph)
 # modules sorted alphabetically: [A, B]
@@ -1904,13 +2273,20 @@ expect(dsm.matrix.len()).to_equal(2)
 
 #### handles empty graph
 
+- handles empty graph
+   - Expected: dsm.modules.len() equals `0`
+   - Expected: dsm.matrix.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("handles empty graph")
 var edges: Dict<text, [text]> = {}
 val graph = make_graph(edges)
 val dsm = build_dsm(graph)
@@ -1922,9 +2298,7 @@ expect(dsm.matrix.len()).to_equal(0)
 
 #### sorts modules alphabetically
 
-- edges = edges set
-- edges = edges set
-- edges = edges set
+- sorts modules alphabetically
    - Expected: dsm.modules.get(0) equals `A`
    - Expected: dsm.modules.get(1) equals `B`
    - Expected: dsm.modules.get(2) equals `C`
@@ -1933,14 +2307,16 @@ expect(dsm.matrix.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("sorts modules alphabetically")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("C", ["A"])
-edges = edges.set("B", [])
-edges = edges.set("A", [])
+edges["C"] = ["A"]
+edges["B"] = []
+edges["A"] = []
 val graph = make_graph(edges)
 val dsm = build_dsm(graph)
 expect(dsm.modules.get(0)).to_equal("A")
@@ -1952,21 +2328,22 @@ expect(dsm.modules.get(2)).to_equal("C")
 
 #### diagonal is always zero
 
-- edges = edges set
-- edges = edges set
+- diagonal is always zero
    - Expected: dsm.matrix.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("diagonal is always zero")
 var edges: Dict<text, [text]> = {}
-edges = edges.set("A", ["B"])
-edges = edges.set("B", ["A"])
+edges["A"] = ["B"]
+edges["B"] = ["A"]
 val graph = make_graph(edges)
 val dsm = build_dsm(graph)
 expect(dsm.matrix.len()).to_equal(2)
@@ -1978,13 +2355,19 @@ expect(dsm.matrix.len()).to_equal(2)
 
 #### maps Identifier to 0
 
+- maps Identifier to 0
+   - Expected: token_kind_ordinal(SimpleTokenKind.Identifier) equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Identifier to 0")
 expect(token_kind_ordinal(SimpleTokenKind.Identifier)).to_equal(0)
 ```
 
@@ -1992,13 +2375,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Identifier)).to_equal(0)
 
 #### maps Keyword to 1
 
+- maps Keyword to 1
+   - Expected: token_kind_ordinal(SimpleTokenKind.Keyword) equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Keyword to 1")
 expect(token_kind_ordinal(SimpleTokenKind.Keyword)).to_equal(1)
 ```
 
@@ -2006,13 +2395,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Keyword)).to_equal(1)
 
 #### maps Operator to 2
 
+- maps Operator to 2
+   - Expected: token_kind_ordinal(SimpleTokenKind.Operator) equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Operator to 2")
 expect(token_kind_ordinal(SimpleTokenKind.Operator)).to_equal(2)
 ```
 
@@ -2020,13 +2415,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Operator)).to_equal(2)
 
 #### maps Literal to 3
 
+- maps Literal to 3
+   - Expected: token_kind_ordinal(SimpleTokenKind.Literal) equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Literal to 3")
 expect(token_kind_ordinal(SimpleTokenKind.Literal)).to_equal(3)
 ```
 
@@ -2034,13 +2435,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Literal)).to_equal(3)
 
 #### maps Punctuation to 4
 
+- maps Punctuation to 4
+   - Expected: token_kind_ordinal(SimpleTokenKind.Punctuation) equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Punctuation to 4")
 expect(token_kind_ordinal(SimpleTokenKind.Punctuation)).to_equal(4)
 ```
 
@@ -2048,13 +2455,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Punctuation)).to_equal(4)
 
 #### maps Comment to 5
 
+- maps Comment to 5
+   - Expected: token_kind_ordinal(SimpleTokenKind.Comment) equals `5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Comment to 5")
 expect(token_kind_ordinal(SimpleTokenKind.Comment)).to_equal(5)
 ```
 
@@ -2062,13 +2475,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Comment)).to_equal(5)
 
 #### maps Whitespace to 6
 
+- maps Whitespace to 6
+   - Expected: token_kind_ordinal(SimpleTokenKind.Whitespace) equals `6`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("maps Whitespace to 6")
 expect(token_kind_ordinal(SimpleTokenKind.Whitespace)).to_equal(6)
 ```
 
@@ -2078,19 +2497,19 @@ expect(token_kind_ordinal(SimpleTokenKind.Whitespace)).to_equal(6)
 
 #### filters out whitespace tokens
 
-- make token
-- make token
-- make token
+- filters out whitespace tokens
    - Expected: relaxed.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("filters out whitespace tokens")
 val tokens = [
     make_token(SimpleTokenKind.Identifier, 1, 0),
     make_token(SimpleTokenKind.Whitespace, 1, 5),
@@ -2104,18 +2523,19 @@ expect(relaxed.len()).to_equal(2)
 
 #### filters out comment tokens
 
-- make token
-- make token
+- filters out comment tokens
    - Expected: relaxed.len() equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("filters out comment tokens")
 val tokens = [
     make_token(SimpleTokenKind.Keyword, 1, 0),
     make_token(SimpleTokenKind.Comment, 1, 5)
@@ -2128,13 +2548,20 @@ expect(relaxed.len()).to_equal(1)
 
 #### preserves line and column info
 
+- preserves line and column info
+   - Expected: relaxed.get(0).line equals `7`
+   - Expected: relaxed.get(0).column equals `12`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("preserves line and column info")
 val tokens = [make_token(SimpleTokenKind.Literal, 7, 12)]
 val relaxed = to_relaxed_tokens(tokens)
 expect(relaxed.get(0).line).to_equal(7)
@@ -2145,8 +2572,7 @@ expect(relaxed.get(0).column).to_equal(12)
 
 #### sets correct kind_ordinal
 
-- make token
-- make token
+- sets correct kind_ordinal
    - Expected: relaxed.get(0).kind_ordinal equals `1`
    - Expected: relaxed.get(1).kind_ordinal equals `4`
 
@@ -2154,10 +2580,12 @@ expect(relaxed.get(0).column).to_equal(12)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("sets correct kind_ordinal")
 val tokens = [
     make_token(SimpleTokenKind.Keyword, 1, 0),
     make_token(SimpleTokenKind.Punctuation, 1, 3)
@@ -2171,13 +2599,19 @@ expect(relaxed.get(1).kind_ordinal).to_equal(4)
 
 #### returns empty for empty input
 
+- returns empty for empty input
+   - Expected: relaxed.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty for empty input")
 var tokens: [SimpleToken] = []
 val relaxed = to_relaxed_tokens(tokens)
 expect(relaxed.len()).to_equal(0)
@@ -2187,19 +2621,19 @@ expect(relaxed.len()).to_equal(0)
 
 #### returns empty when all tokens are whitespace/comments
 
-- make token
-- make token
-- make token
+- returns empty when all tokens are whitespace/comments
    - Expected: relaxed.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COUPLING
+step("returns empty when all tokens are whitespace/comments")
 val tokens = [
     make_token(SimpleTokenKind.Whitespace, 1, 0),
     make_token(SimpleTokenKind.Comment, 2, 0),
@@ -2218,12 +2652,12 @@ expect(relaxed.len()).to_equal(0)
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/coupling/coupling_metrics_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering compute_fan_out, compute_fan_in, compute_all_metrics, find_cycles, find_instability_inversions, extract_layer_number, is_digit, find_layer_violations, fields_share_access, find_method_index, sort_descending, compute_lcom4, compute_pss, compute_public_ratio, compute_avg_param_count, compute_max_param_count, compute_overload_groups, compute_eur, compute_entropy, type_set_edit_distance, generate_deletion_variants, compute_type_hash, build_dsm, token_kind_ordinal, to_relaxed_tokens.
 - compute_fan_out
 - compute_fan_in
 - compute_all_metrics
@@ -2262,3 +2696,60 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-coupling-analysis`
+- `REQ-SSPEC-COUPLING`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `648c96314c34443e366e0085361e9aec87ab44284070b2f26157b640a34f6239`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `648c96314c34443e366e0085361e9aec87ab44284070b2f26157b640a34f6239`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `648c96314c34443e366e0085361e9aec87ab44284070b2f26157b640a34f6239`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/coupling/coupling_metrics_spec.spl
+mirror: doc/06_spec/01_unit/coupling/coupling_metrics_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/01_unit/coupling/coupling_metrics_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/coupling/coupling_metrics_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/coupling/coupling_metrics_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 120 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/coupling/coupling_metrics_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/coupling/coupling_metrics_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns correct fan-out for a linear chain' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/coupling/coupling_metrics_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns correct fan-out for a module with multiple deps' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/coupling/coupling_metrics_spec.spl:119:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns zero fan-out for isolated modules' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

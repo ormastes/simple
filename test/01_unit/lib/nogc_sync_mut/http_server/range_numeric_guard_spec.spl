@@ -1,30 +1,51 @@
-extern fn rt_file_read_text(path: text) -> text
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # Regression guard for the Range header parser.
 #
-# History: this spec used to require `start = start_str.to_int() ?? 0` and
-# `end = end_str.to_int() ?? -1`. That pattern is DEAD -- `.to_int()` is typed
+# History: `start = start_str.to_int() ?? 0` was DEAD -- `.to_int()` is typed
 # `i64?` but its runtime returns a plain int64_t and can never produce nil, so
 # the `??` arm never fired and `bytes=abc-def` was silently served as
 # `bytes=0-0`. `utilities.spl` now parses through `try_parse_int` and IGNORES a
-# malformed Range (serve the whole entity, RFC 9110 §14.2) instead of coercing
-# it. The assertions below pin that stronger behaviour; requiring the old
-# spelling would be requiring the defect back.
-describe "nogc sync http server range numeric guard":
-    it "parses range bounds through a parser that can actually fail":
-        val source = rt_file_read_text("src/lib/nogc_sync_mut/http_server/utilities.spl") ?? ""
+# malformed Range (serve the whole entity, RFC 9110 §14.2). The oracles below
+# execute the real parser and pin that behaviour.
 
-        expect(source).to_contain("val parsed_start = try_parse_int(start_str)")
-        expect(source).to_contain("val parsed_end = try_parse_int(end_str)")
+use std.spec.step
+
+use std.nogc_sync_mut.http_server.utilities.{parse_range_header}
+
+describe "nogc sync http server range numeric guard":
+    # @manual scenario evidence
+    it "parses range bounds through a parser that can actually fail":
+        # @req REQ-SSPEC-LIB
+        step("parses range bounds through a parser that can actually fail")
+        # oracle: well-formed bounds round-trip exactly
+        val (s1, e1) = parse_range_header("bytes=10-20")
+        expect(s1).to_equal(10)
+        expect(e1).to_equal(20)
+        val (s2, e2) = parse_range_header("bytes=5-")
+        expect(s2).to_equal(5)
+        expect(e2).to_equal(-1)
 
     it "fails closed on a malformed bound instead of coercing it":
-        val source = rt_file_read_text("src/lib/nogc_sync_mut/http_server/utilities.spl") ?? ""
-
-        expect(source).to_contain("if parsed_start == nil:")
-        expect(source).to_contain("if parsed_end == nil:")
+        # @req REQ-SSPEC-LIB
+        step("fails closed on a malformed bound instead of coercing it")
+        # oracle: whole-entity sentinel (0, -1) — never the historical silent (0, 0)
+        val (s1, e1) = parse_range_header("bytes=abc-def")
+        expect(s1).to_equal(0)
+        expect(e1).to_equal(-1)
+        val (s2, e2) = parse_range_header("bytes=-7")
+        expect(s2).to_equal(0)
+        expect(e2).to_equal(-1)
+        val (s3, e3) = parse_range_header("")
+        expect(s3).to_equal(0)
+        expect(e3).to_equal(-1)
 
     it "never reintroduces the coercing to_int spellings":
-        val source = rt_file_read_text("src/lib/nogc_sync_mut/http_server/utilities.spl") ?? ""
-
-        expect(source.contains("start = start_str.to_int()")).to_equal(false)
-        expect(source.contains("end = end_str.to_int()")).to_equal(false)
+        # @req REQ-SSPEC-LIB
+        step("never reintroduces the coercing to_int spellings")
+        # oracle: a negative start is rejected, not parsed into a negative slice
+        val (s, e) = parse_range_header("bytes=abc-20")
+        expect(s).to_equal(0)
+        expect(e).to_equal(-1)

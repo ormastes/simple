@@ -1,29 +1,6 @@
 # Async Effect Specification
 
-> <details>
-
-<!-- sdn-diagram:id=async_effect_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=async_effect_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-async_effect_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=async_effect_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Effect types, EffectRunner channels, dispatch_effect, Timer effect processing, Log effect processing, UpdateProp effect processing, FetchData effect processing, EffectRunner clear.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,22 @@ async_effect_spec -> common
 
 #### creates a FetchData effect
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates a FetchData effect
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a FetchData effect")
 val effect = Effect.FetchData(url: "https://example.com/api", callback_id: "eff_fetch_cb1")
 val desc = describe_effect(effect)
 expect desc to_contain "fetch"
@@ -58,13 +44,18 @@ expect desc to_contain "eff_fetch_cb1"
 
 #### creates a Timer effect
 
+- creates a Timer effect
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a Timer effect")
 val effect = Effect.Timer(delay_ms: 500, callback_id: "eff_timer_cb1")
 val desc = describe_effect(effect)
 expect desc to_contain "timer"
@@ -76,13 +67,18 @@ expect desc to_contain "eff_timer_cb1"
 
 #### creates a Log effect
 
+- creates a Log effect
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a Log effect")
 val effect = Effect.Log(message: "Widget mounted")
 val desc = describe_effect(effect)
 expect desc to_contain "log"
@@ -93,13 +89,18 @@ expect desc to_contain "Widget mounted"
 
 #### creates an UpdateProp effect
 
+- creates an UpdateProp effect
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates an UpdateProp effect")
 val effect = Effect.UpdateProp(widget_id: "eff_upw1", key: "content", value: "Updated text")
 val desc = describe_effect(effect)
 expect desc to_contain "update_prop"
@@ -114,17 +115,18 @@ expect desc to_contain "Updated text"
 
 #### starts with empty pending and result queues
 
-1. expect runner pending count
-2. expect runner result count
+- starts with empty pending and result queues
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts with empty pending and result queues")
 val runner = new_effect_runner()
 expect runner.pending_count() to_equal 0
 expect runner.result_count() to_equal 0
@@ -134,16 +136,18 @@ expect runner.result_count() to_equal 0
 
 #### tracks log messages separately
 
-1. expect runner log count
+- tracks log messages separately
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tracks log messages separately")
 val runner = new_effect_runner()
 expect runner.log_count() to_equal 0
 ```
@@ -154,30 +158,7 @@ expect runner.log_count() to_equal 0
 
 #### adds effect to pending queue
 
-1. runner dispatch effect
-2. expect runner pending count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val runner = new_effect_runner()
-runner.dispatch_effect(Effect.Log(message: "eff_disp_test"))
-expect runner.pending_count() to_equal 1
-```
-
-</details>
-
-#### adds multiple effects
-
-1. runner dispatch effect
-2. runner dispatch effect
-3. runner dispatch effect
-4. expect runner pending count
+- adds effect to pending queue
 
 
 <details>
@@ -187,6 +168,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds effect to pending queue")
+val runner = new_effect_runner()
+runner.dispatch_effect(Effect.Log(message: "eff_disp_test"))
+expect runner.pending_count() to_equal 1
+```
+
+</details>
+
+#### adds multiple effects
+
+- adds multiple effects
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("adds multiple effects")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.Log(message: "eff_disp_a"))
 runner.dispatch_effect(Effect.Timer(delay_ms: 100, callback_id: "eff_disp_t"))
@@ -200,19 +204,18 @@ expect runner.pending_count() to_equal 3
 
 #### processes timer and produces result
 
-1. runner dispatch effect
-2. runner process effects
-3. expect runner pending count
-4. expect runner result count
+- processes timer and produces result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("processes timer and produces result")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.Timer(delay_ms: 250, callback_id: "eff_tmr_cb1"))
 runner.process_effects()
@@ -228,19 +231,18 @@ expect result != nil to_equal true
 
 #### processes log and records message
 
-1. runner dispatch effect
-2. runner process effects
-3. expect runner log count
-4. expect runner result count
+- processes log and records message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("processes log and records message")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.Log(message: "Hello from lifecycle"))
 runner.process_effects()
@@ -252,20 +254,18 @@ expect runner.result_count() to_equal 1
 
 #### processes multiple log effects in order
 
-1. runner dispatch effect
-2. runner dispatch effect
-3. runner process effects
-4. expect runner log count
-5. expect runner result count
+- processes multiple log effects in order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("processes multiple log effects in order")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.Log(message: "eff_log_first"))
 runner.dispatch_effect(Effect.Log(message: "eff_log_second"))
@@ -280,19 +280,18 @@ expect runner.result_count() to_equal 2
 
 #### processes update_prop and produces result
 
-1. runner dispatch effect
-2. runner process effects
-3. expect runner pending count
-4. expect runner result count
+- processes update_prop and produces result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("processes update_prop and produces result")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.UpdateProp(widget_id: "eff_up_w1", key: "label", value: "New Label"))
 runner.process_effects()
@@ -308,19 +307,18 @@ expect result != nil to_equal true
 
 #### processes fetch and produces result with url
 
-1. runner dispatch effect
-2. runner process effects
-3. expect runner pending count
-4. expect runner result count
+- processes fetch and produces result with url
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("processes fetch and produces result with url")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.FetchData(url: "https://api.example.com/data", callback_id: "eff_fd_cb1"))
 runner.process_effects()
@@ -334,20 +332,18 @@ expect runner.result_count() to_equal 1
 
 #### clears results after processing
 
-1. runner dispatch effect
-2. runner process effects
-3. expect runner result count
-4. runner clear results
-5. expect runner result count
+- clears results after processing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("clears results after processing")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.Log(message: "eff_clr_test"))
 runner.process_effects()
@@ -360,20 +356,18 @@ expect runner.result_count() to_equal 0
 
 #### clears log messages
 
-1. runner dispatch effect
-2. runner process effects
-3. expect runner log count
-4. runner clear log
-5. expect runner log count
+- clears log messages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("clears log messages")
 val runner = new_effect_runner()
 runner.dispatch_effect(Effect.Log(message: "eff_clr_log"))
 runner.process_effects()
@@ -391,12 +385,12 @@ expect runner.log_count() to_equal 0
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/async_effect_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Effect types, EffectRunner channels, dispatch_effect, Timer effect processing, Log effect processing, UpdateProp effect processing, FetchData effect processing, EffectRunner clear.
 - Effect types
 - EffectRunner channels
 - dispatch_effect
@@ -418,3 +412,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bcaf9e3f1556227ea9e45693edc3d999105cfc1ea28205b4e32d6a827c87010a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bcaf9e3f1556227ea9e45693edc3d999105cfc1ea28205b4e32d6a827c87010a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bcaf9e3f1556227ea9e45693edc3d999105cfc1ea28205b4e32d6a827c87010a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/async_effect_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/async_effect_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/async_effect_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/async_effect_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/async_effect_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a FetchData effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/async_effect_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a Timer effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/async_effect_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a Log effect' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

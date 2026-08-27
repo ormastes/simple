@@ -1,29 +1,6 @@
-# Compiler Full Pipeline Intensive Tests
+# @req REQ-SSPEC-INTEGRATION
 
-> Comprehensive end-to-end testing of the complete compilation pipeline: Lexer → Parser → AST → MIR → Backend → Code Generation.
-
-<!-- sdn-diagram:id=compiler_intensive_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=compiler_intensive_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-compiler_intensive_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=compiler_intensive_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> check(code.contains("class"))
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,51 +9,30 @@ compiler_intensive_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Compiler Full Pipeline Intensive Tests
+# @req REQ-SSPEC-INTEGRATION
 
-Comprehensive end-to-end testing of the complete compilation pipeline: Lexer → Parser → AST → MIR → Backend → Code Generation.
+check(code.contains("class"))
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #1000-1010 |
-| Category | Testing |
-| Difficulty | 5/5 |
-| Status | Implemented |
+| Category | Compiler |
+| Status | Active |
 | Source | `test/02_integration/compiler/compiler_intensive_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+check(code.contains("class"))
+            check(code.contains("fn"))
 
-Comprehensive end-to-end testing of the complete compilation pipeline:
-Lexer → Parser → AST → MIR → Backend → Code Generation.
-
-Tests the full compiler workflow with real source code through all phases.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Full Pipeline | Complete lexer→parser→MIR→codegen workflow |
-| E2E Testing | End-to-end validation with real Simple code |
-| Phase Integration | Verify each phase integrates correctly |
-
-## Related Specifications
-
-- [Lexer](../../src/compiler/10.frontend/core/lexer.spl) - Tokenization
-- [Parser](../../src/compiler/10.frontend/core/parser.spl) - AST generation
-- [MIR](../../src/compiler/50.mir/) - Mid-level IR
-- [Backend](../../src/compiler/70.backend/) - Code generation
-
-## Examples
-
-```simple
-# Full compilation test
-val code = "fn add(x, y): x + y"
-val result = compile_pipeline(code)
-```
+        slow_it "compiles class with constructor":
+            step("compiles class with constructor")
+            val code = """
+            class Counter:
+                count: i64
+                static fn new() -> Counter:
+                    Counter(count: 0)
 
 ## Scenarios
 
@@ -89,17 +45,18 @@ val result = compile_pipeline(code)
 
 #### compiles function definition end-to-end _(slow)_
 
-1. check
-2. check
+- compiles function definition end-to-end
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles function definition end-to-end")
 # Simple function that should compile successfully
 val code = "fn add(x, y): x + y"
 
@@ -121,17 +78,18 @@ check(has_fn_keyword)
 
 #### compiles function with return type _(slow)_
 
-1. check
-2. check
+- compiles function with return type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles function with return type")
 val code = "fn square(x: i64) -> i64: x * x"
 check(code.contains("->"))
 check(code.contains("i64"))
@@ -149,18 +107,18 @@ check(code.contains("i64"))
 
 #### compiles simple class _(slow)_
 
-1. fn get x
-2. check
-3. check
+- compiles simple class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles simple class")
 val code = """
 class Point:
     x: i64
@@ -182,19 +140,18 @@ check(code.contains("fn"))
 
 #### compiles class with constructor _(slow)_
 
-1. static fn new
-2. Counter
-3. check
-4. check
+- compiles class with constructor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles class with constructor")
 val code = """
 class Counter:
     count: i64
@@ -218,17 +175,18 @@ check(code.contains("Counter"))
 
 #### handles import statements _(slow)_
 
-1. check
-2. check
+- handles import statements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles import statements")
 val code = "use std.spec\ncheck(true)"
 check(code.contains("use"))
 check(code.contains("std.spec"))
@@ -244,13 +202,18 @@ check(code.contains("std.spec"))
 
 #### handles multiple imports _(slow)_
 
+- handles multiple imports
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles multiple imports")
 val code = """
 use std.spec
 ```
@@ -272,3 +235,51 @@ use std.spec
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a4968d288aff9e30a9c7af35f025e1e14e59dc5deb9eb2842cfe7e865e709b3b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a4968d288aff9e30a9c7af35f025e1e14e59dc5deb9eb2842cfe7e865e709b3b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a4968d288aff9e30a9c7af35f025e1e14e59dc5deb9eb2842cfe7e865e709b3b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/compiler/compiler_intensive_spec.spl
+mirror: doc/06_spec/02_integration/compiler/compiler_intensive_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/compiler/compiler_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/compiler/compiler_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/compiler/compiler_intensive_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles function definition end-to-end' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/compiler_intensive_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles function with return type' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/compiler_intensive_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles simple class' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,38 +1,31 @@
-# Types Specification
+# types_spec
 
-> <details>
-
-<!-- sdn-diagram:id=types_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=types_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-types_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=types_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Prove that Types.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Types Specification
+# types_spec
+
+Purpose: Prove that Types.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler_core/types_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove that Types.
+Audience: COMP-CORE maintainers who read this spec to confirm the behavior still holds.
 
 ## Scenarios
 
@@ -40,18 +33,27 @@ types_spec -> std
 
 #### keeps core string span token and symbol helpers available
 
+- keeps core string span token and symbol helpers available
+- Verify: keeps core string span token and symbol helpers available
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COMPILER_CORE
+step("keeps core string span token and symbol helpers available")
+step("Verify: keeps core string span token and symbol helpers available")
+# @req: REQ-COMP-CORE-TYPES-001
 val source = types_source()
 
 expect(source).to_contain("fn str_concat(a: text, b: text) -> text")
+expect(source).to_contain("fn str_len(s: text) -> i64:\n    rt_string_len(s)")
 expect(source).to_contain("fn str_contains(s: text, needle: text) -> bool")
-expect(source).to_contain("fn span_new(start: i64, end_pos: i64, line: i64, col: i64) -> i64")
+expect(source).to_contain("fn span_start(span_id: i64) -> i64")
 expect(source).to_contain("fn token_new(kind: i64, span_id: i64, value: text) -> i64")
 expect(source).to_contain("fn symbol_new(name: text, sym_type: i64, depth: i64, decl_id: i64, is_mut: i64) -> i64")
 expect(source).to_contain("fn scope_push() -> i64")
@@ -61,13 +63,20 @@ expect(source).to_contain("fn scope_push() -> i64")
 
 #### keeps type tags and type name conversion available
 
+- keeps type tags and type name conversion available
+- Verify: keeps type tags and type name conversion available
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COMPILER_CORE
+step("keeps type tags and type name conversion available")
+step("Verify: keeps type tags and type name conversion available")
 val source = types_source()
 
 expect(source).to_contain("val TYPE_VOID = 0")
@@ -84,13 +93,20 @@ expect(source).to_contain("fn type_tag_to_c(tag: i64) -> text")
 
 #### keeps named type and function signature registries available
 
+- keeps named type and function signature registries available
+- Verify: keeps named type and function signature registries available
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-COMPILER_CORE
+step("keeps named type and function signature registries available")
+step("Verify: keeps named type and function signature registries available")
 val source = types_source()
 
 expect(source).to_contain("fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64")
@@ -103,30 +119,278 @@ expect(source).to_contain("fn reset_all_pools()")
 
 </details>
 
-## At a Glance
+#### keeps Dict and Result specialization ranges bounded and resettable
 
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler_core/types_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+- keeps Dict and Result specialization ranges bounded and resettable
+- Verify: keeps Dict and Result specialization ranges bounded and resettable
+   - Expected: source does not contain `fn clear_i64_pool`
 
-## Overview
 
-Tests covering:
-- Types
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER_CORE
+step("keeps Dict and Result specialization ranges bounded and resettable")
+step("Verify: keeps Dict and Result specialization ranges bounded and resettable")
+val source = types_source()
+
+expect(source).to_contain("val TYPE_DICT_BASE = 1000")
+expect(source).to_contain("val TYPE_RESULT_BASE = 2000")
+expect(source).to_contain("val TYPE_RESULT_LIMIT = 3000")
+expect(source).to_contain("val TYPE_NAMED_BASE = 10000")
+expect(source).to_contain("if idx >= TYPE_RESULT_BASE - TYPE_DICT_BASE:")
+expect(source).to_contain("if idx >= TYPE_RESULT_LIMIT - TYPE_RESULT_BASE:")
+expect(source).to_contain("result_type_ok = []")
+expect(source).to_contain("result_type_err = []")
+expect(source.contains("fn clear_i64_pool")).to_equal(false)
+```
+
+</details>
+
+#### interns and bounds every encoded composite type registry
+
+- interns and bounds every encoded composite type registry
+- Verify: interns and bounds every encoded composite type registry
+   - Expected: union_type_register([i64_tag, text_tag]) equals `union_base`
+   - Expected: union_type_register([i64_tag, text_tag]) equals `union_base`
+   - Expected: union_type_register([text_tag, i64_tag]) equals `union_base + 1`
+   - Expected: intersection_type_register([i64_tag, text_tag]) equals `intersection_base`
+   - Expected: intersection_type_register([i64_tag, text_tag]) equals `intersection_base`
+   - Expected: intersection_type_register([text_tag, i64_tag]) equals `intersection_base + 1`
+   - Expected: refinement_type_register(i64_tag, "value > 0") equals `refinement_base`
+   - Expected: refinement_type_register(i64_tag, "value > 0") equals `refinement_base`
+   - Expected: tuple_type_register([i64_tag, text_tag]) equals `tuple_base`
+   - Expected: tuple_type_register([i64_tag, text_tag]) equals `tuple_base`
+   - Expected: tuple_type_register([text_tag, i64_tag]) equals `tuple_base + 1`
+   - Expected: dict_type_register(i64_tag, text_tag) equals `dict_base`
+   - Expected: dict_type_register(i64_tag, text_tag) equals `dict_base`
+   - Expected: result_type_register(i64_tag, text_tag) equals `result_base`
+   - Expected: result_type_register(i64_tag, text_tag) equals `result_base`
+   - Expected: array_generic_type_register(named_base) equals `array_base`
+   - Expected: array_generic_type_register(named_base) equals `array_base`
+   - Expected: union_type_get_members(-1) equals `[]`
+   - Expected: intersection_type_get_members(-1) equals `[]`
+   - Expected: refinement_type_base(-1) equals `any_tag`
+   - Expected: refinement_type_predicate(-1) equals ``
+   - Expected: tuple_type_get_elems(-1) equals `[]`
+   - Expected: dict_type_get_key(-1) equals `any_tag`
+   - Expected: dict_type_get_value(-1) equals `any_tag`
+   - Expected: result_type_get_ok(-1) equals `any_tag`
+   - Expected: result_type_get_err(-1) equals `any_tag`
+   - Expected: array_generic_type_get_elem(-1) equals `any_tag`
+   - Expected: union_last equals `intersection_base - 1`
+   - Expected: union_type_register([i64_tag, text_tag]) equals `union_base`
+   - Expected: union_type_register([text_tag, -1]) equals `-1`
+   - Expected: intersection_last equals `refinement_base - 1`
+   - Expected: intersection_type_register([i64_tag, text_tag]) equals `intersection_base`
+   - Expected: intersection_type_register([text_tag, -1]) equals `-1`
+   - Expected: refinement_last equals `dict_base - 1`
+   - Expected: refinement_type_register(i64_tag, "value > 0") equals `refinement_base`
+   - Expected: refinement_type_register(text_tag, "overflow") equals `-1`
+   - Expected: tuple_last equals `tuple_limit - 1`
+   - Expected: tuple_type_register([i64_tag, text_tag]) equals `tuple_base`
+   - Expected: tuple_type_register([text_tag, -1]) equals `-1`
+   - Expected: dict_last equals `result_base - 1`
+   - Expected: dict_type_register(i64_tag, text_tag) equals `dict_base`
+   - Expected: dict_type_register(-1, text_tag) equals `-1`
+   - Expected: result_last equals `tuple_base - 1`
+   - Expected: result_type_register(i64_tag, text_tag) equals `result_base`
+   - Expected: result_type_register(-1, text_tag) equals `-1`
+   - Expected: array_last equals `array_limit - 1`
+   - Expected: array_generic_type_register(named_base) equals `array_base`
+   - Expected: array_generic_type_register(-1) equals `-1`
+   - Expected: union_type_register([text_tag, i64_tag]) equals `union_base`
+   - Expected: intersection_type_register([text_tag, i64_tag]) equals `intersection_base`
+   - Expected: refinement_type_register(text_tag, "fresh") equals `refinement_base`
+   - Expected: tuple_type_register([text_tag, i64_tag]) equals `tuple_base`
+   - Expected: dict_type_register(text_tag, i64_tag) equals `dict_base`
+   - Expected: result_type_register(text_tag, i64_tag) equals `result_base`
+   - Expected: array_generic_type_register(named_base + 1) equals `array_base`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 99 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-COMPILER_CORE
+step("interns and bounds every encoded composite type registry")
+step("Verify: interns and bounds every encoded composite type registry")
+# Local raw tags keep this native-runnable through bootstrap compilers
+# whose cross-module imported `val` representation is not yet stable.
+val i64_tag = 2
+val text_tag = 4
+val any_tag = 12
+val union_base = 500
+val intersection_base = 600
+val refinement_base = 700
+val dict_base = 1000
+val result_base = 2000
+val tuple_base = 3000
+val tuple_limit = 4000
+val array_base = 4000
+val array_limit = 5000
+val named_base = 10000
+reset_all_pools()
+expect(union_type_register([i64_tag, text_tag])).to_equal(union_base)
+expect(union_type_register([i64_tag, text_tag])).to_equal(union_base)
+expect(union_type_register([text_tag, i64_tag])).to_equal(union_base + 1)
+expect(intersection_type_register([i64_tag, text_tag])).to_equal(intersection_base)
+expect(intersection_type_register([i64_tag, text_tag])).to_equal(intersection_base)
+expect(intersection_type_register([text_tag, i64_tag])).to_equal(intersection_base + 1)
+expect(refinement_type_register(i64_tag, "value > 0")).to_equal(refinement_base)
+expect(refinement_type_register(i64_tag, "value > 0")).to_equal(refinement_base)
+expect(tuple_type_register([i64_tag, text_tag])).to_equal(tuple_base)
+expect(tuple_type_register([i64_tag, text_tag])).to_equal(tuple_base)
+expect(tuple_type_register([text_tag, i64_tag])).to_equal(tuple_base + 1)
+expect(dict_type_register(i64_tag, text_tag)).to_equal(dict_base)
+expect(dict_type_register(i64_tag, text_tag)).to_equal(dict_base)
+expect(result_type_register(i64_tag, text_tag)).to_equal(result_base)
+expect(result_type_register(i64_tag, text_tag)).to_equal(result_base)
+expect(array_generic_type_register(named_base)).to_equal(array_base)
+expect(array_generic_type_register(named_base)).to_equal(array_base)
+expect(union_type_get_members(-1)).to_equal([])
+expect(intersection_type_get_members(-1)).to_equal([])
+expect(refinement_type_base(-1)).to_equal(any_tag)
+expect(refinement_type_predicate(-1)).to_equal("")
+expect(tuple_type_get_elems(-1)).to_equal([])
+expect(dict_type_get_key(-1)).to_equal(any_tag)
+expect(dict_type_get_value(-1)).to_equal(any_tag)
+expect(result_type_get_ok(-1)).to_equal(any_tag)
+expect(result_type_get_err(-1)).to_equal(any_tag)
+expect(array_generic_type_get_elem(-1)).to_equal(any_tag)
+
+var union_last = union_base
+for i in 2..(intersection_base - union_base):
+    union_last = union_type_register([i64_tag, named_base + i])
+expect(union_last).to_equal(intersection_base - 1)
+expect(union_type_register([i64_tag, text_tag])).to_equal(union_base)
+expect(union_type_register([text_tag, -1])).to_equal(-1)
+var intersection_last = intersection_base
+for i in 2..(refinement_base - intersection_base):
+    intersection_last = intersection_type_register([i64_tag, named_base + i])
+expect(intersection_last).to_equal(refinement_base - 1)
+expect(intersection_type_register([i64_tag, text_tag])).to_equal(intersection_base)
+expect(intersection_type_register([text_tag, -1])).to_equal(-1)
+var refinement_last = refinement_base
+for i in 1..(dict_base - refinement_base):
+    refinement_last = refinement_type_register(i64_tag, "value > {i}")
+expect(refinement_last).to_equal(dict_base - 1)
+expect(refinement_type_register(i64_tag, "value > 0")).to_equal(refinement_base)
+expect(refinement_type_register(text_tag, "overflow")).to_equal(-1)
+var tuple_last = tuple_base
+for i in 2..(tuple_limit - tuple_base):
+    tuple_last = tuple_type_register([i64_tag, named_base + i])
+expect(tuple_last).to_equal(tuple_limit - 1)
+expect(tuple_type_register([i64_tag, text_tag])).to_equal(tuple_base)
+expect(tuple_type_register([text_tag, -1])).to_equal(-1)
+var dict_last = dict_base
+for i in 1..(result_base - dict_base):
+    dict_last = dict_type_register(named_base + i, text_tag)
+expect(dict_last).to_equal(result_base - 1)
+expect(dict_type_register(i64_tag, text_tag)).to_equal(dict_base)
+expect(dict_type_register(-1, text_tag)).to_equal(-1)
+var result_last = result_base
+for i in 1..(tuple_base - result_base):
+    result_last = result_type_register(named_base + i, text_tag)
+expect(result_last).to_equal(tuple_base - 1)
+expect(result_type_register(i64_tag, text_tag)).to_equal(result_base)
+expect(result_type_register(-1, text_tag)).to_equal(-1)
+var array_last = array_base
+for i in 1..(array_limit - array_base):
+    array_last = array_generic_type_register(named_base + i)
+expect(array_last).to_equal(array_limit - 1)
+expect(array_generic_type_register(named_base)).to_equal(array_base)
+expect(array_generic_type_register(-1)).to_equal(-1)
+
+reset_all_pools()
+expect(union_type_register([text_tag, i64_tag])).to_equal(union_base)
+expect(intersection_type_register([text_tag, i64_tag])).to_equal(intersection_base)
+expect(refinement_type_register(text_tag, "fresh")).to_equal(refinement_base)
+expect(tuple_type_register([text_tag, i64_tag])).to_equal(tuple_base)
+expect(dict_type_register(text_tag, i64_tag)).to_equal(dict_base)
+expect(result_type_register(text_tag, i64_tag)).to_equal(result_base)
+expect(array_generic_type_register(named_base + 1)).to_equal(array_base)
+reset_all_pools()
+```
+
+</details>
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-COMP-CORE-TYPES-001`
+- `REQ-SSPEC-COMPILER_CORE`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6b220f8780ecd4f0881cdf8b8ca7373f73f618c0104ff5fd5e4ec9e0e5d8ff86`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6b220f8780ecd4f0881cdf8b8ca7373f73f618c0104ff5fd5e4ec9e0e5d8ff86`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6b220f8780ecd4f0881cdf8b8ca7373f73f618c0104ff5fd5e4ec9e0e5d8ff86`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **70/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/compiler_core/types_spec.spl
+mirror: doc/06_spec/01_unit/compiler_core/types_spec.md (current)
+findings: 8 blockers: 2
+  narrative=100 structure=100 oracle=20
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=70; blocker cap makes effective=49
+doc/06_spec/01_unit/compiler_core/types_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/compiler_core/types_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/compiler_core/types_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/compiler_core/types_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/compiler_core/types_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/compiler_core/types_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps core string span token and symbol helpers available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler_core/types_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps type tags and type name conversion available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler_core/types_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps named type and function signature registries available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

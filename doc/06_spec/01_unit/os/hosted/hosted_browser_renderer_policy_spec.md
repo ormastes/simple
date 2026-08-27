@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 62 | 62 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,8 +24,8 @@ Treats decoded renderer protocol messages as untrusted input at the hosted brows
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl` |
-| Updated | 2026-07-30 |
-| Generator | Manual mirror; admitted pure-Simple docgen pending |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -48,13 +48,23 @@ navigation policy rather than subresource mixed-content policy.
 
 #### unwraps only a canonical IPv6 address for socket and TLS
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- unwraps only a canonical IPv6 address for socket and TLS
+   - Expected: hosted_browser_transport_host("[::1") equals `[::1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("unwraps only a canonical IPv6 address for socket and TLS")
 expect(hosted_browser_transport_host(
     "[2606:4700:4700::1111]"
 )).to_equal("2606:4700:4700::1111")
@@ -77,17 +87,18 @@ expect(hosted_browser_transport_host("[::1")).to_equal("[::1")
 
 #### normalizes every hosted browser transport boundary
 
-- "hosted browser transport host
-- "hosted browser transport host
+- normalizes every hosted browser transport boundary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("normalizes every hosted browser transport boundary")
 val renderer = rt_file_read_text(
     "src/os/hosted/hosted_browser_renderer_process.spl"
 ) ?? ""
@@ -104,12 +115,144 @@ expect(content).to_contain(
 
 </details>
 
+### hosted browser attachment disposition
+
+#### rejects an attachment token in any Content-Disposition value
+
+- rejects an attachment token in any Content-Disposition value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("rejects an attachment token in any Content-Disposition value")
+expect(browser_header_has_attachment_disposition(
+    "Content-Disposition: inline\r\n" +
+    "cOnTeNt-DisPoSiTiOn: \tAttachment ; filename=\"probe.html\""
+)).to_be(true)
+expect(browser_header_has_attachment_disposition(
+    "Content-Disposition: inline; filename=\"probe.html\""
+)).to_be(false)
+expect(browser_header_has_attachment_disposition(
+    "Content-Type: text/html"
+)).to_be(false)
+```
+
+</details>
+
+#### stages only a body-free SBR2 rejection response
+
+- stages only a body-free SBR2 rejection response
+   - Expected: reason equals ``
+   - Expected: broker.document_url equals `safe_url`
+   - Expected: broker.history_urls equals `[safe_url]`
+   - Expected: broker.document_csp_policy equals `default-src 'self'`
+   - Expected: broker.pending_document_commit_url equals ``
+   - Expected: broker.provisional_document_origin equals ``
+   - Expected: broker.pending_document_csp_policy equals ``
+   - Expected: broker.pending_history_action equals ``
+   - Expected: decoded.status equals `message`
+   - Expected: response.status equals `0`
+   - Expected: response.body equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 75 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("stages only a body-free SBR2 rejection response")
+val safe_url = "https://safe.test/retained"
+val attachment_url = "https://safe.test/probe.html"
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+broker.document_url = safe_url
+broker.document_origin = "https://safe.test"
+broker.document_csp_policy = "default-src 'self'"
+broker.document_csp_ready = true
+broker.history_urls = [safe_url]
+broker.history_csp_policies = [broker.document_csp_policy]
+broker.history_csp_ready = [true]
+broker.history_index = 0
+broker.active_command_capability = (
+    "11111111111111111111111111111111"
+)
+broker.active_root_command_request_id = 1
+val reason = broker._write_network_response(
+    request("document", attachment_url),
+    HostedBrowserRequestPolicy(
+        ok: true,
+        reason: "ok",
+        mode: RequestMode.Navigate,
+        credentials: "include",
+        canonical_url: attachment_url,
+        sanitized_headers: "",
+        consumes_navigation: true
+    ),
+    broker._finalize_network(
+        "document",
+        FetchRequest(
+            url: Url.parse_or_opaque(attachment_url),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.Navigate,
+            credentials: "include"
+        ),
+        FetchResponse(
+            status: 200,
+            headers:
+                "Content-Disposition: inline\r\n" +
+                "Content-Disposition: attachment; filename=\"probe.html\"",
+            body: [
+                60u8, 115u8, 99u8, 114u8, 105u8, 112u8, 116u8, 62u8
+            ]
+        )
+    ),
+    0
+)
+expect(reason).to_equal("")
+expect(broker.document_url).to_equal(safe_url)
+expect(broker.history_urls).to_equal([safe_url])
+expect(broker.document_csp_policy).to_equal("default-src 'self'")
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+expect(broker.pending_document_csp_policy).to_equal("")
+expect(broker.pending_document_csp_ready).to_be(false)
+expect(broker.pending_history_action).to_equal("")
+expect(broker.pending_wire).to_start_with("SBR2\t")
+val decoded = browser_renderer_capability_decoder_feed(
+    browser_renderer_capability_decoder_new(1),
+    broker.pending_wire
+)
+expect(decoded.status).to_equal("message")
+val response = browser_renderer_network_response_decode(
+    browser_renderer_capability_payload_message(decoded.message)
+)
+expect(response.ok).to_be(true)
+expect(response.status).to_equal(0)
+expect(response.body).to_equal("")
+expect(response.error).to_equal(
+    "document-attachment-unsupported"
+)
+```
+
+</details>
+
 ### hosted browser renderer broker policy
 
 #### keeps Favorite bound to the committed page during navigation
 
+- keeps Favorite bound to the committed page during navigation
 - Admit one deterministic secondary browser entry
-- var profile = BrowserProfileStore memory
 - Enter a new address through production registry routing
 - Reject Favorite while the navigation command is pending
    - Expected: command_busy.callback_count equals `0`
@@ -124,17 +267,22 @@ expect(content).to_contain(
 - Persist only the newly committed URL
    - Expected: saved.entries.len() equals `1`
    - Expected: saved.entries[0].first equals `https://new.test/`
-- profile close
    - Expected: registry.close() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 91 lines folded for reproduction.
+Runnable source: 97 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps Favorite bound to the committed page during navigation")
+"""
+The parent-owned Favorite control must not bookmark the previous
+committed URL while the address bar already displays a pending target.
+"""
 step("Admit one deterministic secondary browser entry")
 var registry = HostedBrowserRendererRegistry.create(
     "/definitely/missing/simple-browser-renderer",
@@ -232,42 +380,29 @@ expect(registry.close()).to_equal(true)
 
 #### admits decoded renderer side effects only through trusted CSP state
 
-- var mocks = MockResponseRegistry create
-- mocks register
-- mocks register
-- set mock registry
+- admits decoded renderer side effects only through trusted CSP state
 - Reject an opaque sandbox document that forges a cookie write
-- var opaque = HostedBrowserRendererProcess create
-- fail
-- Some
 - Reject missing and invalid CSP before cookie mutation
-- source origin, "/", Some
-- rt time now unix micros
-- cookie broker document csp policy = "x" repeat
-- source origin, "/", Some
-- rt time now unix micros
 - Reject base-policy errors before forged cookie writes
-- var malformed = HostedBrowserRendererProcess create
-- fail
-- Some
 - Reject renderer navigation when active CSP is unavailable
-- var navigation = HostedBrowserRendererProcess create
-- fail
-- Some
 - Allow only the parent-authorized initial document bootstrap
-- var bootstrap = HostedBrowserRendererProcess create
 - Route an opaque HTTPS to HTTP document through navigation policy
-- var downgrade = HostedBrowserRendererProcess create
-- set mock registry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 138 lines folded for reproduction.
+Runnable source: 145 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("admits decoded renderer side effects only through trusted CSP state")
+"""
+Renderer SBRQ4 messages are attacker-controlled input. The broker must
+reject cookie and navigation side effects before they mutate trusted
+state, while retaining the one parent-authorized initial document load.
+"""
 var mocks = MockResponseRegistry.create()
 mocks.register("https://bootstrap.test/", 200, "bootstrap")
 mocks.register("http://destination.test/", 200, "destination")
@@ -412,27 +547,17 @@ set_mock_registry(MockResponseRegistry.create())
 
 #### blocks forged renderer requests with committed CSP before transport
 
-- var mocks = MockResponseRegistry create
-- mocks register
-- set mock registry
-- var broker = HostedBrowserRendererProcess create
-- url: Url parse or opaque
-- broker  commit document url
-- broker navigation permit = permit
+- blocks forged renderer requests with committed CSP before transport
 - Treat a sandboxed document as an opaque network origin
    - Expected: opaque_fetch.mode equals `RequestMode.Cors`
    - Expected: opaque_fetch.sanitized_headers equals `Origin: null`
 - Apply a pending sandbox before the first frame commit
 - Tighten rather than discard committed CSP on 304
-- url: Url parse or opaque
-- broker  commit document url
 - Reject a same-origin forged fetch
-- browser renderer decoder new
    - Expected: blocked_fetch_message.status equals `message`
    - Expected: blocked_fetch.reason equals `csp-connect-src-blocked`
    - Expected: broker.network_job_handle equals `0`
 - Reject a cross-origin forged image beacon
-- browser renderer decoder new
    - Expected: blocked_image_message.status equals `message`
    - Expected: blocked_image.reason equals `csp-img-src-blocked`
    - Expected: broker.network_job_handle equals `0`
@@ -440,29 +565,23 @@ set_mock_registry(MockResponseRegistry.create())
    - Expected: missing.reason equals `csp-policy-unavailable`
    - Expected: broker.network_job_handle equals `0`
 - Fail closed when committed policy state is invalid
-- broker document csp policy = "x" repeat
    - Expected: invalid.reason equals `csp-policy-unavailable`
 - Allow only an explicitly admitted control
-- browser renderer decoder new
-- browser renderer decoder new
    - Expected: broker.network_job_handle equals `0`
 - Stage target history CSP and URL before resource dispatch
-- broker history urls push
-- broker history csp ready push
-- broker  stage history document csp
 - Restore the broker CSP ledger with history
-- broker  restore history document
 - Preserve the CSP ledger across production site swaps
-- set mock registry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 321 lines folded for reproduction.
+Runnable source: 323 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("blocks forged renderer requests with committed CSP before transport")
 var mocks = MockResponseRegistry.create()
 for url in [
     "https://app.test/private",
@@ -790,16 +909,18 @@ set_mock_registry(MockResponseRegistry.create())
 
 #### issues only bounded canonical http navigation permits
 
-- var broker = HostedBrowserRendererProcess create
+- issues only bounded canonical http navigation permits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("issues only bounded canonical http navigation permits")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 expect(broker.poll()).to_be_nil()
 expect(broker.authorize_navigation(
@@ -817,17 +938,18 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### loads persisted HSTS into the trusted navigation permit
 
-- var broker = HostedBrowserRendererProcess create
-- BrowserHstsSnapshot create
+- loads persisted HSTS into the trusted navigation permit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("loads persisted HSTS into the trusted navigation permit")
 val now_ms = rt_time_now_unix_micros() / 1000
 var entries: [BrowserHstsSnapshotEntry] = []
 entries.push(BrowserHstsSnapshotEntry(
@@ -852,13 +974,18 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### rewrites one trusted redirect location after HSTS upgrade
 
+- rewrites one trusted redirect location after HSTS upgrade
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rewrites one trusted redirect location after HSTS upgrade")
 val headers = hosted_browser_replace_response_header(
     "Location: http://secure.test/a\nX-Test: yes\n" +
     "location: http://evil.test/",
@@ -874,38 +1001,77 @@ expect(headers).to_equal(
 
 #### rejects a malformed HTTPS redirect before creating a navigation permit
 
-- Receive a hostile `Location: https:///missing-host` response from the
-  authenticated transport.
-- Reject it as `invalid-navigation-redirect` without creating a broker navigation
-  permit, pending document commit, or provisional origin.
+- rejects a malformed HTTPS redirect before creating a navigation permit
+- Receive a hostile redirect location from the authenticated transport
+- Reject it without authorizing a follow-up connection
+   - Expected: rejected.is_err() is true
+   - Expected: rejected.unwrap_err() equals `invalid-navigation-redirect`
+   - Expected: broker.navigation_permit.active is false
+   - Expected: broker.pending_document_commit_url equals ``
+   - Expected: broker.provisional_document_origin equals ``
 
-Docgen: pending — this reviewed manual mirror reflects the executable SSpec;
-the isolated worktree has no deployed self-hosted runtime.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("rejects a malformed HTTPS redirect before creating a navigation permit")
+step("Receive a hostile redirect location from the authenticated transport")
+val url = "https://safe.test/start"
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+val request = request("document", url)
+val policy = HostedBrowserRequestPolicy(
+    ok: true, reason: "ok", mode: RequestMode.Navigate,
+    credentials: "include", canonical_url: url,
+    sanitized_headers: "", consumes_navigation: true
+)
+val response = broker._finalize_network(
+    "document",
+    FetchRequest(
+        url: Url.parse_or_opaque(url), method: "GET", headers: "",
+        body: [], mode: RequestMode.Navigate, credentials: "include"
+    ),
+    FetchResponse(
+        status: 302, headers: "Location: https:///missing-host",
+        body: []
+    )
+)
+
+step("Reject it without authorizing a follow-up connection")
+val rejected = broker._record_document_response(
+    request, policy, response, 0
+)
+expect(rejected.is_err()).to_equal(true)
+expect(rejected.unwrap_err()).to_equal("invalid-navigation-redirect")
+expect(broker.navigation_permit.active).to_equal(false)
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+```
+
+</details>
 
 #### never learns HSTS from generic response finalization
 
-- var broker = HostedBrowserRendererProcess create
-- broker network set requester origin
-- fetch request
-- sts response
+- never learns HSTS from generic response finalization
    - Expected: denied.error equals `CORS response validation failed`
-- sts response
    - Expected: not_found.status equals `404`
-- fetch request
-- sts response
    - Expected: plaintext.status equals `200`
-- fetch request
-- sts response
    - Expected: untrusted.status equals `200`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("never learns HSTS from generic response finalization")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.network.set_requester_origin("https://origin.test")
 val denied = broker._finalize_network(
@@ -970,18 +1136,19 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### caps wasm before hex encoding can double the IPC body
 
-- var broker = HostedBrowserRendererProcess create
+- caps wasm before hex encoding can double the IPC body
    - Expected: encoded.body equals `000f10ff`
-- body push
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("caps wasm before hex encoding can double the IPC body")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 val encoded = broker._finalize_network(
     "wasm",
@@ -1010,10 +1177,8 @@ expect(hosted_browser_network_response_limit_reason(
 
 #### does not start asynchronous navigation before renderer readiness
 
-- var broker = HostedBrowserRendererProcess create
-- Err
+- does not start asynchronous navigation before renderer readiness
    - Expected: reason equals `invalid-renderer-state`
-- Ok
    - Expected: broker.command_deadline_ms equals `0`
    - Expected: broker.pending_operation equals ``
    - Expected: broker.pending_document_commit_url equals ``
@@ -1026,10 +1191,12 @@ expect(hosted_browser_network_response_limit_reason(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("does not start asynchronous navigation before renderer readiness")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 match broker.begin_navigate(
     "https://example.test/", "GET", "", "", "", 1000
@@ -1052,18 +1219,18 @@ expect(broker.navigation_permit.active).to_be(false)
 
 #### treats repeated asynchronous Stop as idempotent
 
-- var broker = HostedBrowserRendererProcess create
-- Err
-- Ok
+- treats repeated asynchronous Stop as idempotent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("treats repeated asynchronous Stop as idempotent")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 100
@@ -1079,7 +1246,7 @@ match broker.begin_stop(1000):
 
 #### replaces a fully sent slow navigation before stale completion
 
-- var broker = HostedBrowserRendererProcess create
+- replaces a fully sent slow navigation before stale completion
    - Expected: broker.deferred_commands.len() equals `1`
    - Expected: broker.network_job_handle equals `0`
    - Expected: broker.network_job_redirect_count equals `0`
@@ -1087,21 +1254,11 @@ match broker.begin_stop(1000):
    - Expected: broker.next_animation_ms equals `-1`
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
-- browser renderer decoder new
    - Expected: navigation.action equals `open`
    - Expected: navigation.url equals `https://example.test/new`
    - Expected: broker.pending_wire_reply_to_request_id equals `3`
-- browser renderer decoder new
-- Err
-- fail
-- Ok
    - Expected: broker.network_job_handle equals `0`
    - Expected: broker.pending_document_commit_url equals ``
-- draw ir composition
-- browser renderer decoder new
-- Err
-- fail
-- Ok
    - Expected: broker.pending_history_action equals `push`
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
@@ -1110,10 +1267,12 @@ match broker.begin_stop(1000):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 146 lines folded for reproduction.
+Runnable source: 148 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("replaces a fully sent slow navigation before stale completion")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.document_url = "https://example.test/current"
@@ -1266,8 +1425,7 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### preserves a slow navigation when its replacement is invalid
 
-- var broker = HostedBrowserRendererProcess create
-- "javascript:alert
+- preserves a slow navigation when its replacement is invalid
    - Expected: rejected.unwrap_err() equals `invalid-navigation`
    - Expected: broker.network_job_handle equals `424243`
    - Expected: broker.network_job_redirect_count equals `4`
@@ -1279,10 +1437,12 @@ expect(broker.navigation_permit.url).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("preserves a slow navigation when its replacement is invalid")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.document_url = "https://example.test/current"
@@ -1347,7 +1507,7 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### preserves a partially written navigation frame
 
-- var broker = HostedBrowserRendererProcess create
+- preserves a partially written navigation frame
    - Expected: replacement.unwrap_err() equals `renderer-busy`
    - Expected: broker.pending_wire_offset equals `1`
    - Expected: broker.pending_wire_reply_to_request_id equals `2`
@@ -1357,10 +1517,12 @@ expect(broker.navigation_permit.url).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("preserves a partially written navigation frame")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 9000000000000
@@ -1394,11 +1556,10 @@ expect(broker.navigation_permit.url).to_equal(
 
 #### defers Stop until a partially written navigation command is complete
 
-- var broker = HostedBrowserRendererProcess create
+- defers Stop until a partially written navigation command is complete
    - Expected: broker.pending_operation equals `navigation`
    - Expected: broker._begin_stop_after_write() equals ``
    - Expected: broker.pending_operation equals `stop`
-- browser renderer decoder new
    - Expected: broker.pending_history_action equals ``
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
@@ -1408,10 +1569,12 @@ expect(broker.navigation_permit.url).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("defers Stop until a partially written navigation command is complete")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 9000000000000
@@ -1471,19 +1634,20 @@ expect(broker.network_job_redirect_count).to_equal(0)
 
 #### authorizes Reload and replaces its current history entry
 
-- var broker = HostedBrowserRendererProcess create
+- authorizes Reload and replaces its current history entry
    - Expected: broker.pending_history_action equals `replace`
-- broker  commit document url
    - Expected: broker.history_urls.len() equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("authorizes Reload and replaces its current history entry")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.document_url = "https://example.test/old"
@@ -1505,149 +1669,25 @@ expect(broker.history_urls[0]).to_equal(
 
 </details>
 
-#### synchronizes same-origin history state into parent Back and Forward
-
-- var broker = HostedBrowserRendererProcess create
-- browser renderer decoder new
-   - Expected: back_navigation.action equals `back`
-   - Expected: back_navigation.url equals `https://example.test/start`
-- browser renderer decoder new
-   - Expected: forward_navigation.action equals `forward`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 73 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-broker.state = "active"
-broker.document_url = "https://example.test/start"
-broker.document_origin = "https://example.test"
-broker.history_urls = ["https://example.test/start"]
-broker.history_index = 0
-expect(broker._frame_history_state_valid(
-    "https://example.test/next#view",
-    "https://example.test/start",
-    ""
-)).to_be(true)
-expect(broker._frame_history_state_valid(
-    "https://attacker.test/", "", ""
-)).to_be(false)
-expect(broker._frame_history_state_valid(
-    "https://example.test/next", "https://attacker.test/", ""
-)).to_be(false)
-broker.history_urls = [
-    "https://unrelated.test/",
-    "https://previous.test/",
-    "https://example.test/start"
-]
-broker.history_index = 2
-expect(broker._frame_history_state_valid(
-    "https://example.test/next",
-    "https://previous.test/",
-    ""
-)).to_be(true)
-expect(broker._frame_history_state_valid(
-    "https://example.test/next",
-    "https://unrelated.test/",
-    ""
-)).to_be(false)
-broker.history_urls = ["https://example.test/start"]
-broker.history_index = 0
-broker._apply_frame_history_state(
-    "https://example.test/next#view",
-    "https://example.test/start",
-    ""
-)
-expect(broker.document_url).to_equal(
-    "https://example.test/next#view"
-)
-expect(broker.begin_go_back(1000).is_ok()).to_be(true)
-val back = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(1), broker.pending_wire
-)
-val back_navigation = browser_renderer_navigation_decode(back.message)
-expect(back_navigation.ok).to_be(true)
-expect(back_navigation.action).to_equal("back")
-expect(back_navigation.url).to_equal("https://example.test/start")
-
-broker.pending_wire = ""
-broker.pending_wire_is_command = false
-broker.command_deadline_ms = 0
-broker.pending_operation = ""
-broker._apply_frame_history_state(
-    "https://example.test/start",
-    "",
-    "https://example.test/next#view"
-)
-expect(broker.begin_go_forward(1000).is_ok()).to_be(true)
-val forward = browser_renderer_decoder_feed(
-    browser_renderer_decoder_new(1), broker.pending_wire
-)
-val forward_navigation = browser_renderer_navigation_decode(
-    forward.message
-)
-expect(forward_navigation.ok).to_be(true)
-expect(forward_navigation.action).to_equal("forward")
-expect(forward_navigation.url).to_equal(
-    "https://example.test/next#view"
-)
-```
-
-</details>
-
-#### accepts the previous displayed URL across a network commit
-
-- var broker = HostedBrowserRendererProcess create
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-broker.document_url = "https://a.test/start"
-broker.document_origin = "https://a.test"
-broker.history_urls = ["https://a.test/start"]
-broker.history_index = 0
-broker.history_current_url = "https://a.test/start#view"
-broker.pending_document_commit_url = "https://b.test/next"
-broker.pending_history_action = "push"
-expect(broker._frame_history_state_valid(
-    "https://b.test/next",
-    "https://a.test/start#view",
-    ""
-)).to_be(true)
-```
-
-</details>
-
 #### rejects a forged legacy frame before committing a pending document
 
-A legacy `SBRF2` frame has no history state. While a broker-authorized
-document response is pending, that omission fails and tears down the broker
-before it can commit the target URL or advance history. Only a state-bearing
-renderer reply may complete the transition.
-
+- rejects a forged legacy frame before committing a pending document
 - Send a state-less renderer frame while a document is pending
-   - Expected: the decoded frame has no history state
 - Fail closed before the forged frame can commit the target
-   - Expected: rejection reason equals `missing-frame-history`
-   - Expected: broker is failed and closed without committing the target
+   - Expected: rejected.reason equals `missing-frame-history`
+   - Expected: broker.state equals `failed`
+   - Expected: broker.history_urls.len() equals `1`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects a forged legacy frame before committing a pending document")
 step("Send a state-less renderer frame while a document is pending")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://source.test/start"
@@ -1676,27 +1716,30 @@ val rejected = broker._accept_decoded_frame(forged, 1)
 expect(rejected.ok).to_be(false)
 expect(rejected.reason).to_equal("missing-frame-history")
 expect(broker.state).to_equal("failed")
-expect(broker.document_url).to_equal("")
-expect(broker.history_urls.len()).to_equal(0)
+expect(broker.document_url).to_equal(
+    "https://source.test/start"
+)
+expect(broker.history_urls.len()).to_equal(1)
 ```
 
 </details>
 
 #### resolves duplicate history URLs in the requested direction
 
-- var back = HostedBrowserRendererProcess create
+- resolves duplicate history URLs in the requested direction
    - Expected: back.pending_history_index equals `0`
-- var forward = HostedBrowserRendererProcess create
    - Expected: forward.pending_history_index equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("resolves duplicate history URLs in the requested direction")
 var back = HostedBrowserRendererProcess.create(1, 640, 480)
 back.state = "active"
 back.history_urls = ["https://a.test/", "https://a.test/"]
@@ -1720,9 +1763,7 @@ expect(forward.pending_history_index).to_equal(1)
 
 #### queues asynchronous page input without draining the pipe
 
-- var broker = HostedBrowserRendererProcess create
-- Err
-- Ok
+- queues asynchronous page input without draining the pipe
    - Expected: broker.pending_wire_offset equals `0`
    - Expected: broker.pending_wire_reply_to_request_id equals `2`
    - Expected: broker.expected_reply_to_request_id equals `0`
@@ -1732,10 +1773,12 @@ expect(forward.pending_history_index).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("queues asynchronous page input without draining the pipe")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 match broker.begin_pointer(1, 20, 30, true, 1000):
@@ -1754,7 +1797,7 @@ expect(broker.next_request_id).to_equal(2)
 
 #### coalesces wheel input without occupying the discrete command slot
 
-- var broker = HostedBrowserRendererProcess create
+- coalesces wheel input without occupying the discrete command slot
    - Expected: broker.pending_scroll_delta_milli_y equals `1250`
    - Expected: broker.pending_wire equals ``
    - Expected: broker.pending_scroll_delta_milli_y equals `1250`
@@ -1765,10 +1808,12 @@ expect(broker.next_request_id).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("coalesces wheel input without occupying the discrete command slot")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.queue_scroll(1, 500).is_ok()).to_be(true)
@@ -1793,10 +1838,8 @@ expect(broker.pending_scroll_delta_milli_y).to_equal(0)
 
 #### does not let page input replace a pending navigation
 
-- var broker = HostedBrowserRendererProcess create
-- Err
+- does not let page input replace a pending navigation
    - Expected: reason equals `renderer-busy`
-- Ok
    - Expected: broker.state equals `active`
    - Expected: broker.pending_operation equals `navigation`
    - Expected: broker.deferred_commands.len() equals `0`
@@ -1805,10 +1848,12 @@ expect(broker.pending_scroll_delta_milli_y).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("does not let page input replace a pending navigation")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 100
@@ -1827,19 +1872,27 @@ expect(broker.deferred_commands.len()).to_equal(0)
 
 #### should preserve immediate pointer press and release in order
 
-1. Queue a primary page pointer press.
-2. Cancel the page press before chrome takes ownership.
-3. Decode the deferred renderer cancellation.
-4. Ignore a redundant cancellation without queuing a command.
+- should preserve immediate pointer press and release in order
+- Queue a primary page pointer press
+- Cancel the page press before chrome takes ownership
+   - Expected: broker.deferred_commands.len() equals `1`
+- Decode the deferred renderer cancellation
+   - Expected: broker._activate_deferred_command() equals ``
+   - Expected: released.event_id equals `2`
+   - Expected: broker.deferred_commands.len() equals `0`
+- Ignore a redundant cancellation without queuing a command
+   - Expected: idle.pending_wire equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should preserve immediate pointer press and release in order")
 step("Queue a primary page pointer press")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
@@ -1893,19 +1946,29 @@ expect(idle.pending_wire).to_equal("")
 
 #### should retry a page pointer cancellation after renderer work drains
 
-1. Queue a page press while a resource job becomes active.
-2. Retain one cancellation while the renderer is busy.
-3. Drain prior work and emit the retained pointer release.
-4. Acknowledge the cancellation before releasing its owner state.
+- should retry a page pointer cancellation after renderer work drains
+- Queue a page press while a resource job becomes active
+- Retain the cancellation while the renderer is busy
+   - Expected: broker.pending_pointer_cancel_event_id equals `2`
+   - Expected: broker.pending_pointer_cancel_event_id equals `2`
+   - Expected: reason equals `pointer-cancel-pending`
+- Drain prior work and emit the retained pointer release
+   - Expected: canceled.event_id equals `2`
+   - Expected: broker.pending_operation equals `pointer-cancel`
+   - Expected: broker.pending_pointer_cancel_event_id equals `2`
+- Acknowledge the cancellation before releasing its owner state
+   - Expected: broker.pending_pointer_cancel_event_id equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should retry a page pointer cancellation after renderer work drains")
 step("Queue a page press while a resource job becomes active")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
@@ -1974,14 +2037,13 @@ expect(broker.pending_pointer_cancel_event_id).to_equal(0)
 
 #### coalesces an unsent animation but defers after it is sent
 
-- var broker = HostedBrowserRendererProcess create
+- coalesces an unsent animation but defers after it is sent
    - Expected: broker.pending_operation equals `pointer`
    - Expected: broker.pending_operation equals `advance`
    - Expected: broker.deferred_commands.len() equals `1`
    - Expected: broker.expected_reply_to_request_id equals `2`
    - Expected: broker.next_request_id equals `3`
    - Expected: broker._activate_deferred_command() equals ``
-- browser renderer decoder new
    - Expected: activated.message.kind equals `key`
    - Expected: activated.message.request_id equals `4`
    - Expected: broker.pending_wire_reply_to_request_id equals `4`
@@ -1990,10 +2052,12 @@ expect(broker.pending_pointer_cancel_event_id).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("coalesces an unsent animation but defers after it is sent")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.begin_advance(16, 1000).is_ok()).to_be(true)
@@ -2025,9 +2089,7 @@ expect(broker.pending_wire_reply_to_request_id).to_equal(4)
 
 #### coalesces a resize storm to the latest deferred dimensions
 
-- var broker = HostedBrowserRendererProcess create
-- Err
-- Ok
+- coalesces a resize storm to the latest deferred dimensions
    - Expected: broker.deferred_commands.len() equals `1`
    - Expected: broker._activate_deferred_command() equals ``
    - Expected: broker.pending_operation equals `resize`
@@ -2038,10 +2100,12 @@ expect(broker.pending_wire_reply_to_request_id).to_equal(4)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("coalesces a resize storm to the latest deferred dimensions")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.begin_pointer(
@@ -2075,7 +2139,7 @@ expect(broker.pending_resize_height).to_equal(600)
 
 #### does not erase an animation network response to queue input
 
-- var broker = HostedBrowserRendererProcess create
+- does not erase an animation network response to queue input
    - Expected: broker.pending_wire equals `network-response`
    - Expected: broker.deferred_commands.len() equals `1`
 
@@ -2083,10 +2147,12 @@ expect(broker.pending_resize_height).to_equal(600)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("does not erase an animation network response to queue input")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 broker.command_deadline_ms = 100
@@ -2103,7 +2169,7 @@ expect(broker.deferred_commands.len()).to_equal(1)
 
 #### retains the process handle when native close fails
 
-- var broker = HostedBrowserRendererProcess create
+- retains the process handle when native close fails
    - Expected: broker.pid equals `999999999`
    - Expected: broker.state equals `active`
    - Expected: broker.state equals `closed`
@@ -2112,10 +2178,12 @@ expect(broker.deferred_commands.len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("retains the process handle when native close fails")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.pid = 999999999
 broker.state = "active"
@@ -2131,8 +2199,7 @@ expect(broker.state).to_equal("closed")
 
 #### clears a renderer handle already reaped by liveness
 
-- var broker = HostedBrowserRendererProcess create
-- Some
+- clears a renderer handle already reaped by liveness
    - Expected: result.reason equals `renderer-crashed`
    - Expected: "missing-result" equals `renderer-crashed`
    - Expected: broker.pid equals `0`
@@ -2141,10 +2208,12 @@ expect(broker.state).to_equal("closed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("clears a renderer handle already reaped by liveness")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.pid = 999999999
 broker.state = "active"
@@ -2162,18 +2231,19 @@ expect(broker.pid).to_equal(0)
 
 #### denies a renderer document request without a parent permit
 
-- permit
-- request
+- denies a renderer document request without a parent permit
    - Expected: policy.reason equals `unauthorized-document-request`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("denies a renderer document request without a parent permit")
 val policy = hosted_browser_renderer_request_policy(
     "",
     permit(false, ""),
@@ -2187,19 +2257,18 @@ expect(policy.reason).to_equal("unauthorized-document-request")
 
 #### authorizes only canonical renderer link and supported form shapes
 
-- var initial = HostedBrowserRendererProcess create
-- var link = HostedBrowserRendererProcess create
-- var forged = HostedBrowserRendererProcess create
-- var parent = HostedBrowserRendererProcess create
+- authorizes only canonical renderer link and supported form shapes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("authorizes only canonical renderer link and supported form shapes")
 var initial = HostedBrowserRendererProcess.create(1, 640, 480)
 expect(initial.authorize_renderer_navigation(request(
     "document", "https://destination.test/"
@@ -2253,15 +2322,188 @@ expect(parent.navigation_permit.url).to_equal(
 
 </details>
 
-#### accepts exactly one matching parent navigation shape
+#### treats every renderer document as form-action constrained
+
+- treats every renderer document as form-action constrained
+- Reject forged GET and POST document requests under form-action none
+- Keep same-origin forms and absent form-action links working
+- Leave parent-controlled navigation outside the renderer form gate
+   - Expected: parent.navigation_permit.form_action_policy equals ``
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("treats every renderer document as form-action constrained")
+step("Reject forged GET and POST document requests under form-action none")
+var denied = HostedBrowserRendererProcess.create(1, 640, 480)
+denied.document_url = "https://account.test/profile"
+denied.document_origin = "https://account.test"
+denied.document_csp_policy = "form-action 'none'"
+denied.document_csp_ready = true
+expect(denied.authorize_renderer_navigation(request(
+    "document", "https://collector.test/capture?secret=token"
+))).to_be(false)
+expect(denied.authorize_renderer_navigation(request(
+    "document", "https://collector.test/capture", "POST", "",
+    "secret=token", "application/x-www-form-urlencoded"
+))).to_be(false)
+expect(denied.navigation_permit.active).to_be(false)
+
+step("Keep same-origin forms and absent form-action links working")
+var same_origin = HostedBrowserRendererProcess.create(1, 640, 480)
+same_origin.document_url = "https://account.test/profile"
+same_origin.document_origin = "https://account.test"
+same_origin.document_csp_policy = "form-action 'self'"
+same_origin.document_csp_ready = true
+expect(same_origin.authorize_renderer_navigation(request(
+    "document", "https://account.test/save", "POST", "",
+    "name=Ada", "application/x-www-form-urlencoded"
+))).to_be(true)
+expect(same_origin.navigation_permit.form_action_policy).to_equal(
+    "form-action 'self'"
+)
+expect(same_origin.navigation_permit.form_action_document_url).to_equal(
+    "https://account.test/profile"
+)
+
+var unrestricted = HostedBrowserRendererProcess.create(1, 640, 480)
+unrestricted.document_url = "https://account.test/profile"
+unrestricted.document_origin = "https://account.test"
+unrestricted.document_csp_policy = "default-src 'none'"
+unrestricted.document_csp_ready = true
+expect(unrestricted.authorize_renderer_navigation(request(
+    "document", "https://destination.test/"
+))).to_be(true)
+
+step("Leave parent-controlled navigation outside the renderer form gate")
+var parent = HostedBrowserRendererProcess.create(1, 640, 480)
+parent.document_url = "https://account.test/profile"
+parent.document_origin = "https://account.test"
+parent.document_csp_policy = "form-action 'none'"
+parent.document_csp_ready = true
+expect(parent.authorize_navigation(
+    "https://destination.test/", "GET", "", "", ""
+)).to_be(true)
+expect(parent.navigation_permit.form_action_policy).to_equal("")
+```
+
+</details>
+
+#### binds form-action authority across redirects before side effects
+
+- binds form-action authority across redirects before side effects
+- Carry the host-owned form authority through an allowed redirect
+   - Expected: allowed.navigation_permit.url equals `allowed_url`
+- Reject before cookies HSTS history or permits can change
+   - Expected: denied.document_url equals `source_url`
+   - Expected: denied.history_urls equals `[source_url]`
+   - Expected: denied.hsts_snapshot(1000).entries.len() equals `hsts_before`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 73 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("binds form-action authority across redirects before side effects")
+val source_url = "https://account.test/profile"
+val allowed_url = "https://forms.account.test/continue"
+val denied_url = "https://collector.test/capture"
+val form_policy = "form-action https://forms.account.test/"
+val navigation_policy = HostedBrowserRequestPolicy(
+    ok: true, reason: "ok", mode: RequestMode.Navigate,
+    credentials: "include", canonical_url: source_url,
+    sanitized_headers: "", consumes_navigation: true,
+    form_action_policy: form_policy,
+    form_action_document_url: source_url
+)
+
+step("Carry the host-owned form authority through an allowed redirect")
+var allowed = HostedBrowserRendererProcess.create(1, 640, 480)
+val allowed_response = allowed._network_response(
+    "document", FetchResponse(
+        status: 302, headers: "Location: {allowed_url}", body: []
+    )
+)
+expect(allowed._record_document_response(
+    request("document", source_url), navigation_policy,
+    allowed_response, 0
+).is_ok()).to_be(true)
+expect(allowed.navigation_permit.url).to_equal(allowed_url)
+expect(allowed.navigation_permit.form_action_policy).to_equal(
+    form_policy
+)
+expect(allowed.navigation_permit.form_action_document_url).to_equal(
+    source_url
+)
+
+step("Reject before cookies HSTS history or permits can change")
+var denied = HostedBrowserRendererProcess.create(1, 640, 480)
+denied.document_url = source_url
+denied.document_origin = "https://account.test"
+denied.history_urls = [source_url]
+denied.history_csp_policies = [form_policy]
+denied.history_csp_ready = [true]
+denied.history_index = 0
+val hsts_before = denied.hsts_snapshot(1000).entries.len()
+val source_origin = Origin(
+    scheme: "https", host: "account.test", port: 443
+)
+val cookies_before = denied.network.cookie_store.get_header_for_origin(
+    source_origin, "/", Some(source_origin), "GET", false,
+    rt_time_now_unix_micros() / 1000000
+)
+val denied_response = denied._network_response(
+    "document", FetchResponse(
+        status: 302,
+        headers: "Location: {denied_url}\r\n" +
+            "Set-Cookie: leaked=1; Secure; Path=/\r\n" +
+            "Strict-Transport-Security: max-age=60",
+        body: []
+    )
+)
+expect(denied._form_action_redirect_allowed(
+    navigation_policy, denied_response, 0
+).is_err()).to_be(true)
+expect(denied._record_document_response(
+    request("document", source_url), navigation_policy,
+    denied_response, 0
+).is_err()).to_be(true)
+expect(denied.document_url).to_equal(source_url)
+expect(denied.history_urls).to_equal([source_url])
+expect(denied.navigation_permit.active).to_be(false)
+expect(denied.hsts_snapshot(1000).entries.len()).to_equal(hsts_before)
+expect(denied.network.cookie_store.get_header_for_origin(
+    source_origin, "/", Some(source_origin), "GET", false,
+    rt_time_now_unix_micros() / 1000000
+)).to_equal(cookies_before)
+```
+
+</details>
+
+#### accepts exactly one matching parent navigation shape
+
+- accepts exactly one matching parent navigation shape
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("accepts exactly one matching parent navigation shape")
 val policy = hosted_browser_renderer_request_policy(
     "",
     permit(
@@ -2290,20 +2532,19 @@ expect(policy.consumes_navigation).to_be(true)
 
 #### rejects a document request that changes the permitted target
 
-- permit
-- request
+- rejects a document request that changes the permitted target
    - Expected: policy.reason equals `unauthorized-document-request`
-- permit
-- request
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects a document request that changes the permitted target")
 val policy = hosted_browser_renderer_request_policy(
     "",
     permit(true, "https://example.test/allowed"),
@@ -2327,17 +2568,19 @@ expect(split_transport.reason).to_equal(
 
 #### derives same-origin mode from broker committed state
 
-- permit
+- derives same-origin mode from broker committed state
    - Expected: policy.credentials equals `credentials`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("derives same-origin mode from broker committed state")
 for credentials in ["omit", "same-origin", "include"]:
     val policy = hosted_browser_renderer_request_policy(
         "https://example.test",
@@ -2356,17 +2599,19 @@ for credentials in ["omit", "same-origin", "include"]:
 
 #### requires exact supported renderer credentials
 
-- permit
+- requires exact supported renderer credentials
    - Expected: policy.reason equals `invalid-request-credentials`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires exact supported renderer credentials")
 for credentials in ["Include", "same_origin", "", " include"]:
     val policy = hosted_browser_renderer_request_policy(
         "https://example.test",
@@ -2384,16 +2629,18 @@ for credentials in ["Include", "same_origin", "", " include"]:
 
 #### requires include credentials for parent-authorized documents
 
-- permit
+- requires include credentials for parent-authorized documents
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires include credentials for parent-authorized documents")
 for credentials in ["omit", "same-origin"]:
     val policy = hosted_browser_renderer_request_policy(
         "",
@@ -2413,24 +2660,22 @@ for credentials in ["omit", "same-origin"]:
 
 #### requires cors for simple cross-origin resources
 
-- permit
+- requires cors for simple cross-origin resources
    - Expected: policy.credentials equals `omit`
-- url: Url parse or opaque
-- permit
    - Expected: forged.reason equals `forbidden-request-header`
-- permit
    - Expected: same_origin_credentials.credentials equals `same-origin`
-- permit
    - Expected: credentialed.credentials equals `include`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires cors for simple cross-origin resources")
 val policy = hosted_browser_renderer_request_policy(
     "https://example.test",
     permit(false, ""),
@@ -2496,17 +2741,19 @@ expect(credentialed.credentials).to_equal("include")
 
 #### rejects renderer-authored cookie request headers
 
-- permit
+- rejects renderer-authored cookie request headers
    - Expected: policy.reason equals `forbidden-request-header`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects renderer-authored cookie request headers")
 for header in [
     "Cookie: sid=secret", "cOoKiE2: sid=secret",
     "Sec-Fetch-Site: same-origin", "Proxy-Authorization: secret",
@@ -2528,22 +2775,18 @@ for header in [
 
 #### binds ordered script cookie writes to the active document origin
 
-- var broker = HostedBrowserRendererProcess create
-- old origin, "/next", Some
-- rt time now unix micros
-- new origin, "/next", Some
-- rt time now unix micros
-- old origin, "/next", Some
-- rt time now unix micros
+- binds ordered script cookie writes to the active document origin
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("binds ordered script cookie writes to the active document origin")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://old.test/app"
 broker.document_origin = "https://old.test"
@@ -2580,33 +2823,36 @@ expect(broker.network.cookie_store.get_header_for_origin(
 
 #### partitions script cookies by the active broker document not a stale request
 
-- Seed the broker transport with hostile requester `https://stale.test`.
-- Write a `Secure; SameSite=None; Partitioned` script cookie from
-  `https://app.test/page`.
-- Expected: the cookie is visible only through `cookie_partition_key(app)`;
-  the stale partition remains empty.
+- partitions script cookies by the active broker document not a stale request
+- Leave a hostile prior requester origin in the broker transport
+- Store a Partitioned script cookie through the active document
+- Expose it only under the active document partition
 
-Docgen: pending — reviewed manual mirror because this isolated worktree has no
-deployed self-hosted runtime.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("partitions script cookies by the active broker document not a stale request")
+step("Leave a hostile prior requester origin in the broker transport")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://app.test/page"
 broker.document_origin = "https://app.test"
 broker.network.set_requester_origin("https://stale.test")
 
+step("Store a Partitioned script cookie through the active document")
 expect(broker._apply_script_cookie_writes([
     "part=active; Secure; SameSite=None; Partitioned; Path=/"
 ])).to_equal(true)
 val app = Origin(scheme: "https", host: "app.test", port: 443)
 val stale = Origin(scheme: "https", host: "stale.test", port: 443)
 val now = rt_time_now_unix_micros() / 1000000
+
+step("Expose it only under the active document partition")
 expect(broker.network.cookie_store.get_header_for_origin(
     app, "/", Some(app), "GET", false, now,
     cookie_partition_key(app)
@@ -2621,16 +2867,18 @@ expect(broker.network.cookie_store.get_header_for_origin(
 
 #### validates renderer initiators before cookie writes or fetch
 
-- var broker = HostedBrowserRendererProcess create
+- validates renderer initiators before cookie writes or fetch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("validates renderer initiators before cookie writes or fetch")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://trusted.test/app"
 broker.document_origin = "https://trusted.test"
@@ -2662,23 +2910,19 @@ expect(broker._renderer_initiator_valid(request(
 
 #### keeps all cookies in the broker transport only
 
-- var broker = HostedBrowserRendererProcess create
-- broker network set requester origin
-- broker document origin, permit
-- url: Url parse or opaque
+- keeps all cookies in the broker transport only
    - Expected: finalized.error equals ``
-- browser renderer decoder new
-- Err
-- Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps all cookies in the broker transport only")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.document_url = "https://secure.test/app"
 broker.document_origin = "https://secure.test"
@@ -2738,18 +2982,19 @@ match broker.network.prepare_single_hop(
 
 #### blocks active and passive mixed content at the trusted broker
 
-- permit
-- request
+- blocks active and passive mixed content at the trusted broker
    - Expected: policy.reason equals `mixed-content-blocked`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("blocks active and passive mixed content at the trusted broker")
 for kind in ["script", "style", "image", "fetch"]:
     val policy = hosted_browser_renderer_request_policy(
         "https://example.test",
@@ -2764,22 +3009,13 @@ for kind in ["script", "style", "image", "fetch"]:
 
 #### renders an HSTS-upgraded external PNG and blocks its mixed-content control
 
+- renders an HSTS-upgraded external PNG and blocks its mixed-content control
+   - Artifact capture: after_step
 - Load an HTTPS document with an HTTP image under includeSubDomains HSTS
    - Artifact capture: after_step
-- var broker = HostedBrowserRendererProcess create
-   - Artifact capture: after_step
-- BrowserHstsSnapshot create
-   - Artifact capture: after_step
-- var session = BrowserSession new
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 2 expected checks
+   - Evidence: artifact verified by 3 expected checks
    - Expected: original.kind equals `image`
    - Expected: original.url equals `image_url`
-- broker document origin, permit
-   - Artifact capture: after_step
-- browser renderer decoder new
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
    - Expected: transport_upgrade.status equals `307`
 - Fetch and decode the upgraded PNG through the broker
    - Artifact capture: after_step
@@ -2787,8 +3023,6 @@ for kind in ["script", "style", "image", "fetch"]:
    - Expected: upgraded.url equals `effective_url`
    - Expected: upgraded.redirect_count equals `20`
    - Expected: session.image_resources.len() equals `1`
--  external png pixels
-   - Artifact capture: after_step
 - Render the decoded image through Draw IR
    - Artifact capture: after_step
    - Evidence: artifact verified by 5 expected checks
@@ -2799,26 +3033,21 @@ for kind in ["script", "style", "image", "fetch"]:
    - Expected: pixels[5] equals `0xFF778899u32`
 - Block the same mixed-content image without HSTS
    - Artifact capture: after_step
-- var blocked = BrowserSession new
-   - Artifact capture: after_step
-- "https://source test", permit
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 2 expected checks
+   - Evidence: artifact verified by 3 expected checks
    - Expected: blocked_policy.reason equals `mixed-content-blocked`
    - Expected: blocked.image_resources.len() equals `0`
-- var csp = BrowserSession new
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
    - Expected: csp.image_resources.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 119 lines folded for reproduction.
+Runnable source: 121 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("renders an HSTS-upgraded external PNG and blocks its mixed-content control")
 step("Load an HTTPS document with an HTTP image under includeSubDomains HSTS")
 val image_url = "http://cdn.secure.test/pixel.png"
 val image_html = (
@@ -2944,24 +3173,15 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
 #### loads brokered CSS background images and renders their exact pixels
 
+- loads brokered CSS background images and renders their exact pixels
 - Load inline and linked CSS background images through the broker
-- "background-image:url
-- var broker = HostedBrowserRendererProcess create
-- BrowserHstsSnapshot create
-- var session = BrowserSession new
    - Expected: style.kind equals `style`
-- " unused{background-image:url
    - Expected: original.kind equals `image`
    - Expected: original.url equals `image_url`
-- broker document origin, permit
-- browser renderer decoder new
    - Expected: transport_upgrade.status equals `307`
-- session, original, transport upgrade,  background png hex
    - Expected: upgraded.redirect_count equals `20`
    - Expected: linked.kind equals `image`
    - Expected: linked.url equals `linked_image_url`
-- broker document origin, permit
--  commit png response
    - Expected: session.image_resources.len() equals `2`
 - Apply background size position repeat origin and clip
 - Render the background image behind element content
@@ -2975,22 +3195,20 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
    - Expected: pixels[4 * 8 + 1] equals `0xFF0000FFu32`
    - Expected: pixels[2 * 8 + 7] equals `0xFF123456u32`
 - Block background images denied by CSP or mixed-content policy
-- "<div style='background-image:url
-- var blocked = BrowserSession new
-- broker document origin, permit
    - Expected: blocked_policy.reason equals `mixed-content-blocked`
    - Expected: blocked.image_resources.len() equals `0`
-- var csp = BrowserSession new
    - Expected: csp.image_resources.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 166 lines folded for reproduction.
+Runnable source: 168 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("loads brokered CSS background images and renders their exact pixels")
 step("Load inline and linked CSS background images through the broker")
 val image_url = "http://cdn.secure.test/tile.png"
 val linked_image_url = "https://assets.test/unused.png"
@@ -3163,21 +3381,20 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
 #### loads ordinary cross-origin images without exposing a CORS fetch
 
-- permit
-- request
+- loads ordinary cross-origin images without exposing a CORS fetch
    - Expected: image.credentials equals `include`
    - Expected: image.sanitized_headers equals ``
-- permit
-- request
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("loads ordinary cross-origin images without exposing a CORS fetch")
 val image = hosted_browser_renderer_request_policy(
     "https://example.test",
     permit(false, ""),
@@ -3204,26 +3421,19 @@ expect(script.sanitized_headers).to_equal(
 
 #### accepts only exact broker-owned HSTS transport upgrades
 
-- permit
-- request
-- permit
-- request
+- accepts only exact broker-owned HSTS transport upgrades
    - Expected: forged_policy.reason equals `invalid-request-url`
-- Logger new
-- Err
-- fail
-- Ok
-- origin, "/", Some
-- rt time now unix micros
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 93 lines folded for reproduction.
+Runnable source: 95 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("accepts only exact broker-owned HSTS transport upgrades")
 expect(hosted_browser_hsts_upgrade_valid(
     "http://secure.test/app.js",
     "https://secure.test/app.js"
@@ -3323,65 +3533,30 @@ match credential_free.finalize_single_hop(
 
 #### round trips broker HSTS upgrades without spending redirect state
 
-- var broker = HostedBrowserRendererProcess create
-- BrowserHstsSnapshot create
-- permit
+- round trips broker HSTS upgrades without spending redirect state
    - Expected: broker.network_job_handle equals `0`
-- browser renderer decoder new
    - Expected: response.url equals `http://secure.test/app.js`
    - Expected: response.status equals `307`
-- BrowserHstsSnapshot create
-- var document = BrowserSession new
-- fail
-- Some
-- fail
-- Some
    - Expected: next.url equals `https://secure.test/form`
    - Expected: next.redirect_count equals `20`
    - Expected: next.method equals `POST`
    - Expected: next.body equals `name=value`
    - Expected: next.credentials equals `include`
-- var unmarked = BrowserSession new
-- fail
-- Some
-- var session = BrowserSession new
-- session pending requests push
-- fail
-- Some
-- Err
-- fail
-- Ok
-- fail
-- Some
    - Expected: next.redirect_count equals `20`
    - Expected: next.method equals `method`
    - Expected: next.body equals `body`
    - Expected: next.headers equals ``
-- url: Url parse or opaque
-- Err
-- Ok
-- Err
-- Ok
-- var blocked = BrowserSession new
-- Err
-- fail
-- Ok
-- fail
-- Some
-- Err
-- fail
-- Ok
-- Some
-- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 274 lines folded for reproduction.
+Runnable source: 276 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("round trips broker HSTS upgrades without spending redirect state")
 val now_ms = rt_time_now_unix_micros() / 1000
 var entries: [BrowserHstsSnapshotEntry] = []
 entries.push(BrowserHstsSnapshotEntry(
@@ -3660,18 +3835,21 @@ match blocked.take_pending_request():
 
 </details>
 
-#### denies cross-origin requests that need an unbrokered preflight
+#### admits sanitized cross-origin author headers for broker preflight
 
-- permit
+- admits sanitized cross-origin author headers for broker preflight
+   - Expected: policy.mode equals `RequestMode.Cors`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("admits sanitized cross-origin author headers for broker preflight")
 val policy = hosted_browser_renderer_request_policy(
     "https://example.test",
     permit(false, ""),
@@ -3684,17 +3862,216 @@ val policy = hosted_browser_renderer_request_policy(
         "text/plain"
     )
 )
-expect(policy.ok).to_be(false)
-expect(policy.reason).to_equal(
-    "cross-origin-preflight-unavailable"
+expect(policy.ok).to_be(true)
+expect(policy.mode).to_equal(RequestMode.Cors)
+expect(policy.sanitized_headers).to_equal(
+    "Content-Type: text/plain"
 )
+expect(policy.sanitized_headers.contains("Origin:")).to_be(false)
+```
+
+</details>
+
+#### runs hosted OPTIONS before the admitted actual request
+
+- runs hosted OPTIONS before the admitted actual request
+   - Expected: response.status equals `204`
+   - Expected: response.error equals ``
+   - Expected: preflight.method equals `OPTIONS`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 55 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("runs hosted OPTIONS before the admitted actual request")
+var registry = MockResponseRegistry.create()
+registry.register_with_headers(
+    "https://api.test/update", 204,
+    [
+        Pair("Access-Control-Allow-Origin", "https://example.test"),
+        Pair("Access-Control-Allow-Methods", "POST"),
+        Pair(
+            "Access-Control-Allow-Headers",
+            "content-type, x-admin-action"
+        ),
+        Pair("Set-Cookie", "preflight=blocked"),
+        Pair("Strict-Transport-Security", "max-age=600")
+    ],
+    ""
+)
+set_mock_registry(registry)
+val fetch = request(
+    "fetch", "https://api.test/update", "POST",
+    "X-Admin-Action: update", "value", "text/plain",
+    "omit", [], "https://example.test"
+)
+val policy = hosted_browser_renderer_request_policy(
+    "https://example.test", permit(false, ""), fetch
+)
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+broker.document_url = "https://example.test/page"
+broker.document_origin = "https://example.test"
+match broker._start_network_job(fetch, policy, 0):
+    nil:
+        fail("mock CORS exchange did not complete")
+    Some(response):
+        expect(response.status).to_equal(204)
+        expect(response.error).to_equal("")
+expect(observed_mock_request_count(
+    "https://api.test/update", "OPTIONS"
+)).to_equal(1)
+expect(observed_mock_request_count(
+    "https://api.test/update", "POST"
+)).to_equal(1)
+match observed_mock_request("https://api.test/update"):
+    nil:
+        fail("missing hosted preflight")
+    Some(preflight):
+        expect(preflight.method).to_equal("OPTIONS")
+        expect(preflight.headers).to_contain(
+            "Origin: https://example.test"
+        )
+        expect(preflight.headers).to_contain(
+            "Access-Control-Request-Headers: content-type, x-admin-action"
+        )
+        expect(preflight.headers.contains("Cookie:")).to_be(false)
+expect(broker.hsts_dirty).to_be(false)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
+#### does not issue an actual request after denied preflight policy
+
+- does not issue an actual request after denied preflight policy
+   - Expected: response.status equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 51 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("does not issue an actual request after denied preflight policy")
+for denied_headers in [
+    "Access-Control-Allow-Origin: https://example.test\r\n" +
+        "Access-Control-Allow-Headers: x-admin-action",
+    "Access-Control-Allow-Origin: https://example.test\r\n" +
+        "Access-Control-Allow-Methods: POST",
+    "Location: https://api.test/elsewhere"
+]:
+    var registry = MockResponseRegistry.create()
+    var response_headers: [Pair<text, text>] = []
+    for line in denied_headers.split("\r\n"):
+        val colon = line.index_of(":")
+        if colon > 0:
+            response_headers.push(Pair(
+                line.slice(0, colon),
+                line.slice(colon + 1, line.len()).trim()
+            ))
+    registry.register_with_headers(
+        "https://api.test/denied",
+        if denied_headers.starts_with("Location:"): 302 else: 204,
+        response_headers, ""
+    )
+    set_mock_registry(registry)
+    val fetch = request(
+        "fetch", "https://api.test/denied", "POST",
+        "X-Admin-Action: update", "value", "text/plain",
+        "omit", [], "https://example.test"
+    )
+    val policy = hosted_browser_renderer_request_policy(
+        "https://example.test", permit(false, ""), fetch
+    )
+    var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+    broker.document_url = "https://example.test/page"
+    broker.document_origin = "https://example.test"
+    match broker._start_network_job(fetch, policy, 0):
+        nil:
+            fail("denied preflight left a job active")
+        Some(response):
+            expect(response.status).to_equal(0)
+            expect(response.error).to_equal(
+                "network: CORS preflight denied"
+            )
+    expect(observed_mock_request_count(
+        "https://api.test/denied", "OPTIONS"
+    )).to_equal(1)
+    expect(observed_mock_request_count(
+        "https://api.test/denied", "POST"
+    )).to_equal(0)
+    expect(broker.hsts_dirty).to_be(false)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
+#### clears staged preflight authority on stop and timeout
+
+- clears staged preflight authority on stop and timeout
+   - Expected: broker.network_job_phase equals ``
+   - Expected: broker.network_job_handle equals `0`
+   - Expected: response.error equals `renderer-network-timeout`
+   - Expected: broker.network_job_phase equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("clears staged preflight authority on stop and timeout")
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+broker.network_job_phase = "preflight"
+broker.network_job_actual_request = Some(fetch_request(
+    "https://api.test/update", RequestMode.Cors
+))
+expect(broker._cancel_pending_for_stop()).to_be(true)
+expect(broker.network_job_phase).to_equal("")
+expect(broker.network_job_actual_request).to_be_nil()
+expect(broker.network_job_handle).to_equal(0)
+
+set_mock_registry(MockResponseRegistry.create())
+broker.command_deadline_ms = 1
+broker.document_url = "https://example.test/page"
+broker.document_origin = "https://example.test"
+val fetch = request(
+    "fetch", "https://api.test/timeout", "POST",
+    "X-Admin-Action: update", "value", "text/plain",
+    "omit", [], "https://example.test"
+)
+val policy = hosted_browser_renderer_request_policy(
+    "https://example.test", permit(false, ""), fetch
+)
+match broker._start_network_job(fetch, policy, 0):
+    nil:
+        fail("expired preflight started a runtime job")
+    Some(response):
+        expect(response.error).to_equal("renderer-network-timeout")
+expect(broker.network_job_phase).to_equal("")
+expect(broker.network_job_actual_request).to_be_nil()
+expect(observed_mock_request_count(
+    "https://api.test/timeout", "POST"
+)).to_equal(0)
+set_mock_registry(MockResponseRegistry.create())
 ```
 
 </details>
 
 #### requires a fresh renderer generation before a cross-site document
 
-- var broker = HostedBrowserRendererProcess create
+- requires a fresh renderer generation before a cross-site document
    - Expected: broker.site_lock equals `https://example.test`
    - Expected: broker.site_swap_site equals `https://victim.test`
    - Expected: broker.network_job_handle equals `0`
@@ -3705,10 +4082,12 @@ expect(policy.reason).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires a fresh renderer generation before a cross-site document")
 var broker = HostedBrowserRendererProcess.create(7, 640, 480)
 expect(broker._document_site_swap_required(
     "https://app.example.test/start"
@@ -3728,7 +4107,7 @@ expect(broker.provisional_document_origin).to_equal("")
 
 #### retains one generation for same schemeful-site navigation
 
-- var broker = HostedBrowserRendererProcess create
+- retains one generation for same schemeful-site navigation
    - Expected: broker.generation equals `7`
    - Expected: broker.site_lock equals `https://example.test`
 
@@ -3736,10 +4115,12 @@ expect(broker.provisional_document_origin).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("retains one generation for same schemeful-site navigation")
 var broker = HostedBrowserRendererProcess.create(7, 640, 480)
 expect(broker._document_site_swap_required(
     "https://app.example.test/start"
@@ -3756,9 +4137,7 @@ expect(broker.site_swap_pending).to_be(false)
 
 #### withholds a cross-site redirect body and credentials from the old child
 
-- var broker = HostedBrowserRendererProcess create
-- broker navigation permit = permit
-- url: Url parse or opaque
+- withholds a cross-site redirect body and credentials from the old child
    - Expected: reason equals `HOSTED_BROWSER_SITE_SWAP_REQUIRED`
    - Expected: broker.navigation_permit.url equals `target_url`
    - Expected: broker.site_swap_site equals `https://victim.test`
@@ -3770,10 +4149,12 @@ expect(broker.site_swap_pending).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("withholds a cross-site redirect body and credentials from the old child")
 val source_url = "https://app.example.test/start"
 val target_url = "https://account.victim.test/private"
 var broker = HostedBrowserRendererProcess.create(7, 640, 480)
@@ -3819,7 +4200,7 @@ expect(broker.provisional_document_origin).to_equal("")
 
 #### rejects old-generation SBRQ4 after a site swap
 
-- browser renderer decoder new
+- rejects old-generation SBRQ4 after a site swap
    - Expected: stale.status equals `violation`
    - Expected: stale.decoder.error equals `stale-generation`
 
@@ -3827,10 +4208,12 @@ expect(broker.provisional_document_origin).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects old-generation SBRQ4 after a site swap")
 val old_request = browser_renderer_fetch_request_encode(
     7, 2, 1, "fetch-1", "fetch",
     "https://account.victim.test/private", "GET", "", "", "",
@@ -3848,7 +4231,7 @@ expect(stale.decoder.error).to_equal("stale-generation")
 
 #### binds a bookmark title to generation reply and canonical URL
 
-- var renderer = HostedBrowserRendererProcess create
+- binds a bookmark title to generation reply and canonical URL
    - Expected: renderer.bookmark_stored_title() equals `Bound title`
    - Expected: renderer.bookmark_stored_title() equals ``
    - Expected: renderer.bookmark_stored_title() equals ``
@@ -3859,10 +4242,12 @@ expect(stale.decoder.error).to_equal("stale-generation")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("binds a bookmark title to generation reply and canonical URL")
 var renderer = HostedBrowserRendererProcess.create(7, 64, 48)
 renderer.expected_reply_to_request_id = 41
 renderer.document_url = "https://title.test/"
@@ -3891,8 +4276,8 @@ expect(renderer.bookmark_stored_title()).to_equal("")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 53 |
-| Active scenarios | 53 |
+| Total scenarios | 62 |
+| Active scenarios | 62 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -3907,3 +4292,60 @@ expect(renderer.bookmark_stored_title()).to_equal("")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8db8df0c09002a67a1dea42ff5adb02cde9a45ec50b2dc4113a5cce4d1b76173`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8db8df0c09002a67a1dea42ff5adb02cde9a45ec50b2dc4113a5cce4d1b76173`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8db8df0c09002a67a1dea42ff5adb02cde9a45ec50b2dc4113a5cce4d1b76173`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+
+SSpec documentization score: 85/100
+source: test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl
+mirror: doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=90 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/hosted/hosted_browser_renderer_policy_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 82 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unwraps only a canonical IPv6 address for socket and TLS' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes every hosted browser transport boundary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:140:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects an attachment token in any Content-Disposition value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:1664:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve immediate pointer press and release in order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl:1716:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retry a page pointer cancellation after renderer work drains' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -437,6 +437,7 @@ Resource templates:
 ```text
 spipe://project/{project}/artifact/{uid}
 spipe://workspace/{workspace}/view/{view}/{path}
+spipe://workspace/{workspace}/search/{query_hash}
 spipe://workspace/{workspace}/trace/{uid}
 ```
 

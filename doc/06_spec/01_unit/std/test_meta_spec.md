@@ -1,29 +1,6 @@
-# Test Metadata Static Extraction Specification
+# Test Meta Specification
 
-> Static test metadata extraction enables fast test listing (~1 second for 1000+ tests) by analyzing test files at parse time WITHOUT executing DSL code.
-
-<!-- sdn-diagram:id=test_meta_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_meta_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_meta_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_meta_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering TestMeta DSL Detection, TestMeta Grouping, TestMeta Full Name, TestMeta Tag Extraction, TestMeta Performance.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,65 +9,7 @@ test_meta_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Test Metadata Static Extraction Specification
-
-Static test metadata extraction enables fast test listing (~1 second for 1000+ tests) by analyzing test files at parse time WITHOUT executing DSL code.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #2000-2010 |
-| Category | Testing |
-| Difficulty | 3/5 |
-| Status | In Progress |
-| Source | `test/01_unit/std/test_meta_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Static test metadata extraction enables fast test listing (~1 second for 1000+ tests)
-by analyzing test files at parse time WITHOUT executing DSL code.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Static Analysis | Extract test info from AST without runtime execution |
-| TestMeta | Metadata for a single test (description, is_slow, is_skipped, tags) |
-| TestGroupMeta | Metadata for describe/context blocks |
-| FileTestMeta | Aggregated metadata for a test file |
-
-## Supported Test DSL Patterns
-
-- `it "description": body` - Regular test
-- `slow_it "description": body` - Slow test (is_slow=true)
-- `disabled_test "description": body` - Disabled test (is_skipped=true)
-- `disabled "description": body` - Alias for disabled_test
-- `describe "name": body` - Test group
-- `context "name": body` - Test group (alias)
-
-## Usage
-
-```bash
-# Fast test listing (uses static analysis)
-simple test --list
-
-# List slow tests only
-simple test --list --only-slow
-
-# List skipped tests only
-simple test --list --only-skipped
-
-# List with tags
-simple test --list --show-tags
-```
-
-## Related Specifications
-
-- [SPipe Framework](spec_framework.md) - BDD testing framework
-- [Test Runner](test_runner.md) - Test execution system
+# Test Meta Specification
 
 ## Scenarios
 
@@ -100,16 +19,18 @@ simple test --list --show-tags
 
 #### detects it() as a regular test
 
-- assert true
+- detects it() as a regular test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects it() as a regular test")
 # This test verifies it() is detected
 # The static analyzer should extract:
 # - description: "detects it() as a regular test"
@@ -123,16 +44,18 @@ assert_true(verified)
 
 #### extracts test description from first argument
 
-- assert true
+- extracts test description from first argument
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts test description from first argument")
 # Description should be: "extracts test description from first argument"
 val description_extracted = true
 assert_true(description_extracted)
@@ -144,16 +67,18 @@ assert_true(description_extracted)
 
 #### slow_it creates tests with is_slow=true
 
-- assert true
+- slow_it creates tests with is_slow=true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("slow_it creates tests with is_slow=true")
 # Verify slow test detection in unit tests
 val slow_detection_works = true
 assert_true(slow_detection_works)
@@ -165,16 +90,18 @@ assert_true(slow_detection_works)
 
 #### disabled_test creates tests with is_skipped=true
 
-- assert true
+- disabled_test creates tests with is_skipped=true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("disabled_test creates tests with is_skipped=true")
 # Verify that disabled_test function exists and is recognized
 # Static analyzer marks these as is_skipped=true
 val disabled_detection_works = true
@@ -185,16 +112,18 @@ assert_true(disabled_detection_works)
 
 #### disabled() is an alias for disabled_test
 
-- assert true
+- disabled() is an alias for disabled_test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("disabled() is an alias for disabled_test")
 val disabled_alias_works = true
 assert_true(disabled_alias_works)
 ```
@@ -207,16 +136,18 @@ assert_true(disabled_alias_works)
 
 #### detects describe blocks
 
-- assert true
+- detects describe blocks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects describe blocks")
 val describe_works = true
 assert_true(describe_works)
 ```
@@ -227,16 +158,18 @@ assert_true(describe_works)
 
 #### detects context blocks as groups
 
-- assert true
+- detects context blocks as groups
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects context blocks as groups")
 val context_works = true
 assert_true(context_works)
 ```
@@ -251,16 +184,18 @@ assert_true(context_works)
 
 #### supports deeply nested tests
 
-- assert true
+- supports deeply nested tests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("supports deeply nested tests")
 # Full path: TestMeta Grouping > nested groups > level 2 > level 3 > supports deeply nested tests
 val nesting_works = true
 assert_true(nesting_works)
@@ -272,16 +207,18 @@ assert_true(nesting_works)
 
 #### builds full name from group path
 
-- assert true
+- builds full name from group path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds full name from group path")
 # Expected full name: "TestMeta Full Name > builds full name from group path"
 val full_name_works = true
 assert_true(full_name_works)
@@ -293,16 +230,18 @@ assert_true(full_name_works)
 
 #### extracts tags from comments
 
-- assert true
+- extracts tags from comments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts tags from comments")
 # This test should have tags: integration, database
 val tags_work = true
 assert_true(tags_work)
@@ -312,16 +251,18 @@ assert_true(tags_work)
 
 #### inherits tags from parent groups
 
-- assert true
+- inherits tags from parent groups
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("inherits tags from parent groups")
 # This test should have tag: integration (from group)
 val inheritance_works = true
 assert_true(inheritance_works)
@@ -333,16 +274,18 @@ assert_true(inheritance_works)
 
 #### extracts metadata efficiently
 
-- assert true
+- extracts metadata efficiently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts metadata efficiently")
 # Performance is verified through Rust unit tests and benchmarks
 # This test documents the expected behavior
 val is_efficient = true
@@ -350,6 +293,25 @@ assert_true(is_efficient)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/std/test_meta_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering TestMeta DSL Detection, TestMeta Grouping, TestMeta Full Name, TestMeta Tag Extraction, TestMeta Performance.
+- TestMeta DSL Detection
+- TestMeta Grouping
+- TestMeta Full Name
+- TestMeta Tag Extraction
+- TestMeta Performance
 
 ## Scenario Summary
 
@@ -363,3 +325,51 @@ assert_true(is_efficient)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1be1f0e5132efeb32bf5773ed9405fc3404ad2eff7b5cfb731e3191c55fc3ebe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1be1f0e5132efeb32bf5773ed9405fc3404ad2eff7b5cfb731e3191c55fc3ebe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1be1f0e5132efeb32bf5773ed9405fc3404ad2eff7b5cfb731e3191c55fc3ebe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/test_meta_spec.spl
+mirror: doc/06_spec/01_unit/std/test_meta_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/test_meta_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/test_meta_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/test_meta_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects it() as a regular test' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/test_meta_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts test description from first argument' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/test_meta_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'slow_it creates tests with is_slow=true' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

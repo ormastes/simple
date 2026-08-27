@@ -1,37 +1,10 @@
 # Ui Access Dispatch Specification
 
-> <details>
-
-<!-- sdn-diagram:id=ui_access_dispatch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ui_access_dispatch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ui_access_dispatch_spec -> std
-ui_access_dispatch_spec -> common
-ui_access_dispatch_spec -> nogc_sync_mut
-ui_access_dispatch_spec -> os
-ui_access_dispatch_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ui_access_dispatch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering ui_access_protocol MCP dispatch.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,13 +17,22 @@ ui_access_dispatch_spec -> app
 
 #### routes snapshot and surface reads through the canonical dispatcher
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- routes snapshot and surface reads through the canonical dispatcher
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("routes snapshot and surface reads through the canonical dispatcher")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -71,13 +53,18 @@ expect(surface).to_contain("popup#ok_btn")
 
 #### binds window metadata through the shared session registry
 
+- binds window metadata through the shared session registry
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("binds window metadata through the shared session registry")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -95,13 +82,19 @@ expect(snapshot).to_contain("\"surface_id\":\"window_1\"")
 
 #### dispatches canonical actions and rejects invalid targets
 
+- dispatches canonical actions and rejects invalid targets
+   - Expected: bridge.session.active_surface() equals `popup`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dispatches canonical actions and rejects invalid targets")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -131,13 +124,18 @@ expect(missing_target).to_contain("error: missing surface_id")
 
 #### observes declarative state through snapshot, surface, node, and filtered reads
 
+- observes declarative state through snapshot, surface, node, and filtered reads
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("observes declarative state through snapshot, surface, node, and filtered reads")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -158,13 +156,18 @@ expect(filtered).to_contain("popup#ok_btn")
 
 #### queries structured declarative results
 
+- queries structured declarative results
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("queries structured declarative results")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -187,13 +190,18 @@ expect(missing).to_contain("error: canonical node popup#missing not found")
 
 #### ensures bounded declarative expectations over canonical queries
 
+- ensures bounded declarative expectations over canonical queries
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ensures bounded declarative expectations over canonical queries")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -220,13 +228,18 @@ expect(ensured).to_contain("\"canonical_id\":\"popup#ok_btn\"")
 
 #### preserves focused semantics across state, observe, and query
 
+- preserves focused semantics across state, observe, and query
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("preserves focused semantics across state, observe, and query")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -258,13 +271,19 @@ expect(query).to_contain("\"canonical_id\":\"popup#ok_btn\"")
 
 #### reads and sets declarative state through canonical targets
 
+- reads and sets declarative state through canonical targets
+   - Expected: server.bridge.session.active_surface() equals `main`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reads and sets declarative state through canonical targets")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -292,7 +311,17 @@ val active = server.dispatch(
     "{\"surface_id\":\"main\",\"state_key\":\"active\",\"state_value\":\"true\"}"
 )
 expect(active).to_contain("ok: state active=true on main")
-expect(bridge.session.active_surface()).to_equal("main")
+# Subject corrected from `bridge.session` to `server.bridge.session`.
+# `OsMcpServer.new(vfs, bridge)` takes the bridge BY VALUE, so the
+# server mutates its own copy and the `it`-local `bridge` can never
+# observe it (proved with build/uiquery_probe/p2.spl). The original
+# subject also contradicted line 116 of this same file, which asserts
+# the `it`-local `bridge` is NOT updated by a server-side action. Both
+# assertions can only hold at once if the bridge were shared; under the
+# current value semantics exactly one of them is satisfiable. The
+# assertion itself ("state active=true made main the active surface")
+# is unchanged and still verified — on the handle that was mutated.
+expect(server.bridge.session.active_surface()).to_equal("main")
 val invoke = server.dispatch(
     "ui_access_state",
     "{\"canonical_id\":\"main#submit_btn\",\"state_key\":\"invoke\",\"state_value\":\"true\"}"
@@ -309,13 +338,18 @@ expect(selected_false).to_contain("ok: state selected=false on main#submit_btn")
 
 #### reads and writes typed values for value-bearing canonical nodes
 
+- reads and writes typed values for value-bearing canonical nodes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reads and writes typed values for value-bearing canonical nodes")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -335,15 +369,82 @@ expect(unsupported).to_contain("error: unsupported value target main#submit_btn"
 
 </details>
 
-#### reads additive adapter snapshots and vision probes
+#### persists two successive mutations through the one-hop bridge delegation
+
+- persists two successive mutations through the one-hop bridge delegation
+   - Expected: server.bridge.session.active_surface() equals `main`
+   - Expected: server.bridge.session.active_surface() equals `popup`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("persists two successive mutations through the one-hop bridge delegation")
+# Regression guard for the depth-2 mutating-call defect: reaching the
+# session as `self.bridge.session.<mut>()` silently DROPS the write, so
+# every mutating tool now goes through a one-hop wrapper on CliGuiBridge.
+# A single mutation cannot discriminate — a dropped write and a write
+# that landed both leave a plausible-looking snapshot when the asserted
+# value happens to match the initial state. Two successive mutations
+# asserted with ABSOLUTE values do: if the second write is dropped the
+# read still shows the first value, and if both are dropped it shows the
+# seed value.
+val session = _session_with_popup()
+val bridge = CliGuiBridge.new(session)
+val server = OsMcpServer.new(VfsManager.new(), bridge)
+
+expect(server.dispatch("ui_access_value", "{\"canonical_id\":\"main#name_input\"}")).to_contain("\"value\":\"Ada\"")
+
+val first = server.dispatch(
+    "ui_access_value",
+    "{\"surface_id\":\"main\",\"canonical_id\":\"main#name_input\",\"value\":\"Grace\"}"
+)
+expect(first).to_contain("\"value\":\"Grace\"")
+expect(server.dispatch("ui_access_value", "{\"canonical_id\":\"main#name_input\"}")).to_contain("\"value\":\"Grace\"")
+
+val second = server.dispatch(
+    "ui_access_value",
+    "{\"surface_id\":\"main\",\"canonical_id\":\"main#name_input\",\"value\":\"Hopper\"}"
+)
+expect(second).to_contain("\"value\":\"Hopper\"")
+val reread = server.dispatch("ui_access_value", "{\"canonical_id\":\"main#name_input\"}")
+expect(reread).to_contain("\"value\":\"Hopper\"")
+
+# Two successive active-surface mutations, absolute after each.
+server.dispatch("ui_access_state", "{\"surface_id\":\"main\",\"state_key\":\"active\",\"state_value\":\"true\"}")
+expect(server.bridge.session.active_surface()).to_equal("main")
+server.dispatch("ui_access_state", "{\"surface_id\":\"popup\",\"state_key\":\"active\",\"state_value\":\"true\"}")
+expect(server.bridge.session.active_surface()).to_equal("popup")
+
+# Two successive action dispatches must both reach the event log.
+server.dispatch("ui_access_act", "{\"canonical_id\":\"popup#ok_btn\",\"action\":\"click\"}")
+server.dispatch("ui_access_act", "{\"canonical_id\":\"popup#ok_btn\",\"action\":\"ok\"}")
+val history = server.dispatch("ui_access_history", "{\"surface_id\":\"popup\",\"count\":\"10\"}")
+expect(history).to_contain("\"payload\":\"click_ok_btn\"")
+expect(history).to_contain("\"payload\":\"ok\"")
+```
+
+</details>
+
+#### reads additive adapter snapshots and vision probes
+
+- reads additive adapter snapshots and vision probes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("reads additive adapter snapshots and vision probes")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -361,13 +462,18 @@ expect(probe).to_contain("\"mark_id\":\"mark_1\"")
 
 #### rejects invalid declarative state transitions
 
+- rejects invalid declarative state transitions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid declarative state transitions")
 val session = _session_with_popup()
 val bridge = CliGuiBridge.new(session)
 val server = OsMcpServer.new(VfsManager.new(), bridge)
@@ -389,20 +495,18 @@ expect(missing).to_contain("error: missing surface_id")
 
 #### reads persisted find and history results when a store is attached
 
-1. var session =  session with popup
-2. var store = UiAccessStore memory
-3. session attach access store
-4. store persist snapshot
-5. session dispatch
+- reads persisted find and history results when a store is attached
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reads persisted find and history results when a store is attached")
 var session = _session_with_popup()
 var store = UiAccessStore.memory()?
 session.attach_access_store(store)
@@ -425,21 +529,18 @@ expect(history).to_contain("\"event_kind\":\"action\"")
 
 #### auto-attaches a persisted store through CliGuiBridge.new when runtime path is configured
 
-1. rt env set
-2. file delete
-3. var session =  session with popup
-4. bridge session dispatch
-5. rt env set
-6. file delete
+- auto-attaches a persisted store through CliGuiBridge.new when runtime path is configured
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("auto-attaches a persisted store through CliGuiBridge.new when runtime path is configured")
 val db_path = "/tmp/ui_access_bridge_auto.sqlite"
 rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", db_path)
 if file_exists(db_path):
@@ -466,23 +567,71 @@ if file_exists(db_path):
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/services/llm/ui_access_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering ui_access_protocol MCP dispatch.
 - ui_access_protocol MCP dispatch
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0c0a080e1aef2ab99b69dc7c35815b0c70948c0be795b2a9a46c7eeec1c7f582`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0c0a080e1aef2ab99b69dc7c35815b0c70948c0be795b2a9a46c7eeec1c7f582`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0c0a080e1aef2ab99b69dc7c35815b0c70948c0be795b2a9a46c7eeec1c7f582`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/services/llm/ui_access_dispatch_spec.spl
+mirror: doc/06_spec/01_unit/os/services/llm/ui_access_dispatch_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/services/llm/ui_access_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/services/llm/ui_access_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/services/llm/ui_access_dispatch_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes snapshot and surface reads through the canonical dispatcher' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/llm/ui_access_dispatch_spec.spl:99:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'binds window metadata through the shared session registry' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/llm/ui_access_dispatch_spec.spl:114:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches canonical actions and rejects invalid targets' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

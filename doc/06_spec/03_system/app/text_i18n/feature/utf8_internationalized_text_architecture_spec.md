@@ -119,6 +119,11 @@ identity fails before its measurements are considered.
 
 #### should retain the complete fail-closed acceptance flow
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should retain the complete fail-closed acceptance flow
 - Load the pinned multilingual font manifest
    - Expected: coverage.actual_owner_count equals `TEXT_I18N_COVERAGE_OWNER_COUNT`
 - Accept exact-face-bound simple-script shaping
@@ -139,10 +144,12 @@ identity fails before its measurements are considered.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain the complete fail-closed acceptance flow")
 step("Load the pinned multilingual font manifest")
 val coverage = text_i18n_coverage_contract_check(text_i18n_coverage_owners())
 expect(coverage.valid).to_be(true)
@@ -174,16 +181,19 @@ expect(perf_rows[17].evidence_class).to_equal("native-device")
 
 #### should reject incomplete owner backend and performance inventories
 
+- should reject incomplete owner backend and performance inventories
 - Reject incomplete evidence before acceptance
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject incomplete owner backend and performance inventories")
 step("Reject incomplete evidence before acceptance")
 expect(text_i18n_coverage_contract_check([]).valid).to_be(false)
 expect(text_i18n_backend_contract_valid([])).to_be(false)
@@ -194,16 +204,19 @@ expect(text_i18n_perf_rows_valid([])).to_be(false)
 
 #### should enforce zero-baseline memory behavior
 
+- should enforce zero-baseline memory behavior
 - Apply the deterministic no-allocation memory gate
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should enforce zero-baseline memory behavior")
 step("Apply the deterministic no-allocation memory gate")
 expect(text_i18n_growth_within(0, 0, 0)).to_be(true)
 expect(text_i18n_growth_within(1, 0, 100)).to_be(false)
@@ -233,3 +246,80 @@ expect(text_i18n_growth_within(101, 100, 1)).to_be(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-001`
+- `REQ-002`
+- `REQ-003`
+- `REQ-004`
+- `REQ-005`
+- `REQ-006`
+- `REQ-007`
+- `REQ-008`
+- `REQ-009`
+- `REQ-010`
+- `REQ-011`
+- `REQ-012`
+- `REQ-013`
+- `REQ-014`
+- `REQ-015`
+- `REQ-016`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `91832a373e4cb9f3276b690409c727c5db21dcf77608d5a57fa12fc6b661adaa`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `91832a373e4cb9f3276b690409c727c5db21dcf77608d5a57fa12fc6b661adaa`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `91832a373e4cb9f3276b690409c727c5db21dcf77608d5a57fa12fc6b661adaa`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl
+mirror: doc/06_spec/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.md (current)
+findings: 9 blockers: 1
+  narrative=100 structure=85 oracle=100
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 16 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:122:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain the complete fail-closed acceptance flow' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:122:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should retain the complete fail-closed acceptance flow' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:151:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject incomplete owner backend and performance inventories' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:151:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject incomplete owner backend and performance inventories' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:159:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should enforce zero-baseline memory behavior' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/text_i18n/feature/utf8_internationalized_text_architecture_spec.spl:159:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should enforce zero-baseline memory behavior' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

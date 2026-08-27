@@ -1,30 +1,6 @@
 # Ide Harden Specification
 
-> <details>
-
-<!-- sdn-diagram:id=ide_harden_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ide_harden_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ide_harden_spec -> std
-ide_harden_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ide_harden_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering markdown_render: empty and malformed input are total, markdown_render: Obsidian feature probe, preview_pane: height edge cases, preview_pane: CRLF source normalisation, preview_pane: scroll with zero or negative max_lines, capabilities: report is total on all registered capabilities, md_editing: boundary inputs at line 0, last line, beyond EOL, md_editing: toggle formatting on empty selection / insert at end.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,27 @@ ide_harden_spec -> app
 
 #### empty source yields a structured result with non-negative counts
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- empty source yields a structured result with non-negative counts
+   - Expected: p.block_count >= 0 is true
+   - Expected: p.rendered_line_count >= 0 is true
+   - Expected: p.preview_line_count >= 0 is true
+   - Expected: p.contains_heading is false
+   - Expected: p.contains_table is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("empty source yields a structured result with non-negative counts")
 val p = ide_markdown_render_probe_empty()
 expect(p.block_count >= 0).to_equal(true)
 expect(p.rendered_line_count >= 0).to_equal(true)
@@ -60,13 +50,22 @@ expect(p.contains_table).to_equal(false)
 
 #### malformed (unclosed fence) source yields a structured result
 
+- malformed (unclosed fence) source yields a structured result
+   - Expected: p.block_count >= 0 is true
+   - Expected: p.rendered_line_count >= 0 is true
+   - Expected: p.preview_line_count >= 0 is true
+   - Expected: p.contains_heading is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("malformed (unclosed fence) source yields a structured result")
 val p = ide_markdown_render_probe_malformed()
 expect(p.block_count >= 0).to_equal(true)
 expect(p.rendered_line_count >= 0).to_equal(true)
@@ -80,13 +79,19 @@ expect(p.contains_heading).to_equal(true)
 
 #### wiki link [[x]] is parsed without crashing and yields at least one block
 
+- wiki link [[x]] is parsed without crashing and yields at least one block
+   - Expected: p.wiki_link_block_count > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("wiki link [[x]] is parsed without crashing and yields at least one block")
 val p = ide_markdown_obsidian_probe()
 expect(p.wiki_link_block_count > 0).to_equal(true)
 ```
@@ -95,13 +100,19 @@ expect(p.wiki_link_block_count > 0).to_equal(true)
 
 #### embed ![[x]] is parsed without crashing and yields at least one block
 
+- embed ![[x]] is parsed without crashing and yields at least one block
+   - Expected: p.embed_block_count > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("embed ![[x]] is parsed without crashing and yields at least one block")
 val p = ide_markdown_obsidian_probe()
 expect(p.embed_block_count > 0).to_equal(true)
 ```
@@ -110,13 +121,19 @@ expect(p.embed_block_count > 0).to_equal(true)
 
 #### callout > [!NOTE] is parsed without crashing and yields at least one block
 
+- callout > [!NOTE] is parsed without crashing and yields at least one block
+   - Expected: p.callout_block_count > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("callout > [!NOTE] is parsed without crashing and yields at least one block")
 val p = ide_markdown_obsidian_probe()
 expect(p.callout_block_count > 0).to_equal(true)
 ```
@@ -125,13 +142,19 @@ expect(p.callout_block_count > 0).to_equal(true)
 
 #### table is parsed without crashing and yields at least one block
 
+- table is parsed without crashing and yields at least one block
+   - Expected: p.table_block_count > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table is parsed without crashing and yields at least one block")
 val p = ide_markdown_obsidian_probe()
 expect(p.table_block_count > 0).to_equal(true)
 ```
@@ -140,13 +163,19 @@ expect(p.table_block_count > 0).to_equal(true)
 
 #### unclosed fence is parsed without crashing and yields at least one block
 
+- unclosed fence is parsed without crashing and yields at least one block
+   - Expected: p.unclosed_fence_block_count > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("unclosed fence is parsed without crashing and yields at least one block")
 val p = ide_markdown_obsidian_probe()
 expect(p.unclosed_fence_block_count > 0).to_equal(true)
 ```
@@ -155,13 +184,20 @@ expect(p.unclosed_fence_block_count > 0).to_equal(true)
 
 #### empty_source_safe and malformed_source_safe flags are both true
 
+- empty_source_safe and malformed_source_safe flags are both true
+   - Expected: p.empty_source_safe is true
+   - Expected: p.malformed_source_safe is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("empty_source_safe and malformed_source_safe flags are both true")
 val p = ide_markdown_obsidian_probe()
 expect(p.empty_source_safe).to_equal(true)
 expect(p.malformed_source_safe).to_equal(true)
@@ -173,13 +209,19 @@ expect(p.malformed_source_safe).to_equal(true)
 
 #### render with height 0 returns empty list, not a crash
 
+- render with height 0 returns empty list, not a crash
+   - Expected: result.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("render with height 0 returns empty list, not a crash")
 val pane = preview_pane_update(preview_pane_create(1), "# Hello\n\nBody")
 val result = preview_pane_render(pane, 0)
 expect(result.len()).to_equal(0)
@@ -189,13 +231,19 @@ expect(result.len()).to_equal(0)
 
 #### render with negative height returns empty list, not a crash
 
+- render with negative height returns empty list, not a crash
+   - Expected: result.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("render with negative height returns empty list, not a crash")
 val pane = preview_pane_update(preview_pane_create(1), "# Hello\n\nBody")
 val result = preview_pane_render(pane, -5)
 expect(result.len()).to_equal(0)
@@ -205,13 +253,19 @@ expect(result.len()).to_equal(0)
 
 #### render with height larger than content returns at most height lines
 
+- render with height larger than content returns at most height lines
+   - Expected: result.len() >= 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("render with height larger than content returns at most height lines")
 val pane = preview_pane_update(preview_pane_create(1), "line1\nline2")
 val result = preview_pane_render(pane, 100)
 expect(result.len() >= 0).to_equal(true)
@@ -221,13 +275,19 @@ expect(result.len() >= 0).to_equal(true)
 
 #### render with empty source and positive height returns empty or minimal output
 
+- render with empty source and positive height returns empty or minimal output
+   - Expected: result.len() >= 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("render with empty source and positive height returns empty or minimal output")
 val pane = preview_pane_update(preview_pane_create(1), "")
 val result = preview_pane_render(pane, 10)
 expect(result.len() >= 0).to_equal(true)
@@ -239,13 +299,19 @@ expect(result.len() >= 0).to_equal(true)
 
 #### CRLF source parses without crash and produces same block count as LF
 
+- CRLF source parses without crash and produces same block count as LF
+   - Expected: out_lf.len() equals `out_crlf.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CRLF source parses without crash and produces same block count as LF")
 val lf_source = "# Title\n\nParagraph\n\n- item"
 val crlf_source = "# Title\r\n\r\nParagraph\r\n\r\n- item"
 val pane_lf = preview_pane_update(preview_pane_create(1), lf_source)
@@ -259,13 +325,19 @@ expect(out_lf.len()).to_equal(out_crlf.len())
 
 #### standalone CR is also normalised
 
+- standalone CR is also normalised
+   - Expected: result.len() >= 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("standalone CR is also normalised")
 val cr_source = "# Title\rBody"
 val pane = preview_pane_update_crlf(preview_pane_create(1), cr_source)
 val result = preview_pane_render(pane, 10)
@@ -278,13 +350,19 @@ expect(result.len() >= 0).to_equal(true)
 
 #### scroll with max_lines 0 returns pane unchanged
 
+- scroll with max_lines 0 returns pane unchanged
+   - Expected: scrolled.viewport_start equals `pane.viewport_start`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("scroll with max_lines 0 returns pane unchanged")
 val pane = preview_pane_update(preview_pane_create(1), "line\nline\nline")
 val scrolled = preview_pane_scroll(pane, 5, 0)
 expect(scrolled.viewport_start).to_equal(pane.viewport_start)
@@ -294,13 +372,19 @@ expect(scrolled.viewport_start).to_equal(pane.viewport_start)
 
 #### scroll with max_lines negative returns pane unchanged
 
+- scroll with max_lines negative returns pane unchanged
+   - Expected: scrolled.viewport_start equals `pane.viewport_start`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("scroll with max_lines negative returns pane unchanged")
 val pane = preview_pane_update(preview_pane_create(1), "line\nline\nline")
 val scrolled = preview_pane_scroll(pane, 5, -3)
 expect(scrolled.viewport_start).to_equal(pane.viewport_start)
@@ -310,13 +394,19 @@ expect(scrolled.viewport_start).to_equal(pane.viewport_start)
 
 #### scroll does not go negative
 
+- scroll does not go negative
+   - Expected: scrolled.viewport_start >= 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("scroll does not go negative")
 val pane = preview_pane_update(preview_pane_create(1), "a\nb\nc")
 val scrolled = preview_pane_scroll(pane, -100, 10)
 expect(scrolled.viewport_start >= 0).to_equal(true)
@@ -328,13 +418,19 @@ expect(scrolled.viewport_start >= 0).to_equal(true)
 
 #### ide_capability_count is positive
 
+- ide_capability_count is positive
+   - Expected: ide_capability_count() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ide_capability_count is positive")
 expect(ide_capability_count() > 0).to_equal(true)
 ```
 
@@ -342,13 +438,19 @@ expect(ide_capability_count() > 0).to_equal(true)
 
 #### ide_capability_ids returns one id per capability
 
+- ide_capability_ids returns one id per capability
+   - Expected: ids.len() equals `ide_capability_count()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ide_capability_ids returns one id per capability")
 val ids = ide_capability_ids()
 expect(ids.len()).to_equal(ide_capability_count())
 ```
@@ -357,13 +459,19 @@ expect(ids.len()).to_equal(ide_capability_count())
 
 #### ide_capability_report returns two lines per capability
 
+- ide_capability_report returns two lines per capability
+   - Expected: report.len() equals `ide_capability_count() * 2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ide_capability_report returns two lines per capability")
 val report = ide_capability_report()
 expect(report.len()).to_equal(ide_capability_count() * 2)
 ```
@@ -372,13 +480,19 @@ expect(report.len()).to_equal(ide_capability_count() * 2)
 
 #### capability ids contain no empty strings
 
+- capability ids contain no empty strings
+   - Expected: all_nonempty is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("capability ids contain no empty strings")
 val ids = ide_capability_ids()
 var all_nonempty = true
 for id in ids:
@@ -393,13 +507,19 @@ expect(all_nonempty).to_equal(true)
 
 #### table insert row at line 0 of a table works
 
+- table insert row at line 0 of a table works
+   - Expected: edit.changed is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table insert row at line 0 of a table works")
 val content = "| A | B |\n| --- | --- |\n| 1 | 2 |"
 val edit = md_table_insert_row_after(content, 0)
 expect(edit.changed).to_equal(true)
@@ -409,13 +529,19 @@ expect(edit.changed).to_equal(true)
 
 #### table insert row on empty content returns unchanged (no crash)
 
+- table insert row on empty content returns unchanged (no crash)
+   - Expected: edit.changed is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table insert row on empty content returns unchanged (no crash)")
 val edit = md_table_insert_row_after("", 0)
 expect(edit.changed).to_equal(false)
 ```
@@ -424,13 +550,19 @@ expect(edit.changed).to_equal(false)
 
 #### table insert row with cursor_line beyond content length returns unchanged (no crash)
 
+- table insert row with cursor_line beyond content length returns unchanged (no crash)
+   - Expected: edit.changed is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table insert row with cursor_line beyond content length returns unchanged (no crash)")
 val content = "| A | B |\n| --- | --- |"
 val edit = md_table_insert_row_after(content, 999)
 expect(edit.changed).to_equal(false)
@@ -440,13 +572,19 @@ expect(edit.changed).to_equal(false)
 
 #### table insert row with negative cursor_line returns unchanged (no crash)
 
+- table insert row with negative cursor_line returns unchanged (no crash)
+   - Expected: edit.changed is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table insert row with negative cursor_line returns unchanged (no crash)")
 val edit = md_table_insert_row_after("| A |\n| --- |", -1)
 expect(edit.changed).to_equal(false)
 ```
@@ -455,13 +593,19 @@ expect(edit.changed).to_equal(false)
 
 #### table insert column on empty content returns unchanged (no crash)
 
+- table insert column on empty content returns unchanged (no crash)
+   - Expected: edit.changed is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table insert column on empty content returns unchanged (no crash)")
 val edit = md_table_insert_column_after("", 0, 0)
 expect(edit.changed).to_equal(false)
 ```
@@ -470,13 +614,19 @@ expect(edit.changed).to_equal(false)
 
 #### table set cell on empty content returns unchanged (no crash)
 
+- table set cell on empty content returns unchanged (no crash)
+   - Expected: edit.changed is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table set cell on empty content returns unchanged (no crash)")
 val edit = md_table_set_cell("", 0, 0, "val")
 expect(edit.changed).to_equal(false)
 ```
@@ -485,13 +635,19 @@ expect(edit.changed).to_equal(false)
 
 #### table set cell with out-of-range col returns unchanged (no crash)
 
+- table set cell with out-of-range col returns unchanged (no crash)
+   - Expected: edit.changed is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("table set cell with out-of-range col returns unchanged (no crash)")
 val content = "| A | B |\n| --- | --- |\n| 1 | 2 |"
 val edit = md_table_set_cell(content, 2, 99, "x")
 expect(edit.changed).to_equal(false)
@@ -501,13 +657,19 @@ expect(edit.changed).to_equal(false)
 
 #### md_dispatch_motion with empty content at line 0 does not crash
 
+- md_dispatch_motion with empty content at line 0 does not crash
+   - Expected: result.found is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_dispatch_motion with empty content at line 0 does not crash")
 val result = md_dispatch_motion("]", "]", "", 0, 0)
 expect(result.found).to_equal(false)
 ```
@@ -516,13 +678,19 @@ expect(result.found).to_equal(false)
 
 #### md_dispatch_motion with cursor beyond last line does not crash
 
+- md_dispatch_motion with cursor beyond last line does not crash
+   - Expected: result.found is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_dispatch_motion with cursor beyond last line does not crash")
 val content = "# Head\nbody"
 val result = md_dispatch_motion("]", "]", content, 999, 0)
 expect(result.found).to_equal(false)
@@ -532,13 +700,19 @@ expect(result.found).to_equal(false)
 
 #### md_commands_dispatch toggleTask on empty content returns not-a-task
 
+- md_commands_dispatch toggleTask on empty content returns not-a-task
+   - Expected: result.status_message equals `not a task`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch toggleTask on empty content returns not-a-task")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.toggleTask", state, "", 0, 0)
 expect(result.status_message).to_equal("not a task")
@@ -548,13 +722,19 @@ expect(result.status_message).to_equal("not a task")
 
 #### md_commands_dispatch toggleTask at line beyond content length returns not-a-task
 
+- md_commands_dispatch toggleTask at line beyond content length returns not-a-task
+   - Expected: result.status_message equals `not a task`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch toggleTask at line beyond content length returns not-a-task")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.toggleTask", state, "- [ ] item", 999, 0)
 expect(result.status_message).to_equal("not a task")
@@ -564,13 +744,19 @@ expect(result.status_message).to_equal("not a task")
 
 #### md_commands_dispatch unknown command returns command name as status
 
+- md_commands_dispatch unknown command returns command name as status
+   - Expected: result.status_message equals `markdown.nonexistent`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch unknown command returns command name as status")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.nonexistent", state, "text", 0, 0)
 expect(result.status_message).to_equal("markdown.nonexistent")
@@ -580,13 +766,19 @@ expect(result.status_message).to_equal("markdown.nonexistent")
 
 #### md_assist_on_enter on empty string returns empty continuation
 
+- md_assist_on_enter on empty string returns empty continuation
+   - Expected: result equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_assist_on_enter on empty string returns empty continuation")
 val result = md_assist_on_enter("", 0)
 expect(result).to_equal("")
 ```
@@ -595,13 +787,19 @@ expect(result).to_equal("")
 
 #### md_assist_toggle_task on plain text returns text unchanged
 
+- md_assist_toggle_task on plain text returns text unchanged
+   - Expected: result equals `just a paragraph`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_assist_toggle_task on plain text returns text unchanged")
 val result = md_assist_toggle_task("just a paragraph")
 expect(result).to_equal("just a paragraph")
 ```
@@ -612,13 +810,19 @@ expect(result).to_equal("just a paragraph")
 
 #### md_commands_dispatch insertTable on empty content inserts table text
 
+- md_commands_dispatch insertTable on empty content inserts table text
+   - Expected: result.insert_text contains `Header`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch insertTable on empty content inserts table text")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.insertTable", state, "", 0, 0)
 expect(result.insert_text.contains("Header")).to_equal(true)
@@ -628,13 +832,19 @@ expect(result.insert_text.contains("Header")).to_equal(true)
 
 #### md_commands_dispatch insertLink on empty content inserts link text
 
+- md_commands_dispatch insertLink on empty content inserts link text
+   - Expected: result.insert_text contains `[text](url)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch insertLink on empty content inserts link text")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.insertLink", state, "", 0, 0)
 expect(result.insert_text.contains("[text](url)")).to_equal(true)
@@ -644,13 +854,19 @@ expect(result.insert_text.contains("[text](url)")).to_equal(true)
 
 #### md_commands_dispatch insertCodeBlock on empty content inserts fence text
 
+- md_commands_dispatch insertCodeBlock on empty content inserts fence text
+   - Expected: result.insert_text contains `````
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch insertCodeBlock on empty content inserts fence text")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.insertCodeBlock", state, "", 0, 0)
 expect(result.insert_text.contains("```")).to_equal(true)
@@ -660,13 +876,19 @@ expect(result.insert_text.contains("```")).to_equal(true)
 
 #### md_commands_dispatch documentStats on empty content does not crash
 
+- md_commands_dispatch documentStats on empty content does not crash
+   - Expected: result.status_message.len() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("md_commands_dispatch documentStats on empty content does not crash")
 val state = md_editor_state_new()
 val result = md_commands_dispatch("markdown.documentStats", state, "", 0, 0)
 expect(result.status_message.len() > 0).to_equal(true)
@@ -681,12 +903,12 @@ expect(result.status_message.len() > 0).to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ide/ide_harden_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering markdown_render: empty and malformed input are total, markdown_render: Obsidian feature probe, preview_pane: height edge cases, preview_pane: CRLF source normalisation, preview_pane: scroll with zero or negative max_lines, capabilities: report is total on all registered capabilities, md_editing: boundary inputs at line 0, last line, beyond EOL, md_editing: toggle formatting on empty selection / insert at end.
 - markdown_render: empty and malformed input are total
 - markdown_render: Obsidian feature probe
 - preview_pane: height edge cases
@@ -708,3 +930,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a7477e215483917e4f75d3f87fbe8caee03a1becdb4ba2ed8508d9550500e870`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a7477e215483917e4f75d3f87fbe8caee03a1becdb4ba2ed8508d9550500e870`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a7477e215483917e4f75d3f87fbe8caee03a1becdb4ba2ed8508d9550500e870`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/ide/ide_harden_spec.spl
+mirror: doc/06_spec/01_unit/app/ide/ide_harden_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ide/ide_harden_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ide/ide_harden_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ide/ide_harden_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/ide/ide_harden_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'empty source yields a structured result with non-negative counts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ide/ide_harden_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'malformed (unclosed fence) source yields a structured result' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ide/ide_harden_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'wiki link [[x]] is parsed without crashing and yields at least one block' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

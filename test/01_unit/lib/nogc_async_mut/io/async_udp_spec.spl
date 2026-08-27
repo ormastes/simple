@@ -1,100 +1,42 @@
-# # Async UDP I/O Specification
-#
-# **Feature IDs:** #IO-ASYNC-UDP
-# **Category:** Stdlib
-# **Difficulty:** 3/5
-# **Status:** Implemented
-#
-# ## Overview
-#
-# AsyncUdpSocket provides epoll-driven non-blocking UDP.
-# Implements AsyncClose (UDP is message-based, not stream-based).
-#
-# ## Syntax
-#
-# ```simple
-# val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-# await socket.send_to([72, 105], "127.0.0.1:9001")?
-# val (data, sender) = await socket.recv_from(1024)?
-# await socket.close()?
-# ```
-#
-# ## Key Concepts
-#
-# | Concept | Description |
-# |---------|-------------|
-# | AsyncUdpSocket | Non-blocking UDP socket (epoll) — AsyncClose |
-# | send_to/recv_from | Addressed async datagram operations |
-# | connect/send/recv | Connected async datagram operations |
-#
-# ## Behavior
-#
-# - bind() sets socket to non-blocking
-# - send_to/recv_from are epoll-driven futures
-# - connect() and local_addr() are sync (immediate operations)
-# - close() deregisters from event loop
-#
-# ## Sync vs Async Comparison
-#
-# ```simple
-# # Sync:
-# val socket = UdpSocket.bind("127.0.0.1:0")?
-# socket.send_to(data, addr)?
-#
-# # Async — same names, just add await:
-# val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-# await socket.send_to(data, addr)?
-# ```
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
+# AsyncUdpSocket datagram behavior on loopback: bind, send_to/recv_from
+# round-trip, and socket state. Futures are eager; recv_from blocks
+# until the datagram queued by the earlier send arrives.
 
-# ============================================================================
-# AsyncUdpSocket
-# ============================================================================
+use std.spec.step
+use std.nogc_async_mut.host_io.net.{AsyncUdpSocket}
+use std.async.poll.{Poll}
 
-describe "AsyncUdpSocket":
-    # ## Non-Blocking UDP Socket
-    #
-    # Epoll-driven async datagram socket.
+describe "AsyncUdpSocket loopback":
+    # @manual scenario evidence
+    it "binds to an ephemeral port and reports its address":
+        # @req REQ-SSPEC-LIB
+        step("bind 127.0.0.1:0 and read local_addr")
+        val sock = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val addr = sock.local_addr().unwrap()
+        expect(addr.contains("127.0.0.1")).to_equal(true)
+        expect(sock.is_open()).to_equal(true)
+        sock.close()
 
-    context "bind":
-        it "documents async bind":
-            # val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-            # expect socket.is_open() == true
-            pass
-
-    context "send_to and recv_from":
-        # ### Addressed Mode (Async)
-
-        it "documents async datagram exchange":
-            # val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-            # await socket.send_to([72, 105], "127.0.0.1:9001")?
-            # val (data, sender) = await socket.recv_from(1024)?
-            # await socket.close()?
-            pass
-
-    context "connected mode":
-        # ### Connected Mode (Async)
-        #
-        # connect() is sync; send/recv are async.
-
-        it "documents async connected mode":
-            # val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-            # socket.connect("127.0.0.1:9001")?  # sync
-            # await socket.send([72, 105])?
-            # val data = await socket.recv(1024)?
-            # await socket.close()?
-            pass
-
-    context "broadcast (sync)":
-        it "documents broadcast setup":
-            # val socket = await AsyncUdpSocket.bind("0.0.0.0:0")?
-            # socket.set_broadcast(true)?  # sync
-            # await socket.send_to(data, "255.255.255.255:9000")?
-            pass
-
-    context "close":
-        it "documents async close":
-            # val socket = await AsyncUdpSocket.bind("127.0.0.1:0")?
-            # await socket.close()?
-            # expect socket.is_open() == false
-            pass
+    it "round-trips a datagram between two bound sockets":
+        # @req REQ-SSPEC-LIB
+        step("send_to then recv_from a fixed payload")
+        val sender = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val receiver = AsyncUdpSocket.bind("127.0.0.1:0").unwrap()
+        val dest = receiver.local_addr().unwrap()
+        # oracle: ASCII "ping" = [112, 105, 110, 103]
+        match sender.send_to([112, 105, 110, 103], dest).poll():
+            case Poll.Ready(Ok(n)): expect(n).to_equal(4)
+            case _: expect(false).to_equal(true)
+        var (data, from) = match receiver.recv_from(64).poll():
+            case Poll.Ready(Ok(pair)): pair
+            case _: panic("recv_from failed")
+        expect(data.len()).to_equal(4)
+        expect(data[0]).to_equal(112)
+        expect(data[3]).to_equal(103)
+        expect(from.contains("127.0.0.1")).to_equal(true)
+        sender.close()
+        receiver.close()

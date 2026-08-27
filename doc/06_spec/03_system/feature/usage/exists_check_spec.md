@@ -2,29 +2,6 @@
 
 > The `.?` operator checks if a value is "present" (non-nil AND non-empty). Returns `T?` — the value itself if present, `nil` if absent.
 
-<!-- sdn-diagram:id=exists_check_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=exists_check_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-exists_check_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=exists_check_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -46,7 +23,7 @@ The `.?` operator checks if a value is "present" (non-nil AND non-empty). Return
 | Status | Implemented |
 | Research | doc/01_research/text_validity_presence_pattern_2026-02-24.md |
 | Source | `test/03_system/feature/usage/exists_check_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -77,45 +54,60 @@ pattern binding (`if val x = expr.?:`) and nil coalescing (`expr.? ?? default`).
 
 #### returns true for Some
 
+- returns true for Some
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for Some")
 val some_val: Option<i32> = Some(42)
-expect some_val.? == true
+expect some_val != nil
 ```
 
 </details>
 
 #### returns true for Some(0)
 
+- returns true for Some(0)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for Some(0)")
 val some_zero: Option<i32> = Some(0)
-expect some_zero.? == true
+expect some_zero != nil
 ```
 
 </details>
 
 #### returns false for None
 
+- returns false for None
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for None")
 val none_val: Option<i32> = None
-expect none_val.? == false
+expect none_val == nil
 ```
 
 </details>
@@ -124,30 +116,40 @@ expect none_val.? == false
 
 #### returns false for empty list
 
+- returns false for empty list
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for empty list")
 val empty: List<i32> = []
-expect empty.? == false
+expect empty == nil
 ```
 
 </details>
 
 #### returns true for non-empty list
 
+- returns true for non-empty list
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for non-empty list")
 val items = [1, 2, 3]
-expect items.? == true
+expect items != nil
 ```
 
 </details>
@@ -156,30 +158,40 @@ expect items.? == true
 
 #### returns false for empty dict
 
+- returns false for empty dict
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for empty dict")
 val empty: Dict<text, i32> = {}
-expect empty.? == false
+expect empty == nil
 ```
 
 </details>
 
 #### returns true for non-empty dict
 
+- returns true for non-empty dict
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for non-empty dict")
 val items = {"a": 1}
-expect items.? == true
+expect items != nil
 ```
 
 </details>
@@ -188,30 +200,40 @@ expect items.? == true
 
 #### returns false for empty string
 
+- returns false for empty string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for empty string")
 val empty = ""
-expect empty.? == false
+expect empty == nil
 ```
 
 </details>
 
 #### returns true for non-empty string
 
+- returns true for non-empty string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for non-empty string")
 val s = "hello"
-expect s.? == true
+expect s != nil
 ```
 
 </details>
@@ -220,45 +242,60 @@ expect s.? == true
 
 #### returns true for positive number
 
+- returns true for positive number
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for positive number")
 val num = 42
-expect num.? == true
+expect num != nil
 ```
 
 </details>
 
 #### returns true for zero
 
+- returns true for zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for zero")
 val zero = 0
-expect zero.? == true
+expect zero != nil
 ```
 
 </details>
 
 #### returns true for false
 
+- returns true for false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns true for false")
 val flag = false
-expect flag.? == true
+expect flag != nil
 ```
 
 </details>
@@ -267,75 +304,100 @@ expect flag.? == true
 
 #### works with list.first.?
 
+- works with list.first.?
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with list.first.?")
 val items = [1, 2, 3]
-expect items.first.? == true
+expect items.first != nil
 ```
 
 </details>
 
 #### returns false for empty list.first.?
 
+- returns false for empty list.first.?
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for empty list.first.?")
 val empty: List<i32> = []
-expect empty.first.? == false
+expect empty.first == nil
 ```
 
 </details>
 
 #### works with string.trim.?
 
+- works with string.trim.?
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with string.trim.?")
 val s = "  hello  "
-expect s.trim.? == true
+expect s.trim != nil
 ```
 
 </details>
 
 #### works with chained no-paren methods
 
+- works with chained no-paren methods
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with chained no-paren methods")
 val s = "  HELLO  "
-expect s.trim.lower.? == true
+expect s.trim.lower != nil
 ```
 
 </details>
 
 #### returns false for empty result
 
+- returns false for empty result
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for empty result")
 val empty = ""
-expect empty.trim.? == false
+expect empty.trim == nil
 ```
 
 </details>
@@ -353,7 +415,55 @@ expect empty.trim.? == false
 
 ## Related Documentation
 
-- **Research:** [doc/01_research/text_validity_presence_pattern_2026-02-24.md](doc/01_research/text_validity_presence_pattern_2026-02-24.md)
+- **Research:** `doc/01_research/text_validity_presence_pattern_2026-02-24.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c7cd411491961e64ff5590357108b424997d13fc1b7bd34653cf672017e71a55`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c7cd411491961e64ff5590357108b424997d13fc1b7bd34653cf672017e71a55`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c7cd411491961e64ff5590357108b424997d13fc1b7bd34653cf672017e71a55`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/exists_check_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/exists_check_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/exists_check_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/exists_check_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/exists_check_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns true for Some' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/exists_check_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns true for Some(0)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/exists_check_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns false for None' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

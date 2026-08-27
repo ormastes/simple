@@ -1,30 +1,6 @@
 # Driver Api External Facade Specification
 
-> 1. delete file
-
-<!-- sdn-diagram:id=driver_api_external_facade_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=driver_api_external_facade_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-driver_api_external_facade_spec -> std
-driver_api_external_facade_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=driver_api_external_facade_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Driver API External Facade.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,21 +17,24 @@ driver_api_external_facade_spec -> compiler
 
 #### compile_to_smf writes an smf artifact for a direct external caller
 
-1. delete file
-2. write file
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- compile_to_smf writes an smf artifact for a direct external caller
    - Expected: result.is_ok() is true
    - Expected: rt_file_exists(out_path) is true
-3. delete file
-4. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("compile_to_smf writes an smf artifact for a direct external caller")
 val src_path = "/tmp/sml_driver_api_compile_to_smf.spl"
 val out_path = "/tmp/sml_driver_api_compile_to_smf.smf"
 delete_file(out_path)
@@ -74,18 +53,19 @@ delete_file(out_path)
 
 #### check_file returns success for a valid source file
 
-1. write file
+- check_file returns success for a valid source file
    - Expected: result.is_success() is true
-2. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("check_file returns success for a valid source file")
 val src_path = "/tmp/sml_driver_api_check_ok.spl"
 write_file(src_path, "fn main(): 1 + 2")
 
@@ -99,18 +79,19 @@ delete_file(src_path)
 
 #### parse_sdn_file returns success for a readable sdn file
 
-1. write file
+- parse_sdn_file returns success for a readable sdn file
    - Expected: result.is_success() is true
-2. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parse_sdn_file returns success for a readable sdn file")
 val sdn_path = "/tmp/sml_driver_api_parse_ok.sdn"
 val content = "root:" + NL + "  name: \"driver-api\""
 write_file(sdn_path, content)
@@ -125,21 +106,20 @@ delete_file(sdn_path)
 
 #### aot_c_file writes an empty c backend artifact file for a direct external caller
 
-1. delete file
-2. write file
+- aot_c_file writes an empty c backend artifact file for a direct external caller
    - Expected: result.is_success() is true
    - Expected: rt_file_exists(out_path) is true
-3. delete file
-4. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("aot_c_file writes an empty c backend artifact file for a direct external caller")
 val src_path = "/tmp/sml_driver_api_aot_c.spl"
 val out_path = "/tmp/sml_driver_api_aot_c.cpp"
 delete_file(out_path)
@@ -158,21 +138,20 @@ delete_file(out_path)
 
 #### aot_vhdl_file writes a VHDL artifact for a direct external caller
 
-1. delete file
-2. write file
+- aot_vhdl_file writes a VHDL artifact for a direct external caller
    - Expected: result.is_success() is true
    - Expected: rt_file_exists(out_path) is true
-3. delete file
-4. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("aot_vhdl_file writes a VHDL artifact for a direct external caller")
 val src_path = "/tmp/sml_driver_api_aot_vhdl.spl"
 val out_path = "/tmp/sml_driver_api_aot_vhdl.vhd"
 delete_file(out_path)
@@ -192,19 +171,19 @@ delete_file(out_path)
 
 #### aot_native_project_with_backend fails fast with a clear runtime error
 
-1. write file
+- aot_native_project_with_backend fails fast with a clear runtime error
    - Expected: result.is_success() is false
-2. delete file
-3. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("aot_native_project_with_backend fails fast with a clear runtime error")
 val src_path = "/tmp/sml_driver_api_project_fail.spl"
 val out_path = "/tmp/sml_driver_api_project_fail.bin"
 write_file(src_path, "fn main(): 11")
@@ -222,25 +201,22 @@ delete_file(out_path)
 
 #### backend helper symbols import cleanly for a direct external caller
 
-1. write file
-2. delete file
-3. delete file
+- backend helper symbols import cleanly for a direct external caller
    - Expected: llvm_result.is_success() is true
    - Expected: rt_file_exists(llvm_out_path) is true
    - Expected: cuda_result.is_success() is true
    - Expected: rt_file_exists(cuda_out_path) is true
-4. delete file
-5. delete file
-6. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("backend helper symbols import cleanly for a direct external caller")
 val src_path = "/tmp/sml_driver_api_backend_helpers.spl"
 val llvm_out_path = "/tmp/sml_driver_api_backend_helpers.ll"
 val cuda_out_path = "/tmp/sml_driver_api_backend_helpers.cu"
@@ -265,10 +241,7 @@ delete_file(cuda_out_path)
 
 #### grouped compile helper imports resolve cleanly for a direct external caller
 
-1. write file
-2. write file
-3. delete file
-4. delete file
+- grouped compile helper imports resolve cleanly for a direct external caller
    - Expected: compile_result.is_success() is true
    - Expected: smf_result.is_ok() is true
    - Expected: rt_file_exists(smf_out_path) is true
@@ -276,19 +249,17 @@ delete_file(cuda_out_path)
    - Expected: sdn_result.is_success() is true
    - Expected: c_result.is_success() is true
    - Expected: rt_file_exists(c_out_path) is true
-5. delete file
-6. delete file
-7. delete file
-8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("grouped compile helper imports resolve cleanly for a direct external caller")
 val src_path = "/tmp/sml_driver_api_grouped_compile.spl"
 val smf_out_path = "/tmp/sml_driver_api_grouped_compile.smf"
 val c_out_path = "/tmp/sml_driver_api_grouped_compile.cpp"
@@ -323,25 +294,22 @@ delete_file(sdn_path)
 
 #### grouped backend helper imports resolve cleanly for a direct external caller
 
-1. write file
-2. delete file
-3. delete file
+- grouped backend helper imports resolve cleanly for a direct external caller
    - Expected: llvm_native_result.is_success() is false
    - Expected: rt_file_exists(llvm_native_out_path) is false
    - Expected: native_result.is_success() is false
    - Expected: rt_file_exists(native_out_path) is false
-4. delete file
-5. delete file
-6. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("grouped backend helper imports resolve cleanly for a direct external caller")
 val src_path = "/tmp/sml_driver_api_grouped_backend.spl"
 val llvm_native_out_path = "/tmp/sml_driver_api_grouped_backend_llvm_native.bin"
 val native_out_path = "/tmp/sml_driver_api_grouped_backend_native.bin"
@@ -372,12 +340,12 @@ delete_file(native_out_path)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/driver_api_external_facade_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Driver API External Facade.
 - Driver API External Facade
 
 ## Scenario Summary
@@ -392,3 +360,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f50ca270dab2d7f5c65effb5a52e72532ae1b6074ca5a1a1bf034b1ac94c4d9e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f50ca270dab2d7f5c65effb5a52e72532ae1b6074ca5a1a1bf034b1ac94c4d9e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f50ca270dab2d7f5c65effb5a52e72532ae1b6074ca5a1a1bf034b1ac94c4d9e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/compiler/driver_api_external_facade_spec.spl
+mirror: doc/06_spec/03_system/compiler/driver_api_external_facade_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/compiler/driver_api_external_facade_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/compiler/driver_api_external_facade_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/compiler/driver_api_external_facade_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compile_to_smf writes an smf artifact for a direct external caller' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/driver_api_external_facade_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'check_file returns success for a valid source file' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/driver_api_external_facade_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parse_sdn_file returns success for a readable sdn file' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

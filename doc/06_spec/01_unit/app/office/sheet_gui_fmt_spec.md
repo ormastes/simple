@@ -20,7 +20,7 @@ Sheet GUI number-format display + data-validation editing spec.
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/office/sheet_gui_fmt_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Sheet GUI number-format display + data-validation editing spec.
@@ -56,13 +56,19 @@ line per visible row ("<rownum>|<cell>|<cell>...").
 
 #### renders a currency-formatted cell as its formatted string ($#,##0.00)
 
+- renders a currency-formatted cell as its formatted string ($#,##0.00)
+   - Expected: lines[2] equals `1|$1,234.50`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders a currency-formatted cell as its formatted string ($#,##0.00)")
 var sheet = Sheet.new("Money")
 sheet.set_value("A1", "1234.5")
 var formats = empty_sheet_formats()
@@ -78,13 +84,19 @@ expect(lines[2]).to_equal("1|$1,234.50")
 
 #### renders a percent-formatted cell (0.4567 with 0.0% -> 45.7%)
 
+- renders a percent-formatted cell (0.4567 with 0.0% -> 45.7%)
+   - Expected: lines[2] equals `1|45.7%`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders a percent-formatted cell (0.4567 with 0.0% -> 45.7%)")
 var sheet = Sheet.new("Pct")
 sheet.set_value("A1", "0.4567")
 var formats = empty_sheet_formats()
@@ -100,13 +112,19 @@ expect(lines[2]).to_equal("1|45.7%")
 
 #### renders a date-code cell from an Excel serial (45107 -> 2023-06-30)
 
+- renders a date-code cell from an Excel serial (45107 -> 2023-06-30)
+   - Expected: lines[2] equals `1|2023-06-30`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders a date-code cell from an Excel serial (45107 -> 2023-06-30)")
 var sheet = Sheet.new("Dates")
 sheet.set_value("A1", "45107")
 var formats = empty_sheet_formats()
@@ -122,13 +140,19 @@ expect(lines[2]).to_equal("1|2023-06-30")
 
 #### renders byte-identically to sheet_gui_view_with_selection with an empty format container
 
+- renders byte-identically to sheet_gui_view_with_selection with an empty format container
+   - Expected: full_view.text_dump equals `plain_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders byte-identically to sheet_gui_view_with_selection with an empty format container")
 val sheet = _price_sheet()
 val session = session_new(sheet, "B2")
 val no_rules: [CondRule] = []
@@ -142,13 +166,19 @@ expect(full_view.text_dump).to_equal(plain_view.text_dump)
 
 #### renders byte-identically to sheet_gui_view_with_formats with an empty format container (cf rules active)
 
+- renders byte-identically to sheet_gui_view_with_formats with an empty format container (cf rules active)
+   - Expected: full_view.text_dump equals `cf_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders byte-identically to sheet_gui_view_with_formats with an empty format container (cf rules active)")
 val sheet = _price_sheet()
 val session = session_new(sheet, "")
 val rules: [CondRule] = [CondRule(range: "B2:B3", kind: "above_average", criteria: "", n: 0, css: "")]
@@ -162,13 +192,23 @@ expect(full_view.text_dump).to_equal(cf_view.text_dump)
 
 #### leaves every unformatted cell's dump line identical when only one cell has a format
 
+- leaves every unformatted cell's dump line identical when only one cell has a format
+   - Expected: full_lines[0] equals `plain_lines[0]`
+   - Expected: full_lines[1] equals `plain_lines[1]`
+   - Expected: full_lines[2] equals `plain_lines[2]`
+   - Expected: full_lines[3] equals `plain_lines[3]`
+   - Expected: full_lines[4] equals `3|Gadget|$1,234.50`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("leaves every unformatted cell's dump line identical when only one cell has a format")
 val sheet = _price_sheet()
 val session = session_new(sheet, "")
 val no_rules: [CondRule] = []
@@ -189,13 +229,19 @@ expect(full_lines[4]).to_equal("3|Gadget|$1,234.50")
 
 #### formats a formula cell's numeric result (=A1+A2 -> $42.00)
 
+- formats a formula cell's numeric result (=A1+A2 -> $42.00)
+   - Expected: lines[4] equals `3|$42.00`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats a formula cell's numeric result (=A1+A2 -> $42.00)")
 var sheet = Sheet.new("Formulas")
 sheet.set_value("A1", "10")
 sheet.set_value("A2", "32")
@@ -214,13 +260,19 @@ expect(lines[4]).to_equal("3|$42.00")
 
 #### wraps the selection bracket around the FORMATTED text
 
+- wraps the selection bracket around the FORMATTED text
+   - Expected: lines[2] equals `1|[$1,234.50]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wraps the selection bracket around the FORMATTED text")
 var sheet = Sheet.new("SelFmt")
 sheet.set_value("A1", "1234.5")
 var formats = empty_sheet_formats()
@@ -238,13 +290,20 @@ expect(lines[2]).to_equal("1|[$1,234.50]")
 
 #### commits a valid edit and the grid re-renders it formatted
 
+- commits a valid edit and the grid re-renders it formatted
+   - Expected: outcome.last_error equals ``
+   - Expected: lines[3] equals `2|Widget|$42.00`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("commits a valid edit and the grid re-renders it formatted")
 val sheet = _price_sheet()
 var formats = empty_sheet_formats()
 formats = sheet_set_number_format(formats, "B2", "$#,##0.00")
@@ -263,13 +322,20 @@ expect(lines[3]).to_equal("2|Widget|$42.00")
 
 #### rejects an out-of-range value with the rule's message and an unchanged dump
 
+- rejects an out-of-range value with the rule's message and an unchanged dump
+   - Expected: outcome.last_error equals `Price must be a whole number between 1 and 100`
+   - Expected: after_view.text_dump equals `before_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects an out-of-range value with the rule's message and an unchanged dump")
 val sheet = _price_sheet()
 var vrules = empty_validation_rules()
 vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
@@ -287,13 +353,20 @@ expect(after_view.text_dump).to_equal(before_view.text_dump)
 
 #### rejects a non-integer for a whole_number rule
 
+- rejects a non-integer for a whole_number rule
+   - Expected: outcome.last_error equals `Price must be a whole number between 1 and 100`
+   - Expected: cell_display_text(out_cell) equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects a non-integer for a whole_number rule")
 val sheet = _price_sheet()
 var vrules = empty_validation_rules()
 vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
@@ -310,13 +383,20 @@ expect(cell_display_text(out_cell)).to_equal("10")
 
 #### accepts everything with an empty rules container (matches plain session_edit)
 
+- accepts everything with an empty rules container (matches plain session_edit)
+   - Expected: outcome.last_error equals ``
+   - Expected: validated_view.text_dump equals `plain_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("accepts everything with an empty rules container (matches plain session_edit)")
 val sheet = _price_sheet()
 val vrules = empty_validation_rules()
 val session = session_new(sheet, "")
@@ -334,13 +414,22 @@ expect(validated_view.text_dump).to_equal(plain_view.text_dump)
 
 #### keeps validation and format working on the SAME cell (valid commit reformats, invalid keeps old formatted value)
 
+- keeps validation and format working on the SAME cell (valid commit reformats, invalid keeps old formatted value)
+   - Expected: valid_outcome.last_error equals ``
+   - Expected: valid_lines[3] equals `2|Widget|$50.00`
+   - Expected: invalid_outcome.last_error equals `Price must be a whole number between 1 and 100`
+   - Expected: invalid_lines[3] equals `2|Widget|$50.00`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("keeps validation and format working on the SAME cell (valid commit reformats, invalid keeps old formatted value)")
 val sheet = _price_sheet()
 var formats = empty_sheet_formats()
 formats = sheet_set_number_format(formats, "B2", "$#,##0.00")
@@ -366,13 +455,21 @@ expect(invalid_lines[3]).to_equal("2|Widget|$50.00")
 
 #### commits a valid typed buffer on enter
 
+- commits a valid typed buffer on enter
+   - Expected: outcome.last_error equals ``
+   - Expected: out_session.pending_input equals ``
+   - Expected: cell_display_text(out_cell) equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("commits a valid typed buffer on enter")
 val sheet = _price_sheet()
 var vrules = empty_validation_rules()
 vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
@@ -392,13 +489,22 @@ expect(cell_display_text(out_cell)).to_equal("42")
 
 #### rejects an invalid typed buffer on enter, retaining the buffer and the mid-typing dump
 
+- rejects an invalid typed buffer on enter, retaining the buffer and the mid-typing dump
+   - Expected: outcome.last_error equals `Price must be a whole number between 1 and 100`
+   - Expected: out_session.pending_input equals `999`
+   - Expected: cell_display_text(out_cell) equals `10`
+   - Expected: after_view.text_dump equals `before_view.text_dump`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects an invalid typed buffer on enter, retaining the buffer and the mid-typing dump")
 val sheet = _price_sheet()
 var vrules = empty_validation_rules()
 vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
@@ -424,13 +530,20 @@ expect(after_view.text_dump).to_equal(before_view.text_dump)
 
 #### passes non-commit keys through untouched (arrow move, no validation)
 
+- passes non-commit keys through untouched (arrow move, no validation)
+   - Expected: outcome.last_error equals ``
+   - Expected: out_session.selected_ref equals `B3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes non-commit keys through untouched (arrow move, no validation)")
 val sheet = _price_sheet()
 var vrules = empty_validation_rules()
 vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
@@ -455,3 +568,51 @@ expect(out_session.selected_ref).to_equal("B3")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `712a4048254d079a60d8c9b86d8836eabf3f98585384b056b16913db63978a92`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `712a4048254d079a60d8c9b86d8836eabf3f98585384b056b16913db63978a92`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `712a4048254d079a60d8c9b86d8836eabf3f98585384b056b16913db63978a92`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/office/sheet_gui_fmt_spec.spl
+mirror: doc/06_spec/01_unit/app/office/sheet_gui_fmt_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/sheet_gui_fmt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/sheet_gui_fmt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/sheet_gui_fmt_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders a currency-formatted cell as its formatted string ($#,##0.00)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheet_gui_fmt_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders a percent-formatted cell (0.4567 with 0.0% -> 45.7%)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/sheet_gui_fmt_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders a date-code cell from an Excel serial (45107 -> 2023-06-30)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

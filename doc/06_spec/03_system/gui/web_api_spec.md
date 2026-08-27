@@ -1,31 +1,6 @@
 # Web Api Specification
 
-> <details>
-
-<!-- sdn-diagram:id=web_api_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=web_api_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-web_api_spec -> app
-web_api_spec -> nogc_sync_mut
-web_api_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=web_api_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering generate_html_page, generate_css, generate_js, generate_wm_js, generate_wm_html_page, web WM runtime assets.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -45,13 +20,22 @@ web_api_spec -> common
 
 #### produces a full HTML page from demo.ui.sdn _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-Runnable source: 16 lines folded for reproduction.
+
+- produces a full HTML page from demo.ui.sdn
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces a full HTML page from demo.ui.sdn")
 val html = web_api_html("examples/06_io/ui/demo.ui.sdn", 3000)
 # Must start with DOCTYPE
 expect(html).to_start_with("<!DOCTYPE html>")
@@ -80,13 +64,18 @@ expect(html).to_contain("widget-statusbar")
 
 #### produces a full HTML page from minimal.ui.sdn _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- produces a full HTML page from minimal.ui.sdn
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces a full HTML page from minimal.ui.sdn")
 val html = web_api_html("examples/06_io/ui/minimal.ui.sdn", 8080)
 expect(html).to_start_with("<!DOCTYPE html>")
 expect(html).to_contain("<title>Minimal</title>")
@@ -106,13 +95,18 @@ expect(html).to_contain("Hello from Simple UI!")
 
 #### dark theme contains dark background color _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- dark theme contains dark background color
 
-Runnable source: 9 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dark theme contains dark background color")
 val css = generate_css("dark")
 expect(css.len()).to_be_greater_than(0)
 # Dark theme uses #1e1e2e background
@@ -134,13 +128,18 @@ expect(css).to_contain(".widget-statusbar")
 
 #### light theme contains light background color _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- light theme contains light background color
 
-Runnable source: 6 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("light theme contains light background color")
 val css = generate_css("light")
 expect(css.len()).to_be_greater_than(0)
 # Light theme uses #ffffff background
@@ -159,13 +158,19 @@ expect(css).to_contain("#333333")
 
 #### dark and light themes produce different output _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- dark and light themes produce different output
+   - Expected: dark_css != light_css is true
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dark and light themes produce different output")
 val dark_css = generate_css("dark")
 val light_css = generate_css("light")
 expect(dark_css != light_css).to_equal(true)
@@ -181,13 +186,20 @@ expect(dark_css != light_css).to_equal(true)
 
 #### glass obsidian theme serializes real CSS color values _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- glass obsidian theme serializes real CSS color values
+   - Expected: css does not contain `Object { class`
+   - Expected: css does not contain `+ WM_TRAFFIC`
 
-Runnable source: 6 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("glass obsidian theme serializes real CSS color values")
 val css = generate_css("glass_obsidian_dark")
 expect(css).to_contain("--ui-bg: #060612")
 expect(css).to_contain("--ui-text: #E3E0F3")
@@ -208,13 +220,18 @@ expect(css.contains("+ WM_TRAFFIC")).to_equal(false)
 
 #### produces WebSocket connection code _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- produces WebSocket connection code
 
-Runnable source: 6 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces WebSocket connection code")
 val js = generate_js(3000)
 expect(js.len()).to_be_greater_than(0)
 expect(js).to_contain("WebSocket")
@@ -233,13 +250,18 @@ expect(js).to_contain("keydown")
 
 #### uses correct port in WebSocket URL _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- uses correct port in WebSocket URL
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses correct port in WebSocket URL")
 val js = generate_js(9999)
 expect(js).to_contain("9999")
 ```
@@ -256,13 +278,18 @@ expect(js).to_contain("9999")
 
 #### boots immediately when the document is already loaded _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- boots immediately when the document is already loaded
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("boots immediately when the document is already loaded")
 val js = generate_wm_js(3333)
 expect(js).to_contain("document.readyState === 'complete'")
 expect(js).to_contain("bootWMAfterLoad();")
@@ -279,13 +306,18 @@ expect(js).to_contain("new SimpleWindowManager()")
 
 #### retries stalled or errored websocket connections _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- retries stalled or errored websocket connections
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("retries stalled or errored websocket connections")
 val js = generate_wm_js(3333)
 expect(js).to_contain("let reconnectTimer = null")
 expect(js).to_contain("let connectDeadline = null")
@@ -307,13 +339,18 @@ expect(js).to_contain("scheduleReconnect()")
 
 #### produces the SimpleOS WM shell scaffold _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- produces the SimpleOS WM shell scaffold
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces the SimpleOS WM shell scaffold")
 val html = generate_wm_html_page("glass_obsidian_dark", "SimpleOS Web WM", 3333)
 expect(html).to_start_with("<!DOCTYPE html>")
 expect(html).to_contain("<title>SimpleOS Web WM</title>")
@@ -333,13 +370,18 @@ expect(html).to_contain("scheduleReconnect()")
 
 #### sets root WM token attributes on live pages _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- sets root WM token attributes on live pages
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sets root WM token attributes on live pages")
 val html = generate_wm_html_page("glass_obsidian_dark", "SimpleOS Web WM", 3333)
 expect(html).to_contain("data-wm-theme=\"glass_obsidian_dark\"")
 expect(html).to_contain("data-wm-icon-mask=\"circle\"")
@@ -359,14 +401,19 @@ expect(html).to_contain("data-wm-corner-radius=\"round\"")
 
 #### serves retained renderer as a browser module _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- serves retained renderer as a browser module
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val server = rt_file_read_text("src/app/ui.web/server.spl")
+# @req REQ-SSPEC-SYSTEM
+step("serves retained renderer as a browser module")
+val server = file_read_text("src/app/ui.web/server.spl")
 expect(server).to_contain("\"/retained_renderer.js\"")
 expect(server).to_contain("src/app/ui.web/retained_renderer.js")
 expect(server).to_contain("Content-Type: application/javascript")
@@ -382,14 +429,19 @@ expect(server).to_contain("Content-Type: application/javascript")
 
 #### boot script can call the WM message handler _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- boot script can call the WM message handler
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val wm = rt_file_read_text("src/app/ui.web/wm.js")
+# @req REQ-SSPEC-SYSTEM
+step("boot script can call the WM message handler")
+val wm = file_read_text("src/app/ui.web/wm.js")
 expect(wm).to_contain("handleMessage(frame)")
 expect(wm).to_contain("this.receiveFrame(frame)")
 ```
@@ -404,14 +456,19 @@ expect(wm).to_contain("this.receiveFrame(frame)")
 
 #### MDI drag and resize update real browser windows immediately _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- MDI drag and resize update real browser windows immediately
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val wm = rt_file_read_text("src/app/ui.web/wm.js")
+# @req REQ-SSPEC-SYSTEM
+step("MDI drag and resize update real browser windows immediately")
+val wm = file_read_text("src/app/ui.web/wm.js")
 expect(wm).to_contain("ds.winEl.style.left")
 expect(wm).to_contain("ds.winEl.style.top")
 expect(wm).to_contain("rs.winEl.style.width")
@@ -428,14 +485,19 @@ expect(wm).to_contain("rs.winEl.style.height")
 
 #### retained renderer applies root props and icons _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- retained renderer applies root props and icons
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val renderer = rt_file_read_text("src/app/ui.web/retained_renderer.js")
+# @req REQ-SSPEC-SYSTEM
+step("retained renderer applies root props and icons")
+val renderer = file_read_text("src/app/ui.web/retained_renderer.js")
 expect(renderer).to_contain("key === 'class'")
 expect(renderer).to_contain("key === 'style'")
 expect(renderer).to_contain("props.width ?? props.w")
@@ -454,12 +516,12 @@ expect(renderer).to_contain("surface.icon || surface.app_icon || props.icon || p
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/web_api_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering generate_html_page, generate_css, generate_js, generate_wm_js, generate_wm_html_page, web WM runtime assets.
 - generate_html_page
 - generate_css
 - generate_js
@@ -479,3 +541,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bc8691512bdad4abddfc55c27a656b70ece9c3b614f9f6885c3dcf55b67c1d26`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bc8691512bdad4abddfc55c27a656b70ece9c3b614f9f6885c3dcf55b67c1d26`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bc8691512bdad4abddfc55c27a656b70ece9c3b614f9f6885c3dcf55b67c1d26`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/gui/web_api_spec.spl
+mirror: doc/06_spec/03_system/gui/web_api_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/gui/web_api_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/gui/web_api_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/web_api_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces a full HTML page from demo.ui.sdn' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/web_api_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces a full HTML page from minimal.ui.sdn' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/web_api_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dark theme contains dark background color' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -24,7 +24,7 @@ Specs for `std.enterprise_outbox` (sync-tier impl `src/lib/nogc_sync_mut/enterpr
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -54,6 +54,11 @@ Lane: .spipe/simple_enterprise_suite (W2-F, outbox/reconciliation §5/§8).
 
 #### dispatches all pending events and writes audit entries
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- dispatches all pending events and writes audit entries
 - Append three outbox events for tenant A
    - Expected: outbox_worker_pending(store, "tenant-a").len() equals `3`
 - Dispatch a full batch to an accepting target
@@ -69,10 +74,12 @@ Lane: .spipe/simple_enterprise_suite (W2-F, outbox/reconciliation §5/§8).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("dispatches all pending events and writes audit entries")
 val store = fresh_store()
 step("Append three outbox events for tenant A")
 outbox_append(store, "tenant-a", "sales.order.created", "o1")
@@ -102,6 +109,7 @@ store_close(store)
 
 #### leaves rows pending and records the retry when the handler fails
 
+- leaves rows pending and records the retry when the handler fails
 - Dispatch to an always-failing target
    - Expected: rep.attempted equals `1`
    - Expected: rep.dispatched equals `0`
@@ -114,10 +122,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("leaves rows pending and records the retry when the handler fails")
 val store = fresh_store()
 outbox_append(store, "tenant-a", "sales.order.created", "o1")
 step("Dispatch to an always-failing target")
@@ -138,6 +148,7 @@ store_close(store)
 
 #### records successes, keeps failures pending, and never double-dispatches on re-run
 
+- records successes, keeps failures pending, and never double-dispatches on re-run
 - Append three events; the middle payload will be rejected
 - Dispatch with a target that fails payload p-bad
    - Expected: rep1.dispatched equals `2`
@@ -154,10 +165,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("records successes, keeps failures pending, and never double-dispatches on re-run")
 val store = fresh_store()
 step("Append three events; the middle payload will be rejected")
 outbox_append(store, "tenant-a", "e.one", "p1")
@@ -182,6 +195,7 @@ store_close(store)
 
 #### honors max_batch and picks up the remainder next run
 
+- honors max_batch and picks up the remainder next run
 - Dispatch with max_batch=2
    - Expected: rep1.attempted equals `2`
    - Expected: outbox_worker_pending(store, "tenant-a").len() equals `1`
@@ -193,10 +207,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("honors max_batch and picks up the remainder next run")
 val store = fresh_store()
 outbox_append(store, "tenant-a", "e.one", "p1")
 outbox_append(store, "tenant-a", "e.two", "p2")
@@ -218,6 +234,7 @@ store_close(store)
 
 #### flags a row as dead-letter after more than N recorded failures
 
+- flags a row as dead-letter after more than N recorded failures
 - Fail delivery three times
 - Reconcile with max_retries=2 — the row is a dead-letter candidate
    - Expected: rep.pending_count equals `1`
@@ -230,10 +247,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("flags a row as dead-letter after more than N recorded failures")
 val store = fresh_store()
 outbox_append(store, "tenant-a", "e.doomed", "p-bad")
 step("Fail delivery three times")
@@ -255,6 +274,7 @@ store_close(store)
 
 #### reports a dispatch record without an outbox row as corruption
 
+- reports a dispatch record without an outbox row as corruption
 - Forge a dispatch record for a nonexistent outbox row id
 - Reconcile detects the orphan and keeps counts honest
    - Expected: rep.total_rows equals `1`
@@ -266,10 +286,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("reports a dispatch record without an outbox row as corruption")
 val store = fresh_store()
 outbox_append(store, "tenant-a", "e.one", "p1")
 outbox_dispatch_batch(store, "tenant-a", dispatch_target_ok(), 1000, 10)
@@ -292,6 +314,7 @@ store_close(store)
 
 #### dispatch and reconciliation never cross tenants
 
+- dispatch and reconciliation never cross tenants
 - Dispatch tenant A only
    - Expected: outbox_worker_pending(store, "tenant-a").len() equals `0`
    - Expected: outbox_worker_pending(store, "tenant-b").len() equals `1`
@@ -304,10 +327,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("dispatch and reconciliation never cross tenants")
 val store = fresh_store()
 outbox_append(store, "tenant-a", "e.a", "pa")
 outbox_append(store, "tenant-b", "e.b", "pb")
@@ -329,6 +354,7 @@ store_close(store)
 
 #### pending and dispatch state survive close and reopen
 
+- pending and dispatch state survive close and reopen
 - Open a file-backed store, append two events, dispatch one
    - Expected: outbox_worker_pending(store, "tenant-a").len() equals `1`
 - Reopen — exactly the failed row is still pending, dispatch survives
@@ -343,10 +369,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("pending and dispatch state survive close and reopen")
 dir_create_all("/tmp/simple_outbox_spec")
 val path = "/tmp/simple_outbox_spec/restart_survival.db"
 if file_exists(path):
@@ -394,3 +422,54 @@ file_delete(path)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `252c6ab717cc83427c1b407a7940e0bbc2ff4e1c39e6d6dd3f11791333f42ed3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `252c6ab717cc83427c1b407a7940e0bbc2ff4e1c39e6d6dd3f11791333f42ed3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `252c6ab717cc83427c1b407a7940e0bbc2ff4e1c39e6d6dd3f11791333f42ed3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 40 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches all pending events and writes audit entries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves rows pending and records the retry when the handler fails' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records successes, keeps failures pending, and never double-dispatches on re-run' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Scilib Simd Ops Perf Specification
 
-> 1. var start = rt time now nanos
-
-<!-- sdn-diagram:id=scilib_simd_ops_perf_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=scilib_simd_ops_perf_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-scilib_simd_ops_perf_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=scilib_simd_ops_perf_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering science SIMD operation performance probe.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,84 +17,36 @@ scilib_simd_ops_perf_spec -> std
 
 #### records public SIMD-backed operation timings
 
-1. var start = rt time now nanos
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- records public SIMD-backed operation timings
    - Expected: result.value equals `120.0`
-
-2.  report
-
-3. start = rt time now nanos
    - Expected: result.get_f64(Index.new(7)).value equals `17.0`
-
-4.  report
-
-5. start = rt time now nanos
    - Expected: result.value equals `120.0`
-
-6.  report
-
-7. start = rt time now nanos
    - Expected: result.get_f32(Index.new(7)).value equals `17.0`
-
-8.  report
-
-9. start = rt time now nanos
    - Expected: result.get_f64(Index.new(7)).value equals `9.0`
-
-10.  report
-
-11. start = rt time now nanos
    - Expected: result.value equals `36.0`
-
-12.  report
-
-13. start = rt time now nanos
    - Expected: result.get_f64(Index.new(7)).value equals `64.0`
-
-14.  report
-
-15. start = rt time now nanos
    - Expected: result.get_f64(Index.new(7)).value equals `8.0`
-
-16.  report
-
-17. start = rt time now nanos
    - Expected: result.get_f64(Index.new(7)).value equals `16.0`
-
-18.  report
-
-19. start = rt time now nanos
    - Expected: result.value equals `36.0`
-
-20.  report
-
-21. start = rt time now nanos
    - Expected: result.get_f32(Index.new(7)).value equals `16.0`
-
-22.  report
-
-23. start = rt time now nanos
    - Expected: result.get_f32(Index.new(7)).value equals `4.0`
-
-24.  report
-
-25. start = rt time now nanos
    - Expected: result.get_f32(Index.new(7)).value equals `64.0`
-
-26.  report
-
-27. start = rt time now nanos
    - Expected: result.get_f32(Index.new(7)).value equals `8.0`
-
-28.  report
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 122 lines folded for reproduction.
+Runnable source: 124 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("records public SIMD-backed operation timings")
 val iterations = 1000
 val f64_left = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(5.0), Float64.new(6.0), Float64.new(7.0), Float64.new(8.0)])
 val f64_right = vector_from([Float64.new(8.0), Float64.new(7.0), Float64.new(6.0), Float64.new(5.0), Float64.new(4.0), Float64.new(3.0), Float64.new(2.0), Float64.new(1.0)])
@@ -251,12 +180,12 @@ _report("simd_ndarray_f32_abs_avg_ns", iterations, rt_time_now_nanos() - start)
 | Category | Other |
 | Status | Active |
 | Source | `test/05_perf/scilib_simd_ops_perf_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering science SIMD operation performance probe.
 - science SIMD operation performance probe
 
 ## Scenario Summary
@@ -271,3 +200,48 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0df99de7ab0f782ad92e6fa49f753e39018e158f63175550c163d8afd40233ee`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0df99de7ab0f782ad92e6fa49f753e39018e158f63175550c163d8afd40233ee`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0df99de7ab0f782ad92e6fa49f753e39018e158f63175550c163d8afd40233ee`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/05_perf/scilib_simd_ops_perf_spec.spl
+mirror: doc/06_spec/05_perf/scilib_simd_ops_perf_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/05_perf/scilib_simd_ops_perf_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/scilib_simd_ops_perf_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/scilib_simd_ops_perf_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/05_perf/scilib_simd_ops_perf_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records public SIMD-backed operation timings' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

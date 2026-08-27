@@ -2,29 +2,6 @@
 
 > Validates bi-directional alignment between CLI commands and MCP tools. Ensures that overlapping workflows share semantics (REQ-F3-002) and that every CLI command has a documented MCP equivalent or is explicitly CLI-only (REQ-ALIGN-001, REQ-ALIGN-002).
 
-<!-- sdn-diagram:id=surface_alignment_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=surface_alignment_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-surface_alignment_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=surface_alignment_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 28 | 28 | 0 | 0 |
@@ -49,7 +26,7 @@ Validates bi-directional alignment between CLI commands and MCP tools. Ensures t
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/app/surface_alignment_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -83,13 +60,19 @@ CLI-only (REQ-ALIGN-001, REQ-ALIGN-002).
 
 #### core workflow commands have MCP equivalents
 
+- core workflow commands have MCP equivalents
+   - Expected: core_commands_with_mcp.len() equals `mcp_equivalents.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("core workflow commands have MCP equivalents")
 val core_commands_with_mcp = [
     "test", "build", "lint", "fmt", "fix",
     "check", "diff", "doc-coverage"
@@ -106,13 +89,19 @@ expect(core_commands_with_mcp.len()).to_equal(mcp_equivalents.len())
 
 #### package management commands have MCP equivalents
 
+- package management commands have MCP equivalents
+   - Expected: pkg_commands.len() equals `pkg_mcp.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("package management commands have MCP equivalents")
 val pkg_commands = [
     "add", "remove", "install", "init", "list",
     "tree", "cache", "update", "lock"
@@ -130,13 +119,19 @@ expect(pkg_commands.len()).to_equal(pkg_mcp.len())
 
 #### code analysis commands have MCP equivalents
 
+- code analysis commands have MCP equivalents
+   - Expected: analysis_commands.len() equals `analysis_mcp.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("code analysis commands have MCP equivalents")
 val analysis_commands = [
     "info", "brief", "stats", "env", "desugar",
     "lex", "ffi-gen", "i18n", "check-arch",
@@ -157,13 +152,19 @@ expect(analysis_commands.len()).to_equal(analysis_mcp.len())
 
 #### doc generation commands have MCP equivalents
 
+- doc generation commands have MCP equivalents
+   - Expected: docgen_commands.len() equals `docgen_mcp.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("doc generation commands have MCP equivalents")
 val docgen_commands = [
     "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
     "feature-doc", "todo-gen", "grammar-doc"
@@ -183,13 +184,18 @@ expect(docgen_commands.len()).to_equal(docgen_mcp.len())
 
 #### defines the canonical CLI-only command list
 
+- defines the canonical CLI-only command list
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("defines the canonical CLI-only command list")
 # These commands are intentionally CLI-only because they are
 # interactive, daemon-based, or platform-specific
 val cli_only_commands = [
@@ -213,13 +219,18 @@ expect(cli_only_commands.len()).to_be_greater_than(20)
 
 #### all CLI-only commands are intentionally excluded
 
+- all CLI-only commands are intentionally excluded
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("all CLI-only commands are intentionally excluded")
 # Reasons for CLI-only status:
 # - Interactive: compile, run, watch, watch-daemon, mcp, lsp, dap
 # - Platform: targets, linkers, os
@@ -242,13 +253,19 @@ expect(total_cli_only).to_be_greater_than(15)
 
 #### debug session tools are MCP-only
 
+- debug session tools are MCP-only
+   - Expected: mcp_only_debug.len() equals `19`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("debug session tools are MCP-only")
 val mcp_only_debug = [
     "debug_create_session", "debug_list_sessions",
     "debug_close_session", "debug_set_breakpoint",
@@ -268,13 +285,19 @@ expect(mcp_only_debug.len()).to_equal(19)
 
 #### hardware debug tools are MCP-only
 
+- hardware debug tools are MCP-only
+   - Expected: mcp_only_hw.len() equals `6`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("hardware debug tools are MCP-only")
 val mcp_only_hw = [
     "debug_trace_capture", "debug_coverage_collect",
     "debug_flash_program", "debug_system_reset",
@@ -287,13 +310,19 @@ expect(mcp_only_hw.len()).to_equal(6)
 
 #### editor tools are MCP-only
 
+- editor tools are MCP-only
+   - Expected: mcp_only_editor.len() equals `5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("editor tools are MCP-only")
 val mcp_only_editor = [
     "simple_read", "simple_edit", "simple_multi_edit",
     "simple_status", "simple_api"
@@ -305,13 +334,19 @@ expect(mcp_only_editor.len()).to_equal(5)
 
 #### VCS tools are mostly MCP-only
 
+- VCS tools are mostly MCP-only
+   - Expected: mcp_only_vcs.len() equals `6`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("VCS tools are mostly MCP-only")
 # VCS tools use jj commands that are complex multi-step operations
 # diff and log have CLI equivalents, but squash/new/commit/push/rebase/pull
 # are MCP-specific wrappers around jj
@@ -326,13 +361,19 @@ expect(mcp_only_vcs.len()).to_equal(6)
 
 #### analysis tools are partially MCP-only
 
+- analysis tools are partially MCP-only
+   - Expected: mcp_only_analysis.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("analysis tools are partially MCP-only")
 val mcp_only_analysis = [
     "simple_dependencies", "simple_api_diff",
     "simple_search"
@@ -346,13 +387,19 @@ expect(mcp_only_analysis.len()).to_equal(3)
 
 #### cli-passthrough tools all map to valid CLI commands
 
+- cli-passthrough tools all map to valid CLI commands
+   - Expected: mcp_name.starts_with("simple_") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cli-passthrough tools all map to valid CLI commands")
 # Each MCP tool with handler_kind "cli" must map to a real command
 val mapped_pairs = [
     ["simple_test", "test"],
@@ -393,13 +440,19 @@ for pair in mapped_pairs:
 
 #### total aligned pairs covers expected count
 
+- total aligned pairs covers expected count
+   - Expected: total_cli equals `68`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("total aligned pairs covers expected count")
 # Commands with MCP equivalents
 val both_count = 38
 # CLI-only commands
@@ -415,13 +468,19 @@ expect(total_cli).to_equal(68)
 
 #### MCP side is fully accounted
 
+- MCP side is fully accounted
+   - Expected: total_mcp equals `99`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("MCP side is fully accounted")
 # Both (mapped) + MCP-only should equal total MCP tools
 # Note: some CLI commands map to multiple MCP tools (e.g., log -> debug_log_*)
 val mapped_mcp_count = 60
@@ -434,13 +493,20 @@ expect(total_mcp).to_equal(99)
 
 #### no orphan entries exist
 
+- no orphan entries exist
+   - Expected: total_classified_cli equals `total_in_matrix_cli`
+   - Expected: total_classified_mcp equals `total_in_matrix_mcp`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("no orphan entries exist")
 # An orphan is a tool/command that appears in neither classification
 # nor the alignment matrix. By definition, if both inventories are
 # complete, there can be no orphans.
@@ -460,13 +526,19 @@ expect(total_classified_mcp).to_equal(total_in_matrix_mcp)
 
 #### test command and simple_test have same semantics
 
+- test command and simple_test have same semantics
+   - Expected: cli_accepts_path equals `mcp_accepts_path`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("test command and simple_test have same semantics")
 # Both run the test runner with a path argument
 val cli_cmd = "test"
 val mcp_tool = "simple_test"
@@ -479,13 +551,19 @@ expect(cli_accepts_path).to_equal(mcp_accepts_path)
 
 #### build command and simple_build have same semantics
 
+- build command and simple_build have same semantics
+   - Expected: cli_produces_binary equals `mcp_produces_binary`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("build command and simple_build have same semantics")
 val cli_cmd = "build"
 val mcp_tool = "simple_build"
 val cli_produces_binary = true
@@ -497,13 +575,19 @@ expect(cli_produces_binary).to_equal(mcp_produces_binary)
 
 #### lint command and simple_lint have same semantics
 
+- lint command and simple_lint have same semantics
+   - Expected: cli_returns_warnings equals `mcp_returns_warnings`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("lint command and simple_lint have same semantics")
 val cli_cmd = "lint"
 val mcp_tool = "simple_lint"
 val cli_returns_warnings = true
@@ -515,13 +599,19 @@ expect(cli_returns_warnings).to_equal(mcp_returns_warnings)
 
 #### fmt command and simple_format have same semantics
 
+- fmt command and simple_format have same semantics
+   - Expected: cli_formats_file equals `mcp_formats_file`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fmt command and simple_format have same semantics")
 val cli_cmd = "fmt"
 val mcp_tool = "simple_format"
 val cli_formats_file = true
@@ -533,13 +623,19 @@ expect(cli_formats_file).to_equal(mcp_formats_file)
 
 #### fix command and simple_fix have same semantics
 
+- fix command and simple_fix have same semantics
+   - Expected: cli_applies_fixes equals `mcp_applies_fixes`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fix command and simple_fix have same semantics")
 val cli_cmd = "fix"
 val mcp_tool = "simple_fix"
 val cli_applies_fixes = true
@@ -551,13 +647,19 @@ expect(cli_applies_fixes).to_equal(mcp_applies_fixes)
 
 #### diff command and simple_diff both use jj/git
 
+- diff command and simple_diff both use jj/git
+   - Expected: cli_uses_jj equals `mcp_uses_jj`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("diff command and simple_diff both use jj/git")
 val cli_uses_jj = true
 val mcp_uses_jj = true
 expect(cli_uses_jj).to_equal(mcp_uses_jj)
@@ -571,13 +673,20 @@ expect(cli_uses_jj).to_equal(mcp_uses_jj)
 
 #### CLI diff uses shell, MCP diff uses VCS handler
 
+- CLI diff uses shell, MCP diff uses VCS handler
+   - Expected: cli_handler_kind equals `shell_wrapper`
+   - Expected: mcp_handler_kind equals `vcs`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CLI diff uses shell, MCP diff uses VCS handler")
 # CLI diff calls `jj diff` via shell
 # MCP simple_diff uses the VCS handler with structured output
 val cli_handler_kind = "shell_wrapper"
@@ -591,13 +700,19 @@ expect(mcp_handler_kind).to_equal("vcs")
 
 #### CLI query dispatches to file, MCP has separate ast/sem tools
 
+- CLI query dispatches to file, MCP has separate ast/sem tools
+   - Expected: mcp_split_tools.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CLI query dispatches to file, MCP has separate ast/sem tools")
 # CLI: simple query <subcommand>
 # MCP: simple_ast_query, simple_sem_query, simple_query_schema
 val cli_unified_command = "query"
@@ -612,13 +727,19 @@ expect(mcp_split_tools.len()).to_equal(3)
 
 #### CLI test-daemon is one command, MCP splits into 4 tools
 
+- CLI test-daemon is one command, MCP splits into 4 tools
+   - Expected: mcp_tools.len() equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CLI test-daemon is one command, MCP splits into 4 tools")
 val cli_command = "test-daemon"
 val mcp_tools = [
     "test_daemon_run", "test_daemon_clean",
@@ -631,13 +752,19 @@ expect(mcp_tools.len()).to_equal(4)
 
 #### CLI task-daemon is one command, MCP splits into 3 tools
 
+- CLI task-daemon is one command, MCP splits into 3 tools
+   - Expected: mcp_tools.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CLI task-daemon is one command, MCP splits into 3 tools")
 val cli_command = "task-daemon"
 val mcp_tools = [
     "task_status", "task_cancel", "task_list"
@@ -649,13 +776,19 @@ expect(mcp_tools.len()).to_equal(3)
 
 #### CLI log is one command, MCP splits into 6 debug-log tools
 
+- CLI log is one command, MCP splits into 6 debug-log tools
+   - Expected: mcp_tools.len() equals `6`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("CLI log is one command, MCP splits into 6 debug-log tools")
 val cli_command = "log"
 val mcp_tools = [
     "debug_log_enable", "debug_log_disable",
@@ -669,13 +802,19 @@ expect(mcp_tools.len()).to_equal(6)
 
 #### MCP has editor tools with no CLI equivalent
 
+- MCP has editor tools with no CLI equivalent
+   - Expected: editor_only_tools.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("MCP has editor tools with no CLI equivalent")
 # simple_read, simple_edit, simple_multi_edit are inherently
 # MCP-only because they provide IDE-like edit operations
 val editor_only_tools = [
@@ -688,13 +827,19 @@ expect(editor_only_tools.len()).to_equal(3)
 
 #### MCP has debug session tools with no CLI equivalent
 
+- MCP has debug session tools with no CLI equivalent
+   - Expected: debug_session_count + hw_debug_count equals `25`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("MCP has debug session tools with no CLI equivalent")
 # Debug session management is inherently interactive and
 # session-based, making it MCP-only
 val debug_session_count = 19
@@ -717,8 +862,63 @@ expect(debug_session_count + hw_debug_count).to_equal(25)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/simple_cli_mcp_completeness.md](doc/02_requirements/feature/simple_cli_mcp_completeness.md)
-- **Plan:** [doc/03_plan/simple_cli_mcp_completeness_plan_2026-03-27.md](doc/03_plan/simple_cli_mcp_completeness_plan_2026-03-27.md)
+- **Requirements:** `doc/02_requirements/feature/simple_cli_mcp_completeness.md`
+- **Plan:** `doc/03_plan/simple_cli_mcp_completeness_plan_2026-03-27.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-ALIGN-002).`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8c2fabc866515c2fb896db766443310066c4423d00e5600888e1dec6cd444512`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8c2fabc866515c2fb896db766443310066c4423d00e5600888e1dec6cd444512`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8c2fabc866515c2fb896db766443310066c4423d00e5600888e1dec6cd444512`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+
+SSpec documentization score: 85/100
+source: test/01_unit/app/surface_alignment_spec.spl
+mirror: doc/06_spec/01_unit/app/surface_alignment_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=95 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/surface_alignment_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/surface_alignment_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/surface_alignment_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/surface_alignment_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'core workflow commands have MCP equivalents' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/surface_alignment_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'package management commands have MCP equivalents' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/surface_alignment_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'code analysis commands have MCP equivalents' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/surface_alignment_spec.spl:333:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'test command and simple_test have same semantics' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

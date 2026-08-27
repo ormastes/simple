@@ -1,29 +1,6 @@
-# mcp_query_tools_spec
+# Mcp Query Tools Specification
 
-> Tests the 5 Tier 2 MCP query tool handlers: simple_definition, simple_references, simple_hover, simple_completions, simple_type_at
-
-<!-- sdn-diagram:id=mcp_query_tools_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mcp_query_tools_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mcp_query_tools_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mcp_query_tools_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering simple_definition tool, simple_references tool, simple_hover tool, simple_completions tool, simple_type_at tool.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,32 +9,7 @@ mcp_query_tools_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# mcp_query_tools_spec
-
-Tests the 5 Tier 2 MCP query tool handlers: simple_definition, simple_references, simple_hover, simple_completions, simple_type_at
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #MCP-QUERY-001 |
-| Category | Tooling |
-| Difficulty | 2/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/mcp_unit/mcp_query_tools_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests the 5 Tier 2 MCP query tool handlers:
-simple_definition, simple_references, simple_hover, simple_completions, simple_type_at
-
-## Behavior
-
-- Each tool delegates to bin/simple query CLI
-- Requires file and line parameters
-- Column parameter is optional
+# Mcp Query Tools Specification
 
 ## Scenarios
 
@@ -65,13 +17,23 @@ simple_definition, simple_references, simple_hover, simple_completions, simple_t
 
 #### requires file parameter
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- requires file parameter
+   - Expected: has_error is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("requires file parameter")
 val file = ""
 val has_error = file == ""
 expect(has_error).to_equal(true)
@@ -81,13 +43,19 @@ expect(has_error).to_equal(true)
 
 #### requires line parameter
 
+- requires line parameter
+   - Expected: has_error is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("requires line parameter")
 val line = ""
 val has_error = line == ""
 expect(has_error).to_equal(true)
@@ -97,13 +65,18 @@ expect(has_error).to_equal(true)
 
 #### builds definition command
 
+- builds definition command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds definition command")
 val file = "src/app/cli/main.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query definition " + file + " " + line
@@ -117,13 +90,18 @@ expect(cmd).to_contain(line)
 
 #### builds definition command with column
 
+- builds definition command with column
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds definition command with column")
 val file = "src/app/cli/main.spl"
 val line = "42"
 val column = "10"
@@ -139,13 +117,18 @@ expect(cmd).to_contain("42 10")
 
 #### builds references command
 
+- builds references command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds references command")
 val file = "src/app/cli/main.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query references " + file + " " + line
@@ -159,13 +142,18 @@ expect(cmd).to_contain("query references")
 
 #### builds hover command
 
+- builds hover command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds hover command")
 val file = "src/app/cli/main.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query hover " + file + " " + line
@@ -179,13 +167,18 @@ expect(cmd).to_contain("query hover")
 
 #### builds completions command
 
+- builds completions command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds completions command")
 val file = "src/app/cli/main.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query completions " + file + " " + line
@@ -197,13 +190,18 @@ expect(cmd).to_contain("query completions")
 
 #### builds completions command with prefix
 
+- builds completions command with prefix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds completions command with prefix")
 val file = "src/app/cli/main.spl"
 val line = "42"
 val prefix = "cli_"
@@ -219,13 +217,18 @@ expect(cmd).to_contain("--prefix cli_")
 
 #### builds type-at command
 
+- builds type-at command
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds type-at command")
 val file = "src/app/cli/main.spl"
 val line = "42"
 var cmd = "timeout 30 bin/simple query type-at " + file + " " + line
@@ -234,6 +237,25 @@ expect(cmd).to_contain("query type-at")
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/mcp_unit/mcp_query_tools_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering simple_definition tool, simple_references tool, simple_hover tool, simple_completions tool, simple_type_at tool.
+- simple_definition tool
+- simple_references tool
+- simple_hover tool
+- simple_completions tool
+- simple_type_at tool
 
 ## Scenario Summary
 
@@ -247,3 +269,51 @@ expect(cmd).to_contain("query type-at")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1b0937549b41a41e8336c7d47bcf62e8cec91062a3743618a7f40e39377224b1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1b0937549b41a41e8336c7d47bcf62e8cec91062a3743618a7f40e39377224b1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1b0937549b41a41e8336c7d47bcf62e8cec91062a3743618a7f40e39377224b1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/mcp_unit/mcp_query_tools_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_unit/mcp_query_tools_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_unit/mcp_query_tools_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_unit/mcp_query_tools_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_unit/mcp_query_tools_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires file parameter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/mcp_query_tools_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires line parameter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/mcp_query_tools_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds definition command' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

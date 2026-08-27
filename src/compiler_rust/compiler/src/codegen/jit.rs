@@ -405,7 +405,6 @@ impl JitCompiler {
         let func_names: std::collections::HashSet<&str> = mir
             .functions
             .iter()
-            .filter(|f| f.blocks.is_empty())
             .map(|f| f.name.as_str())
             .chain(mir.extern_fn_names.iter().map(String::as_str))
             .collect();

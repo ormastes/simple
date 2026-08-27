@@ -1,29 +1,6 @@
 # TreeSitter Lexer Specification
 
-> use compiler.core.lexer.{Lexer, lexer_new, lexer_next_token, Token, TokenKind}
-
-<!-- sdn-diagram:id=treesitter_lexer_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=treesitter_lexer_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-treesitter_lexer_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=treesitter_lexer_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ treesitter_lexer_spec -> compiler
 
 # TreeSitter Lexer Specification
 
-use compiler.core.lexer.{Lexer, lexer_new, lexer_next_token, Token, TokenKind}
+use std.spec.step
 
 ## At a Glance
 
@@ -44,12 +21,14 @@ use compiler.core.lexer.{Lexer, lexer_new, lexer_next_token, Token, TokenKind}
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/treesitter_lexer_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## API
 
 ```simple
+use std.spec.step
+
 use compiler.core.lexer.{Lexer, lexer_new, lexer_next_token, Token, TokenKind}
 
 var lexer = lexer_new(source)
@@ -62,16 +41,22 @@ val token = lexer_next_token(lexer)
 
 #### tokenizes fn keyword
 
-1. var lexer = lexer new
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- tokenizes fn keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes fn keyword")
 var lexer = lexer_new("fn")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwFn
@@ -81,16 +66,18 @@ expect token.kind to_equal TokenKind.KwFn
 
 #### tokenizes val keyword
 
-1. var lexer = lexer new
+- tokenizes val keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes val keyword")
 var lexer = lexer_new("val")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwVal
@@ -100,16 +87,18 @@ expect token.kind to_equal TokenKind.KwVal
 
 #### tokenizes var keyword
 
-1. var lexer = lexer new
+- tokenizes var keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes var keyword")
 var lexer = lexer_new("var")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwVar
@@ -119,16 +108,18 @@ expect token.kind to_equal TokenKind.KwVar
 
 #### tokenizes if keyword
 
-1. var lexer = lexer new
+- tokenizes if keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes if keyword")
 var lexer = lexer_new("if")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwIf
@@ -138,16 +129,18 @@ expect token.kind to_equal TokenKind.KwIf
 
 #### tokenizes struct keyword
 
-1. var lexer = lexer new
+- tokenizes struct keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes struct keyword")
 var lexer = lexer_new("struct")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwStruct
@@ -157,16 +150,18 @@ expect token.kind to_equal TokenKind.KwStruct
 
 #### tokenizes enum keyword
 
-1. var lexer = lexer new
+- tokenizes enum keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes enum keyword")
 var lexer = lexer_new("enum")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwEnum
@@ -176,16 +171,18 @@ expect token.kind to_equal TokenKind.KwEnum
 
 #### tokenizes impl keyword
 
-1. var lexer = lexer new
+- tokenizes impl keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes impl keyword")
 var lexer = lexer_new("impl")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwImpl
@@ -195,16 +192,18 @@ expect token.kind to_equal TokenKind.KwImpl
 
 #### tokenizes trait keyword
 
-1. var lexer = lexer new
+- tokenizes trait keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes trait keyword")
 var lexer = lexer_new("trait")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.KwTrait
@@ -216,16 +215,18 @@ expect token.kind to_equal TokenKind.KwTrait
 
 #### tokenizes simple identifier
 
-1. var lexer = lexer new
+- tokenizes simple identifier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes simple identifier")
 var lexer = lexer_new("foo")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Ident
@@ -235,16 +236,18 @@ expect token.kind to_equal TokenKind.Ident
 
 #### tokenizes identifier with underscore
 
-1. var lexer = lexer new
+- tokenizes identifier with underscore
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes identifier with underscore")
 var lexer = lexer_new("_bar")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Ident
@@ -254,16 +257,18 @@ expect token.kind to_equal TokenKind.Ident
 
 #### tokenizes identifier with digits
 
-1. var lexer = lexer new
+- tokenizes identifier with digits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes identifier with digits")
 var lexer = lexer_new("foo123")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Ident
@@ -275,16 +280,18 @@ expect token.kind to_equal TokenKind.Ident
 
 #### tokenizes integer
 
-1. var lexer = lexer new
+- tokenizes integer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes integer")
 var lexer = lexer_new("42")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Integer
@@ -294,16 +301,18 @@ expect token.kind to_equal TokenKind.Integer
 
 #### tokenizes float
 
-1. var lexer = lexer new
+- tokenizes float
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes float")
 var lexer = lexer_new("3.14")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Float
@@ -313,16 +322,18 @@ expect token.kind to_equal TokenKind.Float
 
 #### tokenizes zero
 
-1. var lexer = lexer new
+- tokenizes zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes zero")
 var lexer = lexer_new("0")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Integer
@@ -334,16 +345,18 @@ expect token.kind to_equal TokenKind.Integer
 
 #### tokenizes plus
 
-1. var lexer = lexer new
+- tokenizes plus
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes plus")
 var lexer = lexer_new("+")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Plus
@@ -353,16 +366,18 @@ expect token.kind to_equal TokenKind.Plus
 
 #### tokenizes minus
 
-1. var lexer = lexer new
+- tokenizes minus
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes minus")
 var lexer = lexer_new("-")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Minus
@@ -372,16 +387,18 @@ expect token.kind to_equal TokenKind.Minus
 
 #### tokenizes star
 
-1. var lexer = lexer new
+- tokenizes star
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes star")
 var lexer = lexer_new("*")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Star
@@ -391,16 +408,18 @@ expect token.kind to_equal TokenKind.Star
 
 #### tokenizes colon
 
-1. var lexer = lexer new
+- tokenizes colon
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes colon")
 var lexer = lexer_new(":")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Colon
@@ -410,16 +429,18 @@ expect token.kind to_equal TokenKind.Colon
 
 #### tokenizes arrow
 
-1. var lexer = lexer new
+- tokenizes arrow
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes arrow")
 var lexer = lexer_new("->")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Arrow
@@ -431,16 +452,18 @@ expect token.kind to_equal TokenKind.Arrow
 
 #### tokenizes left paren
 
-1. var lexer = lexer new
+- tokenizes left paren
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes left paren")
 var lexer = lexer_new("(")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.LParen
@@ -450,16 +473,18 @@ expect token.kind to_equal TokenKind.LParen
 
 #### tokenizes right paren
 
-1. var lexer = lexer new
+- tokenizes right paren
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes right paren")
 var lexer = lexer_new(")")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.RParen
@@ -469,16 +494,18 @@ expect token.kind to_equal TokenKind.RParen
 
 #### tokenizes left brace
 
-1. var lexer = lexer new
+- tokenizes left brace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes left brace")
 var lexer = lexer_new("{")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.LBrace
@@ -488,16 +515,18 @@ expect token.kind to_equal TokenKind.LBrace
 
 #### tokenizes right brace
 
-1. var lexer = lexer new
+- tokenizes right brace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes right brace")
 var lexer = lexer_new("}")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.RBrace
@@ -507,16 +536,18 @@ expect token.kind to_equal TokenKind.RBrace
 
 #### tokenizes left bracket
 
-1. var lexer = lexer new
+- tokenizes left bracket
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes left bracket")
 var lexer = lexer_new("[")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.LBracket
@@ -526,16 +557,18 @@ expect token.kind to_equal TokenKind.LBracket
 
 #### tokenizes right bracket
 
-1. var lexer = lexer new
+- tokenizes right bracket
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes right bracket")
 var lexer = lexer_new("]")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.RBracket
@@ -547,16 +580,18 @@ expect token.kind to_equal TokenKind.RBracket
 
 #### tokenizes function signature
 
-1. var lexer = lexer new
+- tokenizes function signature
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes function signature")
 var lexer = lexer_new("fn add(a: i64):")
 val t1 = lexer_next_token(lexer)
 expect t1.kind to_equal TokenKind.KwFn
@@ -568,16 +603,18 @@ expect t2.kind to_equal TokenKind.Ident
 
 #### tokenizes variable declaration
 
-1. var lexer = lexer new
+- tokenizes variable declaration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tokenizes variable declaration")
 var lexer = lexer_new("val x = 42")
 val t1 = lexer_next_token(lexer)
 expect t1.kind to_equal TokenKind.KwVal
@@ -591,16 +628,18 @@ expect t2.kind to_equal TokenKind.Ident
 
 #### produces EOF for empty input
 
-1. var lexer = lexer new
+- produces EOF for empty input
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces EOF for empty input")
 var lexer = lexer_new("")
 val token = lexer_next_token(lexer)
 expect token.kind to_equal TokenKind.Eof
@@ -610,16 +649,18 @@ expect token.kind to_equal TokenKind.Eof
 
 #### produces EOF after all tokens consumed
 
-1. var lexer = lexer new
+- produces EOF after all tokens consumed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces EOF after all tokens consumed")
 var lexer = lexer_new("x")
 val t1 = lexer_next_token(lexer)
 val t2 = lexer_next_token(lexer)
@@ -640,3 +681,51 @@ expect t2.kind to_equal TokenKind.Eof
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6fda9ace6b72220fe4284dc0dda97c7deeca666585a4109bc13151add92d8fc1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6fda9ace6b72220fe4284dc0dda97c7deeca666585a4109bc13151add92d8fc1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6fda9ace6b72220fe4284dc0dda97c7deeca666585a4109bc13151add92d8fc1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/treesitter_lexer_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/treesitter_lexer_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/treesitter_lexer_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/treesitter_lexer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/treesitter_lexer_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes fn keyword' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/treesitter_lexer_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes val keyword' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/treesitter_lexer_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes var keyword' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

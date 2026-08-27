@@ -2,30 +2,6 @@
 
 > Validates the benchmark ledger that measures C-baseline vs pure-Simple performance ratios across 5 hot-path categories: memcpy, string ops, file system, compress, and crypto.
 
-<!-- sdn-diagram:id=benchmark_ledger_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=benchmark_ledger_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-benchmark_ledger_spec -> std
-benchmark_ledger_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=benchmark_ledger_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -47,7 +23,7 @@ Validates the benchmark ledger that measures C-baseline vs pure-Simple performan
 | Status | Draft |
 | Plan | doc/03_plan/pure_simple_lib_standalone_hw_plan.md |
 | Source | `test/01_unit/app/stats/benchmark_ledger_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -71,13 +47,19 @@ file system, compress, and crypto.
 
 #### AC-2: enum has all five required categories
 
+- AC-2: enum has all five required categories
+   - Expected: memcpy_ok is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: enum has all five required categories")
 val memcpy_cat = HotPathCategory.Memcpy
 val string_cat = HotPathCategory.StringOps
 val fs_cat = HotPathCategory.FileSystem
@@ -95,13 +77,18 @@ expect(memcpy_ok).to_equal(true)
 
 #### AC-2: returns BenchmarkStats for memcpy category
 
+- AC-2: returns BenchmarkStats for memcpy category
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: returns BenchmarkStats for memcpy category")
 val stats = run_category_benchmark(HotPathCategory.Memcpy)
 
 # BenchmarkStats should have a non-negative elapsed_ns
@@ -113,13 +100,18 @@ expect(elapsed).to_be_greater_than(-1)
 
 #### AC-2: returns BenchmarkStats for string ops category
 
+- AC-2: returns BenchmarkStats for string ops category
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: returns BenchmarkStats for string ops category")
 val stats = run_category_benchmark(HotPathCategory.StringOps)
 
 val elapsed = stats.elapsed_ns
@@ -132,13 +124,18 @@ expect(elapsed).to_be_greater_than(-1)
 
 #### AC-2: returns C baseline stats for memcpy
 
+- AC-2: returns C baseline stats for memcpy
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: returns C baseline stats for memcpy")
 val c_stats = c_baseline_for(HotPathCategory.Memcpy)
 
 val elapsed = c_stats.elapsed_ns
@@ -151,13 +148,18 @@ expect(elapsed).to_be_greater_than(-1)
 
 #### AC-2: computes ratio as c_baseline / pure_simple
 
+- AC-2: computes ratio as c_baseline / pure_simple
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: computes ratio as c_baseline / pure_simple")
 val pure_stats = run_category_benchmark(HotPathCategory.Memcpy)
 val c_stats = c_baseline_for(HotPathCategory.Memcpy)
 val ratio = compute_parity_ratio(pure_stats, c_stats)
@@ -172,13 +174,19 @@ expect(ratio).to_be_greater_than(0)
 
 #### AC-2: writes ledger report to specified path
 
+- AC-2: writes ledger report to specified path
+   - Expected: is_ok is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: writes ledger report to specified path")
 val result = generate_benchmark_ledger("/tmp/test_ledger.md")
 
 val is_ok = result.is_ok()
@@ -189,13 +197,18 @@ expect(is_ok).to_equal(true)
 
 #### AC-2: ledger contains all five category rows
 
+- AC-2: ledger contains all five category rows
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: ledger contains all five category rows")
 val result = generate_benchmark_ledger("/tmp/test_ledger_rows.md")
 val ledger_text = result.unwrap()
 
@@ -210,13 +223,18 @@ expect(ledger_text).to_contain("Crypto")
 
 #### AC-2: ledger contains ratio column
 
+- AC-2: ledger contains ratio column
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("AC-2: ledger contains ratio column")
 val result = generate_benchmark_ledger("/tmp/test_ledger_ratio.md")
 val ledger_text = result.unwrap()
 
@@ -238,7 +256,55 @@ expect(ledger_text).to_contain("ratio")
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/pure_simple_lib_standalone_hw_plan.md](doc/03_plan/pure_simple_lib_standalone_hw_plan.md)
+- **Plan:** `doc/03_plan/pure_simple_lib_standalone_hw_plan.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5425e197727c27e0275ca3e75591e3bbfe1c2364bf7a77b86769825499e547f8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5425e197727c27e0275ca3e75591e3bbfe1c2364bf7a77b86769825499e547f8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5425e197727c27e0275ca3e75591e3bbfe1c2364bf7a77b86769825499e547f8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/stats/benchmark_ledger_spec.spl
+mirror: doc/06_spec/01_unit/app/stats/benchmark_ledger_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/stats/benchmark_ledger_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/stats/benchmark_ledger_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/stats/benchmark_ledger_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-2: enum has all five required categories' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/stats/benchmark_ledger_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-2: returns BenchmarkStats for memcpy category' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/stats/benchmark_ledger_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-2: returns BenchmarkStats for string ops category' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

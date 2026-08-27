@@ -24,7 +24,7 @@ Validates the lightweight inventory gate that ties the WHATWG HTML element inven
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/check/html_css_rendering_manifest_traceability_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -241,6 +241,11 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 
 #### proves the rendered fixture matrix covers HTML tags and implemented CSS
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- proves the rendered fixture matrix covers HTML tags and implemented CSS
 - Verify executable HTML and CSS traceability
    - Expected: code equals `0`
 - Read the emitted evidence contract
@@ -263,10 +268,12 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 76 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("proves the rendered fixture matrix covers HTML tags and implemented CSS")
 step("Verify executable HTML and CSS traceability")
 val command = "rm -rf build/test-html-css-rendering-manifest-traceability && BUILD_DIR=build/test-html-css-rendering-manifest-traceability REPORT_PATH=build/test-html-css-rendering-manifest-traceability/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 sh scripts/check/check-html-css-rendering-manifest-traceability.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -352,6 +359,7 @@ expect(report).to_contain("- implemented CSS properties: " + css_source_count + 
 
 #### rejects a truncated render manifest even when fixture HTML still exists
 
+- rejects a truncated render manifest even when fixture HTML still exists
 - Create a manifest missing one render case and run the gate against it
    - Expected: code equals `0`
 - Assert the gate fails on case count instead of silently accepting partial coverage
@@ -360,10 +368,12 @@ expect(report).to_contain("- implemented CSS properties: " + css_source_count + 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects a truncated render manifest even when fixture HTML still exists")
 step("Create a manifest missing one render case and run the gate against it")
 val command = "rm -rf build/test-html-css-rendering-manifest-traceability-truncated && mkdir -p build/test-html-css-rendering-manifest-traceability-truncated/source && head -n 50 tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt > build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt && BUILD_DIR=build/test-html-css-rendering-manifest-traceability-truncated/out REPORT_PATH=build/test-html-css-rendering-manifest-traceability-truncated/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 HTML_CSS_RENDERING_MANIFEST_PATH=build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt sh scripts/check/check-html-css-rendering-manifest-traceability.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -382,6 +392,7 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_m
 
 #### rejects canonical implemented CSS properties missing from rendered fixtures
 
+- rejects canonical implemented CSS properties missing from rendered fixtures
 - Create a temporary implemented CSS source with one extra supported property
    - Expected: code equals `0`
 - Assert the rendered fixture gate follows the canonical implemented CSS source
@@ -391,10 +402,12 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_m
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects canonical implemented CSS properties missing from rendered fixtures")
 step("Create a temporary implemented CSS source with one extra supported property")
 val command = "rm -rf build/test-html-css-rendering-manifest-traceability-extra-css && mkdir -p build/test-html-css-rendering-manifest-traceability-extra-css/source && cp scripts/check/check-html-css-sspec-traceability.shs build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs && perl -0pi -e 's/\"z-index\",/\"z-index\",\\n    \"simple-renderdoc-test-extra-property\",/' build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs && BUILD_DIR=build/test-html-css-rendering-manifest-traceability-extra-css/out REPORT_PATH=build/test-html-css-rendering-manifest-traceability-extra-css/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 HTML_CSS_RENDERING_IMPLEMENTED_CSS_SOURCE=build/test-html-css-rendering-manifest-traceability-extra-css/source/traceability.shs sh scripts/check/check-html-css-rendering-manifest-traceability.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -435,3 +448,57 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_proper
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-019`
+- `REQ-WEB-BROWSER-021`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b9ea5be7b8f4f7dbf57892dccc653771efdff2dc60ec853d82781bbe7b39b77f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b9ea5be7b8f4f7dbf57892dccc653771efdff2dc60ec853d82781bbe7b39b77f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b9ea5be7b8f4f7dbf57892dccc653771efdff2dc60ec853d82781bbe7b39b77f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **83/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/check/html_css_rendering_manifest_traceability_spec.spl
+mirror: doc/06_spec/03_system/check/html_css_rendering_manifest_traceability_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=83; blocker cap makes effective=49
+doc/06_spec/03_system/check/html_css_rendering_manifest_traceability_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/html_css_rendering_manifest_traceability_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/html_css_rendering_manifest_traceability_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/html_css_rendering_manifest_traceability_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 5 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/check/html_css_rendering_manifest_traceability_spec.spl:330:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects canonical implemented CSS properties missing from rendered fixtures' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

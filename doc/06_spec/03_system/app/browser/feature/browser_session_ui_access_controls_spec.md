@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,14 +19,13 @@ This spec exercises browser chrome and DOM controls through the canonical textua
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-010 |
+| Requirements | REQ-WEB-BROWSER-009 and REQ-WEB-BROWSER-010 in doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
 | Plan | doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md |
 | Design | doc/05_design/ui/web/simple_web_browser_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl` |
-| Updated | 2026-07-31 |
-| Manual status | Static candidate; whole changed manual hand-reviewed |
-| Generator | Prior generated basis, manually reconciled; docgen not run |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -67,7 +66,7 @@ Display policy: `embed_tui`
 
 #### exposes browser toolbar controls as queryable UI access nodes
 
-- var session =  browser session fixture
+- exposes browser toolbar controls as queryable UI access nodes
    - Expected: snapshot.mode equals `browser_session`
    - Expected: snapshot.active_surface equals `browser:session`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Back", 1).len() equals `1`
@@ -79,25 +78,18 @@ Display policy: `embed_tui`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Go", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len() equals `1`
 
-#### ends hosted address editing before Home succeeds or fails
-
-- Restore the committed address before a busy Home rejection.
-  - Expected: a renderer without a committed URL restores `about:blank`.
-  - Expected: Home press ends address editing and publishes the committed URL.
-  - Expected: a busy Home release reports `renderer-busy` without restoring the draft.
-  - Expected: subsequent text cannot mutate the address.
-- Keep successful Home navigation on the parent renderer route.
-  - Expected: Home press publishes the committed URL before release.
-  - Expected: Home release admits the configured URL and publishes it.
-
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-WEB-BROWSER-009
+# @req REQ-WEB-BROWSER-010
+# @req REQ-SSPEC-SYSTEM
+step("exposes browser toolbar controls as queryable UI access nodes")
 var session = _browser_session_fixture()
 
 val snapshot = session.ui_access_snapshot()
@@ -115,626 +107,802 @@ expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://e
 
 </details>
 
-#### should expose and activate one canonical Go control without duplicate navigation
+#### ends hosted address editing before Home succeeds or fails
 
-**Requirements exercised:** REQ-WEB-BROWSER-009 (address/chrome navigation)
-and REQ-WEB-BROWSER-010 (canonical relative-reference resolution).
+- ends hosted address editing before Home succeeds or fails
+- Restore the committed address before a busy Home rejection
+   - Expected: busy_down.reason equals `chrome-pressed`
+   - Expected: registry.address_text(90) equals `committed_url`
+   - Expected: busy_up.reason equals `renderer-busy`
+   - Expected: registry.address_text(90) equals `committed_url`
+- Keep successful Home navigation on the parent renderer route
+   - Expected: home_down.reason equals `chrome-pressed`
+   - Expected: registry.address_text(90) equals `committed_url`
+   - Expected: home_up.callback_count equals `1`
+   - Expected: registry.address_text(90) equals `home_url`
 
-- **Open the production browser chrome**
-  - Expected: one enabled `Go` button exists at `browser:session#go` with click and key actions, ordered before Address and Title to match the visual chrome.
-- **Enter and activate the destination**
-  - Expected: Go pointer release and address Enter resolve `../next?x=1#ok` against the committed document and queue exactly one equivalent GET request.
-  - Expected: Go press ends address focus without discarding its typed target; Home press restores the committed address in both parent and worker state.
-  - Expected: Go keyboard Enter and Space each use the same address activation owner.
-  - Expected: the protocol admits Go, while raw worker Go and Reload release return `navigation-command-required`; rejected Reload leaves URL, loading/request state, complete history/current index, body, and DrawIR revision unchanged.
-  - Expected: Go release and address Enter call the same process-level owner; its callable fixture admits one normalized command with `callback_count=1`, while invalid input retains focus and committed history.
-- **Use Home Bookmark Stop and Reload**
-  - Expected: Back, Forward, bookmark, Stop, Home, Reload, and Favorite retain their existing behavior.
-- **Observe canonical history controls and rendered document**
-  - Expected: Go occupies `(268,32,40,36)` only from width 312, while Address appears at its eight-pixel minimum from width 324; exact batch command deltas prove narrower commands are suppressed.
-  - Expected: each window batch at widths 267, 268, 311, 312, 323, and 324 has the exact clipped embedding rectangle `(0,0,width,126)`.
-  - Expected: literal boundary pixels distinguish the width-311 toolbar from width-312 Go, the width-323 toolbar from width-324 Address, and the four-pixel area to the right of Address.
-  - Expected: the 400x200 composition retains exact literal Go, gutter, and Address regions without a self-comparison oracle.
-
-Static provenance: correction cycle 3/3 is based on
-`ccbe8adb05ea719a6f117514a30dbf12f0d10b3b`. All 21 scenarios remain listed
-as 21 active, 0 skipped, and 0 pending. The whole changed manual was
-hand-reviewed against the executable source. Runtime, bootstrap, docgen, and
-push were not invoked; this is a static candidate and does not claim an
-admitted runtime or generated-manual PASS.
-
-Exact bounded gate command and recorded result:
-
-```sh
-git diff --cached --check &&
-test "$(git diff --name-only)" = "tools/tauri-shell/src-tauri/gen/android/gradlew.bat" &&
-test "$(find doc/06_spec -name '*_spec.spl' | wc -l)" -eq 0 &&
-test "$(rg -c 'hosted_browser_process_activate_address' src/os/hosted/hosted_entry.spl)" -eq 3 &&
-! rg -q 'rt_file_read_text.*hosted_entry' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl &&
-test "$(rg -c '^\| 21 \| 21 \| 0 \| 0 \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 1 &&
-test "$(rg -c '^    it "' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl)" -eq 21 &&
-test "$(rg -c '^#### ' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 21 &&
-test "$(rg -c '^\| (Total|Active|Slow|Skipped|Pending) scenarios \| [0-9]+ \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 5 &&
-test "$(rg -c '^\| (Total|Active) scenarios \| 21 \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 2 &&
-test "$(rg -c '^\| (Slow|Skipped|Pending) scenarios \| 0 \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 3 &&
-test "$(rg -U -c 'All 21 scenarios remain listed\nas 21 active, 0 skipped, and 0 pending\.' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 1 &&
-test "$(rg -c '_expect_browser_window_batch_clip' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl)" -eq 7 &&
-diff -u <(awk 'found && /^    it / {exit} /    it "should expose and activate one canonical Go control without duplicate navigation":/ {found=1} found {print}' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl) <(awk '/Runnable source: [0-9]+ lines folded for reproduction\./ {block=block+1} block==2 && /^```simple$/ {seen=1; next} seen && /^```$/ {exit} seen {print}' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md) &&
-echo GO_CYCLE3_STATIC_GATE=PASS
-```
-
-Recorded result: `GO_CYCLE3_STATIC_GATE=PASS`.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 488 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source,
-including UI-access, hosted-pointer, isolated-renderer, direct-worker,
-hosted-entry, Draw IR, resized hit-layout, and literal-pixel assertions.
+Runnable source: 72 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-    it "should expose and activate one canonical Go control without duplicate navigation":
-        step("Open the production browser chrome")
-        val committed_url = "https://example.com/a/start"
-        val address_reference = "../next?x=1#ok"
-        val target_url = "https://example.com/next?x=1#ok"
-        var session = BrowserSession.new()
-        expect(session.open_html(
-            committed_url,
-            "<html><head><title>Start</title></head><body>Start</body></html>"
-        ).is_ok()).to_be(true)
-        val go_nodes = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "button", "Go", 1
-        )
-        expect(go_nodes.len()).to_equal(1)
-        expect(go_nodes[0].canonical_id).to_equal("browser:session#go")
-        expect(go_nodes[0].action_names).to_equal(["click", "key"])
-        expect(go_nodes[0].enabled).to_be(true)
-        val chrome_snapshot = session.ui_access_snapshot()
-        expect(_snapshot_node_index(chrome_snapshot, "go")).to_equal(6)
-        expect(_snapshot_node_index(chrome_snapshot, "address")).to_equal(7)
-        expect(_snapshot_node_index(chrome_snapshot, "title")).to_equal(8)
-        var empty_address = BrowserSession.new()
-        empty_address.current_url = ""
-        empty_address.document_url = ""
-        empty_address.address_draft = ""
-        val disabled_go = ui_access_find_nodes(
-            empty_address.ui_access_snapshot(), "browser:session",
-            "button", "Go", 1
-        )
-        expect(disabled_go[0].enabled).to_be(false)
-        expect(empty_address.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#go", action: "click",
-            text_value: "", x: 0, y: 0
-        )).code).to_equal("disabled")
+# @req REQ-SSPEC-SYSTEM
+step("ends hosted address editing before Home succeeds or fails")
+expect(browser_address_draft_after_control_press(
+    "home", "", "https://draft.test/"
+)).to_equal("about:blank")
+step("Restore the committed address before a busy Home rejection")
+val committed_url = "https://example.com/committed"
+val draft_url = "https://draft.test/"
+val home_url = "https://home.test/"
+var registry = HostedBrowserRendererRegistry.create(
+    "/bin/false", home_url
+)
+val _ = registry.ensure(
+    90, "<main>Committed</main>", 64, 48, 0, 100000
+)
+var entry = registry.entries[0]
+entry.ready = true
+entry.failure_reason = ""
+entry.renderer.state = "active"
+entry.renderer.document_url = committed_url
+entry.renderer.document_origin = "https://example.com"
+entry.renderer.home_url = home_url
+registry.entries[0] = entry
+val _ = registry.dispatch_chrome_pointer(1, 90, "address", true)
+val _ = registry.dispatch_chrome_pointer(2, 90, "address", false)
+expect(registry.dispatch_text(
+    3, 90, draft_url
+).callback_count).to_equal(1)
+entry = registry.entries[0]
+entry.renderer.pending_wire = "partially-written-command"
+entry.renderer.pending_wire_offset = 1
+registry.entries[0] = entry
+val busy_down = registry.dispatch_chrome_pointer(
+    4, 90, "home", true
+)
+expect(busy_down.reason).to_equal("chrome-pressed")
+expect(registry.entries[0].address_editing).to_be(false)
+expect(registry.entries[0].address_replace_on_text).to_be(false)
+expect(registry.address_text(90)).to_equal(committed_url)
+val busy_up = registry.dispatch_chrome_pointer(
+    5, 90, "home", false
+)
+expect(busy_up.reason).to_equal("renderer-busy")
+expect(registry.dispatch_text(
+    6, 90, "must-not-edit-address"
+).reason).to_equal("renderer-busy")
+expect(registry.address_text(90)).to_equal(committed_url)
 
-        step("Enter and activate the destination")
-        expect(session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#address", action: "set_value",
-            text_value: address_reference, x: 0, y: 0
-        )).ok).to_be(true)
-        val go_click = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#go", action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(go_click.ok).to_be(true)
-        expect(session.pending_request_count()).to_equal(1)
-        val go_request = session.take_pending_request().unwrap()
-        expect(session.pending_request_count()).to_equal(0)
-        expect(go_request.url).to_equal("https://example.com/next?x=1")
-        expect(go_request.method).to_equal("GET")
+step("Keep successful Home navigation on the parent renderer route")
+entry = registry.entries[0]
+entry.renderer.pending_wire = ""
+entry.renderer.pending_wire_offset = 0
+registry.entries[0] = entry
+val _ = registry.dispatch_chrome_pointer(7, 90, "address", true)
+val _ = registry.dispatch_chrome_pointer(8, 90, "address", false)
+expect(registry.dispatch_text(
+    9, 90, draft_url
+).callback_count).to_equal(1)
+val home_down = registry.dispatch_chrome_pointer(
+    10, 90, "home", true
+)
+expect(home_down.reason).to_equal("chrome-pressed")
+expect(registry.address_text(90)).to_equal(committed_url)
+val home_up = registry.dispatch_chrome_pointer(
+    11, 90, "home", false
+)
+expect(home_up.callback_count).to_equal(1)
+expect(registry.address_text(90)).to_equal(home_url)
+expect(registry.entries[0].renderer.navigation_permit.url).to_equal(
+    home_url
+)
+val _ = registry.close()
+```
 
-        var pointer = HostedWebContentSession.create(
-            91, "<main>Pointer</main>", 64, 48
-        )
-        expect(pointer.browser.open_html(
-            committed_url, "<main>Pointer</main>"
-        ).is_ok()).to_be(true)
-        expect(pointer.browser.apply_address_update(
-            "", address_reference, true
-        ).is_ok()).to_be(true)
-        val pointer_down = pointer.dispatch_chrome_pointer(
-            1, "go", true
-        )
-        expect(pointer_down.callback_count).to_equal(0)
-        expect(pointer.browser.pending_request_count()).to_equal(0)
-        expect(pointer.dispatch_chrome_pointer(
-            2, "go", false
-        ).callback_count).to_equal(1)
-        expect(pointer.browser.pending_request_count()).to_equal(1)
-        val pointer_request = pointer.browser.take_pending_request().unwrap()
-        expect(pointer_request.url).to_equal(go_request.url)
-        expect(pointer_request.method).to_equal(go_request.method)
+</details>
 
-        var isolated = HostedBrowserRendererRegistry.create(
-            "/bin/false", "https://home.test/"
-        )
-        val _ = isolated.ensure(
-            93, "<main>Isolated</main>", 64, 48, 0, 100000
-        )
-        var isolated_entry = isolated.entries[0]
-        isolated_entry.renderer = HostedBrowserRendererProcess.create(
-            93, 64, 48
-        )
-        isolated_entry.renderer.state = "active"
-        isolated_entry.renderer.document_url = committed_url
-        isolated_entry.renderer.document_origin = "https://example.com"
-        isolated_entry.renderer.history_urls = [committed_url]
-        isolated_entry.renderer.history_index = 0
-        isolated_entry.renderer_closed = false
-        isolated_entry.ready = true
-        isolated_entry.failure_reason = ""
-        isolated_entry.address_draft = address_reference
-        isolated.entries[0] = isolated_entry
-        val isolated_down = isolated.dispatch_chrome_pointer(
-            8, 93, "go", true
-        )
-        expect(isolated_down.callback_count).to_equal(0)
-        expect(isolated.entries[0].renderer.pending_wire).to_equal("")
-        expect(isolated.dispatch_chrome_pointer(
-            9, 93, "go", false
-        ).callback_count).to_equal(1)
-        expect(isolated.entries[0].renderer.pending_wire != "").to_be(true)
-        val isolated_command = browser_renderer_navigation_decode(
-            browser_renderer_decoder_feed(
-                browser_renderer_decoder_new(93),
-                isolated.entries[0].renderer.pending_wire
-            ).message
-        )
-        expect(isolated_command.action).to_equal("open")
-        expect(isolated_command.url).to_equal(target_url)
+#### should expose and activate one canonical Go control without duplicate navigation
 
-        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
-        val worker_capability = "11111111111111111111111111111111"
-        val worker_init = browser_renderer_capability_bind_encoded(
-            browser_renderer_message_encode(
-                "init", 94, 2, "<main>Worker Go</main>"
-            ),
-            94, 2, 2, worker_capability
-        )
-        expect(worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(94),
-                worker_init.wire
-            ).message
-        ).ok).to_be(true)
-        val worker_go_down = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(94, 3, 10, "go", true),
-            94, 3, 3, worker_capability
-        )
-        expect(worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(94),
-                worker_go_down.wire
-            ).message
-        ).ok).to_be(true)
-        val worker_go_up = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(94, 4, 11, "go", false),
-            94, 4, 4, worker_capability
-        )
-        val worker_go_route = worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(94),
-                worker_go_up.wire
-            ).message
-        )
-        expect(worker_go_route.ok).to_be(false)
-        expect(worker_go_route.reason).to_equal(
-            "navigation-command-required"
-        )
-        var reload_worker = HostedBrowserRendererWorkerSession.create(64, 48)
-        val reload_worker_capability = "22222222222222222222222222222222"
-        val reload_worker_init = browser_renderer_capability_bind_encoded(
-            browser_renderer_message_encode(
-                "init", 97, 2, "<main>Worker Reload</main>"
-            ),
-            97, 2, 2, reload_worker_capability
-        )
-        expect(reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                reload_worker_init.wire
-            ).message
-        ).ok).to_be(true)
-        expect(reload_worker.browser.open_html(
-            committed_url, "<main>Worker Reload</main>"
-        ).is_ok()).to_be(true)
-        val worker_reload_url = reload_worker.browser.current_url
-        val worker_reload_loading = reload_worker.browser.is_loading
-        val worker_reload_pending = reload_worker.browser.pending_request_count()
-        val worker_reload_history = reload_worker.browser.history
-        val worker_reload_current_index = reload_worker.browser.current_index
-        val worker_reload_body = reload_worker.browser.current_body_html
-        val worker_reload_composition_revision = (
-            reload_worker.render_session.counters.composition_revision
-        )
-        val worker_reload_down = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(97, 3, 12, "reload", true),
-            97, 3, 3, reload_worker_capability
-        )
-        expect(reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                worker_reload_down.wire
-            ).message
-        ).ok).to_be(true)
-        val worker_reload_up = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(97, 4, 13, "reload", false),
-            97, 4, 4, reload_worker_capability
-        )
-        val worker_reload_route = reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                worker_reload_up.wire
-            ).message
-        )
-        expect(worker_reload_route.ok).to_be(false)
-        expect(worker_reload_route.reason).to_equal(
-            "navigation-command-required"
-        )
-        expect(reload_worker.browser.current_url).to_equal(worker_reload_url)
-        expect(reload_worker.browser.is_loading).to_equal(worker_reload_loading)
-        expect(reload_worker.browser.pending_request_count()).to_equal(
-            worker_reload_pending
-        )
-        expect(reload_worker.browser.history).to_equal(
-            worker_reload_history
-        )
-        expect(reload_worker.browser.current_index).to_equal(
-            worker_reload_current_index
-        )
-        expect(reload_worker.browser.current_body_html).to_equal(worker_reload_body)
-        expect(reload_worker.render_session.counters.composition_revision).to_equal(
-            worker_reload_composition_revision
-        )
+- should expose and activate one canonical Go control without duplicate navigation
+   - GUI capture: after_step (HTML preferred when available)
+- Open the production browser chrome
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 6 expected checks
+   - Expected: go_nodes.len() equals `1`
+   - Expected: go_nodes[0].canonical_id equals `browser:session#go`
+   - Expected: go_nodes[0].action_names equals `["click", "key"]`
+   - Expected: _snapshot_node_index(chrome_snapshot, "go") equals `6`
+   - Expected: _snapshot_node_index(chrome_snapshot, "address") equals `7`
+   - Expected: _snapshot_node_index(chrome_snapshot, "title") equals `8`
+- Enter and activate the destination
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 44 expected checks
+   - Expected: session.pending_request_count() equals `1`
+   - Expected: session.pending_request_count() equals `0`
+   - Expected: go_request.url equals `https://example.com/next?x=1`
+   - Expected: go_request.method equals `GET`
+   - Expected: pointer_down.callback_count equals `0`
+   - Expected: pointer.browser.address_draft equals `address_reference`
+   - Expected: pointer.chrome_focus equals ``
+   - Expected: pointer.browser.pending_request_count() equals `0`
+   - Expected: pointer.browser.pending_request_count() equals `1`
+   - Expected: pointer_request.url equals `go_request.url`
+   - Expected: pointer_request.method equals `go_request.method`
+   - Expected: isolated_down.callback_count equals `0`
+   - Expected: isolated.address_text(93) equals `address_reference`
+   - Expected: isolated.entries[0].renderer.pending_wire equals ``
+   - Expected: isolated_command.action equals `open`
+   - Expected: isolated_command.url equals `target_url`
+   - Expected: worker.browser.address_draft equals `address_reference`
+   - Expected: worker.chrome_focus equals ``
+   - Expected: worker.browser.address_draft equals `committed_url`
+   - Expected: worker.chrome_focus equals ``
+   - Expected: reload_worker.browser.current_url equals `worker_reload_url`
+   - Expected: reload_worker.browser.is_loading equals `worker_reload_loading`
+   - Expected: reload_worker.browser.current_body_html equals `worker_reload_body`
+   - Expected: direct.pending_wire equals ``
+   - Expected: direct_release.callback_count equals `1`
+   - Expected: direct_release.reason equals ``
+   - Expected: direct_release.target_url equals `target_url`
+   - Expected: direct.pending_operation equals `navigation`
+   - Expected: direct_command.action equals `open`
+   - Expected: direct_command.url equals `target_url`
+   - Expected: direct.history_urls equals `direct_history`
+   - Expected: direct.history_index equals `0`
+   - Expected: direct.document_url equals `committed_url`
+   - Expected: rejected_release.callback_count equals `0`
+   - Expected: rejected_direct.pending_wire equals ``
+   - Expected: rejected_direct.history_urls equals `rejected_history`
+   - Expected: rejected_direct.history_index equals `0`
+   - Expected: rejected_direct.document_url equals `committed_url`
+   - Expected: entered.dispatch_key(6, 13, true).callback_count equals `1`
+   - Expected: entered.dispatch_key(7, 13, false).callback_count equals `0`
+   - Expected: entered.browser.pending_request_count() equals `1`
+   - Expected: enter_request.url equals `go_request.url`
+   - Expected: enter_request.method equals `go_request.method`
+   - Expected: keyed.pending_request_count() equals `1`
+- Use Home Bookmark Stop and Reload
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 7 expected checks
+   - Expected: controls.current_url equals `https://example.com/one`
+   - Expected: controls.current_url equals `https://example.com/two`
+   - Expected: bookmarks.len() equals `1`
+   - Expected: controls.pending_request_count() equals `1`
+   - Expected: controls.pending_request_count() equals `0`
+   - Expected: controls.current_url equals `https://example.com/home`
+   - Expected: controls.current_url equals `https://example.com/home`
+- Observe canonical history controls and rendered document
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 15 expected checks
+   - Expected: go_rect.x equals `268`
+   - Expected: go_rect.y equals `32`
+   - Expected: go_rect.width equals `40`
+   - Expected: go_rect.height equals `36`
+   - Expected: go_label.text_value equals `Go`
+   - Expected: go_label.x equals `280`
+   - Expected: address_rect.x equals `312`
+   - Expected: address_rect.y equals `32`
+   - Expected: address_rect.width equals `84`
+   - Expected: address_rect.height equals `36`
+   - Expected: shared_wm_browser_address_width(323) equals `0`
+   - Expected: exact_go_312.len() equals `narrow_311.len() + 2`
+   - Expected: below_address_min.len() equals `exact_go_312.len()`
+   - Expected: first.pixels.len() equals `400 * 200`
+   - Expected: first.skipped_command_count equals `0`
 
-        var direct = HostedBrowserRendererProcess.create(95, 64, 48)
-        direct.state = "active"
-        direct.document_url = committed_url
-        direct.document_origin = "https://example.com"
-        direct.history_urls = [committed_url]
-        direct.history_index = 0
-        direct.history_current_url = committed_url
-        val direct_history = direct.history_urls
-        expect(direct.pending_wire).to_equal("")
-        val direct_release = hosted_browser_process_activate_address(
-            direct, direct.document_url, address_reference, 2000
-        )
-        expect(direct_release.callback_count).to_equal(1)
-        expect(direct_release.reason).to_equal("")
-        expect(direct_release.retain_address_focus).to_be(false)
-        expect(direct_release.target_url).to_equal(target_url)
-        expect(direct.pending_wire != "").to_be(true)
-        expect(direct.pending_wire_is_command).to_be(true)
-        expect(direct.pending_operation).to_equal("navigation")
-        expect(direct.navigation_permit.active).to_be(true)
-        val direct_envelope = browser_renderer_capability_decoder_feed(
-            browser_renderer_capability_decoder_new(95),
-            direct.pending_wire
-        )
-        val direct_command = browser_renderer_navigation_decode(
-            browser_renderer_capability_payload_message(
-                direct_envelope.message
-            )
-        )
-        expect(direct_command.ok).to_be(true)
-        expect(direct_command.action).to_equal("open")
-        expect(direct_command.url).to_equal(target_url)
-        expect(direct.history_urls).to_equal(direct_history)
-        expect(direct.history_index).to_equal(0)
-        expect(direct.document_url).to_equal(committed_url)
 
-        var rejected_direct = HostedBrowserRendererProcess.create(
-            96, 64, 48
-        )
-        rejected_direct.state = "active"
-        rejected_direct.document_url = committed_url
-        rejected_direct.document_origin = "https://example.com"
-        rejected_direct.history_urls = [committed_url]
-        rejected_direct.history_index = 0
-        rejected_direct.history_current_url = committed_url
-        val rejected_history = rejected_direct.history_urls
-        val rejected_release = hosted_browser_process_activate_address(
-            rejected_direct, rejected_direct.document_url,
-            "https://bad_host/", 2000
-        )
-        expect(rejected_release.callback_count).to_equal(0)
-        expect(rejected_release.reason).to_equal(
-            "invalid navigation authority"
-        )
-        expect(rejected_release.retain_address_focus).to_be(true)
-        expect(rejected_direct.pending_wire).to_equal("")
-        expect(rejected_direct.navigation_permit.active).to_be(false)
-        expect(rejected_direct.history_urls).to_equal(rejected_history)
-        expect(rejected_direct.history_index).to_equal(0)
-        expect(rejected_direct.document_url).to_equal(committed_url)
+<details>
+<summary>Executable SSpec</summary>
 
-        var entered = HostedWebContentSession.create(
-            92, "<main>Enter</main>", 64, 48
-        )
-        expect(entered.browser.open_html(
-            committed_url, "<main>Enter</main>"
-        ).is_ok()).to_be(true)
-        val _ = entered.dispatch_chrome_pointer(3, "address", true)
-        val _ = entered.dispatch_chrome_pointer(4, "address", false)
-        expect(entered.dispatch_text(
-            5, address_reference
-        ).callback_count).to_equal(1)
-        expect(entered.dispatch_key(6, 13, true).callback_count).to_equal(1)
-        expect(entered.dispatch_key(7, 13, false).callback_count).to_equal(0)
-        expect(entered.browser.pending_request_count()).to_equal(1)
-        val enter_request = entered.browser.take_pending_request().unwrap()
-        expect(enter_request.url).to_equal(go_request.url)
-        expect(enter_request.method).to_equal(go_request.method)
+Runnable source: 594 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-        for key in ["Enter", "Space"]:
-            var keyed = BrowserSession.new()
-            expect(keyed.open_html(
-                committed_url, "<main>Key</main>"
-            ).is_ok()).to_be(true)
-            expect(keyed.apply_address_update(
-                "", address_reference, true
-            ).is_ok()).to_be(true)
-            expect(keyed.ui_access_act(WinTextActionRequest(
-                target_id: "browser:session#go", action: "key",
-                text_value: key, x: 0, y: 0
-            )).ok).to_be(true)
-            expect(keyed.pending_request_count()).to_equal(1)
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should expose and activate one canonical Go control without duplicate navigation")
+step("Open the production browser chrome")
+val committed_url = "https://example.com/a/start"
+val address_reference = "../next?x=1#ok"
+val target_url = "https://example.com/next?x=1#ok"
+var session = BrowserSession.new()
+expect(session.open_html(
+    committed_url,
+    "<html><head><title>Start</title></head><body>Start</body></html>"
+).is_ok()).to_be(true)
+val go_nodes = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Go", 1
+)
+expect(go_nodes.len()).to_equal(1)
+expect(go_nodes[0].canonical_id).to_equal("browser:session#go")
+expect(go_nodes[0].action_names).to_equal(["click", "key"])
+expect(go_nodes[0].enabled).to_be(true)
+val chrome_snapshot = session.ui_access_snapshot()
+expect(_snapshot_node_index(chrome_snapshot, "go")).to_equal(6)
+expect(_snapshot_node_index(chrome_snapshot, "address")).to_equal(7)
+expect(_snapshot_node_index(chrome_snapshot, "title")).to_equal(8)
+var empty_address = BrowserSession.new()
+empty_address.current_url = ""
+empty_address.document_url = ""
+empty_address.address_draft = ""
+val disabled_go = ui_access_find_nodes(
+    empty_address.ui_access_snapshot(), "browser:session",
+    "button", "Go", 1
+)
+expect(disabled_go[0].enabled).to_be(false)
+expect(empty_address.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#go", action: "click",
+    text_value: "", x: 0, y: 0
+)).code).to_equal("disabled")
 
-        step("Use Home Bookmark Stop and Reload")
-        var controls = _browser_session_fixture()
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#back", action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        expect(controls.current_url).to_equal("https://example.com/one")
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#forward", action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        expect(controls.current_url).to_equal("https://example.com/two")
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#favorite", action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        val bookmarks = ui_access_find_nodes(
-            controls.ui_access_snapshot(), "browser:session",
-            "link", "Two", 1
-        )
-        expect(bookmarks.len()).to_equal(1)
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: bookmarks[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        expect(controls.pending_request_count()).to_equal(1)
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#stop", action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        expect(controls.pending_request_count()).to_equal(0)
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#home", action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        expect(controls.current_url).to_equal("https://example.com/home")
-        expect(controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#reload", action: "click",
-            text_value: "", x: 0, y: 0
-        )).ok).to_be(true)
-        expect(controls.current_url).to_equal("https://example.com/home")
+step("Enter and activate the destination")
+expect(session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: address_reference, x: 0, y: 0
+)).ok).to_be(true)
+val go_click = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#go", action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(go_click.ok).to_be(true)
+expect(session.pending_request_count()).to_equal(1)
+val go_request = session.take_pending_request().unwrap()
+expect(session.pending_request_count()).to_equal(0)
+expect(go_request.url).to_equal("https://example.com/next?x=1")
+expect(go_request.method).to_equal("GET")
 
-        step("Observe canonical history controls and rendered document")
-        val composition = shared_wm_scene_draw_ir_composition(
-            _browser_chrome_scene(400), _empty_taskbar(),
-            DRAW_IR_BACKEND_CPU, 1000, "", 0
-        )
-        val chrome = composition.batches[2].commands
-        val go_rect = _draw_command(chrome, "win1-browser-control-6")
-        val go_label = _draw_command(
-            chrome, "win1-browser-control-label-6"
-        )
-        val address_rect = _draw_command(chrome, "win1-browser-address")
-        expect(go_rect.x).to_equal(268)
-        expect(go_rect.y).to_equal(32)
-        expect(go_rect.width).to_equal(40)
-        expect(go_rect.height).to_equal(36)
-        expect(go_label.text_value).to_equal("Go")
-        expect(go_label.x).to_equal(280)
-        expect(address_rect.x).to_equal(312)
-        expect(address_rect.y).to_equal(32)
-        expect(address_rect.width).to_equal(84)
-        expect(address_rect.height).to_equal(36)
-        expect(shared_wm_browser_toolbar_control_at(
-            280, 20, 400
-        )).to_equal("go")
-        expect(shared_wm_browser_toolbar_control_at(
-            320, 20, 400
-        )).to_equal("address")
-        expect(shared_wm_browser_toolbar_control_at(
-            250, 20, 267
-        )).to_equal("")
-        expect(shared_wm_browser_toolbar_control_at(
-            250, 20, 268
-        )).to_equal("favorite")
-        expect(shared_wm_browser_toolbar_control_at(
-            268, 20, 268
-        )).to_equal("")
-        expect(shared_wm_browser_toolbar_control_at(
-            280, 20, 311
-        )).to_equal("")
-        expect(shared_wm_browser_toolbar_control_at(
-            280, 20, 312
-        )).to_equal("go")
-        expect(shared_wm_browser_address_width(323)).to_equal(0)
-        expect(shared_wm_browser_address_width(324)).to_equal(
-            WM_BROWSER_ADDRESS_MIN_WIDTH
-        )
-        expect(shared_wm_browser_toolbar_control_at(
-            312, 20, 323
-        )).to_equal("")
-        expect(shared_wm_browser_toolbar_control_at(
-            312, 20, 324
-        )).to_equal("address")
-        expect(shared_wm_browser_toolbar_control_at(
-            320, 20, 324
-        )).to_equal("")
-        val below_favorite_267_composition = (
-            shared_wm_scene_draw_ir_composition(
-                _browser_chrome_scene(267), _empty_taskbar(),
-                DRAW_IR_BACKEND_CPU, 999, "", 0
-            )
-        )
-        val exact_favorite_268_composition = (
-            shared_wm_scene_draw_ir_composition(
-                _browser_chrome_scene(268), _empty_taskbar(),
-                DRAW_IR_BACKEND_CPU, 1000, "", 0
-            )
-        )
-        val narrow_311_composition = shared_wm_scene_draw_ir_composition(
-            _browser_chrome_scene(311), _empty_taskbar(),
-            DRAW_IR_BACKEND_CPU, 1001, "", 0
-        )
-        val exact_go_312_composition = shared_wm_scene_draw_ir_composition(
-            _browser_chrome_scene(312), _empty_taskbar(),
-            DRAW_IR_BACKEND_CPU, 1002, "", 0
-        )
-        val below_address_min_composition = (
-            shared_wm_scene_draw_ir_composition(
-            _browser_chrome_scene(323), _empty_taskbar(),
-            DRAW_IR_BACKEND_CPU, 1003, "", 0
-            )
-        )
-        val exact_address_min_composition = (
-            shared_wm_scene_draw_ir_composition(
-            _browser_chrome_scene(324), _empty_taskbar(),
-            DRAW_IR_BACKEND_CPU, 1004, "", 0
-            )
-        )
-        _expect_browser_window_batch_clip(
-            below_favorite_267_composition, 267
-        )
-        _expect_browser_window_batch_clip(
-            exact_favorite_268_composition, 268
-        )
-        _expect_browser_window_batch_clip(narrow_311_composition, 311)
-        _expect_browser_window_batch_clip(exact_go_312_composition, 312)
-        _expect_browser_window_batch_clip(
-            below_address_min_composition, 323
-        )
-        _expect_browser_window_batch_clip(
-            exact_address_min_composition, 324
-        )
-        val narrow_311 = narrow_311_composition.batches[2].commands
-        val exact_go_312 = exact_go_312_composition.batches[2].commands
-        val below_address_min = (
-            below_address_min_composition.batches[2].commands
-        )
-        val exact_address_min = (
-            exact_address_min_composition.batches[2].commands
-        )
-        expect(_has_draw_command(
-            narrow_311, "win1-browser-control-6"
-        )).to_be(false)
-        expect(_has_draw_command(
-            exact_go_312, "win1-browser-control-6"
-        )).to_be(true)
-        expect(_has_draw_command(
-            below_address_min, "win1-browser-address"
-        )).to_be(false)
-        expect(_draw_command(
-            exact_address_min, "win1-browser-address"
-        ).width).to_equal(WM_BROWSER_ADDRESS_MIN_WIDTH)
-        expect(exact_go_312.len()).to_equal(narrow_311.len() + 2)
-        expect(below_address_min.len()).to_equal(exact_go_312.len())
-        expect(exact_address_min.len()).to_equal(
-            below_address_min.len() + 2
-        )
-        val narrow_raster = Engine2dCompositorBackend.create_named(
-            311, 200, "software"
-        )
-        val narrow_frame = narrow_raster.render_draw_ir_composition(
-            narrow_311_composition, []
-        )
-        narrow_raster.shutdown()
-        expect(narrow_frame.pixels[32 * 311 + 280]).to_equal(
-            0xffe8e8e8u32
-        )
-        val go_boundary_raster = Engine2dCompositorBackend.create_named(
-            312, 200, "software"
-        )
-        val go_boundary_frame = (
-            go_boundary_raster.render_draw_ir_composition(
-                exact_go_312_composition, []
-            )
-        )
-        go_boundary_raster.shutdown()
-        expect(go_boundary_frame.pixels[32 * 312 + 280]).to_equal(
-            0xffe2e2e6u32
-        )
-        val below_address_raster = Engine2dCompositorBackend.create_named(
-            323, 200, "software"
-        )
-        val below_address_frame = (
-            below_address_raster.render_draw_ir_composition(
-                below_address_min_composition, []
-            )
-        )
-        below_address_raster.shutdown()
-        expect(below_address_frame.pixels[32 * 323 + 312]).to_equal(
-            0xffe8e8e8u32
-        )
-        val address_boundary_raster = Engine2dCompositorBackend.create_named(
-            324, 200, "software"
-        )
-        val address_boundary_frame = (
-            address_boundary_raster.render_draw_ir_composition(
-                exact_address_min_composition, []
-            )
-        )
-        address_boundary_raster.shutdown()
-        expect(address_boundary_frame.pixels[32 * 324 + 312]).to_equal(
-            0xffffffffu32
-        )
-        expect(address_boundary_frame.pixels[32 * 324 + 320]).to_equal(
-            0xffe8e8e8u32
-        )
-        val raster = Engine2dCompositorBackend.create_named(
-            400, 200, "software"
-        )
-        val first = raster.render_draw_ir_composition(composition, [])
-        raster.shutdown()
-        expect(first.pixels.len()).to_equal(400 * 200)
-        expect(first.rendered_command_count).to_be_greater_than(0)
-        expect(first.skipped_command_count).to_equal(0)
-        expect(_rect_non_color_count(
-            first.pixels, 400, 268, 32, 12, 36,
-            0xffe2e2e6u32
-        )).to_equal(0)
-        expect(_rect_non_color_count(
-            first.pixels, 400, 308, 32, 4, 36,
-            0xffe8e8e8u32
-        )).to_equal(0)
-        expect(_rect_non_color_count(
-            first.pixels, 400, 312, 32, 84, 7,
-            0xffffffffu32
-        )).to_equal(0)
-        expect(_rect_non_color_count(
-            first.pixels, 400, go_rect.x, go_rect.y,
-            go_rect.width, go_rect.height, go_rect.color
-        )).to_be_greater_than(0)
-        worker.close()
-        expect(isolated.close()).to_be(true)
+var pointer = HostedWebContentSession.create(
+    91, "<main>Pointer</main>", 64, 48
+)
+expect(pointer.browser.open_html(
+    committed_url, "<main>Pointer</main>"
+).is_ok()).to_be(true)
+expect(pointer.browser.apply_address_update(
+    "", address_reference, true
+).is_ok()).to_be(true)
+val pointer_down = pointer.dispatch_chrome_pointer(
+    1, "go", true
+)
+expect(pointer_down.callback_count).to_equal(0)
+expect(pointer.browser.address_draft).to_equal(address_reference)
+expect(pointer.chrome_focus).to_equal("")
+expect(pointer.browser.pending_request_count()).to_equal(0)
+expect(pointer.dispatch_chrome_pointer(
+    2, "go", false
+).callback_count).to_equal(1)
+expect(pointer.browser.pending_request_count()).to_equal(1)
+val pointer_request = pointer.browser.take_pending_request().unwrap()
+expect(pointer_request.url).to_equal(go_request.url)
+expect(pointer_request.method).to_equal(go_request.method)
 
+var isolated = HostedBrowserRendererRegistry.create(
+    "/bin/false", "https://home.test/"
+)
+val _ = isolated.ensure(
+    93, "<main>Isolated</main>", 64, 48, 0, 100000
+)
+var isolated_entry = isolated.entries[0]
+isolated_entry.renderer = HostedBrowserRendererProcess.create(
+    93, 64, 48
+)
+isolated_entry.renderer.state = "active"
+isolated_entry.renderer.document_url = committed_url
+isolated_entry.renderer.document_origin = "https://example.com"
+isolated_entry.renderer.history_urls = [committed_url]
+isolated_entry.renderer.history_index = 0
+isolated_entry.renderer_closed = false
+isolated_entry.ready = true
+isolated_entry.failure_reason = ""
+isolated_entry.address_draft = address_reference
+isolated.entries[0] = isolated_entry
+val isolated_down = isolated.dispatch_chrome_pointer(
+    8, 93, "go", true
+)
+expect(isolated_down.callback_count).to_equal(0)
+expect(isolated.entries[0].address_editing).to_be(false)
+expect(isolated.address_text(93)).to_equal(address_reference)
+expect(isolated.entries[0].renderer.pending_wire).to_equal("")
+expect(isolated.dispatch_chrome_pointer(
+    9, 93, "go", false
+).callback_count).to_equal(1)
+expect(isolated.entries[0].renderer.pending_wire != "").to_be(true)
+val isolated_command = browser_renderer_navigation_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(93),
+        isolated.entries[0].renderer.pending_wire
+    ).message
+)
+expect(isolated_command.action).to_equal("open")
+expect(isolated_command.url).to_equal(target_url)
+
+var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+val worker_capability = "11111111111111111111111111111111"
+val worker_init = browser_renderer_capability_bind_encoded(
+    browser_renderer_message_encode(
+        "init", 94, 2, "<main>Worker Go</main>"
+    ),
+    94, 2, 2, worker_capability
+)
+expect(worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(94),
+        worker_init.wire
+    ).message
+).ok).to_be(true)
+expect(worker.browser.open_html(
+    committed_url, "<main>Worker Go</main>"
+).is_ok()).to_be(true)
+expect(worker.browser.apply_address_update(
+    "", address_reference, true
+).is_ok()).to_be(true)
+val worker_go_down = browser_renderer_capability_bind_encoded(
+    browser_renderer_chrome_encode(94, 3, 10, "go", true),
+    94, 3, 3, worker_capability
+)
+expect(worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(94),
+        worker_go_down.wire
+    ).message
+).ok).to_be(true)
+expect(worker.browser.address_draft).to_equal(address_reference)
+expect(worker.chrome_focus).to_equal("")
+val worker_go_up = browser_renderer_capability_bind_encoded(
+    browser_renderer_chrome_encode(94, 4, 11, "go", false),
+    94, 4, 4, worker_capability
+)
+val worker_go_route = worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(94),
+        worker_go_up.wire
+    ).message
+)
+expect(worker_go_route.ok).to_be(false)
+expect(worker_go_route.reason).to_equal(
+    "navigation-command-required"
+)
+expect(worker.browser.apply_address_update(
+    "", address_reference, true
+).is_ok()).to_be(true)
+val worker_home_down = browser_renderer_capability_bind_encoded(
+    browser_renderer_chrome_encode(94, 5, 12, "home", true),
+    94, 5, 5, worker_capability
+)
+expect(worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(94),
+        worker_home_down.wire
+    ).message
+).ok).to_be(true)
+expect(worker.browser.address_draft).to_equal(committed_url)
+expect(worker.chrome_focus).to_equal("")
+val worker_home_up = browser_renderer_capability_bind_encoded(
+    browser_renderer_chrome_encode(94, 6, 13, "home", false),
+    94, 6, 6, worker_capability
+)
+val worker_home_route = worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(94),
+        worker_home_up.wire
+    ).message
+)
+expect(worker_home_route.ok).to_be(false)
+expect(worker_home_route.reason).to_equal(
+    "navigation-command-required"
+)
+var reload_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+val reload_worker_capability = "22222222222222222222222222222222"
+val reload_worker_init = browser_renderer_capability_bind_encoded(
+    browser_renderer_message_encode(
+        "init", 97, 2, "<main>Worker Reload</main>"
+    ),
+    97, 2, 2, reload_worker_capability
+)
+expect(reload_worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(97),
+        reload_worker_init.wire
+    ).message
+).ok).to_be(true)
+expect(reload_worker.browser.open_html(
+    committed_url, "<main>Worker Reload</main>"
+).is_ok()).to_be(true)
+val worker_reload_url = reload_worker.browser.current_url
+val worker_reload_loading = reload_worker.browser.is_loading
+val worker_reload_pending = reload_worker.browser.pending_request_count()
+val worker_reload_history = reload_worker.browser.history
+val worker_reload_current_index = reload_worker.browser.current_index
+val worker_reload_body = reload_worker.browser.current_body_html
+val worker_reload_composition_revision = (
+    reload_worker.render_session.counters.composition_revision
+)
+val worker_reload_down = browser_renderer_capability_bind_encoded(
+    browser_renderer_chrome_encode(97, 3, 12, "reload", true),
+    97, 3, 3, reload_worker_capability
+)
+expect(reload_worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(97),
+        worker_reload_down.wire
+    ).message
+).ok).to_be(true)
+val worker_reload_up = browser_renderer_capability_bind_encoded(
+    browser_renderer_chrome_encode(97, 4, 13, "reload", false),
+    97, 4, 4, reload_worker_capability
+)
+val worker_reload_route = reload_worker.handle(
+    browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(97),
+        worker_reload_up.wire
+    ).message
+)
+expect(worker_reload_route.ok).to_be(false)
+expect(worker_reload_route.reason).to_equal(
+    "navigation-command-required"
+)
+expect(reload_worker.browser.current_url).to_equal(worker_reload_url)
+expect(reload_worker.browser.is_loading).to_equal(worker_reload_loading)
+expect(reload_worker.browser.pending_request_count()).to_equal(
+    worker_reload_pending
+)
+expect(reload_worker.browser.history).to_equal(
+    worker_reload_history
+)
+expect(reload_worker.browser.current_index).to_equal(
+    worker_reload_current_index
+)
+expect(reload_worker.browser.current_body_html).to_equal(worker_reload_body)
+expect(reload_worker.render_session.counters.composition_revision).to_equal(
+    worker_reload_composition_revision
+)
+
+var direct = HostedBrowserRendererProcess.create(95, 64, 48)
+direct.state = "active"
+direct.document_url = committed_url
+direct.document_origin = "https://example.com"
+direct.history_urls = [committed_url]
+direct.history_index = 0
+direct.history_current_url = committed_url
+val direct_history = direct.history_urls
+expect(direct.pending_wire).to_equal("")
+val direct_release = hosted_browser_process_activate_address(
+    direct, direct.document_url, address_reference, 2000
+)
+expect(direct_release.callback_count).to_equal(1)
+expect(direct_release.reason).to_equal("")
+expect(direct_release.retain_address_focus).to_be(false)
+expect(direct_release.target_url).to_equal(target_url)
+expect(direct.pending_wire != "").to_be(true)
+expect(direct.pending_wire_is_command).to_be(true)
+expect(direct.pending_operation).to_equal("navigation")
+expect(direct.navigation_permit.active).to_be(true)
+val direct_envelope = browser_renderer_capability_decoder_feed(
+    browser_renderer_capability_decoder_new(95),
+    direct.pending_wire
+)
+val direct_command = browser_renderer_navigation_decode(
+    browser_renderer_capability_payload_message(
+        direct_envelope.message
+    )
+)
+expect(direct_command.ok).to_be(true)
+expect(direct_command.action).to_equal("open")
+expect(direct_command.url).to_equal(target_url)
+expect(direct.history_urls).to_equal(direct_history)
+expect(direct.history_index).to_equal(0)
+expect(direct.document_url).to_equal(committed_url)
+
+var rejected_direct = HostedBrowserRendererProcess.create(
+    96, 64, 48
+)
+rejected_direct.state = "active"
+rejected_direct.document_url = committed_url
+rejected_direct.document_origin = "https://example.com"
+rejected_direct.history_urls = [committed_url]
+rejected_direct.history_index = 0
+rejected_direct.history_current_url = committed_url
+val rejected_history = rejected_direct.history_urls
+val rejected_release = hosted_browser_process_activate_address(
+    rejected_direct, rejected_direct.document_url,
+    "https://bad_host/", 2000
+)
+expect(rejected_release.callback_count).to_equal(0)
+expect(rejected_release.reason).to_equal(
+    "invalid navigation authority"
+)
+expect(rejected_release.retain_address_focus).to_be(true)
+expect(rejected_direct.pending_wire).to_equal("")
+expect(rejected_direct.navigation_permit.active).to_be(false)
+expect(rejected_direct.history_urls).to_equal(rejected_history)
+expect(rejected_direct.history_index).to_equal(0)
+expect(rejected_direct.document_url).to_equal(committed_url)
+
+var entered = HostedWebContentSession.create(
+    92, "<main>Enter</main>", 64, 48
+)
+expect(entered.browser.open_html(
+    committed_url, "<main>Enter</main>"
+).is_ok()).to_be(true)
+val _ = entered.dispatch_chrome_pointer(3, "address", true)
+val _ = entered.dispatch_chrome_pointer(4, "address", false)
+expect(entered.dispatch_text(
+    5, address_reference
+).callback_count).to_equal(1)
+expect(entered.dispatch_key(6, 13, true).callback_count).to_equal(1)
+expect(entered.dispatch_key(7, 13, false).callback_count).to_equal(0)
+expect(entered.browser.pending_request_count()).to_equal(1)
+val enter_request = entered.browser.take_pending_request().unwrap()
+expect(enter_request.url).to_equal(go_request.url)
+expect(enter_request.method).to_equal(go_request.method)
+
+for key in ["Enter", "Space"]:
+    var keyed = BrowserSession.new()
+    expect(keyed.open_html(
+        committed_url, "<main>Key</main>"
+    ).is_ok()).to_be(true)
+    expect(keyed.apply_address_update(
+        "", address_reference, true
+    ).is_ok()).to_be(true)
+    expect(keyed.ui_access_act(WinTextActionRequest(
+        target_id: "browser:session#go", action: "key",
+        text_value: key, x: 0, y: 0
+    )).ok).to_be(true)
+    expect(keyed.pending_request_count()).to_equal(1)
+
+step("Use Home Bookmark Stop and Reload")
+var controls = _browser_session_fixture()
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#back", action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+expect(controls.current_url).to_equal("https://example.com/one")
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#forward", action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+expect(controls.current_url).to_equal("https://example.com/two")
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#favorite", action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+val bookmarks = ui_access_find_nodes(
+    controls.ui_access_snapshot(), "browser:session",
+    "link", "Two", 1
+)
+expect(bookmarks.len()).to_equal(1)
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: bookmarks[0].canonical_id, action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+expect(controls.pending_request_count()).to_equal(1)
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#stop", action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+expect(controls.pending_request_count()).to_equal(0)
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#home", action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+expect(controls.current_url).to_equal("https://example.com/home")
+expect(controls.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#reload", action: "click",
+    text_value: "", x: 0, y: 0
+)).ok).to_be(true)
+expect(controls.current_url).to_equal("https://example.com/home")
+
+step("Observe canonical history controls and rendered document")
+val composition = shared_wm_scene_draw_ir_composition(
+    _browser_chrome_scene(400), _empty_taskbar(),
+    DRAW_IR_BACKEND_CPU, 1000, "", 0
+)
+val chrome = composition.batches[2].commands
+val go_rect = _draw_command(chrome, "win1-browser-control-6")
+val go_label = _draw_command(
+    chrome, "win1-browser-control-label-6"
+)
+val address_rect = _draw_command(chrome, "win1-browser-address")
+expect(go_rect.x).to_equal(268)
+expect(go_rect.y).to_equal(32)
+expect(go_rect.width).to_equal(40)
+expect(go_rect.height).to_equal(36)
+expect(go_label.text_value).to_equal("Go")
+expect(go_label.x).to_equal(280)
+expect(address_rect.x).to_equal(312)
+expect(address_rect.y).to_equal(32)
+expect(address_rect.width).to_equal(84)
+expect(address_rect.height).to_equal(36)
+expect(shared_wm_browser_toolbar_control_at(
+    280, 20, 400
+)).to_equal("go")
+expect(shared_wm_browser_toolbar_control_at(
+    320, 20, 400
+)).to_equal("address")
+expect(shared_wm_browser_toolbar_control_at(
+    250, 20, 267
+)).to_equal("")
+expect(shared_wm_browser_toolbar_control_at(
+    250, 20, 268
+)).to_equal("favorite")
+expect(shared_wm_browser_toolbar_control_at(
+    268, 20, 268
+)).to_equal("")
+expect(shared_wm_browser_toolbar_control_at(
+    280, 20, 311
+)).to_equal("")
+expect(shared_wm_browser_toolbar_control_at(
+    280, 20, 312
+)).to_equal("go")
+expect(shared_wm_browser_address_width(323)).to_equal(0)
+expect(shared_wm_browser_address_width(324)).to_equal(
+    WM_BROWSER_ADDRESS_MIN_WIDTH
+)
+expect(shared_wm_browser_toolbar_control_at(
+    312, 20, 323
+)).to_equal("")
+expect(shared_wm_browser_toolbar_control_at(
+    312, 20, 324
+)).to_equal("address")
+expect(shared_wm_browser_toolbar_control_at(
+    320, 20, 324
+)).to_equal("")
+val below_favorite_267_composition = (
+    shared_wm_scene_draw_ir_composition(
+        _browser_chrome_scene(267), _empty_taskbar(),
+        DRAW_IR_BACKEND_CPU, 999, "", 0
+    )
+)
+val exact_favorite_268_composition = (
+    shared_wm_scene_draw_ir_composition(
+        _browser_chrome_scene(268), _empty_taskbar(),
+        DRAW_IR_BACKEND_CPU, 1000, "", 0
+    )
+)
+val narrow_311_composition = shared_wm_scene_draw_ir_composition(
+    _browser_chrome_scene(311), _empty_taskbar(),
+    DRAW_IR_BACKEND_CPU, 1001, "", 0
+)
+val exact_go_312_composition = shared_wm_scene_draw_ir_composition(
+    _browser_chrome_scene(312), _empty_taskbar(),
+    DRAW_IR_BACKEND_CPU, 1002, "", 0
+)
+val below_address_min_composition = (
+    shared_wm_scene_draw_ir_composition(
+    _browser_chrome_scene(323), _empty_taskbar(),
+    DRAW_IR_BACKEND_CPU, 1003, "", 0
+    )
+)
+val exact_address_min_composition = (
+    shared_wm_scene_draw_ir_composition(
+    _browser_chrome_scene(324), _empty_taskbar(),
+    DRAW_IR_BACKEND_CPU, 1004, "", 0
+    )
+)
+_expect_browser_window_batch_clip(
+    below_favorite_267_composition, 267
+)
+_expect_browser_window_batch_clip(
+    exact_favorite_268_composition, 268
+)
+_expect_browser_window_batch_clip(narrow_311_composition, 311)
+_expect_browser_window_batch_clip(exact_go_312_composition, 312)
+_expect_browser_window_batch_clip(
+    below_address_min_composition, 323
+)
+_expect_browser_window_batch_clip(
+    exact_address_min_composition, 324
+)
+val narrow_311 = narrow_311_composition.batches[2].commands
+val exact_go_312 = exact_go_312_composition.batches[2].commands
+val below_address_min = (
+    below_address_min_composition.batches[2].commands
+)
+val exact_address_min = (
+    exact_address_min_composition.batches[2].commands
+)
+expect(_has_draw_command(
+    narrow_311, "win1-browser-control-6"
+)).to_be(false)
+expect(_has_draw_command(
+    exact_go_312, "win1-browser-control-6"
+)).to_be(true)
+expect(_has_draw_command(
+    below_address_min, "win1-browser-address"
+)).to_be(false)
+expect(_draw_command(
+    exact_address_min, "win1-browser-address"
+).width).to_equal(WM_BROWSER_ADDRESS_MIN_WIDTH)
+expect(exact_go_312.len()).to_equal(narrow_311.len() + 2)
+expect(below_address_min.len()).to_equal(exact_go_312.len())
+expect(exact_address_min.len()).to_equal(
+    below_address_min.len() + 2
+)
+val narrow_raster = Engine2dCompositorBackend.create_named(
+    311, 200, "software"
+)
+val narrow_frame = narrow_raster.render_draw_ir_composition(
+    narrow_311_composition, []
+)
+narrow_raster.shutdown()
+expect(narrow_frame.pixels[32 * 311 + 280]).to_equal(
+    0xffe8e8e8u32
+)
+val go_boundary_raster = Engine2dCompositorBackend.create_named(
+    312, 200, "software"
+)
+val go_boundary_frame = (
+    go_boundary_raster.render_draw_ir_composition(
+        exact_go_312_composition, []
+    )
+)
+go_boundary_raster.shutdown()
+expect(go_boundary_frame.pixels[32 * 312 + 280]).to_equal(
+    0xffe2e2e6u32
+)
+val below_address_raster = Engine2dCompositorBackend.create_named(
+    323, 200, "software"
+)
+val below_address_frame = (
+    below_address_raster.render_draw_ir_composition(
+        below_address_min_composition, []
+    )
+)
+below_address_raster.shutdown()
+expect(below_address_frame.pixels[32 * 323 + 312]).to_equal(
+    0xffe8e8e8u32
+)
+val address_boundary_raster = Engine2dCompositorBackend.create_named(
+    324, 200, "software"
+)
+val address_boundary_frame = (
+    address_boundary_raster.render_draw_ir_composition(
+        exact_address_min_composition, []
+    )
+)
+address_boundary_raster.shutdown()
+expect(address_boundary_frame.pixels[32 * 324 + 312]).to_equal(
+    0xffffffffu32
+)
+expect(address_boundary_frame.pixels[32 * 324 + 320]).to_equal(
+    0xffe8e8e8u32
+)
+val raster = Engine2dCompositorBackend.create_named(
+    400, 200, "software"
+)
+val first = raster.render_draw_ir_composition(composition, [])
+raster.shutdown()
+expect(first.pixels.len()).to_equal(400 * 200)
+expect(first.rendered_command_count).to_be_greater_than(0)
+expect(first.skipped_command_count).to_equal(0)
+expect(_rect_non_color_count(
+    first.pixels, 400, 268, 32, 12, 36,
+    0xffe2e2e6u32
+)).to_equal(0)
+expect(_rect_non_color_count(
+    first.pixels, 400, 308, 32, 4, 36,
+    0xffe8e8e8u32
+)).to_equal(0)
+expect(_rect_non_color_count(
+    first.pixels, 400, 312, 32, 84, 7,
+    0xffffffffu32
+)).to_equal(0)
+expect(_rect_non_color_count(
+    first.pixels, 400, go_rect.x, go_rect.y,
+    go_rect.width, go_rect.height, go_rect.color
+)).to_be_greater_than(0)
+worker.close()
+expect(isolated.close()).to_be(true)
 ```
 
 </details>
 
 #### captures browser UI access visible state for the generated manual
 
-- var session = BrowserSession new
-- session open html
+- captures browser UI access visible state for the generated manual
    - Expected: _write_ui_capture(capture) equals `0`
    - Expected: _capture_file_state(capture) equals `matched`
 
@@ -742,10 +910,12 @@ hosted-entry, Draw IR, resized hit-layout, and literal-pixel assertions.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures browser UI access visible state for the generated manual")
 var session = BrowserSession.new()
 session.open_html("https://example.com/start/index.html", "<html><head><title>Start</title></head><body><a href='../docs/page.html'>Read docs</a></body></html>")
 val snapshot = session.ui_access_snapshot()
@@ -766,7 +936,7 @@ expect(_capture_file_state(capture)).to_equal("matched")
 
 #### routes textual UI access actions into BrowserSession primitive controls
 
-- var session =  browser session fixture
+- routes textual UI access actions into BrowserSession primitive controls
    - Expected: back.ok is true
    - Expected: session.current_url equals `https://example.com/one`
    - Expected: forward.ok is true
@@ -777,7 +947,6 @@ expect(_capture_file_state(capture)).to_equal("matched")
    - Expected: favorite_nodes[0].selected is true
    - Expected: unfavorite.ok is true
    - Expected: session.is_favorite("https://example.com/two") is false
-- session ui access snapshot
    - Expected: stop_nodes.len() equals `1`
    - Expected: stop_nodes[0].enabled is true
    - Expected: stop.ok is true
@@ -791,10 +960,12 @@ expect(_capture_file_state(capture)).to_equal("matched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes textual UI access actions into BrowserSession primitive controls")
 var session = _browser_session_fixture()
 
 val back = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#back", action: "click", text_value: "", x: 0, y: 0))
@@ -842,38 +1013,51 @@ expect(session.current_url).to_equal("https://example.com/home")
 
 #### should restore edited text controls during history traversal
 
-Back/Forward restores departure state; Reload keeps rebuilding the committed source.
-
+- should restore edited text controls during history traversal
 - Commit a page and edit its live text control
-   - Expected: text, textarea, checkbox, radio, and select edits succeed
-   - Expected: session.current_url equals `https://example.com/form`
+   - Expected: initial_select.len() equals `1`
+   - Expected: session.current_url equals `first_url`
    - Expected: session.history.len() equals `1`
    - Expected: session.current_index equals `0`
-   - Expected: one textfield exposes `kept`
 - Commit a second page without rewriting the first history entry
-   - Expected: the same URL commits with a different scripted title and CSP
+   - Expected: session.current_url equals `second_url`
    - Expected: session.history.len() equals `2`
-   - Expected: scripted page mutation cannot overwrite the first URL, source, or persisted state
+   - Expected: session.history[0].url equals `first_url`
+   - Expected: session.history[0].source_html equals `first_html`
+   - Expected: session.history[1].url equals `second_url`
+   - Expected: session.history[0].title equals `Form`
+   - Expected: session.history[1].title equals `Scripted next`
    - Expected: session.current_index equals `1`
-   - Expected: Back is enabled
 - Traverse Back through the textual browser control
-   - Expected: back.ok is true
-   - Expected: the committed URL is `https://example.com/form`
-   - Expected: the two-entry history ledger and index `0` are retained
+   - Expected: session.current_url equals `first_url`
+   - Expected: session.history.len() equals `2`
+   - Expected: session.history[0].url equals `first_url`
+   - Expected: session.history[1].url equals `second_url`
+   - Expected: session.current_index equals `0`
+   - Expected: session.current_title equals `Form`
+   - Expected: session.content_security_policy equals `first_policy`
 - Retain the committed page ledger and edited control value
-   - Expected: Back is disabled
-   - Expected: Forward is enabled
-   - Expected: all five control kinds expose their edited state
-   - Expected: Reload restores source defaults and the first CSP without growing history
-   - Expected: Forward restores the second page without growing history
+   - Expected: reload_request.kind equals `document`
+   - Expected: session.history.len() equals `2`
+   - Expected: session.current_index equals `0`
+   - Expected: session.history[0].source_html equals `first_html`
+   - Expected: session.current_url equals `second_url`
+   - Expected: session.history.len() equals `2`
+   - Expected: session.current_index equals `1`
+   - Expected: session.history[0].source_html equals `first_html`
+   - Expected: session.current_title equals `Scripted next`
+   - Expected: session.content_security_policy equals `second_policy`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 201 lines folded for reproduction.
+Runnable source: 219 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should restore edited text controls during history traversal")
 """Back/Forward restores departure state; Reload keeps rebuilding the committed source."""
 val first_url = "https://example.com/form"
 val second_url = first_url
@@ -1097,34 +1281,35 @@ expect(session.content_security_policy).to_equal(second_policy)
 
 #### reports favorite availability and mutation truthfully
 
-The public chrome route reports only session-local favorite mutations.
-
+- reports favorite availability and mutation truthfully
 - Inspect Favorite before a network document is open
    - Expected: unavailable.len() equals `1`
-   - Expected: unavailable[0].enabled equals `false`
+   - Expected: unavailable[0].enabled is false
    - Expected: session.bookmark_snapshot().entries.len() equals `0`
 - Attempt Favorite through the public textual action
-   - Expected: denied.ok equals `false`
+   - Expected: denied.ok is false
    - Expected: denied.code equals `disabled`
    - Expected: session.bookmark_snapshot().entries.len() equals `0`
 - Open a network document and add it through the same action
-   - Expected: added.ok equals `true`
+   - Expected: added.ok is true
    - Expected: session.bookmark_snapshot().entries.len() equals `1`
-   - Expected: session.is_favorite("https://example.com/bookmarkable") equals `true`
 - Remove the saved page and retain an enabled truthful control
-   - Expected: removed.ok equals `true`
+   - Expected: removed.ok is true
    - Expected: session.bookmark_snapshot().entries.len() equals `0`
-   - Expected: available[0].enabled equals `true`
-   - Expected: available[0].selected equals `false`
+   - Expected: available[0].enabled is true
+   - Expected: available[0].selected is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports favorite availability and mutation truthfully")
+"""The public chrome route reports only session-local favorite mutations."""
 step("Inspect Favorite before a network document is open")
 var session = BrowserSession.new()
 val unavailable = ui_access_find_nodes(
@@ -1178,33 +1363,40 @@ expect(available[0].selected).to_equal(false)
 
 #### publishes favorite mutations through exact snapshot revisions
 
-**Requirements exercised:** REQ-WEB-BROWSER-009.
-
-Every logical bookmark-list change invalidates stale UI targets once.
-
+- publishes favorite mutations through exact snapshot revisions
 - Capture a bookmarkable page with one existing saved link
-   - Expected: the initial saved link is accepted
 - Add the current page through Favorite and publish one revision
-   - Expected: the action succeeds
-   - Expected: the snapshot revision advances exactly once
-   - Expected: two bookmarks exist and Favorite is selected
-   - Expected: the current page is listed
+   - Expected: added.ok is true
+   - Expected: session.bookmark_snapshot().entries.len() equals `2`
+   - Expected: selected[0].selected is true
 - Keep normalized no-ops stable and publish changed title and bulk loads
-   - Expected: identical upsert, missing removal, and normalized-equivalent bulk load keep the revision
-   - Expected: a changed title and changed bulk load each advance exactly once
+   - Expected: session.ui_access_revision equals `stable_revision`
+   - Expected: session.ui_access_revision equals `before_title + 1`
+   - Expected: session.ui_access_revision equals `before_bulk + 1`
+   - Expected: session.bookmark_snapshot().entries.len() equals `3`
 - Reject its stale shifted target and open the current bookmark
-   - Expected: the action succeeds
-   - Expected: the snapshot revision advances exactly once
-   - Expected: the stale target is not found and the current target opens
+   - Expected: current_before_remove.len() equals `1`
+   - Expected: removed.ok is true
+   - Expected: session.bookmark_snapshot().entries.len() equals `2`
+   - Expected: unselected[0].selected is false
+   - Expected: stale.ok is false
+   - Expected: stale.code equals `target_not_found`
+   - Expected: session.current_url equals `https://example.com/current`
+   - Expected: current_third.len() equals `1`
+   - Expected: opened.ok is true
+   - Expected: session.current_url equals `https://example.com/third`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 112 lines folded for reproduction.
+Runnable source: 114 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("publishes favorite mutations through exact snapshot revisions")
+"""Every logical bookmark-list change invalidates stale UI targets once."""
 step("Capture a bookmarkable page with one existing saved link")
 var session = BrowserSession.new()
 session.open_html(
@@ -1316,16 +1508,13 @@ val opened = session.ui_access_act(WinTextActionRequest(
 ))
 expect(opened.ok).to_equal(true)
 expect(session.current_url).to_equal("https://example.com/third")
-
 ```
 
 </details>
 
 #### edits and submits the address through textual UI access
 
-- var session = BrowserSession new
-- session register resource
-- session open html
+- edits and submits the address through textual UI access
    - Expected: edit.ok is true
    - Expected: session.ui_access_snapshot().nodes[7].text_value equals `https://example.com/target`
    - Expected: session.current_url equals `https://example.com/start`
@@ -1336,10 +1525,12 @@ expect(session.current_url).to_equal("https://example.com/third")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("edits and submits the address through textual UI access")
 var session = BrowserSession.new()
 session.register_resource("https://example.com/target", "<html><head><title>Target</title></head><body>Target</body></html>")
 session.open_html("https://example.com/start", "<html><head><title>Start</title></head><body>Start</body></html>")
@@ -1358,21 +1549,27 @@ expect(session.current_url).to_equal("https://example.com/target")
 
 #### keeps a cleared address empty and rejects activation without mutation
 
-**Requirements exercised:** REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-021.
-
+- keeps a cleared address empty and rejects activation without mutation
 - Clear the committed address through textual UI access
-   - Expected: the address remains visibly empty and Go becomes disabled.
+   - Expected: cleared_snapshot.nodes[7].text_value equals ``
 - Reject empty Submit and Go without changing browser state
-   - Expected: the committed URL, history position, pending requests, and
-     rendered pixels remain unchanged.
+   - Expected: clicked.code equals `disabled`
+   - Expected: session.current_url equals `url_before`
+   - Expected: session.history.len() equals `history_before`
+   - Expected: session.current_index equals `index_before`
+   - Expected: session.pending_request_count() equals `pending_before`
 - Discard cleared drafts across Back, Forward, Home, and Stop
-   - Expected: each navigation control restores its committed or pending URL;
-     empty edit state never leaks across the shared navigation boundary.
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 84 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps a cleared address empty and rejects activation without mutation")
 step("Clear the committed address through textual UI access")
 var session = BrowserSession.new()
 session.open_html(
@@ -1461,22 +1658,27 @@ expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
 
 #### publishes address edits through a newer UI snapshot revision
 
-**Requirements exercised:** REQ-WEB-BROWSER-007, REQ-WEB-BROWSER-008,
-REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-021.
-
+- publishes address edits through a newer UI snapshot revision
 - Capture the address snapshot before editing
 - Edit the address without starting navigation
-   - Expected: edit succeeds, the snapshot revision increases, the visible
-     address is found by canonical query, and the committed URL remains
-     unchanged.
+   - Expected: edited.ok is true
+   - Expected: addresses.len() equals `1`
+   - Expected: addresses[0].canonical_id equals `browser:session#address`
+   - Expected: session.current_url equals `https://example.com/start`
 - Keep the published revision stable for unchanged or invalid text
-   - Expected: setting the same address and rejected control text do not
-     change the revision.
+   - Expected: unchanged.ok is true
+   - Expected: rejected.code equals `address-invalid-control`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("publishes address edits through a newer UI snapshot revision")
 step("Capture the address snapshot before editing")
 var session = BrowserSession.new()
 session.open_html("https://example.com/start", "<html><body>Start</body></html>")
@@ -1489,9 +1691,12 @@ val edited = session.ui_access_act(WinTextActionRequest(
 ))
 val after = session.ui_access_snapshot()
 expect(edited.ok).to_equal(true)
-expect(after.snapshot_revision).to_be_greater_than(before.snapshot_revision)
+expect(after.snapshot_revision).to_be_greater_than(
+    before.snapshot_revision
+)
 val addresses = ui_access_find_nodes(
-    after, "browser:session", "textfield", "https://example.com/target", 1
+    after, "browser:session", "textfield",
+    "https://example.com/target", 1
 )
 expect(addresses.len()).to_equal(1)
 expect(addresses[0].canonical_id).to_equal("browser:session#address")
@@ -1503,19 +1708,24 @@ val unchanged = session.ui_access_act(WinTextActionRequest(
     text_value: "https://example.com/target", x: 0, y: 0
 ))
 expect(unchanged.ok).to_equal(true)
-expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_revision)
+expect(session.ui_access_snapshot().snapshot_revision).to_equal(
+    after.snapshot_revision
+)
 val rejected = session.ui_access_act(WinTextActionRequest(
     target_id: "browser:session#address", action: "set_value",
     text_value: "https://example.com/\nblocked", x: 0, y: 0
 ))
 expect(rejected.code).to_equal("address-invalid-control")
-expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_revision)
+expect(session.ui_access_snapshot().snapshot_revision).to_equal(
+    after.snapshot_revision
+)
 ```
 
 </details>
 
 #### bounds UTF-8 address input without partial state or pixel mutation
 
+- bounds UTF-8 address input without partial state or pixel mutation
 - Accept exactly 2048 UTF-8 bytes and project the draft accessibly
    - Expected: BROWSER_ADDRESS_MAX_BYTES equals `2048`
    - Expected: initial_pixels[0] equals `0xFFFF0000u32`
@@ -1523,7 +1733,6 @@ expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_r
    - Expected: text_codepoint_len(exact_draft) equals `2046`
    - Expected: accepted.ok is true
    - Expected: _address_node_count(session, exact_draft) equals `1`
-   - Expected: focus_before equals `keep`
 - Reject 2049 bytes before trimming and preserve browser state
    - Expected: leading_overflow.code equals `address-too-long`
    - Expected: trailing_overflow.code equals `address-too-long`
@@ -1534,7 +1743,6 @@ expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_r
    - Expected: session.pending_request_count() equals `pending_before`
    - Expected: session.pending_url equals `pending_url_before`
    - Expected: session.is_loading equals `loading_before`
-   - Expected: system_dom_focused_route(...).node_id equals `focus_before.node_id`
    - Expected: session.ui_access_revision equals `revision_before`
 - Reject C0 DEL and C1 controls before UI projection
    - Expected: leading_newline.code equals `address-invalid-control`
@@ -1547,7 +1755,6 @@ expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_r
    - Expected: session.pending_request_count() equals `pending_before`
    - Expected: session.pending_url equals `pending_url_before`
    - Expected: session.is_loading equals `loading_before`
-   - Expected: system_dom_focused_route(...).node_id equals `focus_before.node_id`
    - Expected: session.ui_access_revision equals `revision_before`
    - Expected: _address_node_count(session, exact_draft) equals `1`
 - Submit an exact 2048-byte URL and render the committed page
@@ -1561,10 +1768,13 @@ expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_r
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 116 lines folded for reproduction.
+Runnable source: 133 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("bounds UTF-8 address input without partial state or pixel mutation")
+"""The address trust boundary checks raw UTF-8 bytes and controls before mutation."""
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/start",
@@ -1704,23 +1914,7 @@ expect(exact_pixels[0]).to_equal(0xFF00FF00u32)
 
 #### keeps hosted worker registry and live-entry address rejection atomic
 
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- rt bytes to text
-- Err
-- Ok
+- keeps hosted worker registry and live-entry address rejection atomic
    - Expected: live_entry_draft equals `about:blank`
    - Expected: live_entry_pending equals `pending`
    - Expected: live_entry_replace is true
@@ -1733,14 +1927,9 @@ expect(exact_pixels[0]).to_equal(0xFF00FF00u32)
    - Expected: hosted.mutation_revision equals `hosted_revision`
    - Expected: hosted.chrome_focus equals `address`
    - Expected: hosted.address_replace_on_text is true
-- hosted browser ui access snapshot
-- hosted browser render to pixels
    - Expected: hosted_exact.callback_count equals `1`
    - Expected: hosted.browser.address_draft equals `exact`
-- hosted browser render to pixels
 - Reject C1 through the renderer worker without clearing focus
-- var worker = HostedBrowserRendererWorkerSession create
-- payload: "T1\t{invalid len
    - Expected: worker.browser.current_url equals `worker_url`
    - Expected: worker.browser.history.len() equals `worker_history`
    - Expected: worker.browser.current_index equals `worker_index`
@@ -1748,9 +1937,6 @@ expect(exact_pixels[0]).to_equal(0xFF00FF00u32)
    - Expected: worker.browser.is_loading equals `worker_loading`
    - Expected: worker.chrome_focus equals `address`
    - Expected: worker.address_replace_on_text is true
-- worker browser ui access snapshot
-- worker browser render to pixels
-- payload: "T1\t{exact len
    - Expected: worker_exact.ok is true
    - Expected: worker.browser.address_draft equals `exact`
 - Reject C1 through the hosted parent registry wire
@@ -1766,10 +1952,12 @@ expect(exact_pixels[0]).to_equal(0xFF00FF00u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 210 lines folded for reproduction.
+Runnable source: 212 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps hosted worker registry and live-entry address rejection atomic")
 val invalid = "https://example.com/" + _scalar_text(128)
 val exact = _repeat_ascii("a", 2048)
 var c0: i64 = 0
@@ -1989,9 +2177,7 @@ val _ = registry.close()
 
 #### lists and opens a saved bookmark through textual UI access
 
-- var session = BrowserSession new
-- session add favorite
-- session ui access snapshot
+- lists and opens a saved bookmark through textual UI access
    - Expected: bookmarks.len() equals `1`
    - Expected: opened.ok is true
    - Expected: session.current_url equals `https://example.com/saved`
@@ -2000,10 +2186,12 @@ val _ = registry.close()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lists and opens a saved bookmark through textual UI access")
 var session = BrowserSession.new()
 session.register_resource(
     "https://example.com/saved",
@@ -2032,8 +2220,7 @@ expect(session.current_body_html).to_contain("Saved page")
 
 #### rejects unsupported browser UI actions through the textual route
 
-- var session = BrowserSession new
-- session open html
+- rejects unsupported browser UI actions through the textual route
    - Expected: result.ok is false
    - Expected: result.code equals `unsupported_operation`
 
@@ -2041,10 +2228,12 @@ expect(session.current_body_html).to_contain("Saved page")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects unsupported browser UI actions through the textual route")
 var session = BrowserSession.new()
 session.open_html("about:blank", "<html><body>Blank</body></html>")
 val result = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#home", action: "set_value", text_value: "x", x: 0, y: 0))
@@ -2056,9 +2245,7 @@ expect(result.code).to_equal("unsupported_operation")
 
 #### exposes page anchors as actionable textual UI links
 
-- var session = BrowserSession new
-- session register resource
-- session open html
+- exposes page anchors as actionable textual UI links
    - Expected: links.len() equals `1`
    - Expected: _node_prop(links[0], "href") equals `https://example.com/docs/page.html`
    - Expected: result.ok is true
@@ -2068,10 +2255,12 @@ expect(result.code).to_equal("unsupported_operation")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exposes page anchors as actionable textual UI links")
 var session = BrowserSession.new()
 session.register_resource("https://example.com/docs/page.html", "<html><head><title>Docs</title></head><body>Docs page</body></html>")
 session.open_html("https://example.com/start/index.html", "<html><head><title>Start</title></head><body><a href='../docs/page.html'>Read docs</a></body></html>")
@@ -2090,8 +2279,7 @@ expect(session.current_body_html).to_contain("Docs page")
 
 #### routes accessible link clicks through DOM cancellation
 
-- var session = BrowserSession new
-- session ui access snapshot
+- routes accessible link clicks through DOM cancellation
    - Expected: links.len() equals `1`
    - Expected: result.ok is true
    - Expected: result.message equals `link event canceled`
@@ -2102,10 +2290,12 @@ expect(session.current_body_html).to_contain("Docs page")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes accessible link clicks through DOM cancellation")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/start",
@@ -2131,7 +2321,7 @@ expect(session.has_pending_requests()).to_equal(false)
 
 #### edits and activates page controls through the DOM-backed UI surface
 
-- var session = BrowserSession new
+- edits and activates page controls through the DOM-backed UI surface
    - Expected: edited.ok is true
    - Expected: session.current_title equals `Typing`
    - Expected: canceled.ok is true
@@ -2149,11 +2339,9 @@ expect(session.has_pending_requests()).to_equal(false)
    - Expected: blocked_key.message equals `control key event canceled`
    - Expected: session.current_title equals `Saved`
    - Expected: checked.ok is true
-- session ui access snapshot
    - Expected: checkboxes.len() equals `1`
    - Expected: checkboxes[0].selected is true
    - Expected: selected_radio.ok is true
-- session ui access snapshot
    - Expected: radios.len() equals `2`
    - Expected: radios[0].selected is false
    - Expected: radios[1].selected is true
@@ -2163,10 +2351,12 @@ expect(session.has_pending_requests()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 81 lines folded for reproduction.
+Runnable source: 111 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("edits and activates page controls through the DOM-backed UI surface")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/form",
@@ -2282,26 +2472,27 @@ expect(radios[1].focused).to_equal(true)
 
 #### should expose input reset as a button and preserve keyboard event order
 
+- should expose input reset as a button and preserve keyboard event order
 - Edit a form control away from its parsed default
-   - Expected: editing the text input succeeds
 - Find reset through the canonical button surface
-   - Expected: exactly one `Reset` button is exposed
-   - Expected: the button supports `click` and `key`
+   - Expected: reset_buttons.len() equals `1`
 - Activate reset with Enter and observe keydown click reset order
-   - Expected: keyboard activation succeeds
-   - Expected: the event order is `keydown,click,reset,`
+   - Expected: keyed.ok is true
+   - Expected: session.current_title equals `keydown,click,reset,`
 - Restore the dirty value and retain pointer click activation
-   - Expected: keyboard reset restores `seed`
-   - Expected: pointer activation succeeds and restores `seed`
+   - Expected: be_dom_get_attr(restored[0], "value") equals `seed`
+   - Expected: clicked.ok is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should expose input reset as a button and preserve keyboard event order")
 step("Edit a form control away from its parsed default")
 var session = BrowserSession.new()
 session.open_html(
@@ -2348,14 +2539,13 @@ val pointer_restored = be_dom_find_by_tag(
 expect(be_dom_get_attr(
     pointer_restored[0], "value"
 )).to_equal("seed")
-
 ```
 
 </details>
 
 #### routes duplicate author IDs by exact DOM node identity
 
-- var session = BrowserSession new
+- routes duplicate author IDs by exact DOM node identity
    - Expected: edited.ok is true
    - Expected: dom_inputs.len() equals `2`
    - Expected: be_dom_get_attr(dom_inputs[0], "data-routed") equals ``
@@ -2369,10 +2559,12 @@ expect(be_dom_get_attr(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes duplicate author IDs by exact DOM node identity")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/form",
@@ -2414,8 +2606,7 @@ expect(second_focused).to_equal(true)
 
 #### changes the exact live select and rejects stale or disabled values
 
-- var session = BrowserSession new
-- session ui access snapshot
+- changes the exact live select and rejects stale or disabled values
    - Expected: before.len() equals `3`
    - Expected: before[0].text_value equals `blue`
    - Expected: before[1].text_value equals `blue`
@@ -2423,7 +2614,6 @@ expect(second_focused).to_equal(true)
    - Expected: changed.ok is true
    - Expected: changed.message equals `selection updated`
    - Expected: callback_count equals `2`
-- session ui access snapshot
    - Expected: after[0].text_value equals `blue`
    - Expected: after[1].text_value equals `red`
    - Expected: after[0].focused is false
@@ -2444,22 +2634,21 @@ expect(second_focused).to_equal(true)
    - Expected: disabled_select.code equals `disabled`
    - Expected: stale.ok is false
    - Expected: stale.code equals `target_not_found`
-- var focus session = BrowserSession new
-- focus session ui access snapshot
    - Expected: focus_disabled.ok is false
    - Expected: focus_session.dom_callback_count equals `1`
    - Expected: be_dom_get_attr(live_select, "data-wrong") equals ``
-- focus session ui access snapshot
    - Expected: focus_after[0].text_value equals `old`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 109 lines folded for reproduction.
+Runnable source: 111 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("changes the exact live select and rejects stale or disabled values")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/select",
@@ -2575,7 +2764,7 @@ expect(focus_after[0].text_value).to_equal("old")
 
 #### hides secret form state and edits textarea through one focused route
 
-- var session = BrowserSession new
+- hides secret form state and edits textarea through one focused route
    - Expected: page_textfield_nodes equals `2`
    - Expected: password_value equals ``
    - Expected: textarea_value equals `old`
@@ -2586,10 +2775,12 @@ expect(focus_after[0].text_value).to_equal("old")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hides secret form state and edits textarea through one focused route")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/form",
@@ -2635,26 +2826,40 @@ expect(textarea_focused).to_equal(true)
 
 #### rejects stale DOM control identities after document replacement
 
-A control action captured from one document cannot target a same-position control in its replacement.
+- rejects stale DOM control identities after document replacement
+- Capture document A link, button, input, and textarea identities
+   - Expected: a_links.len() equals `1`
+   - Expected: a_buttons.len() equals `1`
+   - Expected: a_inputs.len() equals `1`
+   - Expected: a_textareas.len() equals `1`
+- Replace document A with same-position document B controls
+   - Expected: b_links.len() equals `1`
+   - Expected: b_buttons.len() equals `1`
+   - Expected: b_inputs.len() equals `1`
+   - Expected: b_textareas.len() equals `1`
+- Reject every stale document A action without mutating document B
+   - Expected: stale_link.code equals `target_not_found`
+   - Expected: stale_button.code equals `target_not_found`
+   - Expected: stale_input.code equals `target_not_found`
+   - Expected: stale_textarea.code equals `target_not_found`
+   - Expected: session.current_url equals `https://example.com/b`
+   - Expected: session.current_title equals `B`
+   - Expected: session.dom_callback_count equals `callback_count`
+- Re-query document B and activate each fresh identity
+   - Expected: session.current_title equals `B button`
+   - Expected: link_result.message equals `link event canceled`
 
-1. Capture document A link, button, input, and textarea identities.
-2. Replace document A with same-position document B controls.
-3. Reject every stale document A action without mutating document B.
-4. Re-query document B and activate each fresh identity.
-
-Expected results:
-
-- Every DOM-derived canonical ID carries its snapshot revision and DOM node ID.
-- All four stale actions return `target_not_found`.
-- Document B keeps its URL, title, callback count, and values after stale actions.
-- Re-queried document B controls accept their intended actions.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: complete four-step regression scenario folded for reproduction.
+Runnable source: 146 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects stale DOM control identities after document replacement")
+"""A control action captured from one document cannot target a same-position control in its replacement."""
 step("Capture document A link, button, input, and textarea identities")
 var session = BrowserSession.new()
 session.open_html(
@@ -2806,8 +3011,8 @@ expect(link_result.message).to_equal("link event canceled")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -2815,10 +3020,72 @@ expect(link_result.message).to_equal("link event canceled")
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/simple_web_browser_production_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/simple_web_browser_production_hardening.md`
+- **Requirements:** `REQ-WEB-BROWSER-009 and REQ-WEB-BROWSER-010 in doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+- **Plan:** `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md`
 - **Design:** `doc/05_design/ui/web/simple_web_browser_production_hardening.md`
-- **Research:** `doc/01_research/local/simple_web_browser_production_hardening.md`
+- **Research:** `doc/01_research/local/simple_web_browser_engine_production_hardening.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-009`
+- `REQ-WEB-BROWSER-010`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c9a76e98c9dcaa433459e80e4c40cac0cf2044d7c43626beaddd8e413948c0be`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c9a76e98c9dcaa433459e80e4c40cac0cf2044d7c43626beaddd8e413948c0be`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c9a76e98c9dcaa433459e80e4c40cac0cf2044d7c43626beaddd8e413948c0be`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **84/100**; blockers: **0**.
+
+SSpec documentization score: 84/100
+source: test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=85 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 95 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:266:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes browser toolbar controls as queryable UI access nodes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:288:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ends hosted address editing before Home succeeds or fails' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:367:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose and activate one canonical Go control without duplicate navigation' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:367:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose and activate one canonical Go control without duplicate navigation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:1027:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should restore edited text controls during history traversal' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl:2106:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose input reset as a button and preserve keyboard event order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

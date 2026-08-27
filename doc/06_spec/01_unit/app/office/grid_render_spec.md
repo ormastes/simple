@@ -22,7 +22,7 @@ Simple Calc paints its spreadsheet viewport on two surfaces: the full-screen
 | Plan | doc/03_plan/sys_test/office_cli_tui_ui_access.md |
 | Design | doc/05_design/office_cli_tui_ui_access.md |
 | Source | `test/01_unit/app/office/grid_render_spec.spl` |
-| Updated | 2026-08-18 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and Audience
@@ -98,6 +98,7 @@ doc/08_tracking/bug/calc_cursor_hidden_row_awareness_divergence_2026-08-11.md.
 - invalid capture metadata value: tui_grid (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
+- labels columns from A and numbers rows from 1 at the sheet origin
 - Open a sheet holding values in the first columns
 - Render an 8-column, 4-row viewport at the top-left of the sheet
 - Confirm the capture has the requested shape before reading it
@@ -115,10 +116,12 @@ doc/08_tracking/bug/calc_cursor_hidden_row_awareness_divergence_2026-08-11.md.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("labels columns from A and numbers rows from 1 at the sheet origin")
 step("Open a sheet holding values in the first columns")
 val sheet = a_sheet_with_known_values()
 val metrics = spreadsheet_grid_default_metrics()
@@ -147,6 +150,7 @@ expect(grid_line(grid, 2)).to_equal("2                     x                    
 
 #### clips a cell value too wide for its column so the columns stay aligned
 
+- clips a cell value too wide for its column so the columns stay aligned
 - Open a sheet whose B1 holds a ten-character value
 - Render a viewport wide enough to include B
 - Confirm the ten-character value appears cut to five characters
@@ -159,10 +163,12 @@ expect(grid_line(grid, 2)).to_equal("2                     x                    
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("clips a cell value too wide for its column so the columns stay aligned")
 step("Open a sheet whose B1 holds a ten-character value")
 val sheet = a_sheet_with_known_values()
 val metrics = spreadsheet_grid_default_metrics()
@@ -187,6 +193,7 @@ expect(grid_line(grid, 0).len()).to_equal(grid_line(grid, 1).len())
 - invalid capture metadata value: tui_grid (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
+- re-labels headers and row numbers from the scroll origin
 - Open the sheet and scroll three columns right and seven rows down
 - Confirm the capture has the requested shape before reading it
 - Check the headers now start at D rather than A
@@ -201,10 +208,12 @@ expect(grid_line(grid, 0).len()).to_equal(grid_line(grid, 1).len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("re-labels headers and row numbers from the scroll origin")
 step("Open the sheet and scroll three columns right and seven rows down")
 val sheet = a_sheet_with_known_values()
 val metrics = spreadsheet_grid_default_metrics()
@@ -228,6 +237,7 @@ expect(grid_line(grid, 1).contains("deep")).to_equal(true)
 
 #### renders the terminal editor and the access surface identically at a shared origin
 
+- renders the terminal editor and the access surface identically at a shared origin
 - Open one sheet and fix a single viewport size
 - Render it the way the terminal editor does — anchored at A1
 - Render it the way the access controller does when unscrolled
@@ -239,10 +249,12 @@ expect(grid_line(grid, 1).contains("deep")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("renders the terminal editor and the access surface identically at a shared origin")
 step("Open one sheet and fix a single viewport size")
 val sheet = a_sheet_with_known_values()
 val metrics = spreadsheet_grid_default_metrics()
@@ -265,6 +277,7 @@ expect(editor_grid).to_equal(access_grid)
 
 #### distinguishes a scrolled viewport from an unscrolled one
 
+- distinguishes a scrolled viewport from an unscrolled one
 - Render the same sheet at the origin and again scrolled down
 - Confirm both captures are populated
 - Confirm scrolling actually changed what the user sees
@@ -274,10 +287,12 @@ expect(editor_grid).to_equal(access_grid)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("distinguishes a scrolled viewport from an unscrolled one")
 step("Render the same sheet at the origin and again scrolled down")
 val sheet = a_sheet_with_known_values()
 val metrics = spreadsheet_grid_default_metrics()
@@ -312,3 +327,57 @@ expect(at_origin == scrolled).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-OFFICE-GRID-001`
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6e795b9bef8c7e9d8b928f0aa333fbd2632f1bd4d52836ce5aca57d7f2335bf5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6e795b9bef8c7e9d8b928f0aa333fbd2632f1bd4d52836ce5aca57d7f2335bf5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6e795b9bef8c7e9d8b928f0aa333fbd2632f1bd4d52836ce5aca57d7f2335bf5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/office/grid_render_spec.spl
+mirror: doc/06_spec/01_unit/app/office/grid_render_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=90
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/01_unit/app/office/grid_render_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+test/01_unit/app/office/grid_render_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/office/grid_render_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/app/office/grid_render_spec.spl:122:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'labels columns from A and numbers rows from 1 at the sheet origin' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/grid_render_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'clips a cell value too wide for its column so the columns stay aligned' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/grid_render_spec.spl:167:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 're-labels headers and row numbers from the scroll origin' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Collection Utilities Specification
 
-> val sorted = arr.sort()      # Returns new sorted array
-
-<!-- sdn-diagram:id=collection_utilities_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=collection_utilities_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-collection_utilities_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=collection_utilities_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ collection_utilities_spec
 
 # Collection Utilities Specification
 
-val sorted = arr.sort()      # Returns new sorted array
+use std.spec.step
 
 ## At a Glance
 
@@ -44,13 +21,15 @@ val sorted = arr.sort()      # Returns new sorted array
 | Category | Runtime \| Collections |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/collection_utilities_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Array Utility Methods
 
 ```simple
 # Sorting (returns new array)
+use std.spec.step
+
 val sorted = arr.sort()      # Returns new sorted array
 val sorted = arr.sorted()    # Alias for sort
 
@@ -90,13 +69,22 @@ arr.any_truthy()        # Any element truthy?
 
 #### sort returns new sorted array
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- sort returns new sorted array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sort returns new sorted array")
 val arr = [3, 1, 4, 1, 5]
 val s = arr.sort()
 expect s[0] == 1
@@ -110,13 +98,18 @@ expect s[4] == 5
 
 #### sorted returns new sorted array
 
+- sorted returns new sorted array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sorted returns new sorted array")
 val arr = [3, 1, 2]
 val s = arr.sorted()
 # Original unchanged
@@ -133,13 +126,18 @@ expect s[2] == 3
 
 #### reverse returns new reversed array
 
+- reverse returns new reversed array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reverse returns new reversed array")
 val arr = [1, 2, 3]
 val r = arr.reverse()
 expect r[0] == 3
@@ -151,13 +149,18 @@ expect r[2] == 1
 
 #### reversed returns new reversed array
 
+- reversed returns new reversed array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reversed returns new reversed array")
 val arr = [1, 2, 3]
 val r = arr.reversed()
 # Original unchanged
@@ -174,16 +177,18 @@ expect r[2] == 1
 
 #### first returns first element
 
-1. expect arr first
+- first returns first element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("first returns first element")
 val arr = [10, 20, 30]
 expect arr.first() == 10
 ```
@@ -192,16 +197,18 @@ expect arr.first() == 10
 
 #### last returns last element
 
-1. expect arr last
+- last returns last element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("last returns last element")
 val arr = [10, 20, 30]
 expect arr.last() == 30
 ```
@@ -210,16 +217,18 @@ expect arr.last() == 30
 
 #### first returns nil for empty array
 
-1. expect arr first
+- first returns nil for empty array
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("first returns nil for empty array")
 val arr: [i64] = []
 expect arr.first() == nil
 ```
@@ -228,16 +237,18 @@ expect arr.first() == nil
 
 #### last returns nil for empty array
 
-1. expect arr last
+- last returns nil for empty array
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("last returns nil for empty array")
 val arr: [i64] = []
 expect arr.last() == nil
 ```
@@ -246,16 +257,18 @@ expect arr.last() == nil
 
 #### index_of finds element
 
-1. expect arr index of
+- index_of finds element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("index_of finds element")
 val arr = [10, 20, 30, 20]
 expect arr.index_of(20) == 1  # First occurrence
 ```
@@ -264,16 +277,18 @@ expect arr.index_of(20) == 1  # First occurrence
 
 #### index_of returns -1 when not found
 
-1. expect arr index of
+- index_of returns -1 when not found
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("index_of returns -1 when not found")
 val arr = [10, 20, 30]
 expect arr.index_of(99) == -1
 ```
@@ -284,16 +299,18 @@ expect arr.index_of(99) == -1
 
 #### concatenates two arrays
 
-1. expect c len
+- concatenates two arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("concatenates two arrays")
 val a = [1, 2]
 val b = [3, 4]
 val c = a.concat(b)
@@ -307,16 +324,18 @@ expect c[3] == 4
 
 #### creates shallow copy
 
-1. expect c len
+- creates shallow copy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates shallow copy")
 val arr = [1, 2, 3]
 val c = arr.copy()
 expect c[0] == 1
@@ -331,117 +350,7 @@ expect c[2] == 3
 
 #### sums numeric array
 
-1. expect arr sum
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arr = [1, 2, 3, 4]
-expect arr.sum() == 10
-```
-
-</details>
-
-#### sum of empty array is zero
-
-1. expect arr sum
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arr: [i64] = []
-expect arr.sum() == 0
-```
-
-</details>
-
-#### finds minimum value
-
-1. expect arr min
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arr = [3, 1, 4, 1, 5]
-expect arr.min() == 1
-```
-
-</details>
-
-#### finds maximum value
-
-1. expect arr max
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arr = [3, 1, 4, 1, 5]
-expect arr.max() == 5
-```
-
-</details>
-
-#### min of empty array is nil
-
-1. expect arr min
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arr: [i64] = []
-expect arr.min() == nil
-```
-
-</details>
-
-#### max of empty array is nil
-
-1. expect arr max
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arr: [i64] = []
-expect arr.max() == nil
-```
-
-</details>
-
-#### counts occurrences
-
-1. expect arr count of
-2. expect arr count of
-3. expect arr count of
+- sums numeric array
 
 
 <details>
@@ -451,6 +360,128 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums numeric array")
+val arr = [1, 2, 3, 4]
+expect arr.sum() == 10
+```
+
+</details>
+
+#### sum of empty array is zero
+
+- sum of empty array is zero
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("sum of empty array is zero")
+val arr: [i64] = []
+expect arr.sum() == 0
+```
+
+</details>
+
+#### finds minimum value
+
+- finds minimum value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds minimum value")
+val arr = [3, 1, 4, 1, 5]
+expect arr.min() == 1
+```
+
+</details>
+
+#### finds maximum value
+
+- finds maximum value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds maximum value")
+val arr = [3, 1, 4, 1, 5]
+expect arr.max() == 5
+```
+
+</details>
+
+#### min of empty array is nil
+
+- min of empty array is nil
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("min of empty array is nil")
+val arr: [i64] = []
+expect arr.min() == nil
+```
+
+</details>
+
+#### max of empty array is nil
+
+- max of empty array is nil
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("max of empty array is nil")
+val arr: [i64] = []
+expect arr.max() == nil
+```
+
+</details>
+
+#### counts occurrences
+
+- counts occurrences
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("counts occurrences")
 val arr = [1, 2, 1, 3, 1]
 expect arr.count_of(1) == 3
 expect arr.count_of(2) == 1
@@ -463,19 +494,18 @@ expect arr.count_of(99) == 0
 
 #### zips two arrays into tuples
 
-1. expect z[0] ==
-2. expect z len
-3. expect z[1] ==
-4. expect z[2] ==
+- zips two arrays into tuples
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("zips two arrays into tuples")
 val a = [1, 2, 3]
 val b = [10, 20, 30]
 val z = a.zip(b)
@@ -489,19 +519,18 @@ expect z[2] == (3, 30)
 
 #### enumerates array with indices
 
-1. expect e[0] ==
-2. expect e len
-3. expect e[1] ==
-4. expect e[2] ==
+- enumerates array with indices
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("enumerates array with indices")
 val arr = [10, 20, 30]
 val e = arr.enumerate()
 expect e[0] == (0, 10)
@@ -514,16 +543,18 @@ expect e[2] == (2, 30)
 
 #### flattens nested arrays
 
-1. expect result len
+- flattens nested arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("flattens nested arrays")
 val nested = [[1, 2], [3, 4], [5]]
 val result = nested.flatten()
 expect result[0] == 1
@@ -536,16 +567,18 @@ expect result[4] == 5
 
 #### removes duplicates
 
-1. expect u len
+- removes duplicates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("removes duplicates")
 val arr = [1, 2, 1, 3, 2, 1]
 val u = arr.unique()
 expect u[0] == 1
@@ -560,16 +593,18 @@ expect u[2] == 3
 
 #### takes first n elements
 
-1. expect t len
+- takes first n elements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("takes first n elements")
 val arr = [1, 2, 3, 4, 5]
 val t = arr.take(3)
 expect t[0] == 1
@@ -581,16 +616,18 @@ expect t[2] == 3
 
 #### drops first n elements
 
-1. expect d len
+- drops first n elements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("drops first n elements")
 val arr = [1, 2, 3, 4, 5]
 val d = arr.drop(2)
 expect d[0] == 3
@@ -604,16 +641,18 @@ expect d[2] == 5
 
 #### all_truthy returns true when all truthy
 
-1. expect arr all truthy
+- all_truthy returns true when all truthy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all_truthy returns true when all truthy")
 val arr = [1, 2, 3]
 expect arr.all_truthy()
 ```
@@ -622,16 +661,18 @@ expect arr.all_truthy()
 
 #### all_truthy returns false with zero
 
-1. expect not arr all truthy
+- all_truthy returns false with zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all_truthy returns false with zero")
 val arr = [1, 0, 3]
 expect not arr.all_truthy()
 ```
@@ -640,16 +681,18 @@ expect not arr.all_truthy()
 
 #### any_truthy returns true with some truthy
 
-1. expect arr any truthy
+- any_truthy returns true with some truthy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("any_truthy returns true with some truthy")
 val arr = [0, 0, 1]
 expect arr.any_truthy()
 ```
@@ -658,16 +701,18 @@ expect arr.any_truthy()
 
 #### any_truthy returns false when all zero
 
-1. expect not arr any truthy
+- any_truthy returns false when all zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("any_truthy returns false when all zero")
 val arr = [0, 0, 0]
 expect not arr.any_truthy()
 ```
@@ -678,16 +723,18 @@ expect not arr.any_truthy()
 
 #### fills array with value
 
-1. expect filled len
+- fills array with value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fills array with value")
 val arr = [1, 2, 3]
 val filled = arr.fill(0)
 expect filled[0] == 0
@@ -702,23 +749,8 @@ expect filled[2] == 0
 
 #### creates tuple with specified size
 
-1. expect t len
+- creates tuple with specified size
 
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val t = (10, 20, 30)
-expect t.len() == 3
-```
-
-</details>
-
-#### gets tuple elements by index
 
 <details>
 <summary>Executable SSpec</summary>
@@ -727,6 +759,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates tuple with specified size")
+val t = (10, 20, 30)
+expect t.len() == 3
+```
+
+</details>
+
+#### gets tuple elements by index
+
+- gets tuple elements by index
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("gets tuple elements by index")
 val t = (10, 20, 30)
 expect t[0] == 10
 expect t[1] == 20
@@ -737,17 +791,18 @@ expect t[2] == 30
 
 #### first and last on tuple
 
-1. expect t first
-2. expect t last
+- first and last on tuple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("first and last on tuple")
 val t = (10, 20, 30)
 expect t.first() == 10
 expect t.last() == 30
@@ -759,16 +814,18 @@ expect t.last() == 30
 
 #### creates string and gets length
 
-1. expect s len
+- creates string and gets length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates string and gets length")
 val s = "Hello, World!"
 expect s.len() == 13
 ```
@@ -777,16 +834,18 @@ expect s.len() == 13
 
 #### concatenates strings
 
-1. expect c len
+- concatenates strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("concatenates strings")
 val a = "Hello"
 val b = " World"
 val c = a + b
@@ -798,16 +857,18 @@ expect c.len() == 11
 
 #### handles empty string
 
-1. expect s len
+- handles empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles empty string")
 val s = ""
 expect s.len() == 0
 ```
@@ -818,16 +879,18 @@ expect s.len() == 0
 
 #### creates empty dict
 
-1. expect d len
+- creates empty dict
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates empty dict")
 val d = {}
 expect d.len() == 0
 ```
@@ -836,16 +899,18 @@ expect d.len() == 0
 
 #### sets and gets values
 
-1. expect d len
+- sets and gets values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sets and gets values")
 var d = {}
 d["name"] = "Alice"
 d["age"] = 30
@@ -857,16 +922,18 @@ expect d["age"] == 30
 
 #### overwrites existing key
 
-1. expect d len
+- overwrites existing key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("overwrites existing key")
 var d = {"counter": 1}
 d["counter"] = 2
 expect d.len() == 1
@@ -877,13 +944,18 @@ expect d["counter"] == 2
 
 #### returns nil for missing key
 
+- returns nil for missing key
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns nil for missing key")
 val d = {"a": 1}
 expect d["missing"] == nil
 ```
@@ -902,3 +974,51 @@ expect d["missing"] == nil
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fd0eb241a6fbd320b7fbe70ab171003acfb5d179c80d4c4c304e7f912a5db27f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fd0eb241a6fbd320b7fbe70ab171003acfb5d179c80d4c4c304e7f912a5db27f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fd0eb241a6fbd320b7fbe70ab171003acfb5d179c80d4c4c304e7f912a5db27f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/collection_utilities_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/collection_utilities_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/collection_utilities_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/collection_utilities_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/collection_utilities_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sort returns new sorted array' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/collection_utilities_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sorted returns new sorted array' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/collection_utilities_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reverse returns new reversed array' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,128 +1,328 @@
 # FV2 RISC-V Dual-Track Readiness
 
-**Status:** `TEST_BLOCKED` — source/manual prepared; no admitted source-matched
-pure-Simple Stage-4 CLI is available to execute SSpec, docgen, or
-`sspec-maintain`.
+> This system specification verifies the exact RVFI readiness boundary hardened
 
-**Executable source:**
-`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
 
-## Purpose and audience
+<details>
+<summary>Full Scenario Manual</summary>
 
-This manual is for FV2, RTL, and release reviewers validating the boundary
-between RVFI interface readiness and actual RISC-V formal proof. It covers
-REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009. A synthetic core can
-prove that the checker recognizes or rejects a port manifest; it cannot prove
-the generated CPU, Sail oracle, RTL refinement, or SymbiYosys properties.
+# FV2 RISC-V Dual-Track Readiness
 
-## Preconditions
+This system specification verifies the exact RVFI readiness boundary hardened
 
-- A source-matched, provenance-admitted pure-Simple Stage-4 CLI.
-- POSIX `/bin/sh`, `/usr/bin/env`, and `chmod`.
-- For the aggregate lane: the generated sidecar inputs and durable Lean/BYL
-  proof project required by `check-riscv-formal-dual-track.shs`.
-- For strict proof: `sby`, `yosys`, a supported SMT solver, and four generated
-  RV32/RV64 proof bundles accepted by the sidecar contract.
-- No Rust seed, stale Stage-2/3 binary, hand-authored receipt, or readiness-only
-  result may substitute for these prerequisites.
+## At a Glance
 
-## Operator workflow
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-1. Confirm the candidate CLI's Stage-4 provenance and source identity.
-2. Run the focused SSpec once:
+This system specification verifies the exact RVFI readiness boundary hardened
+for REQ-FV2-015 and REQ-FV2-019. Synthetic cores exercise checker behavior;
+they never count as RTL proof. Product acceptance additionally requires the
+aggregate Lean/BYL sidecar gate and the strict SymbiYosys proof gate.
 
-   ```sh
-   bin/simple test test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl --mode=interpreter --clean --timeout 900 --sequential
-   ```
+## Scenarios
 
-3. Run maintenance and regeneration once on the unchanged tree:
+### FV2 RISC-V dual-track readiness
 
-   ```sh
-   bin/simple sspec-maintain scan test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl
-   bin/simple spipe-docgen test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl --output doc/06_spec --no-index
-   ```
+#### should accept exactly the canonical 21-port RVFI readiness manifest
 
-4. Require six executed scenarios, zero failures, docgen `0 stubs`, a current
-   mirror, and all seven maintenance scores independently accepted.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Readiness checker contract (expected show, folded, detail, or skip)
 
-## Scenario narratives
 
-### Canonical readiness path
+<details>
+<summary>Executable SSpec</summary>
 
-- `Prepare a canonical 21-port RVFI core fixture`
-- `Run the strict RVFI readiness checker`
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-The checker must report the complete manifest and readiness marker without an
-error. This is checker-readiness evidence only.
+```simple
+# @req REQ-FV2-015
+# @req REQ-FV2-019.
+```
 
-### Extended-control edge case
+</details>
 
-- `Remove the rvfi_mode control port from the canonical fixture`
-- `Confirm the checker rejects the incomplete RVFI interface`
+#### should reject an RVFI core missing an extended control port
 
-The checker must exit 1, name `rvfi_mode`, and omit every readiness marker.
-Its internal mutation matrix separately removes `rvfi_halt`, `rvfi_intr`,
-`rvfi_mode`, and `rvfi_ixl` one at a time.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Fail-closed interface mutations (expected show, folded, detail, or skip)
 
-### Missing-artifact error path
 
-- `Present a missing generated RVFI core path`
-- `Confirm missing Stage-4 artifacts remain blocked`
+- should reject an RVFI core missing an extended control port
+- Remove the rvfi_mode control port from the canonical fixture
+- Confirm the checker rejects the incomplete RVFI interface
+   - Expected: code equals `1`
 
-A missing generated core must exit 1 with `RV32I core VHDL not found`; it must
-never become a skip or pass.
 
-### Qualified dual-track proof
+<details>
+<summary>Executable SSpec</summary>
 
-- `Run the dual-track aggregate proof gate`
-- `Require the generated sidecar and durable manual proof layers`
-- `Run the strict RVFI SymbiYosys proof gate`
-- `Reject readiness-only or missing-artifact evidence`
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-The aggregate gate must pass the generated sidecar plus durable Lean/BYL
-constraints. The separate strict gate must then report an actual SBY proof
-pass. Neither result substitutes for the other.
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject an RVFI core missing an extended control port")
+step("Remove the rvfi_mode control port from the canonical fixture")
+val core_path = prepare_readiness_fixture(
+    "missing_rvfi_mode_core", "rvfi_mode")
 
-## Requirement traceability
+step("Confirm the checker rejects the incomplete RVFI interface")
+val (stdout, stderr, code) = run_readiness(core_path)
+val report = stdout + stderr
+expect(code).to_equal(1)
+expect(report).to_contain("RVFI readiness: missing RVFI ports")
+expect(report).to_contain("rvfi_mode")
+expect(report).to_contain(
+    "ERROR: RVFI formal flow requires all RVFI ports")
+expect(report.contains("READY:")).to_be(false)
+```
 
-| Requirement | Scenarios | Evidence boundary |
-|---|---|---|
-| REQ-FV2-015 | canonical manifest, aggregate gate, strict SBY | RVFI/Sail/SBY dual track; readiness remains distinct from proof |
-| REQ-FV2-019 | missing port, missing core, mutation matrix, qualified gates | missing, malformed, readiness-only, and failed evidence reject |
-| NFR-FV2-002 | all rejection scenarios | nonzero exits and exact diagnostics remain fail closed |
-| NFR-FV2-009 | aggregate gate and strict SBY | independent proof/oracle identities require qualified execution |
+</details>
 
-## Quality scorecard
+#### should reject a missing generated core instead of reporting readiness
 
-| Component | Current result |
-|---|---|
-| Visible step flow | Source-reviewed: six scenarios with explicit `step("...")` calls |
-| Positive/edge/error assertions | Source-reviewed: real exit/status/diagnostic assertions |
-| Built-in matchers | Source-reviewed: canonical matchers only |
-| Requirement traceability | Source-reviewed: four requirement IDs mapped |
-| Runtime execution | `TEST_BLOCKED` |
-| Docgen mirror/zero stubs | `TEST_BLOCKED` |
-| Seven-part `sspec-maintain` score | `TEST_BLOCKED` |
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Missing-artifact rejection (expected show, folded, detail, or skip)
 
-## Findings and remediation
 
-The source checker previously validated only 17 of the canonical 21 RVFI
-ports. It now includes halt, interrupt, privilege mode, and XLEN control ports
-and carries an internal deliberate-red matrix. The remaining blocker is not a
-test omission: current-main has no admitted Stage-4 CLI or complete generated
-proof artifacts. Build and admit that CLI, then run the workflow above once.
+- should reject a missing generated core instead of reporting readiness
+- Present a missing generated RVFI core path
+- Confirm missing Stage-4 artifacts remain blocked
+   - Expected: code equals `1`
 
-## Evidence and provenance
 
-Prepared from `origin/main` baseline `f6cadcc36aff61d16d988651ea36a040d2af6aad`
-plus lane commit `c39e708fc220f6cad5df867436557e68eab0b083`.
-Static shell self-test passed before this manual was prepared. No runtime,
-docgen, maintenance, generated manual, Sail, Lean, or SBY PASS is claimed.
+<details>
+<summary>Executable SSpec</summary>
 
-## Compatibility and limitations
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-The synthetic fixtures exercise textual readiness validation and are not valid
-CPU or proof artifacts. The full scenarios require a Linux/POSIX qualified
-environment. This manual is an explicitly blocked hand-maintained mirror until
-the admitted doc generator replaces it; executable `.spl` remains exclusively
-under `test/`.
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject a missing generated core instead of reporting readiness")
+step("Present a missing generated RVFI core path")
+expect(dir_create_all(TOOL_DIR)).to_be(true)
+val missing_path = ARTIFACT_DIR + "/missing_generated_core.vhd"
+
+step("Confirm missing Stage-4 artifacts remain blocked")
+val (stdout, stderr, code) = run_readiness(missing_path)
+val report = stdout + stderr
+expect(code).to_equal(1)
+expect(report).to_contain("ERROR: RV32I core VHDL not found")
+expect(report.contains("READY:")).to_be(false)
+```
+
+</details>
+
+#### should keep all four extended RVFI port omissions fail closed
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Checker mutation calibration (expected show, folded, detail, or skip)
+
+
+- should keep all four extended RVFI port omissions fail closed
+- Run the readiness checker's deliberate-red mutation matrix
+- Confirm every omitted control port was rejected
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep all four extended RVFI port omissions fail closed")
+step("Run the readiness checker's deliberate-red mutation matrix")
+val (stdout, stderr, code) = process_run_timeout(
+    "/bin/sh", [RVFI_CHECK, "--self-test"], 30000)
+val report = stdout + stderr
+
+step("Confirm every omitted control port was rejected")
+expect(code).to_equal(0)
+expect(report).to_contain(
+    "STATUS: PASS rvfi-formal-readiness self-test")
+expect(report.contains("STATUS: FAIL")).to_be(false)
+```
+
+</details>
+
+#### should pass the aggregate generated and manual RISC-V proof-model gate
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Qualified dual-track execution (expected show, folded, detail, or skip)
+
+
+- should pass the aggregate generated and manual RISC-V proof-model gate
+   - Log capture: after_step
+- Run the dual-track aggregate proof gate
+   - Log capture: after_step
+- Require the generated sidecar and durable manual proof layers
+   - Log capture: after_step
+   - Evidence: log output verified by 1 expected check
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should pass the aggregate generated and manual RISC-V proof-model gate")
+step("Run the dual-track aggregate proof gate")
+val (stdout, stderr, code) = process_run_timeout(
+    "/bin/sh", [DUAL_TRACK_CHECK], 600000)
+val report = stdout + stderr
+
+step("Require the generated sidecar and durable manual proof layers")
+expect(code).to_equal(0)
+expect(report).to_contain("STATUS: PASS riscv-formal-dual-track")
+expect(report.contains("STATUS: FAIL")).to_be(false)
+```
+
+</details>
+
+#### should require a strict SymbiYosys proof pass after readiness
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Qualified dual-track execution (expected show, folded, detail, or skip)
+
+
+- should require a strict SymbiYosys proof pass after readiness
+   - Log capture: after_step
+- Run the strict RVFI SymbiYosys proof gate
+   - Log capture: after_step
+- Reject readiness-only or missing-artifact evidence
+   - Log capture: after_step
+   - Evidence: log output verified by 1 expected check
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require a strict SymbiYosys proof pass after readiness")
+step("Run the strict RVFI SymbiYosys proof gate")
+val (stdout, stderr, code) = process_run_timeout(
+    "/bin/sh", [STRICT_SBY_CHECK], 600000)
+val report = stdout + stderr
+
+step("Reject readiness-only or missing-artifact evidence")
+expect(code).to_equal(0)
+expect(report).to_contain("STATUS: PASS riscv-rtl-sby-proof")
+expect(report.contains("STATUS: FAIL")).to_be(false)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-FV2-015`
+- `REQ-FV2-019.`
+- `REQ-SSPEC-SYSTEM.`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cdd679c36cf951cd825f73e76d8fbeef5e03ff3a8c3ce47b520efe878d17b71c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cdd679c36cf951cd825f73e76d8fbeef5e03ff3a8c3ce47b520efe878d17b71c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cdd679c36cf951cd825f73e76d8fbeef5e03ff3a8c3ce47b520efe878d17b71c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl
+mirror: doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md (current)
+findings: 14 blockers: 1
+  narrative=100 structure=60 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=74; blocker cap makes effective=49
+doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:65:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should accept exactly the canonical 21-port RVFI readiness manifest' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:65:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept exactly the canonical 21-port RVFI readiness manifest' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:86:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject an RVFI core missing an extended control port' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject an RVFI core missing an extended control port' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:106:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject a missing generated core instead of reporting readiness' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject a missing generated core instead of reporting readiness' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:123:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep all four extended RVFI port omissions fail closed' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep all four extended RVFI port omissions fail closed' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:142:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should pass the aggregate generated and manual RISC-V proof-model gate' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl:160:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require a strict SymbiYosys proof pass after readiness' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

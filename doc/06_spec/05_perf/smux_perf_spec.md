@@ -1,29 +1,6 @@
 # Smux Perf Specification
 
-> <details>
-
-<!-- sdn-diagram:id=smux_perf_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=smux_perf_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-smux_perf_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=smux_perf_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering smux performance smoke.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,16 +20,22 @@ smux_perf_spec -> std
 
 #### keeps reset plus initial session startup under the hosted smoke budget _(slow)_
 
-1. samples = samples push
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- keeps reset plus initial session startup under the hosted smoke budget
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("keeps reset plus initial session startup under the hosted smoke budget")
 # warmup
 var w = 0
 while w < 3:
@@ -84,16 +67,18 @@ expect(p95_ms).to_be_less_than(200)
 
 #### keeps send plus capture p95 within the interactive smoke budget _(slow)_
 
-1. samples2 = samples2 push
+- keeps send plus capture p95 within the interactive smoke budget
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("keeps send plus capture p95 within the interactive smoke budget")
 # warmup
 var w2 = 0
 while w2 < 5:
@@ -127,12 +112,12 @@ expect(p95_ms2).to_be_less_than(20)
 | Category | Other |
 | Status | Active |
 | Source | `test/05_perf/smux_perf_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering smux performance smoke.
 - smux performance smoke
 
 ## Scenario Summary
@@ -147,3 +132,45 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `28a974cf38f4234044a5824baff6de414faa7981cb639afaed63186d34537317`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `28a974cf38f4234044a5824baff6de414faa7981cb639afaed63186d34537317`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `28a974cf38f4234044a5824baff6de414faa7981cb639afaed63186d34537317`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
+
+SSpec documentization score: 95/100
+source: test/05_perf/smux_perf_spec.spl
+mirror: doc/06_spec/05_perf/smux_perf_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/05_perf/smux_perf_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/smux_perf_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/smux_perf_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps reset plus initial session startup under the hosted smoke budget' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,341 +1,1002 @@
 # SimpleOS QEMU Host-GPU 2D
 
-Status: implementation in progress. The host executor now admits checked
-Vulkan, Metal, and native Windows D3D11 rendering. Render and ProcessingIR
-masks negotiate independently; Windows prefers CUDA and falls back to Vulkan.
-The fail-closed Linux/macOS/Windows wrapper self-test exercises the shared
-IMAGE Draw IR fixture. Earlier
-Linux/Vulkan live x86_64, AArch64, and RV64 raw-render receipts pass; refreshed
-cross-ISA Draw IR and CUDA ProcessingIR receipts remain pending. Native Metal
-raw rendering, Draw IR, and dedicated ProcessingIR FillU32 execution are implemented, but their
-prepared-macOS receipts remain unavailable. Native Windows receipts remain
-pending while TODO 548 blocks a fresh Simple/QEMU run. The RV64 canonical
-desktop, nonblocking UART action loop, checked changed-frame present contract,
-and contract-v2 evidence parser are source-ready, but no fresh RV64 live PASS
-is claimed. WFI is excluded because UART IER is zero, and serial initialization
-follows module initialization. ProcessingIR CPU/device timing and preference
-classification are source-ready; TODO 570 remains open until prepared native
-rows provide fresh correlated receipts.
-The exact 1280x720 Draw IR fixture and full pixel oracle are source-ready;
-TODO 569 remains open until fresh supported-host rows execute them.
-NFR-006 source and parser evidence now measures one guest-observed interval
-from device initialization through rejected/timed-out attempts and final
-selection or fallback. TODO 566 remains open until fresh native execution proves
-the inclusive 500,000 us budget.
-The 20-sample warm render/readback source, parser, cached validation, and
-self-test contract is ready. TODO 563 remains open because fresh current-host
-native/TCG execution and combined QEMU/daemon RSS evidence are still missing;
-TCG is correctness-only and native timing must be bound to exact retained QEMU
-argv acceleration evidence.
-Direct guest GPU passthrough is now classified independently: the current host
-has IOMMU and QEMU `vfio-pci`, but both GPUs are host-bound,
-`virtio-gpu-gl` has a broken module dependency, and no validated SimpleOS guest
-Vulkan/CUDA device-readback evidence exists. TODO575 remains open; no device was
-unbound or reassigned.
+> Proves that each supported guest uses one bounded protocol to execute Draw IR
 
-This scenario proves that supported SimpleOS guests use one bounded protocol to
-execute Draw IR and ProcessingIR on a real host device. Unsupported rows retain
-the CPU/software fallback and report a stable reason.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 13 | 13 | 0 | 0 |
 
-## Primary flow
+<details>
+<summary>Full Scenario Manual</summary>
 
-1. **Reject an unusable compiler candidate.** Before any guest build, use the
-   shared shell `candidate_frontend_smoke`/`simple_binary_is_valid` from
-   `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`, sourced
-   by bootstrap and the QEMU wrapper, or the runner's matching pure-Simple
-   `_candidate_frontend_smoke`: self-pin
-   `SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`, and
-   `SIMPLE_FRONTEND_DELEGATE` to the candidate; neutralize inherited
-   execution/worker/bootstrap modes; disable stub fallback; and native-build the checked-in
-   `p2_add.spl` fixture with Cranelift/core-C-bootstrap/entry-closure/one-binary
-   within 60 seconds, run it within 5 seconds, and require status zero plus
-   stdout exactly `5`. Use private cache/output/log state; wrapper EXIT cleanup
-   and runner recursive cleanup are both fail-closed. Runner `p2_add` admission
-   and invalid-mode probing use `_run_candidate_admission_pinned`.
-   `build_os_with_backend` then applies target settings through
-   `_apply_build_env` and runs the authoritative guest native-build through
-   `_run_candidate_pinned`, so it cannot re-enter a sibling or seed delegate.
-   Across all five split `_QemuRunner` modules, every I/O/process/time use
-   routes through shared owners; the modules contain no direct
-   process/file/dir/env/time runtime calls;
-   `runner_targets` reads the retained x86 baseline through `file_read` rather
-   than shell `cat`.
-   Shared CLI `_cli_is_current_exe` resolves a candidate override through
-   existing `_cli_resolve_symlink`, making authoritative worker delegation safe
-   for symlinks such as `bin/simple`. The focused
-   `test/01_unit/app/io/cli_argv0_resolution_spec.spl` source contract adds no
-   `rt_*` alias.
-   The old whole-tree `check startup_simple.spl` probe is invalid because it
-   unconditionally appends global repository hygiene and Git subguards that do
-   not describe a jj-only workspace without `.git`. Bootstrap retains only its
-   focused `check src/app/cli/bootstrap_main.spl` before shared admission.
-2. **Probe the QEMU guest GPU capability.** Boot the selected x86_64, AArch64,
-   or RISC-V guest and negotiate protocol version, limits, backend sets,
-   readback, and host readiness. Try strict native Metal, DirectX, then Vulkan
-   with fresh generations while validating processing against its own mask.
-   Retain the executed `-accel` argument; KVM, HVF, or WHPX is native only for
-   its matching host ISA, while every TCG lane is correctness-only.
-3. **Bound capability negotiation and fallback selection to 500 ms.** Retain
-   every ordered guest attempt and exactly one final decision. Accept 500,000 us
-   and reject 500,001 us for every transcript; only a matching native ISA closes
-   the latency target. Cross-ISA and same-ISA TCG prove the fail-closed contract,
-   not latency. Two valid equal clock samples are recorded as 1 us so zero
-   remains invalid.
-4. **Render and read back the Simple 2D parity fixture.** Correlate frame ID,
-   native device identity, positive backend handle, same-frame output, and the
-   exact CPU-oracle checksum. Raw-render and Draw IR receipts must carry the
-   same execution device identity.
-5. **Submit the canonical full-frame IMAGE composition through the shared guest bridge.**
-   Use the same 64x48 opaque background-and-rectangle oracle as one clipped
-   full-target `DrawIrComposition` IMAGE resource.
-6. **Compare Draw IR readback and correlated device receipt across all three ISAs.**
-   Require the exact checksum and pixel counts with a positive native Metal,
-   DirectX, or Vulkan handle and stable device identity before accepting the marker.
-7. **Render the selected 1280x720 canonical fixture.** Submit one opaque
-   background RECT and one foreground RECT through the same
-   `DrawIrComposition -> Engine2D` path. Compare all 921,600 device-readback
-   pixels against the positional CPU oracle and require checksum 1417723768,
-   633,600 background pixels, 288,000 rectangle pixels, and zero mismatches.
-   Then submit exactly 20 identical warm generations without repeating the full
-   pixel scan. Require samples 1..20, consecutive generation/frame IDs, stable
-   run/backend/device/dimensions/bytes/checksum, positive elapsed time, and zero
-   mismatches. Compute nearest-rank p95 at rank 19 and require at most 16,700 us
-   only for a matching native accelerator proven by the exact retained argv;
-   TCG rows are correctness-only. If a real run needs more wall time, set
-   `SIMPLEOS_HOST_GPU_QEMU_TIMEOUT` for that invocation without changing the
-   default.
-8. **Prove the AArch64 production desktop frame.** Build the
-   `arm64-desktop-engine2d` guest through the wrapper, require its production
-   QEMU argv lane, require exactly one scoped `HOST_GPU_MAP_OK` before the first
-   negotiation event, and accept exactly one correlated
-   `[wm-frame] host-gpu-presented` marker only after receipt validation and
-   checksum-checked MMIO presentation. The marker backend must match the active
-   host contract; its positive run and frame identities must match the submitted
-   generation, and its ready generation must continue from the probe's final
-   ProcessingIR generation under the Metal/DirectX/Vulkan attempt order. Cached
-   reports retain the production serial log and exact QEMU
-   device arguments under the `_production_serial_log` and
-   `_production_qemu_device_args` keys.
-9. **Initialize the dynamic RISC-V VirtIO scanout.** Discover mode and stride
-   through the architecture display facade before framebuffer construction.
-10. **Render the canonical Shared WM scene through Draw IR and Engine2D.** Use
-   compositor-owned surfaces, `DesktopShell`, and `Engine2dWmFrameExecutor`.
-11. **Present the completed framebuffer through VirtIO-GPU.** Transfer and flush
-   only after the correlated canonical frame is complete.
-12. **Handle non-blocking UART window actions.** Initialize the existing 16550
-    owner after module initialization, poll `serial_read_byte`, continue when
-    no byte is available, and map input through `uart_char_to_action` and
-    `WmAction`. Do not use WFI while UART IER is zero.
-13. **Present each changed frame through VirtIO-GPU.** Commit only changed
-    compositor state, rerender through `DesktopShell` and
-    `Engine2dWmFrameExecutor`, and require checked `riscv64_display_present`.
-14. **Report source-only status until a fresh pure-Simple ELF boots.** Contract
-    v2 rejects the historical fixed-resolution/fixed-anchor report; TODO 548
-    remains the execution blocker.
-15. **Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection.**
-   Route raw QEMU framebuffer mutations through the exact native Metal,
-   DirectX, or Vulkan backend selected by HELLO and require checked completion evidence.
-16. **Reject unchecked or fallback raw rendering before device-backed receipt.**
-   Known failure invalidates device provenance; unknown completion poisons the
-   frame rather than replaying it.
-17. **Select host presentation or the existing local production renderer.**
-   The x86 desktop maps the full ivshmem BAR into its active VMM, derives a
-   fresh generation only from an idle slot, submits the canonical WM Draw IR,
-   validates the correlated device receipt, and presents checksum-checked MMIO
-   readback. Any failure falls through to local Engine2D. The current 4K entry
-   honestly selects local rendering until TODO 552 expands the bounded wire.
-18. **Run the ProcessingIR parity fixture.** Correlate the host completion and
-   require exact output-buffer parity with the CPU oracle. Vulkan uses the
-   canonical SFFI owner's fenced tri-state dispatch: only proven status `1`
-   may read back, while unknown completion retains dependencies and the device.
-   The explicit Linux Vulkan-only lane passes
-   `--processing-backend=vulkan` to the daemon, requires negotiated mask `1`,
-   and retains the daemon selector receipt; the default lane remains
-   CUDA-preferred with Vulkan fallback.
-19. **Classify device processing preference.** Time the existing FillU32(256,
-   7) CPU oracle and device executor independently after the HELLO probe. A
-   valid row requires positive correlated microsecond timings and reports
-   `preferred` only when CPU time is at least 1.5 times device time; otherwise
-   it reports `available-not-preferred`. Missing, stale, duplicate, zero, or
-   dishonest evidence fails the row.
-20. **Keep native Metal ProcessingIR separate from Engine2D rendering.** Probe
-   and execute the dedicated MSL FillU32 owner, require checked command
-   completion and pointer readback, and never relabel a Metal render clear as
-   processing evidence.
-21. **Report device-backed host acceleration evidence.** Publish one row with
-   host, guest ISA, QEMU/device arguments, selected QEMU accelerator, protocol,
-   backend, device, IDs,
-   timing, concurrently sampled daemon/QEMU/combined RSS maxima, checksums,
-   status, and reason. For every non-HELLO request, both
-   the guest and daemon require a positive numeric run hash and frame ID; a
-   zero, negative, stale, or mismatched value fails before PASS admission.
-22. **Validate cached rows before aggregation.** Accept a cached report only
-   when all nine host/ISA rows are present and every passing row links to a
-   serial log containing the exact render, Draw IR, 1280x720 fixture, and ProcessingIR receipts.
-   Each passing row also requires a unique QEMU version, a reversible
-   comma-delimited per-argument hex encoding of its exact QEMU argument vector,
-   positive maximum-observed daemon RSS, QEMU RSS, and concurrent combined RSS,
-   plus the correlated daemon log, CPU/device timings, and preference result,
-   with the combined value no smaller than either component; negotiated protocol,
-   positive HELLO/render/Draw IR/ProcessingIR timings, and correlated run/frame
-   IDs. The encoded argv must also match the ISA-specific machine, kernel,
-   exact `-accel` attribution, and shared `hostgpu` object/device binding; wrong
-   or extra tokens fail.
-   Missing, duplicate, empty, or nonpositive evidence fails closed.
-23. **Classify guest GPU passthrough without changing devices.** Inspect IOMMU
-    groups, QEMU VFIO/virtio-gpu capabilities, display-device ownership,
-    selected-device readiness, and validated SimpleOS guest-driver evidence.
-    Until a canonical guest receipt producer exists, caller-authored text and
-    hashes must never promote the row to ready. Probe only trusted root-owned,
-    non-writable system QEMU binaries. Require `mutation_attempted=false`.
-24. **Keep ivshmem offload separate from passthrough.** A working host Vulkan or
-    CUDA daemon is valid ivshmem offload evidence only. It cannot promote VFIO,
-    virtio-gpu/Venus, or guest-native Vulkan/CUDA.
+# SimpleOS QEMU Host-GPU 2D
 
-### Keep native Metal ProcessingIR separate from Engine2D rendering
+Proves that each supported guest uses one bounded protocol to execute Draw IR
 
-The daemon imports `processing_ir_execute_metal`, probes the Metal backend with
-a nonzero FillU32 operation, compares the returned values with the CPU oracle,
-and publishes the same negotiated mask used for the HELLO backend label. The
-executor uses `metal_sffi_run_compute_frame` and canonical pointer readback; it
-does not import `Engine2D` or `MetalSession`.
+## At a Glance
 
-## Failure and fallback checks
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-- Missing service/backend reports `unsupported` or `blocked` and leaves the
-  guest bootable on its existing CPU/software path.
-- Unknown versions, oversized payloads, invalid dimensions/references,
-  duplicate completions, and stale IDs fail before device execution.
-- QEMU flags, screenshots, VirtIO-GPU scanout, CPU mirrors, compile-only
-  output, missing readback, and synthetic or zero handles cannot pass.
+Proves that each supported guest uses one bounded protocol to execute Draw IR
+and ProcessingIR on a real host device, while unsupported rows fall back
+honestly and malformed evidence fails closed.
 
-## Platform matrix
+## Scenarios
 
-Linux uses Vulkan for rendering and CUDA for ProcessingIR on a prepared NVIDIA
-host, with Vulkan ProcessingIR retained when CUDA is unavailable. CUDA receipts
-derive device identity from the CUDA device UUID, not ordinal or compute
-capability, prefer the MIG-aware v2 API, and fail closed when UUID provenance is
-unavailable or all-zero. The native and aggregate wrapper self-tests reject
-identity-less proof and missing reports. macOS uses
-strict native Metal for raw rendering, Draw IR, and exact device receipts. Metal
-ProcessingIR uses its own MSL kernel and device readback rather than an
-Engine2D clear. Windows uses the bounded native D3D11 owner for rendering and
-selects CUDA or Vulkan ProcessingIR independently. Cross-ISA TCG rows
-prove correctness and honest provenance; they are exempt from native-ISA
-latency and speedup targets.
+### SimpleOS QEMU host-GPU rendering and processing
 
-## Verification
+#### negotiates one bounded protocol on x86_64 AArch64 and RISC-V
 
-Run the parser contract without hardware:
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
-```sh
-sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
+
+- negotiates one bounded protocol on x86_64 AArch64 and RISC-V
+   - Log capture: after_step
+- Reject an unusable compiler candidate
+   - Log capture: after_step
+- Probe the QEMU guest GPU capability
+   - Log capture: after_step
+- Validate version limits backend sets readback and readiness
+   - Log capture: after_step
+- Bound capability negotiation and fallback selection to 500 ms
+   - Log capture: after_step
+   - Evidence: log output verified by 21 expected checks
+   - Expected: wrapper does not contain `macos:metal:metal`
+   - Expected: admission does not contain `test/05_perf/io_parity/startup_simple.spl`
+   - Expected: wrapper does not contain `"$simple_bin" os build`
+   - Expected: runner does not contain `rt_process_`
+   - Expected: runner does not contain `rt_file_`
+   - Expected: runner does not contain `rt_dir_`
+   - Expected: runner does not contain `rt_env_`
+   - Expected: runner does not contain `rt_time_`
+   - Expected: runner_targets does not contain `rt_process_`
+   - Expected: runner_targets does not contain `rt_file_`
+   - Expected: runner_targets does not contain `rt_dir_`
+   - Expected: runner_targets does not contain `rt_env_`
+   - Expected: runner_targets does not contain `rt_time_`
+   - Expected: scenario_source does not contain `rt_`
+   - Expected: runner does not contain `process_run_timeout(simple_bin, args, timeout_ms)`
+   - Expected: runner does not contain `test/05_perf/io_parity/startup_simple.spl`
+   - Expected: runner does not contain `frontend_exit_code`
+   - Expected: probe does not contain `(hello.processing_mask & render_mask) != 0`
+   - Expected: probe does not contain `rt_time_now_`
+   - Expected: production does not contain `rt_time_now_`
+   - Expected: x86_clock does not contain `elapsed / 2000`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 194 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("negotiates one bounded protocol on x86_64 AArch64 and RISC-V")
+step("Reject an unusable compiler candidate")
+step("Probe the QEMU guest GPU capability")
+step("Validate version limits backend sets readback and readiness")
+step("Bound capability negotiation and fallback selection to 500 ms")
+val wrapper = host_gpu_wrapper_source()
+val admission = candidate_frontend_admission_source()
+val runner = qemu_runner_build_source()
+val runner_targets = file_read_text("src/os/_QemuRunner/runner_targets.spl")
+val scenario_catalog = file_read_text("src/os/_QemuRunner/scenario_catalog.spl")
+val scenario_disks = file_read_text("src/os/_QemuRunner/scenario_disks.spl")
+val scenario_exec = file_read_text("src/os/_QemuRunner/scenario_exec.spl")
+val process_ops = process_ops_source()
+val probe = host_gpu_probe_source()
+val bridge = host_gpu_guest_bridge_source()
+val production = production_wm_executor_source()
+val clock = boot_monotonic_source()
+val x86_clock = x86_boot_runtime_source()
+val todos = todo_db_source()
+val accepted_compiler = wrapper.index_of("simple_bin=$(find_simple || true)")
+val runtime_prepare = wrapper.index_of("if prepare_linux_runtime; then runtime_ready=1; fi")
+val daemon_build = wrapper.index_of("--entry \"$daemon_entry\"")
+val production_map = production.index_of("HOST_GPU_MAP_OK scope=production isa={" + "guest_isa} base={" + "base}")
+val production_attempt = production.index_of("HOST_GPU_NEGOTIATION_ATTEMPT scope=production")
+val production_done = production.index_of("HOST_GPU_NEGOTIATION_DONE scope=production")
+expect(wrapper).to_contain("simpleos-host-gpu-x86_64")
+expect(wrapper).to_contain("simpleos-host-gpu-aarch64")
+expect(wrapper).to_contain("simpleos-host-gpu-riscv64")
+expect(wrapper).to_contain("daemon_entry=src/app/simpleos_gpu_host/main.spl")
+expect(wrapper).to_contain("macos-vulkan-live-evidence-required")
+expect(wrapper).to_contain("simpleos_qemu_host_gpu_2d_execution=emulator-only")
+expect(wrapper).to_contain("scripts/check/check-macos-vulkan-2d-live-evidence.shs")
+expect(wrapper).to_contain("macos:vulkan:vulkan")
+expect(wrapper.contains("macos:metal:metal")).to_equal(false)
+expect(wrapper).to_contain("EXPECTED_RENDER_MASK")
+expect(wrapper).to_contain("EXPECTED_PROCESSING_MASK")
+expect(wrapper).to_contain("simple_binary_is_valid")
+expect(wrapper).to_contain(". \"$ROOT_DIR/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs\"")
+expect(admission).to_contain("bootstrap seed only")
+expect(admission).to_contain("--mode definitely-invalid-mode")
+expect(admission).to_contain("Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)")
+val bootstrap = bootstrap_main_source()
+expect(bootstrap).to_contain("fn native_build_mode_from_args")
+expect(bootstrap).to_contain("mode != \"dynload\" and mode != \"one-binary\"")
+expect(bootstrap).to_contain("Error: invalid --mode '{" + "mode}' (expected dynload or one-binary)")
+expect(wrapper).to_contain("COMPILER_PROBE_TIMEOUT_SECONDS=5")
+expect(wrapper).to_contain("COMPILER_BUILD_TIMEOUT_SECONDS=60")
+expect(wrapper).to_contain("COMPILER_EXEC_TIMEOUT_SECONDS=5")
+expect(wrapper).to_contain("COMPILER_CHECK_KILL_GRACE_SECONDS=1")
+expect(admission).to_contain("simple_binary_is_valid() (")
+expect(admission).to_contain("version=$(SIMPLE_BINARY=\"$candidate\" \\")
+expect(admission).to_contain("\"${" + "COMPILER_PROBE_TIMEOUT_SECONDS}s\" \"$candidate\" --version")
+expect(admission).to_contain("candidate_frontend_smoke() (")
+expect(admission).to_contain("probe_dir=$(mktemp -d \"${" + "TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX\")")
+expect(admission).to_contain("trap 'rm -rf \"$probe_dir\"' 0")
+expect(admission).to_contain("trap 'exit 1' HUP INT TERM")
+expect(admission).to_contain("probe_output=$probe_dir/p2_add")
+expect(admission).to_contain("scripts/check/cert/redeploy_gate/fixtures/p2_add.spl")
+expect(admission).to_contain("--cache-dir \"$probe_dir/cache\"")
+expect(admission).to_contain("--output \"$probe_output\"")
+expect(admission).to_contain(">\"$probe_dir/build.log\" 2>&1 || exit 1")
+expect(admission).to_contain("SIMPLE_BINARY=\"$candidate\"")
+expect(admission).to_contain("SIMPLE_BIN=\"$candidate\"")
+expect(admission).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$candidate\"")
+expect(admission).to_contain("SIMPLE_FRONTEND_DELEGATE=\"$candidate\"")
+expect(admission).to_contain("SIMPLE_FRONTEND_DELEGATED=1")
+expect(admission).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+expect(admission).to_contain("SIMPLE_EXECUTION_MODE= \\")
+expect(admission).to_contain("SIMPLE_NATIVE_BUILD_FORCE_WORKER=0")
+expect(admission).to_contain("SIMPLE_BOOTSTRAP=0")
+expect(admission).to_contain("--backend cranelift")
+expect(admission).to_contain("--runtime-bundle core-c-bootstrap")
+expect(admission).to_contain("--entry-closure")
+expect(admission).to_contain("--mode one-binary")
+expect(admission).to_contain("${" + "COMPILER_BUILD_TIMEOUT_SECONDS}s")
+expect(admission).to_contain("${" + "COMPILER_EXEC_TIMEOUT_SECONDS}s")
+expect(admission).to_contain("[ \"$probe_stdout\" = 5 ]")
+expect(admission).to_contain("candidate_frontend_smoke \"$candidate\" || return 1")
+expect(admission.contains("test/05_perf/io_parity/startup_simple.spl")).to_equal(false)
+expect(admission).to_contain("if probe=$(SIMPLE_BINARY=\"$candidate\" \\")
+expect(admission).to_contain("SIMPLE_BIN=\"$candidate\" \\")
+expect(admission).to_contain("SIMPLE_FRONTEND_DELEGATE=\"$candidate\" \\\n        SIMPLE_FRONTEND_DELEGATED=1 \\\n        SIMPLE_NO_STUB_FALLBACK=1")
+expect(admission).to_contain("${" + "COMPILER_PROBE_TIMEOUT_SECONDS}s\" \"$candidate\" native-build")
+expect(admission).to_contain("probe_status=$?")
+expect(wrapper).to_contain("frontend_hanging_simple")
+expect(wrapper).to_contain("SIMPLEOS_ADMISSION_POISON_MARKER")
+expect(wrapper).to_contain("SIMPLE_BINARY=\"$seed_simple\"")
+expect(wrapper).to_contain("SIMPLE_EXECUTION_MODE=interpreter")
+expect(wrapper).to_contain("SIMPLE_NATIVE_BUILD_FORCE_WORKER=1")
+expect(wrapper).to_contain("SIMPLE_BOOTSTRAP=1")
+expect(wrapper).to_contain("[ ! -e \"$poison_marker\" ]")
+expect(wrapper).to_contain("linux_runtime_artifact_is_valid")
+expect(wrapper).to_contain("LINUX_RUNTIME_TARGET=build/simpleos_gpu_host/$HOST_ARCH-vulkan-cuda-runtime-target")
+expect(wrapper).to_contain("[ \"$RUNTIME_PATH_IS_DEFAULT\" = 1 ] || return 1")
+expect(wrapper).to_contain("[ \"$RUNTIME_PATH\" = \"$LINUX_DEFAULT_RUNTIME_PATH\" ] || return 1")
+expect(wrapper).to_contain("CARGO_TARGET_DIR=\"$ROOT_DIR/$LINUX_RUNTIME_TARGET\" cargo build --locked")
+expect(wrapper).to_contain("--manifest-path \"$ROOT_DIR/src/compiler_rust/Cargo.toml\"")
+expect(wrapper).to_contain("--package simple-runtime --lib --profile bootstrap --features vulkan,cuda")
+expect(wrapper).to_contain(".fingerprint/simple-runtime-*/lib-simple_runtime.json")
+expect(wrapper).to_contain("run_pinned_native_build()")
+expect(wrapper).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\"$simple_bin\"")
+expect(wrapper).to_contain("SIMPLE_FRONTEND_DELEGATE=\"$simple_bin\"")
+expect(wrapper).to_contain("SIMPLE_FRONTEND_DELEGATED=1")
+expect(wrapper).to_contain("SIMPLEOS_HOST_GPU_NATIVE_BUILD_TIMEOUT")
+expect(wrapper).to_contain("bin/release/$HOST_ARCH-unknown-linux-gnu/simple")
+expect(wrapper).to_contain("cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl")
+expect(wrapper).to_contain("examples/09_embedded/simple_os/arch/x86_64/host_gpu_smoke_entry.spl")
+expect(wrapper).to_contain("examples/09_embedded/simple_os/arch/arm64/host_gpu_smoke_entry.spl")
+expect(wrapper).to_contain("examples/09_embedded/simple_os/arch/riscv64/host_gpu_smoke_entry.spl")
+expect(wrapper).to_contain("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+expect(wrapper.contains("\"$simple_bin\" os build")).to_equal(false)
+expect(accepted_compiler).to_be_greater_than(0)
+expect(accepted_compiler).to_be_less_than(runtime_prepare)
+expect(runtime_prepare).to_be_less_than(daemon_build)
+expect(runner).to_contain("fn _candidate_frontend_smoke(candidate: text) -> bool:")
+expect(runner).to_contain("use std.nogc_sync_mut.io.dir_ops.{" + "dir_create_all, dir_remove_all}")
+expect(runner).to_contain("use std.nogc_sync_mut.io.env_ops.{" + "env_get, env_set, cwd}")
+expect(runner).to_contain("use std.nogc_sync_mut.io.file_ops.{" + "file_delete, file_exists, file_read}")
+expect(runner).to_contain("use std.nogc_sync_mut.io.process_ops.{" + "process_run_timeout}")
+expect(runner).to_contain("use std.nogc_sync_mut.ffi.io.{" + "file_write_text, path_absolute}")
+expect(runner.contains("rt_process_")).to_equal(false)
+expect(runner.contains("rt_file_")).to_equal(false)
+expect(runner.contains("rt_dir_")).to_equal(false)
+expect(runner.contains("rt_env_")).to_equal(false)
+expect(runner.contains("rt_time_")).to_equal(false)
+expect(runner_targets).to_contain("use std.nogc_sync_mut.io.dir_ops.{" + "dir_create_all}")
+expect(runner_targets).to_contain("use std.nogc_sync_mut.io.env_ops.{" + "env_get}")
+expect(runner_targets).to_contain("use std.nogc_sync_mut.io.file_ops.{" + "file_exists, file_read}")
+expect(runner_targets).to_contain("use std.nogc_sync_mut.io.time_ops.{" + "current_time_ms}")
+expect(runner_targets).to_contain("use std.nogc_sync_mut.ffi.io.{" + "file_write_text}")
+expect(runner_targets.contains("rt_process_")).to_equal(false)
+expect(runner_targets.contains("rt_file_")).to_equal(false)
+expect(runner_targets.contains("rt_dir_")).to_equal(false)
+expect(runner_targets.contains("rt_env_")).to_equal(false)
+expect(runner_targets.contains("rt_time_")).to_equal(false)
+for scenario_source in [scenario_catalog, scenario_disks, scenario_exec]:
+    expect(scenario_source).to_contain("use std.nogc_sync_mut.io.file_ops.{" + "file_exists}")
+    expect(scenario_source).to_contain("use std.nogc_sync_mut.io.process_ops.{" + "process_run_timeout}")
+    expect(scenario_source.contains("rt_")).to_equal(false)
+expect(scenario_catalog).to_contain("use std.nogc_sync_mut.io.env_ops.{" + "env_get}")
+expect(scenario_exec).to_contain("use std.nogc_sync_mut.io.dir_ops.{" + "dir_create_all}")
+expect(scenario_exec).to_contain("use std.nogc_sync_mut.io.env_ops.{" + "env_get}")
+expect(runner).to_contain("fn _run_candidate_pinned(candidate: text, args: [text], timeout_ms: i64)")
+expect(runner).to_contain("fn _run_candidate_admission_pinned(candidate: text, args: [text], timeout_ms: i64)")
+expect(runner).to_contain("var pinned_candidate = path_absolute(candidate)")
+expect(runner).to_contain("SIMPLE_BOOTSTRAP_DRIVER={" + "pinned_candidate}")
+expect(runner).to_contain("scripts/check/cert/redeploy_gate/fixtures/p2_add.spl")
+expect(runner).to_contain("candidate, build_args, 60000")
+expect(runner).to_contain("process_run_timeout(probe_output, [], 5000)")
+expect(runner).to_contain("_candidate_frontend_smoke(candidate)")
+expect(runner).to_contain("_run_candidate_admission_pinned(candidate, probe_args, 5000)")
+expect(runner).to_contain("_run_candidate_pinned(simple_bin, args, timeout_ms)")
+expect(runner.contains("process_run_timeout(simple_bin, args, timeout_ms)")).to_equal(false)
+expect(runner).to_contain("val cleanup_ok = dir_remove_all(probe_dir)")
+expect(runner.contains("test/05_perf/io_parity/startup_simple.spl")).to_equal(false)
+expect(runner.contains("frontend_exit_code")).to_equal(false)
+expect(process_ops).to_contain("\"-k\", \"{" + "PROCESS_TIMEOUT_KILL_GRACE_SECONDS}s\"")
+expect(probe).to_contain("render_backend = \"metal\"")
+expect(probe).to_contain("render_backend = \"directx\"")
+expect(probe).to_contain("render_backend = \"vulkan\"")
+expect(probe).to_contain("(hello.processing_mask & processing_mask) == hello.processing_mask")
+expect(probe.contains("(hello.processing_mask & render_mask) != 0")).to_equal(false)
+expect(probe).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0: \"cuda\"")
+expect(probe).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0: \"vulkan\"")
+expect(probe).to_contain("HOST_GPU_NEGOTIATION_ATTEMPT scope=probe")
+expect(probe).to_contain("HOST_GPU_NEGOTIATION_DONE scope=probe")
+expect(production).to_contain("HOST_GPU_NEGOTIATION_ATTEMPT scope=production")
+expect(production).to_contain("HOST_GPU_NEGOTIATION_DONE scope=production")
+expect(production_map).to_be_greater_than(0)
+expect(production_map).to_be_less_than(production_attempt)
+expect(production_map).to_be_less_than(production_done)
+expect(wrapper).to_contain("negotiation_timing_evidence_valid")
+expect(wrapper).to_contain("NEGOTIATION_MAX_US=$(sed -n")
+expect(wrapper).to_contain("SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US")
+expect(wrapper).to_contain("cross-isa-tcg-correctness-only")
+expect(wrapper).to_contain("simpleos_qemu_host_gpu_2d_host_arch")
+expect(wrapper).to_contain("qemu_accel=$(qemu_accel_for_isa \"$isa\" \"$qemu_bin\")")
+expect(wrapper).to_contain("-accel \"$qemu_accel\"")
+expect(wrapper).to_contain("host_native_accel_available")
+expect(wrapper).to_contain("qemu_accel_supported")
+expect(bridge).to_contain("now_us > 0 and now_us <= deadline_us")
+expect(probe.contains("rt_time_now_")).to_equal(false)
+expect(production.contains("rt_time_now_")).to_equal(false)
+expect(todos).to_contain("571, TODO, simpleos")
+expect(clock).to_contain("start_us > _BOOT_MONOTONIC_MAX_US - budget_us")
+expect(x86_clock).to_contain("_cpuid(0x15")
+expect(x86_clock.contains("elapsed / 2000")).to_equal(false)
+expect(run_host_gpu_wrapper_self_test()).to_contain("simpleos_qemu_host_gpu_2d_self_test=pass")
+expect(wrapper).to_contain("BACKEND=directx")
+expect(wrapper).to_contain("EXPECTED_PROCESSING_MASK='(1|8|9)'")
+expect(windows_platform_source()).to_contain("DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;")
+expect(windows_native_linker_source()).to_contain("\"d3d11.lib\", \"dxgi.lib\"")
+expect(windows_shared_linker_source()).to_contain("\"d3d11\", \"dxgi\"")
 ```
 
-The self-test also exercises the production AArch64 frame parser and rejects
-missing, duplicate, wrong-backend, and mismatched run/frame production markers
-without starting QEMU.
+</details>
 
-Classify direct guest access without changing PCI ownership:
+#### classifies direct guest GPU access without changing host devices
 
-```sh
-sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --self-test
-sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --preflight
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- classifies direct guest GPU access without changing host devices
+   - Log capture: after_step
+- Classify guest GPU passthrough without changing devices
+   - Log capture: after_step
+   - Evidence: log output verified by 6 expected checks
+   - Expected: wrapper does not contain `/driver/unbind`
+   - Expected: wrapper does not contain `driver_override`
+   - Expected: wrapper does not contain `modprobe`
+   - Expected: wrapper does not contain `virsh nodedev-detach`
+   - Expected: wrapper does not contain `driverctl`
+   - Expected: wrapper does not contain `/sys/bus/pci/drivers/`
+- Keep ivshmem offload separate from passthrough
+   - Log capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("classifies direct guest GPU access without changing host devices")
+step("Classify guest GPU passthrough without changing devices")
+val wrapper = guest_gpu_passthrough_source()
+expect(run_guest_gpu_passthrough_self_test()).to_contain("simpleos_qemu_guest_gpu_passthrough_self_test=pass")
+expect(wrapper).to_contain("--preflight")
+expect(wrapper).to_contain("qemu_vfio_pci_status")
+expect(wrapper).to_contain("qemu_virtio_gpu_gl_status")
+expect(wrapper).to_contain("QEMU emulator version ")
+expect(wrapper).to_contain("host=<str>")
+expect(wrapper).to_contain("simpleos_guest_vulkan_cuda_evidence_status")
+expect(wrapper).to_contain("No canonical SimpleOS guest Vulkan/CUDA receipt producer exists yet")
+expect(wrapper).to_contain("qemu_path_metadata_is_trusted")
+expect(wrapper).to_contain("trusted_directory /usr/bin")
+expect(wrapper).to_contain("QEMU_PROBE_TIMEOUT_SECONDS")
+expect(wrapper).to_contain("qemu_trust_status")
+expect(wrapper).to_contain("selected_device_status")
+expect(wrapper).to_contain("selected_iommu_group_inventory")
+expect(wrapper).to_contain("mutation_attempted=false")
+expect(wrapper.contains("/driver/unbind")).to_equal(false)
+expect(wrapper.contains("driver_override")).to_equal(false)
+expect(wrapper.contains("modprobe")).to_equal(false)
+expect(wrapper.contains("virsh nodedev-detach")).to_equal(false)
+expect(wrapper.contains("driverctl")).to_equal(false)
+expect(wrapper.contains("/sys/bus/pci/drivers/")).to_equal(false)
+
+step("Keep ivshmem offload separate from passthrough")
+expect(wrapper).to_contain("ivshmem_offload_status=checker-present-separate-path")
+expect(wrapper).to_contain("simpleos-guest-vulkan-cuda-evidence-missing")
+expect(todo_db_source()).to_contain("575, TODO, simpleos")
 ```
 
-The current-host preflight reports `unavailable` with reason
-`simpleos-guest-vulkan-cuda-evidence-missing`, identifies the broken
-`virtio-gpu-gl` module, reports the trusted QEMU 8.2.2 probe, identifies the
-selected NVIDIA group as host-bound, retains the separate ivshmem checker path,
-and proves `mutation_attempted=false`. Its self-test passes; no live guest or
-PCI ownership change was attempted.
+</details>
 
-Validate a cached wrapper report before another checker consumes it:
+#### returns an exact device-backed Simple 2D readback
 
-```sh
-sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report path/to/report
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- returns an exact device-backed Simple 2D readback
+   - Artifact capture: after_step
+- Submit the canonical full-frame IMAGE composition through the shared guest bridge
+   - Artifact capture: after_step
+- Compare Draw IR readback and correlated device receipt across all three ISAs
+   - Artifact capture: after_step
+- Render the selected 1280x720 canonical fixture
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: probe does not contain `_host_gpu_device_receipt_ok`
+   - Expected: probe does not contain `mmio_read64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 53 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns an exact device-backed Simple 2D readback")
+step("Submit the canonical full-frame IMAGE composition through the shared guest bridge")
+step("Compare Draw IR readback and correlated device receipt across all three ISAs")
+step("Render the selected 1280x720 canonical fixture")
+val wrapper = host_gpu_wrapper_source()
+val probe = host_gpu_probe_source()
+expect(probe).to_contain("host_gpu_ivshmem_submit_draw_ir")
+expect(draw_ir_executor_source()).to_contain("val apply_clip = embedding.clip and not fills_target_exactly")
+expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(render_receipt")
+expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(draw_ir_receipt")
+expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(fixture_receipt")
+expect(probe).to_contain("host_gpu_ivshmem_device_receipt_valid(processing_receipt")
+expect(probe.contains("_host_gpu_device_receipt_ok")).to_equal(false)
+expect(probe.contains("mmio_read64")).to_equal(false)
+val bridge = host_gpu_guest_bridge_source()
+val protocol = host_gpu_protocol_source()
+expect(protocol).to_contain("run_id_hash > 0 and frame_id > 0")
+expect(bridge).to_contain("simpleos_host_gpu_wire_correlation_valid(expected_run_id_hash, expected_frame_id)")
+expect(host_gpu_daemon_source()).to_contain("if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id):")
+expect(bridge).to_contain("receipt.completed and receipt.generation == expected_generation")
+expect(bridge).to_contain("receipt.status == SIMPLEOS_HOST_GPU_STATUS_PASS and receipt.reason == 0")
+expect(bridge).to_contain("receipt.native_handle > 0 and receipt.device_identity > 0 and receipt.output_addr > 0u64")
+expect(bridge).to_contain("receipt.output_bytes == expected_bytes and receipt.output_checksum > 0 and receipt.elapsed_us > 0")
+expect(bridge).to_contain("receipt.readback_source == SIMPLEOS_HOST_GPU_READBACK_DEVICE")
+expect(bridge).to_contain("receipt.run_id_hash == expected_run_id_hash and receipt.frame_id == expected_frame_id")
+expect(bridge).to_contain("receipt.backend_code == expected_backend")
+expect(wrapper).to_contain("checksum=405589360 bg=2112 rect=960 other=0")
+expect(wrapper).to_contain("HOST_GPU_DRAW_IR_OK")
+expect(wrapper).to_contain("checksum=405589360 bg=2112 image=960 other=0")
+expect(wrapper).to_contain("serial_render_fixture_valid")
+expect(probe).to_contain("HOST_GPU_WARM_SAMPLE_COUNT: i64 = 20")
+expect(probe).to_contain("HOST_GPU_FIXTURE_SAMPLE isa={" + "isa} backend={" + "render_backend}")
+expect(probe).to_contain("fixture_generation + HOST_GPU_WARM_SAMPLE_COUNT + 1")
+expect(wrapper).to_contain("render_latency_evidence_valid")
+expect(wrapper).to_contain("render_latency_p95_us")
+expect(wrapper).to_contain("emit_render_latency_evidence")
+expect(wrapper).to_contain("serial_qemu_execution_valid")
+expect(wrapper).to_contain("serial_qemu_execution_valid \"$log\" \"$qemu_args\"")
+expect(wrapper).to_contain("serial_qemu_execution_valid \"$probe_log\" \"$probe_args\"")
+expect(wrapper).to_contain("HOST_GPU_QEMU_EXECUTION argv=$qemu_device_args")
+expect(wrapper).to_contain("HOST_GPU_QEMU_EXECUTION argv=$production_qemu_args")
+expect(wrapper).to_contain("rank=$((($HOST_GPU_WARM_SAMPLE_COUNT * 95 + 99) / 100))")
+expect(wrapper).to_contain("RENDER_READBACK_P95_MAX_US=16700")
+expect(wrapper).to_contain("[ \"$p95\" -le \"$RENDER_READBACK_P95_MAX_US\" ]")
+expect(wrapper).to_contain("fixture_generation + HOST_GPU_WARM_SAMPLE_COUNT + 1")
+expect(wrapper).to_contain("_render_latency_applicability=")
+expect(wrapper).to_contain("width=$HOST_GPU_FIXTURE_WIDTH height=$HOST_GPU_FIXTURE_HEIGHT")
+expect(wrapper).to_contain("checksum=$HOST_GPU_FIXTURE_CHECKSUM bg=$HOST_GPU_FIXTURE_BACKGROUND_PIXELS rect=$HOST_GPU_FIXTURE_RECT_PIXELS mismatches=0")
+expect(probe).to_contain("host_gpu_fixture_expected_pixel(i, background, foreground)")
+expect(probe).to_contain("fixture_mismatches = fixture_mismatches + 1")
+expect(probe).to_contain("fixture_checksum != fixture_expected_checksum")
+expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
 ```
 
-Status-only or incomplete cached reports fail closed as malformed evidence.
-The shared shell helper bounds version and invalid-mode probes to five seconds,
-rejects any version probe that reports `bootstrap seed only`, and self-pins
-`SIMPLE_BINARY`, `SIMPLE_BIN`, `SIMPLE_BOOTSTRAP_DRIVER`,
-and `SIMPLE_FRONTEND_DELEGATE` to the candidate; sets
-`SIMPLE_FRONTEND_DELEGATED=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and the repository
-`SIMPLE_LIB`; and neutralizes inherited worker/bootstrap selection with
-`SIMPLE_EXECUTION_MODE=''`, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=0`, and
-`SIMPLE_BOOTSTRAP=0`. It then applies the 60-second exact build and 5-second exact run
-contract above. The deliberate invalid-mode command uses the same pins.
-Explicit overrides do not bypass admission. The wrapper self-test and
-shared-shell syntax check pass, and
-`_QemuRunner` source parity uses `_candidate_frontend_smoke` plus
-`_run_candidate_admission_pinned`; the real guest build separately uses
-`_run_candidate_pinned` after `_apply_build_env`. No current-source runner
-execution is available, so no live candidate is promoted by this manual. TODO
-573 retains only native child-env, unique-temp, and cross-platform timeout
-ownership. TODO 574 retains the monotonic-elapsed/wall-clock split and
-runtime-provider safety audit.
+</details>
 
-TODO 573 is intentionally postponed across unavailable native hosts. A future
-PASS requires provider-complete timeout/capture, argv with spaces and quotes,
-separate stdout/stderr, deadline status, Unix orphan cleanup, Windows process
-tree cleanup, child-env isolation, and concurrent unique host-temp creation.
-The current Rust SFFI timeout lacks group setup and core-C provider parity.
+#### proves one correlated AArch64 production desktop frame
 
-Focused SSpec execution is a separate unresolved compiler contract. Current
-`simple test` dispatch uses `rt_cli_run_tests`, while the alternate
-pure-Simple orchestrator ultimately uses the Rust `rt_cli_run_file`
-interpreter. TODO 572 owns the result-bearing no-seed path. Do not infer an
-SSpec, compiler, QEMU, or GPU PASS from candidate source inspection.
+- proves one correlated AArch64 production desktop frame
+   - Log capture: after_step
+- Prove the AArch64 production desktop frame
+   - Log capture: after_step
 
-Run the live Linux Vulkan-render/CUDA-processing matrix with a deployed
-pure-Simple compiler. After that compiler passes its bounded frontend gate, the
-wrapper validates or builds its architecture-tagged CUDA+Vulkan host SFFI
-archive using the locked `simple-runtime` bootstrap profile and verifies the
-active Cargo fingerprint contains `cuda` and `vulkan`:
 
-```sh
-sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("proves one correlated AArch64 production desktop frame")
+step("Prove the AArch64 production desktop frame")
+val wrapper = host_gpu_wrapper_source()
+val production = production_wm_executor_source()
+val validate = production.index_of("if not host_gpu_ivshmem_device_receipt_valid(receipt")
+val present = production.index_of("if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr")
+val marker = production.index_of("serial_println(\"[wm-frame] host-gpu-presented")
+expect(validate).to_be_greater_than(0)
+expect(validate).to_be_less_than(present)
+expect(present).to_be_less_than(marker)
+expect(wrapper).to_contain("arm64_production_serial_has_correlated_frame")
+expect(wrapper).to_contain("arm64_production_evidence_valid")
+expect(wrapper).to_contain("encoded_argv_field \"$probe_args\" 13")
+expect(wrapper).to_contain("[ \"$isa\" != aarch64 ] || grep -Fq ramfb")
+expect(wrapper).to_contain("daemon_pid=\nrss_monitor_pid=\ntrap 'cleanup_active_guest' EXIT")
+expect(wrapper).to_contain("GUEST_BUILD_REASON=guest-artifact-missing")
+expect(wrapper).to_contain("trap 'cleanup_active_guest' EXIT")
+expect(wrapper).to_contain("arm64-desktop-engine2d")
+expect(wrapper).to_contain("simpleos_arm64_desktop_engine2d.elf")
+expect(wrapper).to_contain("qemu_argv_evidence_valid \"$report_isa\" \"$row_production_qemu_device_args\" production")
+expect(wrapper).to_contain("_production_serial_log")
+expect(wrapper).to_contain("_production_qemu_device_args")
+expect(wrapper).to_contain("[wm-frame] host-gpu-presented")
+expect(wrapper).to_contain("[ \"$presented_generation\" -eq \"$((ready_generation + 1))\" ]")
+expect(wrapper).to_contain("[ \"$presented_run\" -eq \"$ready_generation\" ]")
+expect(wrapper).to_contain("[ \"$presented_frame\" -eq \"$presented_generation\" ]")
 ```
 
-An explicit `SIMPLEOS_HOST_GPU_RUNTIME_PATH` is validation-only: the wrapper
-never deletes or rebuilds it. Building this host runtime provider does not
-authorize the Rust compiler seed, which remains rejected for every Simple
-check, guest build, and execution step.
+</details>
 
-The 2026-07-15 diagnostic full-bootstrap Stage3 compiler passes admission. The compiler no
-longer forces every object relocation into the runtime root set, so existing
-function sections and `--gc-sections` drop dead optional backends; the tagged
-Vulkan/CUDA daemon links without core-C ABI mixing. A bounded AArch64 run then
-builds, boots, maps ivshmem, and observes zero HELLO generation and zero
-negotiation attempts because the daemon never enters the service loop. The
-x86 diagnostic that admitted all of `rt_extras.c` is inadmissible because it
-duplicates strong tuple/RDRAND providers already in `baremetal_stubs.c`; the
-change was removed. TODO577 owns daemon HELLO, TODO578 owns a single-owner x86
-minimal runtime, and TODO537 retains RV64. Because the final source removes
-that rejected admission, TODO548 retains one source-matched rebuild. No live
-GPU receipt is claimed.
+<details>
+<summary>Advanced: routes the RV64 dynamic scanout through the canonical production desktop</summary>
 
-Run the same three-ISA matrix with ProcessingIR forced through Vulkan:
+#### routes the RV64 dynamic scanout through the canonical production desktop
 
-```sh
-SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan \
-  sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+- routes the RV64 dynamic scanout through the canonical production desktop
+- Initialize the dynamic RISC-V VirtIO scanout
+- Render the canonical Shared WM scene through Draw IR and Engine2D
+- Present the completed framebuffer through VirtIO-GPU
+- Handle non-blocking UART window actions
+- Present each changed frame through VirtIO-GPU
+- Report source-only status until a fresh pure-Simple ELF boots
+   - Expected: entry does not contain `riscv_noalloc_boot_idle`
+   - Expected: entry does not contain `use os.kernel.arch.riscv64.cpu.{" + "wfi}`
+   - Expected: entry does not contain `wfi()`
+   - Expected: entry does not contain `extern fn rt_`
+   - Expected: entry does not contain `DISPLAY_WM_ANCHORS_READY`
+   - Expected: runtime does not contain `polls < 1000000ULL`
+   - Expected: runtime does not contain `RT_GPU_WIDTH`
+   - Expected: runtime does not contain `rt_gpu_fill_wm_anchor_scene`
+   - Expected: evidence does not contain `wm_anchor_matches`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 65 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes the RV64 dynamic scanout through the canonical production desktop")
+step("Initialize the dynamic RISC-V VirtIO scanout")
+step("Render the canonical Shared WM scene through Draw IR and Engine2D")
+step("Present the completed framebuffer through VirtIO-GPU")
+step("Handle non-blocking UART window actions")
+step("Present each changed frame through VirtIO-GPU")
+step("Report source-only status until a fresh pure-Simple ELF boots")
+val entry = rv64_desktop_source()
+val owner = rv64_display_owner_source()
+val runtime = rv64_display_runtime_source()
+val runner = qemu_runner_build_source()
+val evidence = rv64_display_evidence_source()
+val render = entry.index_of("shell.render_baremetal_first_frame(executor)")
+val present = entry.index_of("if not riscv64_display_present():")
+val ready = entry.index_of("[desktop-gui-riscv64] desktop-ready revision=")
+val module_init = entry.index_of("__simple_call_module_inits()")
+val serial_setup = entry.index_of("serial_init()")
+val input = entry.index_of("val input_byte = serial_read_byte()")
+val no_input = entry.index_of("if input_byte < 0:")
+val action = entry.index_of("uart_char_to_action(input_byte")
+val rerender = entry.index_of("shell.render_baremetal_frame(executor)")
+val changed_present = entry.last_index_of("if not riscv64_display_present():")
+expect(runner).to_contain("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+expect(runner).to_contain("[\"build/os/generated\", \"src/os\", \"src/lib\", \"examples/09_embedded/simple_os\"]")
+expect(entry).to_contain("FramebufferDriver.from_scanout_raw")
+expect(entry).to_contain("create_fb_engine_sized")
+expect(entry).to_contain("Engine2dWmFrameExecutor.create_host_gpu")
+expect(entry).to_contain("SIMPLEOS_HOST_GPU_ISA_RISCV64")
+expect(entry).to_contain("map_qemu_host_gpu_ivshmem_bar2")
+expect(entry).to_contain("use os.kernel.arch.riscv64.console.{" + "serial_init, serial_read_byte}")
+expect(entry).to_contain("use os.gui.input_event.{" + "WmAction}")
+expect(entry).to_contain("use os.gui.shortcut.{" + "uart_char_to_action}")
+expect(entry).to_contain("if input_byte < 0:\n            continue")
+expect(entry).to_contain("case WmAction.CycleFocus:")
+expect(entry).to_contain("shell.render_baremetal_frame(executor)")
+expect(entry).to_contain("if not riscv64_display_present():")
+expect(entry.contains("riscv_noalloc_boot_idle")).to_equal(false)
+expect(entry.contains("use os.kernel.arch.riscv64.cpu.{" + "wfi}")).to_equal(false)
+expect(entry.contains("wfi()")).to_equal(false)
+expect(entry.contains("extern fn rt_")).to_equal(false)
+expect(entry.contains("DISPLAY_WM_ANCHORS_READY")).to_equal(false)
+expect(render).to_be_greater_than(0)
+expect(render).to_be_less_than(present)
+expect(present).to_be_less_than(ready)
+expect(module_init).to_be_greater_than(0)
+expect(module_init).to_be_less_than(serial_setup)
+expect(serial_setup).to_be_less_than(input)
+expect(input).to_be_less_than(no_input)
+expect(no_input).to_be_less_than(action)
+expect(action).to_be_less_than(rerender)
+expect(rerender).to_be_less_than(changed_present)
+expect(owner).to_contain("extern fn rt_display_present() -> i64")
+expect(runtime).to_contain("const spl_u8 *mode = (const spl_u8 *)g_rt_gpu_resp + 24U + scanout * 24U")
+expect(runtime).to_contain("spl_i64 rt_display_present(void)")
+expect(runtime).to_contain("RT_GPU_COMMAND_TIMEOUT_US")
+expect(runtime).to_contain("g_rt_display_ready && !g_rt_display_failed")
+expect(runtime).to_contain("pages <= g_riscv_pmm_free_pages")
+expect(runtime.contains("polls < 1000000ULL")).to_equal(false)
+expect(runtime.contains("RT_GPU_WIDTH")).to_equal(false)
+expect(runtime.contains("rt_gpu_fill_wm_anchor_scene")).to_equal(false)
+expect(evidence).to_contain("contract_version=2")
+expect(evidence).to_contain("--self-test")
+expect(evidence).to_contain("canonical_palette_witnesses")
+expect(evidence.contains("wm_anchor_matches")).to_equal(false)
 ```
 
-On a prepared macOS host the same command selects the Metal contract, uses the
-Darwin pure-Simple compiler/runtime artifact, and capability-gates each QEMU
-binary before launch. Native macOS evidence remains pending.
+</details>
 
-On Windows, provide a native daemon with `SIMPLEOS_GPU_HOST_BIN`; cached guest
-artifacts may be selected explicitly with
-`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1`. The wrapper does not infer a runtime
-bundle or claim a fresh build.
 
-The default path builds guests through the named `_QemuRunner` scenarios.
-`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` is an explicit cached-artifact
-evidence mode; it is not a fresh-build claim.
+</details>
 
-## Executable source
+#### requires checked raw native backend completion before a device receipt
 
-`test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl`
+- requires checked raw native backend completion before a device receipt
+   - Protocol capture: after_step
+- Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection
+   - Protocol capture: after_step
+- Reject unchecked or fallback raw rendering before device-backed receipt
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 2 expected checks
+   - Expected: helpers does not contain `fn vulkan_dispatch_compute(`
+   - Expected: backend does not contain `vulkan_dispatch_compute(`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires checked raw native backend completion before a device receipt")
+step("Dispatch the raw CLEAR and solid RECT fixture through strict Engine2D selection")
+step("Reject unchecked or fallback raw rendering before device-backed receipt")
+val helpers = vulkan_backend_helpers_source()
+val owner = vulkan_sffi_owner_source()
+val backend = vulkan_backend_source()
+expect(helpers).to_contain("fn vulkan_dispatch_framebuffer_compute_checked")
+expect(helpers).to_contain("vulkan_sffi_dispatch_buffer_compute_checked")
+expect(owner).to_contain("fn vulkan_sffi_dispatch_buffer_compute_checked")
+expect(owner).to_contain("vulkan_sffi_submit_and_wait_fence(cmd)")
+expect(helpers.contains("fn vulkan_dispatch_compute(")).to_equal(false)
+expect(helpers).to_contain("if dispatched > 0:")
+expect(helpers).to_contain("if dispatched < 0:")
+expect(helpers).to_contain("elif self.initialized and self.d_framebuffer > 0:")
+expect(helpers).to_contain("me _dispatch_framebuffer_checked")
+expect(backend).to_contain("self._dispatch_framebuffer_checked")
+expect(backend.contains("vulkan_dispatch_compute(")).to_equal(false)
+val daemon = host_gpu_daemon_source()
+val platform = host_gpu_all_platform_source()
+expect(daemon).to_contain("platform.create_render_target(width.to_i32(), height.to_i32(), backend)")
+expect(platform).to_contain("@cfg(linux)\nfn _create_all_engine")
+expect(platform).to_contain("Engine2D.create_vulkan_backend(width, height)")
+expect(engine2d_source()).to_contain("static fn create_vulkan_backend(width: i32, height: i32)")
+expect(daemon).to_contain("draw_engine.backend_name() != backend")
+```
+
+</details>
+
+#### admits only strict native Metal Draw IR with stable device identity
+
+- admits only strict native Metal Draw IR with stable device identity
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 3 expected checks
+   - Expected: daemon does not contain `platform.create_render_target(1, 1, name)`
+   - Expected: engine2d_source().split("software_backend: Some(sw)").len() equals `3`
+   - Expected: daemon does not contain `backend != "vulkan" and kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 37 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("admits only strict native Metal Draw IR with stable device identity")
+val daemon = host_gpu_daemon_source()
+val all_platform = host_gpu_all_platform_source()
+val macos_platform = host_gpu_macos_platform_source()
+val metal_target = metal_draw_ir_target_source()
+expect(daemon).to_contain("platform.probe_render_backend(name)")
+expect(daemon.contains("platform.create_render_target(1, 1, name)")).to_equal(false)
+expect(all_platform).to_contain("engine.backend_name() == backend")
+expect(all_platform).to_contain("engine.shutdown()")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"vulkan\":")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"vulkan-poisoned-software\":")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"cuda\":")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"metal\":")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"opencl\":")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"rocm\":")
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"software\":")
+expect(engine2d_source()).to_contain("vulkan.shutdown()")
+expect(engine2d_source()).to_contain("cuda.shutdown()")
+expect(engine2d_source()).to_contain("metal.shutdown()")
+expect(engine2d_source()).to_contain("opencl.shutdown()")
+expect(engine2d_source()).to_contain("rocm.shutdown()")
+expect(engine2d_source()).to_contain("software.shutdown()")
+expect(engine2d_source()).to_contain("self.software_backend = Some(software)")
+expect(engine2d_source().split("software_backend: Some(sw)").len()).to_equal(3)  # oracle: the software backend is selected in exactly two fixture sites
+expect(engine2d_source()).to_contain("if self.selected_backend_name == \"vulkan-poisoned-software\":\n            if val Some(vulkan) = self.vulkan_backend:\n                vulkan.shutdown()\n                if vulkan.completion_unknown:\n                    self.vulkan_backend = Some(vulkan)\n                else:\n                    self.vulkan_backend = nil\n            if val Some(software) = self.software_backend:\n                software.shutdown()\n            return")
+expect(macos_platform).to_contain("metal_device_info(0)")
+expect(macos_platform).to_contain("metal_draw_ir_render_target_probe()")
+expect(metal_target).to_contain("_metal_draw_ir_render_target_create(1, 1)")
+expect(metal_target).to_contain("target.shutdown()")
+expect(macos_platform).to_contain("processing_metal_device_identity(info.name, info.total_memory)")
+expect(all_platform).to_contain("directx_hardware_adapter_identity()")
+expect(daemon).to_contain("if backend == \"directx\": result.device_identity")
+expect(daemon).to_contain("if backend == \"directx\": readback.device_identity")
+expect(daemon).to_contain("backend != \"vulkan\" and backend != \"metal\" and backend != \"directx\"")
+expect(host_gpu_wrapper_source()).to_contain("[ \"$render_identity\" = \"$draw_ir_identity\" ]")
+expect(daemon.contains("backend != \"vulkan\" and kind == SIMPLEOS_HOST_GPU_KIND_DRAW_IR")).to_equal(false)
+```
+
+</details>
+
+#### returns an exact device-backed ProcessingIR result
+
+- returns an exact device-backed ProcessingIR result
+   - Artifact capture: after_step
+- Run the ProcessingIR parity fixture
+   - Artifact capture: after_step
+- Compare the result buffer and correlated completion with the CPU oracle
+   - Artifact capture: after_step
+- Classify device processing preference
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: vulkan does not contain `vulkan_submit_and_wait(command)`
+   - Expected: vulkan does not contain `vulkan_begin_compute()`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns an exact device-backed ProcessingIR result")
+step("Run the ProcessingIR parity fixture")
+step("Compare the result buffer and correlated completion with the CPU oracle")
+step("Classify device processing preference")
+val wrapper = host_gpu_wrapper_source()
+val daemon = host_gpu_daemon_source()
+val vulkan = vulkan_processing_source()
+val unknown = vulkan.index_of("if dispatch_status < 0:")
+val cleanup = vulkan.index_of("# Known-safe dispatch statuses may release their dependent resources.")
+expect(wrapper).to_contain("checksum=1792 mismatches=0")
+expect(wrapper).to_contain("PROCESSING_BACKEND")
+expect(wrapper).to_contain("SIMPLEOS_HOST_GPU_PROCESSING_BACKEND")
+expect(wrapper).to_contain("--processing-backend=vulkan")
+expect(wrapper).to_contain("processing_selector_evidence_valid")
+expect(daemon).to_contain("requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN")
+expect(daemon).to_contain("HOST_GPU_DAEMON_SELECTOR processing_backend={" + "processing_selector}")
+expect(vulkan).to_contain("vulkan_sffi_dispatch_buffer_compute_checked")
+expect(vulkan).to_contain("if dispatch_status == 1: vulkan_sffi_read_buffer_bytes")
+expect(vulkan).to_contain("vulkan-dispatch-completion-unknown")
+expect(unknown).to_be_greater_than(0)
+expect(unknown).to_be_less_than(cleanup)
+expect(vulkan.contains("vulkan_submit_and_wait(command)")).to_equal(false)
+expect(vulkan.contains("vulkan_begin_compute()")).to_equal(false)
+expect(cuda_processing_source()).to_contain("cuda_device_identity(device_handle)")
+expect(cuda_processing_source()).to_contain("if identity <= 0:")
+expect(daemon).to_contain("if not completed or backend_handle <= 0 or device_identity <= 0:")
+expect(daemon).to_contain("val cpu_elapsed_us = _elapsed_us_since(cpu_started)")
+expect(daemon).to_contain("val device_elapsed_us = _elapsed_us_since(device_started)")
+expect(daemon).to_contain("return \"preferred\"")
+expect(daemon).to_contain("\"available-not-preferred\"")
+expect(daemon).to_contain("HOST_GPU_PROCESS_PERF isa=")
+expect(wrapper).to_contain("processing_perf_evidence_valid")
+expect(wrapper).to_contain("[ \"$device_us\" = \"$serial_device_us\" ]")
+expect(wrapper).to_contain("processing-perf-evidence-missing")
+expect(cuda_readback_wrapper_source()).to_contain("cuda_generated_2d_readback_device_identity")
+expect(cuda_readback_wrapper_source()).to_contain("cuDeviceGetUuid_v2")
+expect(cuda_readback_wrapper_source()).to_contain("hash &= ((uint64_t)INT64_MAX >> 3)")
+expect(cuda_readback_wrapper_source()).to_contain("UINT64_C(658099427548482596)")
+expect(cuda_readback_wrapper_source()).to_contain("cuda_tagged_identity_decimal")
+expect(cuda_readback_wrapper_source()).to_contain("oversized-device-identity-accepted")
+expect(run_cuda_readback_wrapper_self_test()).to_contain("cuda-submit-readback-identity-checksum-gate")
+expect(run_generated_2d_matrix_self_test()).to_contain("submit-readback-checksum-proof-fails-closed")
+```
+
+</details>
+
+#### keeps native Metal ProcessingIR separate from Engine2D rendering
+
+- keeps native Metal ProcessingIR separate from Engine2D rendering
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 2 expected checks
+   - Expected: metal does not contain `MetalSession`
+   - Expected: metal does not contain `Engine2D`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps native Metal ProcessingIR separate from Engine2D rendering")
+val daemon = file_read_text("src/app/simpleos_gpu_host/platform_macos.spl")
+val metal = metal_processing_source()
+expect(daemon).to_contain("processing_ir_execute_metal")
+expect(daemon).to_contain("SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL")
+expect(daemon).to_contain("processing_ir_outputs_equal(probe.values, oracle)")
+expect(host_gpu_daemon_source()).to_contain("SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, negotiated_processing_mask")
+expect(metal).to_contain("metal_sffi_run_compute_frame")
+expect(metal).to_contain("metal_buffer_download_ptr")
+expect(metal.contains("MetalSession")).to_equal(false)
+expect(metal.contains("Engine2D")).to_equal(false)
+```
+
+</details>
+
+#### keeps the macOS ARM64 RAM-tail wire cache-visible to the host mapping
+
+- keeps the macOS ARM64 RAM-tail wire cache-visible to the host mapping
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the macOS ARM64 RAM-tail wire cache-visible to the host mapping")
+val bridge = file_read_text("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
+val mmio = file_read_text("src/os/kernel/boot/mmio_hardware.spl")
+val runtime = file_read_text("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+expect(bridge).to_contain("if base == 0x5F800000u64:")
+expect(bridge).to_contain("mmio_shared_clean_range")
+expect(bridge).to_contain("mmio_shared_invalidate_range")
+expect(bridge).to_contain("if polls % 1024 == 0:")
+expect(bridge).to_contain("_host_gpu_refresh_response(base)")
+expect(mmio).to_contain("rt_arm64_dcache_clean_range")
+expect(mmio).to_contain("rt_arm64_dcache_invalidate_range")
+expect(runtime).to_contain("dc cvac, %0")
+expect(runtime).to_contain("dc ivac, %0")
+```
+
+</details>
+
+<details>
+<summary>Advanced: keeps the guest bootable when acceleration is unavailable</summary>
+
+#### keeps the guest bootable when acceleration is unavailable
+
+- keeps the guest bootable when acceleration is unavailable
+- Disable the host service or requested backend
+- Select the existing software or CPU fallback with a stable reason
+- Select host presentation or the existing local production renderer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the guest bootable when acceleration is unavailable")
+step("Disable the host service or requested backend")
+step("Select the existing software or CPU fallback with a stable reason")
+step("Select host presentation or the existing local production renderer")
+val wrapper = host_gpu_wrapper_source()
+expect(wrapper).to_contain("runtime-artifact-missing")
+expect(wrapper).to_contain("qemu-host-gpu-capability-missing")
+val production = production_wm_executor_source()
+expect(production).to_contain("host_gpu_ivshmem_submit_draw_ir")
+expect(production).to_contain("host_gpu_ivshmem_device_receipt_valid")
+expect(production).to_contain("self.framebuffer.present_argb32_from_mmio")
+expect(production).to_contain("engine2d_draw_ir_adv_composition_present_with_images")
+```
+
+</details>
+
+
+</details>
+
+<details>
+<summary>Advanced: rejects malformed duplicate and stale protocol traffic</summary>
+
+#### rejects malformed duplicate and stale protocol traffic
+
+- rejects malformed duplicate and stale protocol traffic
+- Submit unknown oversized out-of-range duplicate and stale requests
+- Require every invalid case to fail before device execution
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects malformed duplicate and stale protocol traffic")
+step("Submit unknown oversized out-of-range duplicate and stale requests")
+step("Require every invalid case to fail before device execution")
+val wrapper = host_gpu_wrapper_source()
+expect(wrapper).to_contain("handle=0 identity=0")
+expect(wrapper).to_contain("if serial_has_pass")
+```
+
+</details>
+
+
+</details>
+
+#### publishes honest cross-host and cross-ISA evidence rows
+
+- publishes honest cross-host and cross-ISA evidence rows
+   - Log capture: after_step
+- Report device-backed host acceleration evidence
+   - Log capture: after_step
+- Validate cached rows before aggregation
+   - Log capture: after_step
+- Reject flags screenshots scanout CPU mirrors and synthetic handles
+   - Log capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("publishes honest cross-host and cross-ISA evidence rows")
+step("Report device-backed host acceleration evidence")
+step("Validate cached rows before aggregation")
+step("Reject flags screenshots scanout CPU mirrors and synthetic handles")
+val wrapper = host_gpu_wrapper_source()
+expect(wrapper).to_contain("simpleos_qemu_host_gpu_2d_rows=3")
+expect(wrapper).to_contain("simpleos_qemu_host_gpu_2d_passed=")
+expect(wrapper).to_contain("simpleos_qemu_host_gpu_2d_blocked=")
+expect(wrapper).to_contain("simpleos_qemu_host_gpu_2d_failed=")
+expect(wrapper).to_contain("--validate-report")
+expect(wrapper).to_contain("validate_report")
+expect(wrapper).to_contain("serial_has_pass \"$row_log\" \"$report_isa\"")
+expect(wrapper).to_contain("_qemu_version=$3")
+expect(wrapper).to_contain("_qemu_device_args=$4")
+expect(wrapper).to_contain("_daemon_max_rss_kib=$5")
+expect(wrapper).to_contain("_qemu_max_rss_kib=$6")
+expect(wrapper).to_contain("_combined_max_rss_kib=$7")
+expect(wrapper).to_contain("encode_argv_hex")
+expect(wrapper).to_contain("encoded_argv_valid")
+expect(wrapper).to_contain("qemu_argv_evidence_valid \"$report_isa\" \"$row_qemu_device_args\"")
+expect(wrapper).to_contain("qemu_argv_evidence_valid \"$isa\" \"$qemu_device_args\"")
+expect(wrapper).to_contain("memory-backend-file,id=hostgpu,share=on,mem-path=")
+expect(wrapper).to_contain("ivshmem-plain,memdev=hostgpu")
+expect(wrapper).to_contain("monitor_guest_max_rss")
+expect(wrapper).to_contain("QEMU_KILL_GRACE_SECONDS=${" + "SIMPLEOS_HOST_GPU_QEMU_KILL_GRACE_SECONDS:-2}")
+expect(wrapper).to_contain("\"$TIMEOUT_BIN\" -k \"${" + "QEMU_KILL_GRACE_SECONDS}s\"")
+expect(wrapper).to_contain("printf \"%s\\n\" \"$$\" >\"$qemu_pid_file\"; exec \"$@\"")
+expect(wrapper).to_contain("sampled_combined_rss_kib=$((sampled_daemon_rss_kib + sampled_qemu_rss_kib))")
+expect(wrapper).to_contain("row_rss_evidence_valid \"$row_daemon_rss\" \"$row_qemu_rss\" \"$row_combined_rss\"")
+expect(run_host_gpu_metrics_self_test()).to_contain("simpleos_qemu_host_gpu_2d_metrics_self_test=pass")
+val probe = host_gpu_probe_source()
+expect(probe).to_contain("hello.elapsed_us > 0")
+expect(probe).to_contain("protocol={" + "hello.version} elapsed_us={" + "hello.elapsed_us}")
+expect(probe).to_contain("run={" + "render_receipt.run_id_hash} frame={" + "render_receipt.frame_id}")
+expect(probe).to_contain("run={" + "draw_ir_receipt.run_id_hash} frame={" + "draw_ir_receipt.frame_id}")
+expect(probe).to_contain("run={" + "processing_receipt.run_id_hash} frame={" + "processing_receipt.frame_id}")
+val time_ops = time_ops_source()
+expect(time_ops).to_contain("extern fn rt_time_now_nanos() -> i64")
+expect(time_ops).to_contain("fn time_now_nanos() -> i64:")
+expect(time_ops).to_contain("rt_time_now_nanos()")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 13 |
+| Active scenarios | 13 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `238e24708ed57783c596b755d4ab15469b1cfe364167e64ea497fe11793cb17f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `238e24708ed57783c596b755d4ab15469b1cfe364167e64ea497fe11793cb17f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `238e24708ed57783c596b755d4ab15469b1cfe364167e64ea497fe11793cb17f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl
+mirror: doc/06_spec/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl:440:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'proves one correlated AArch64 production desktop frame' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl:470:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes the RV64 dynamic scanout through the canonical production desktop' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl:538:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires checked raw native backend completion before a device receipt' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

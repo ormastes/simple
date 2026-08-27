@@ -1,6 +1,6 @@
 # Test Host Env Specification
 
-> <details>
+> Tests covering test host environment SIMD evidence.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -15,32 +15,28 @@
 
 ### test host environment SIMD evidence
 
-Shared real-host symlink helper:
-
-```simple
-fn create_file_symlink(target: text, link: text) -> i64:
-    val (_, _, code) = if host_os() == "windows":
-        process_run_timeout("cmd", ["/c", "mklink", link, target], 5000)
-    else:
-        process_run_timeout("/bin/ln", ["-s", target, link], 5000)
-    code
-```
-
 #### binds every SIMD row to one complete architecture-owned frame receipt
 
-- "HostCapabilityRow create
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- binds every SIMD row to one complete architecture-owned frame receipt
    - Expected: source does not contain `"matrix`
    - Expected: source does not contain `native_simd_pixel_evidence`
+   - Expected: source does not contain `detect_simd_level`
    - Expected: source does not contain `if env.validation_reason() == "":`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("binds every SIMD row to one complete architecture-owned frame receipt")
 val source = file_read("src/app/test/test_host_env.spl")
 val test_source = file_read("test/01_unit/app/test_host_env_spec.spl")
 
@@ -78,21 +74,24 @@ expect(test_source.contains("process_run(\"/bin/ln\"")).to_be(false)
 
 #### rejects stale or substituted SIMD source compiler and receipt provenance
 
+- rejects stale or substituted SIMD source compiler and receipt provenance
 - Reject changed canonical source bytes
-- Reject changed or substituted compiler bytes, including a same-byte symlink
+   - Expected: create_file_symlink(source_target_path, source_path) equals `0`
+- Reject changed or substituted compiler bytes
+   - Expected: create_file_symlink(compiler_target_path, compiler_path) equals `0`
+   - Expected: file_hash_sha256(compiler_path) equals `file_hash_sha256(compiler_target_path)`
 - Reject a receipt hash that does not bind the recorded frame fields
 
-The retained SIMD row passes only while the canonical evidence source and selected
-compiler are regular non-symlink files whose current SHA-256 hashes match the
-receipt, and the receipt SHA-256 matches the producer's exact six-line payload.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects stale or substituted SIMD source compiler and receipt provenance")
 val source_path = "/tmp/simple-test-host-env-simd-source.spl"
 val source_target_path = "/tmp/simple-test-host-env-simd-source-target.spl"
 val compiler_path = "/tmp/simple-test-host-env-simd-compiler"
@@ -142,17 +141,23 @@ file_delete(compiler_target_path)
 
 #### rejects deleted or changed retained RenderDoc artifacts
 
+- rejects deleted or changed retained RenderDoc artifacts
 - Bind the retained receipt to current capture and replay XML bytes
 - Reject a same-byte replay XML symlink
+   - Expected: xml_link_code equals `0`
+   - Expected: file_hash_sha256(xml_path) equals `xml_sha`
 - Change and remove either retained RenderDoc artifact
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects deleted or changed retained RenderDoc artifacts")
 step("Bind the retained receipt to current capture and replay XML bytes")
 val capture_path = "/tmp/simple-test-host-env-renderdoc-current.rdc"
 val xml_path = "/tmp/simple-test-host-env-renderdoc-current.xml"
@@ -197,17 +202,23 @@ file_delete(xml_target_path)
 
 #### rejects deleted or changed retained framebuffer captures
 
+- rejects deleted or changed retained framebuffer captures
 - Bind baseline and input receipts to current PPM bytes
 - Reject a same-byte input framebuffer symlink
+   - Expected: input_link_code equals `0`
+   - Expected: file_hash_sha256(input_path) equals `input_sha`
 - Change and remove the retained framebuffer captures
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects deleted or changed retained framebuffer captures")
 step("Bind baseline and input receipts to current PPM bytes")
 val baseline_path = "/tmp/simple-test-host-env-baseline.ppm"
 val input_path = "/tmp/simple-test-host-env-input.ppm"
@@ -250,12 +261,12 @@ file_delete(input_target_path)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/test_host_env_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering test host environment SIMD evidence.
 - test host environment SIMD evidence
 
 ## Scenario Summary
@@ -270,3 +281,49 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ded021d955181c95199187f5f4489bdacd36cb8860f4f38c0be058c53302a23a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ded021d955181c95199187f5f4489bdacd36cb8860f4f38c0be058c53302a23a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ded021d955181c95199187f5f4489bdacd36cb8860f4f38c0be058c53302a23a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **81/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/test_host_env_spec.spl
+mirror: doc/06_spec/01_unit/app/test_host_env_spec.md (current)
+findings: 4 blockers: 1
+  narrative=100 structure=100 oracle=20
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=81; blocker cap makes effective=49
+doc/06_spec/01_unit/app/test_host_env_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/test_host_env_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/test_host_env_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/app/test_host_env_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+<!-- sspec-maintain:scorecard:end -->

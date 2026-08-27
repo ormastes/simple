@@ -1,40 +1,17 @@
 # VHDL Golden File Tests
 
-> Generates VHDL output from the VhdlBuilder and compares against checked-in reference .vhd golden files for regression testing. Validates counter and ALU entity generation including library headers, entity/architecture blocks, port declarations, signal assignments, clocked processes, and combinational logic. Also performs structural sanity checks on generated VHDL output.
-
-<!-- sdn-diagram:id=vhdl_golden_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=vhdl_golden_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-vhdl_golden_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=vhdl_golden_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> As a hardware-backend maintainer I need `VhdlBuilder` to emit structurally correct VHDL, so that a regression in the emitter is caught before anything is handed to a synthesis tool.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # VHDL Golden File Tests
 
-Generates VHDL output from the VhdlBuilder and compares against checked-in reference .vhd golden files for regression testing. Validates counter and ALU entity generation including library headers, entity/architecture blocks, port declarations, signal assignments, clocked processes, and combinational logic. Also performs structural sanity checks on generated VHDL output.
+As a hardware-backend maintainer I need `VhdlBuilder` to emit structurally correct VHDL, so that a regression in the emitter is caught before anything is handed to a synthesis tool.
 
 ## At a Glance
 
@@ -44,61 +21,153 @@ Generates VHDL output from the VhdlBuilder and compares against checked-in refer
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/feature/usage/vhdl_golden_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Generates VHDL output from the VhdlBuilder and compares against checked-in
-reference .vhd golden files for regression testing. Validates counter and ALU
-entity generation including library headers, entity/architecture blocks, port
-declarations, signal assignments, clocked processes, and combinational logic.
-Also performs structural sanity checks on generated VHDL output.
+As a hardware-backend maintainer I need `VhdlBuilder` to emit structurally
+correct VHDL, so that a regression in the emitter is caught before anything is
+handed to a synthesis tool.
+
+**This spec is deliberately UNGATED.** It previously sat behind
+`SIMPLE_VHDL_TEST=1` and asserted only that its own gate was closed. That gate
+was wrong on its face: `VhdlBuilder` is pure Simple text generation and needs
+neither GHDL, Yosys, nor any hardware. Gating it meant the emitter was never
+exercised on any host. Toolchain-dependent VHDL work lives in `vhdl_spec.spl`,
+which keeps its gate for the reason a gate exists.
 
 ## Syntax
 
 ```simple
-var builder = VhdlBuilder__create("counter")
+var builder = VhdlBuilder.create("counter")
 builder.emit_library_header()
 builder.emit_entity_begin("counter")
-builder.emit_port("clk", "in", mapper.bit_type(), false)
+use std.spec.step
+
 val vhdl = builder.build()
 ```
-VHDL Golden File Tests
-
-Generates VHDL output from the builder and compares against
-checked-in reference .vhd files in examples/09_embedded/vhdl/builder/golden/.
 
 ## Scenarios
 
-### VHDL Golden File Tests
+### VhdlBuilder entity emission
 
-#### env_skip: requires SIMPLE_VHDL_TEST
+#### emits a library header before anything else
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- emits a library header before anything else
+- build a minimal unit carrying only the standard header
+- the IEEE library and the numeric package are both declared
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(test_env_require("SIMPLE_VHDL_TEST")).to_equal("blocked:SIMPLE_VHDL_TEST")
+# @req REQ-SSPEC-SYSTEM
+step("emits a library header before anything else")
+step("build a minimal unit carrying only the standard header")
+var builder = VhdlBuilder.create("counter")
+builder.emit_library_header()
+val vhdl = builder.build()
+
+step("the IEEE library and the numeric package are both declared")
+expect(vhdl).to_contain("library ieee")
+expect(vhdl).to_contain("ieee.std_logic_1164")
 ```
 
 </details>
 
-### VHDL Golden Output Sanity
+#### emits a balanced entity block with its ports
 
-#### env_skip: requires SIMPLE_VHDL_TEST
+- emits a balanced entity block with its ports
+- emit a counter entity with a clock, a reset and a count output
+- the entity opens and closes around the named unit
+- every declared port appears with its direction and type
+- the port list is separated, and the LAST port carries no separator
+   - Expected: vhdl does not contain `count : out std_logic_vector(7 downto 0);`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(test_env_require("SIMPLE_VHDL_TEST")).to_equal("blocked:SIMPLE_VHDL_TEST")
+# @req REQ-SSPEC-SYSTEM
+step("emits a balanced entity block with its ports")
+step("emit a counter entity with a clock, a reset and a count output")
+var builder = VhdlBuilder.create("counter")
+builder.emit_library_header()
+builder.emit_entity_begin("counter")
+builder.emit_port_begin()
+builder.emit_port("clk", "in", "std_logic", false)
+builder.emit_port("rst", "in", "std_logic", false)
+builder.emit_port("count", "out", "std_logic_vector(7 downto 0)", true)
+builder.emit_port_end()
+builder.emit_entity_end("counter")
+val vhdl = builder.build()
+
+step("the entity opens and closes around the named unit")
+expect(vhdl).to_contain("entity counter is")
+expect(vhdl).to_contain("end entity counter;")
+
+step("every declared port appears with its direction and type")
+expect(vhdl).to_contain("clk")
+expect(vhdl).to_contain("rst")
+expect(vhdl).to_contain("count")
+expect(vhdl).to_contain("std_logic_vector(7 downto 0)")
+
+step("the port list is separated, and the LAST port carries no separator")
+# `is_last: true` on `count` is the only thing preventing a trailing
+# semicolon, which would be a VHDL syntax error.
+expect(vhdl.contains("count : out std_logic_vector(7 downto 0);")).to_equal(false)
+```
+
+</details>
+
+#### keeps distinct units distinct — the builder is not a shared buffer
+
+- keeps distinct units distinct — the builder is not a shared buffer
+- build two separate units from two separate builders
+- neither output leaks the other's entity name
+   - Expected: alu_vhdl does not contain `entity fsm is`
+   - Expected: fsm_vhdl does not contain `entity alu is`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps distinct units distinct — the builder is not a shared buffer")
+step("build two separate units from two separate builders")
+var alu = VhdlBuilder.create("alu")
+alu.emit_library_header()
+alu.emit_entity_begin("alu")
+alu.emit_entity_end("alu")
+var fsm = VhdlBuilder.create("fsm")
+fsm.emit_library_header()
+fsm.emit_entity_begin("fsm")
+fsm.emit_entity_end("fsm")
+
+step("neither output leaks the other's entity name")
+val alu_vhdl = alu.build()
+val fsm_vhdl = fsm.build()
+expect(alu_vhdl.contains("entity fsm is")).to_equal(false)
+expect(fsm_vhdl.contains("entity alu is")).to_equal(false)
+expect(alu_vhdl).to_contain("entity alu is")
+expect(fsm_vhdl).to_contain("entity fsm is")
 ```
 
 </details>
@@ -107,11 +176,59 @@ expect(test_env_require("SIMPLE_VHDL_TEST")).to_equal("blocked:SIMPLE_VHDL_TEST"
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8523224c2fe8c34fc58e83401e8a9efc6db9afd9cfc4096ee265d42f2964e1d2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8523224c2fe8c34fc58e83401e8a9efc6db9afd9cfc4096ee265d42f2964e1d2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8523224c2fe8c34fc58e83401e8a9efc6db9afd9cfc4096ee265d42f2964e1d2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/vhdl_golden_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/vhdl_golden_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/vhdl_golden_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/vhdl_golden_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/vhdl_golden_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits a library header before anything else' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/vhdl_golden_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits a balanced entity block with its ports' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/vhdl_golden_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps distinct units distinct — the builder is not a shared buffer' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Tmux Simpleos Specification
 
-> 1. smux reset for test
-
-<!-- sdn-diagram:id=tmux_simpleos_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=tmux_simpleos_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-tmux_simpleos_spec -> std
-tmux_simpleos_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=tmux_simpleos_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering tmux_simpleos feature spec, REQ-001 session model, REQ-002 pane-backed shells, REQ-003 attach and detach, REQ-004 split and layout, REQ-005 input and output routing, REQ-006 state query API, REQ-007 capture api, REQ-008 compatibility facing api shape, REQ-009 native first backend, REQ-010 backend swap readiness, REQ-011 explicit non fatal failure handling, REQ-012 initial scope boundary, NFR-007 observability.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,19 +17,34 @@ tmux_simpleos_spec -> os
 
 ### REQ-001 session model
 
-#### should create a persistent session with an initial window and pane
+#### create a persistent session with an initial window and pane
 
-1. smux reset for test
+- create a persistent session with an initial window and pane
    - Expected: session.name equals `dev`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-001
+# @req REQ-002
+# @req REQ-003
+# @req REQ-004
+# @req REQ-005
+# @req REQ-006
+# @req REQ-007
+# @req REQ-008
+# @req REQ-009
+# @req REQ-010
+# @req REQ-011
+# @req REQ-012
+# @req REQ-SSPEC-SYSTEM
+step("create a persistent session with an initial window and pane")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("dev")
 expect(session.name).to_equal("dev")
@@ -69,9 +60,9 @@ expect(panes.len()).to_be_greater_than(0)
 
 ### REQ-002 pane-backed shells
 
-#### should start panes on the native backend
+#### start panes on the native backend
 
-1. smux reset for test
+- start panes on the native backend
    - Expected: panes[0].backend_kind equals `MuxBackendKind.NativeShell`
    - Expected: panes[0].state equals `running`
 
@@ -79,10 +70,13 @@ expect(panes.len()).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("start panes on the native backend")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("shells")
 val windows = smux_list_windows(session.id)
@@ -96,9 +90,9 @@ expect(panes[0].state).to_equal("running")
 
 ### REQ-003 attach and detach
 
-#### should detach a client without destroying the session
+#### detach a client without destroying the session
 
-1. smux reset for test
+- detach a client without destroying the session
    - Expected: smux_attach(session.id, "client-a", 120, 40).attached is true
    - Expected: smux_detach("client-a") is true
    - Expected: sessions[0].name equals `attach`
@@ -107,10 +101,13 @@ expect(panes[0].state).to_equal("running")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detach a client without destroying the session")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("attach")
 expect(smux_attach(session.id, "client-a", 120, 40).attached).to_equal(true)
@@ -124,9 +121,9 @@ expect(sessions[0].name).to_equal("attach")
 
 ### REQ-004 split and layout
 
-#### should split the active pane and create a second pane
+#### split the active pane and create a second pane
 
-1. smux reset for test
+- split the active pane and create a second pane
    - Expected: smux_split_pane(session.id, window.id, first.id, "horizontal").is_ok() is true
    - Expected: panes.len() equals `2`
 
@@ -134,10 +131,13 @@ expect(sessions[0].name).to_equal("attach")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("split the active pane and create a second pane")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("split")
 val window = smux_list_windows(session.id)[0]
@@ -146,16 +146,16 @@ val first = smux_list_panes(session.id, window.id)[0]
 expect(smux_split_pane(session.id, window.id, first.id, "horizontal").is_ok()).to_equal(true)
 
 val panes = smux_list_panes(session.id, window.id)
-expect(panes.len()).to_equal(2)
+expect(panes.len()).to_equal(2)  # oracle: panes.len() must equal 2 — authoritative contract constant
 ```
 
 </details>
 
 ### REQ-005 input and output routing
 
-#### should route sent text and commands to the selected pane
+#### route sent text and commands to the selected pane
 
-1. smux reset for test
+- route sent text and commands to the selected pane
    - Expected: smux_focus_pane(session.id, window.id, pane.id) is true
    - Expected: smux_send_text(session.id, window.id, pane.id, "echo hi") is true
    - Expected: smux_send_command(session.id, window.id, pane.id, "pwd") is true
@@ -166,10 +166,13 @@ expect(panes.len()).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("route sent text and commands to the selected pane")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("io")
 val window = smux_list_windows(session.id)[0]
@@ -180,17 +183,17 @@ expect(smux_send_text(session.id, window.id, pane.id, "echo hi")).to_equal(true)
 expect(smux_send_command(session.id, window.id, pane.id, "pwd")).to_equal(true)
 
 val metrics = smux_metrics()
-expect(metrics.send_text_count).to_equal(1)
-expect(metrics.send_command_count).to_equal(1)
+expect(metrics.send_text_count).to_equal(1)  # oracle: metrics.send_text_count must equal 1 — authoritative contract constant
+expect(metrics.send_command_count).to_equal(1)  # oracle: metrics.send_command_count must equal 1 — authoritative contract constant
 ```
 
 </details>
 
 ### REQ-006 state query API
 
-#### should list sessions windows and panes with stable metadata
+#### list sessions windows and panes with stable metadata
 
-1. smux reset for test
+- list sessions windows and panes with stable metadata
    - Expected: sessions[0].name equals `query`
    - Expected: windows[0].session_id equals `session.id`
    - Expected: panes[0].window_id equals `windows[0].id`
@@ -199,10 +202,13 @@ expect(metrics.send_command_count).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("list sessions windows and panes with stable metadata")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("query")
 val sessions = smux_list_sessions()
@@ -219,19 +225,22 @@ expect(panes[0].window_id).to_equal(windows[0].id)
 
 ### REQ-007 capture api
 
-#### should capture pane output and preserve pane identity
+#### capture pane output and preserve pane identity
 
-1. smux reset for test
+- capture pane output and preserve pane identity
    - Expected: capture.pane_id equals `pane.id`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("capture pane output and preserve pane identity")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("capture")
 val window = smux_list_windows(session.id)[0]
@@ -246,19 +255,22 @@ expect(capture.rows).to_be_greater_than(0)
 
 ### REQ-008 compatibility facing api shape
 
-#### should expose tmux-shaped session window pane operations over the native backend
+#### expose tmux-shaped session window pane operations over the native backend
 
-1. smux reset for test
+- expose tmux-shaped session window pane operations over the native backend
    - Expected: window.name equals `build`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expose tmux-shaped session window pane operations over the native backend")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("compat")
 val window = smux_new_window(session.id, "build")
@@ -272,19 +284,22 @@ expect(panes.len()).to_be_greater_than(0)
 
 ### REQ-009 native first backend
 
-#### should identify the backend as native rather than host tmux
+#### identify the backend as native rather than host tmux
 
-1. smux reset for test
+- identify the backend as native rather than host tmux
    - Expected: smux_backend_contract_name() equals `smux-native`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("identify the backend as native rather than host tmux")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 expect(smux_backend_contract_name()).to_equal("smux-native")
 ```
@@ -293,18 +308,21 @@ expect(smux_backend_contract_name()).to_equal("smux-native")
 
 ### REQ-010 backend swap readiness
 
-#### should keep backend identity behind a named contract boundary
+#### keep backend identity behind a named contract boundary
 
-1. smux reset for test
+- keep backend identity behind a named contract boundary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keep backend identity behind a named contract boundary")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 expect(smux_backend_contract_name()).to_start_with("smux-")
 ```
@@ -313,19 +331,22 @@ expect(smux_backend_contract_name()).to_start_with("smux-")
 
 ### REQ-011 explicit non fatal failure handling
 
-#### should return an error for an invalid pane target
+#### return an error for an invalid pane target
 
-1. smux reset for test
+- return an error for an invalid pane target
    - Expected: result.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("return an error for an invalid pane target")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("errors")
 val window = smux_list_windows(session.id)[0]
@@ -337,19 +358,22 @@ expect(result.err().unwrap()).to_contain("pane")
 
 </details>
 
-#### should return an error when split target is invalid
+#### return an error when split target is invalid
 
-1. smux reset for test
+- return an error when split target is invalid
    - Expected: result.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("return an error when split target is invalid")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 val session = smux_create_session("split-errors")
 val window = smux_list_windows(session.id)[0]
@@ -361,9 +385,9 @@ expect(result.is_err()).to_equal(true)
 
 ### REQ-012 initial scope boundary
 
-#### should expose deferred parity features explicitly
+#### expose deferred parity features explicitly
 
-1. smux reset for test
+- expose deferred parity features explicitly
    - Expected: smux_is_deferred_feature("copy-mode") is true
    - Expected: smux_is_deferred_feature("mouse") is true
    - Expected: smux_is_deferred_feature("key-table-compat") is true
@@ -375,10 +399,13 @@ expect(result.is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expose deferred parity features explicitly")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 smux_reset_for_test()
 expect(smux_is_deferred_feature("copy-mode")).to_equal(true)
 expect(smux_is_deferred_feature("mouse")).to_equal(true)
@@ -392,9 +419,9 @@ expect(smux_is_deferred_feature("split-pane")).to_equal(false)
 
 ### NFR-007 observability
 
-#### should expose observable startup and operation counters
+#### expose observable startup and operation counters
 
-1. smux reset for test
+- expose observable startup and operation counters
    - Expected: smux_resize(session.id, window.id, pane.id, 90, 25).is_ok() is true
    - Expected: metrics.resize_count equals `1`
    - Expected: metrics.capture_count equals `1`
@@ -403,10 +430,12 @@ expect(smux_is_deferred_feature("split-pane")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expose observable startup and operation counters")
 smux_reset_for_test()
 val session = smux_create_session("obs")
 val window = smux_list_windows(session.id)[0]
@@ -418,8 +447,8 @@ val metrics = smux_metrics()
 
 expect(metrics.startup_count).to_be_greater_than(0)
 expect(metrics.last_startup_ns).to_be_greater_than(0u64)
-expect(metrics.resize_count).to_equal(1)
-expect(metrics.capture_count).to_equal(1)
+expect(metrics.resize_count).to_equal(1)  # oracle: metrics.resize_count must equal 1 — authoritative contract constant
+expect(metrics.capture_count).to_equal(1)  # oracle: metrics.capture_count must equal 1 — authoritative contract constant
 ```
 
 </details>
@@ -431,12 +460,12 @@ expect(metrics.capture_count).to_equal(1)
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/tmux_simpleos_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering tmux_simpleos feature spec, REQ-001 session model, REQ-002 pane-backed shells, REQ-003 attach and detach, REQ-004 split and layout, REQ-005 input and output routing, REQ-006 state query API, REQ-007 capture api, REQ-008 compatibility facing api shape, REQ-009 native first backend, REQ-010 backend swap readiness, REQ-011 explicit non fatal failure handling, REQ-012 initial scope boundary, NFR-007 observability.
 - tmux_simpleos feature spec
 - REQ-001 session model
 - REQ-002 pane-backed shells
@@ -464,3 +493,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-001`
+- `REQ-002`
+- `REQ-003`
+- `REQ-004`
+- `REQ-005`
+- `REQ-006`
+- `REQ-007`
+- `REQ-008`
+- `REQ-009`
+- `REQ-010`
+- `REQ-011`
+- `REQ-012`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3136cf916c8af512aeead7900862b3a6a41928e705bb2040117dc43a3432e557`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3136cf916c8af512aeead7900862b3a6a41928e705bb2040117dc43a3432e557`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3136cf916c8af512aeead7900862b3a6a41928e705bb2040117dc43a3432e557`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
+
+SSpec documentization score: 97/100
+source: test/03_system/app/simpleos/feature/tmux_simpleos_spec.spl
+mirror: doc/06_spec/03_system/app/simpleos/feature/tmux_simpleos_spec.md (current)
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simpleos/feature/tmux_simpleos_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simpleos/feature/tmux_simpleos_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

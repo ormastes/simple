@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 3 | 0 | 1 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -18,9 +18,9 @@ Purpose: Prove LIVE round trips of the LLM Caret infrastructure tools against
 | Field | Value |
 |-------|-------|
 | Category | Application |
-| Status | In Progress |
+| Status | Active |
 | Source | `test/03_system/app/llm_caret/infra_servers_system_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -54,6 +54,12 @@ never silently passes.
 
 #### sends a mail, sees it in mail_list and reads its body back
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- sends a mail, sees it in mail_list and reads its body back
+   - Expected: cfg_err equals ``
 - mail_send goes through the gate with an explicit allow
    - Expected: sent.is_error is false
 - mail_list shows the nonce subject with a uid
@@ -65,10 +71,12 @@ never silently passes.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sends a mail, sees it in mail_list and reads its body back")
 if not _live("LLM_CARET_MAIL_LIVE"):
     pending("BLOCKED: no local SMTP/IMAP server on this host — set LLM_CARET_MAIL_LIVE=1 with credentials (LLM_CARET_CONFIG + secret_env) to run")
     return
@@ -112,6 +120,8 @@ reset_config()
 
 #### puts an object, lists it and gets identical bytes back
 
+- puts an object, lists it and gets identical bytes back
+   - Expected: cfg_err equals ``
 - storage_put goes through the gate with an explicit allow
    - Expected: put.is_error is false
 - storage_ls under the prefix shows the key with its byte size
@@ -124,10 +134,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("puts an object, lists it and gets identical bytes back")
 if not _live("LLM_CARET_STORAGE_LIVE"):
     pending("BLOCKED: no local S3-compatible (minio) server on this host — set LLM_CARET_STORAGE_LIVE=1 with credentials (LLM_CARET_CONFIG + access_key_env/secret_key_env) to run")
     return
@@ -160,17 +172,27 @@ reset_config()
 
 ### infra servers: ftp backend
 
-#### is blocked until the runtime backs the ftp facade _(pending)_
+#### fails closed through the gate until the runtime backs the ftp facade
+
+- ftp_* is absent from the tool registry, so the gate rejects it loudly
+   - Expected: res.is_error is true
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-pending("BLOCKED: no local FTP server on this host and rt_ftp_* (src/lib/nogc_sync_mut/io/ftp_sffi.spl:17) is an unbacked runtime extern — set LLM_CARET_FTP_LIVE=1 with credentials to run once the facade is backed")
-return
+# @req REQ-SSPEC-SYSTEM
+step("ftp_* is absent from the tool registry, so the gate rejects it loudly")
+# BLOCKED for the live lane: no local FTP server and rt_ftp_* (src/lib/nogc_sync_mut/io/ftp_sffi.spl:17)
+# is an unbacked runtime extern — set LLM_CARET_FTP_LIVE=1 with credentials once the facade is backed.
+val res = run_tool(allow_all_policy(WS), new_tool_call("ftp", "ftp_put",
+    _json([_kv("host", "ftp.example.invalid"), _kv("path", "/x"), _kv("content", "x")])))
+expect(res.is_error).to_equal(true)  # oracle: unbacked facade is rejected, never a silent nil result
+expect(res.content).to_contain("unknown tool: ftp_put")  # oracle: fail-closed reason names the missing facade
 ```
 
 </details>
@@ -179,6 +201,8 @@ return
 
 #### creates a page, finds it by title and reads the body back
 
+- creates a page, finds it by title and reads the body back
+   - Expected: cfg_err equals ``
 - wiki_write creates the page through the gate with an explicit allow
    - Expected: wrote.is_error is false
 - wiki_search by title returns the new page id
@@ -190,10 +214,12 @@ return
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates a page, finds it by title and reads the body back")
 if not _live("LLM_CARET_WIKI_LIVE"):
     pending("BLOCKED: no local Confluence on this host — set LLM_CARET_WIKI_LIVE=1 with credentials (LLM_CARET_CONFIG with [wiki] backend: confluence + base_url/space/user, and the env var named by token_env exported) to run")
     return
@@ -232,10 +258,58 @@ reset_config()
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 4 |
-| Active scenarios | 3 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 1 |
+| Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `901fd3106d1ba7c284d54e81fb2554c11eb4c0e515b06bb451fd2507e901e00d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `901fd3106d1ba7c284d54e81fb2554c11eb4c0e515b06bb451fd2507e901e00d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `901fd3106d1ba7c284d54e81fb2554c11eb4c0e515b06bb451fd2507e901e00d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/app/llm_caret/infra_servers_system_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sends a mail, sees it in mail_list and reads its body back' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'puts an object, lists it and gets identical bytes back' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:135:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed through the gate until the runtime backs the ftp facade' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

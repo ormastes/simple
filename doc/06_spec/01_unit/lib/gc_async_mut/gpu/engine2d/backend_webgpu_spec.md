@@ -1,33 +1,10 @@
 # Backend Webgpu Specification
 
-> _Exercises the full drawing surface of the backend stub._
-
-<!-- sdn-diagram:id=backend_webgpu_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=backend_webgpu_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-backend_webgpu_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=backend_webgpu_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering engine2d WebGpuBackend (V3 M7 compile surface).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,63 +20,58 @@ _Exercises the full drawing surface of the backend stub._
 
 #### constructs a stub backend without a WebGPU adapter
 
-- var backend = WebGpuBackend create
-   - Expected: backend.initialized == false is true
-   - Expected: backend.gpu_ready == false is true
+- constructs a stub backend without a WebGPU adapter
+   - Expected: backend.initialized is false
+   - Expected: backend.gpu_ready is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("constructs a stub backend without a WebGPU adapter")
+"""A freshly created backend must be inert until init()."""
 var backend = WebGpuBackend.create()
-expect(backend.initialized == false).to_equal(true)
-expect(backend.gpu_ready == false).to_equal(true)
+expect(backend.initialized).to_equal(false)
+expect(backend.gpu_ready).to_equal(false)
 ```
 
 </details>
 
 #### implements the RenderBackend trait end-to-end on a stub
 
-- var backend = WebGpuBackend create
-   - Expected: ok is true
-   - Expected: backend.name() == "webgpu" is true
-   - Expected: backend.width() == 32 is true
-   - Expected: backend.height() == 16 is true
-- backend clear
-- backend draw rect filled
-- backend draw rect
-- backend draw line
-- backend draw circle
-- backend draw circle filled
-- backend draw rounded rect
-- backend draw triangle filled
-- backend draw gradient rect
-- backend draw text
-- backend draw image
-- backend set clip
-- backend clear clip
-- backend present
-   - Expected: pixels.len() == 32 * 16 is true
-- backend shutdown
+- implements the RenderBackend trait end-to-end on a stub
+   - Expected: ok equals `backend.gpu_ready`
+   - Expected: ok is false
+   - Expected: backend.name() equals `webgpu`
+   - Expected: backend.width() equals `32`
+   - Expected: backend.height() equals `16`
+   - Expected: pixels.len() equals `32 * 16`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("implements the RenderBackend trait end-to-end on a stub")
+"""Every trait method must be callable without a GPU."""
 var backend = WebGpuBackend.create()
 val ok = backend.init(32, 16)
-expect(ok).to_equal(true)
-expect(backend.name() == "webgpu").to_equal(true)
-expect(backend.width() == 32).to_equal(true)
-expect(backend.height() == 16).to_equal(true)
+# Honest availability result (site 11): equals gpu_ready, not a
+# bare true. This hermetic host has no real WebGPU adapter.
+expect(ok).to_equal(backend.gpu_ready)
+expect(ok).to_equal(false)
+expect(backend.name()).to_equal("webgpu")
+expect(backend.width()).to_equal(32)
+expect(backend.height()).to_equal(16)
 
 # Drawing path must work even when no GPU is present - the
 # CPU pixel buffer is the parity floor for M7.
@@ -121,7 +93,7 @@ backend.present()
 # read_pixels must return the drawn frame so compositor
 # consumers keep working on hosts without a GPU adapter.
 val pixels = backend.read_pixels()
-expect(pixels.len() == 32 * 16).to_equal(true)
+expect(pixels.len()).to_equal(32 * 16)
 
 backend.shutdown()
 ```
@@ -130,28 +102,26 @@ backend.shutdown()
 
 #### exposes draw_text_bg via Engine2DExtended
 
-- var backend = WebGpuBackend create
-   - Expected: ok is true
-- backend clear
-- backend draw text bg
+- exposes draw_text_bg via Engine2DExtended
+   - Expected: ok equals `backend.gpu_ready`
    - Expected: pixels[0] equals `expected.pixels[0]`
    - Expected: pixels[1] equals `expected.pixels[1]`
    - Expected: pixels[32] equals `expected.pixels[expected.width]`
    - Expected: pixels[33] equals `expected.pixels[expected.width + 1]`
-- backend present
-- backend shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("exposes draw_text_bg via Engine2DExtended")
 var backend = WebGpuBackend.create()
 val ok = backend.init(32, 16)
-expect(ok).to_equal(true)
+expect(ok).to_equal(backend.gpu_ready)
 backend.clear(0xFF000000u32)
 backend.draw_text_bg(0, 0, "A", 0xFFFFFFFFu32, 0xFF202020u32, 7)
 val pixels = backend.read_pixels()
@@ -168,26 +138,25 @@ backend.shutdown()
 
 #### routes foreground draw_text through shared transparent text semantics
 
-- var backend = WebGpuBackend create
-   - Expected: ok is true
-- backend clear
-- backend draw text
+- routes foreground draw_text through shared transparent text semantics
+   - Expected: ok equals `backend.gpu_ready`
    - Expected: fg_count > 0 is true
    - Expected: bg_count > 0 is true
    - Expected: transparent_count > 0 is true
-- backend shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("routes foreground draw_text through shared transparent text semantics")
 var backend = WebGpuBackend.create()
 val ok = backend.init(8, 8)
-expect(ok).to_equal(true)
+expect(ok).to_equal(backend.gpu_ready)
 val bg = 0xFF303030u32
 backend.clear(bg)
 
@@ -222,26 +191,68 @@ backend.shutdown()
 
 #### reports webgpu_available() without crashing
 
-- var backend = WebGpuBackend create
+- reports webgpu_available() without crashing
    - Expected: backend.name() equals `webgpu`
-   - Expected: backend.init(1, 1) is true
-- backend shutdown
+   - Expected: backend.init(1, 1) equals `backend.gpu_ready`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("reports webgpu_available() without crashing")
 # The SFFI stubs must answer the probe safely on hosts with
 # no WebGPU runtime. We only check that the call returns
 # (either true or false) - hermetic CI lacks an adapter.
 val _available = webgpu_available()
 var backend = WebGpuBackend.create()
 expect(backend.name()).to_equal("webgpu")
-expect(backend.init(1, 1)).to_equal(true)
+expect(backend.init(1, 1)).to_equal(backend.gpu_ready)
+backend.shutdown()
+```
+
+</details>
+
+#### un-initialized backend probes Unavailable, not ready
+
+- un-initialized backend probes Unavailable, not ready
+   - Expected: backend.gpu_ready is false
+   - Expected: backend_status_text(probe.status) equals `Unavailable`
+   - Expected: probe.reason.len() > 0 is true
+   - Expected: backend_status_text(probe2.status) equals `Unavailable`
+   - Expected: backend_status_text(probe2.status) equals `Initialized`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("un-initialized backend probes Unavailable, not ready")
+"""Honesty (mirrors probe_directx): a freshly created backend has no
+live GPU surface, so probe() must report Unavailable with a recorded
+reason rather than claiming the GPU path is ready."""
+var backend = WebGpuBackend.create()
+expect(backend.gpu_ready).to_equal(false)
+val probe = backend.probe()
+expect(backend_status_text(probe.status)).to_equal("Unavailable")
+expect(probe.reason.len() > 0).to_equal(true)
+# After init on an adapterless host the surface is still not live, so
+# probe stays honest. On a host that DID acquire a GPU surface it must
+# instead report Initialized — never a false "ready" without a surface.
+backend.init(4, 4)
+val probe2 = backend.probe()
+if not backend.gpu_ready:
+    expect(backend_status_text(probe2.status)).to_equal("Unavailable")
+else:
+    expect(backend_status_text(probe2.status)).to_equal("Initialized")
 backend.shutdown()
 ```
 
@@ -254,23 +265,74 @@ backend.shutdown()
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering engine2d WebGpuBackend (V3 M7 compile surface).
 - engine2d WebGpuBackend (V3 M7 compile surface)
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3221eb8f68a17340fd42a7010f2d9ec3f228ead5f355e278bd274d9f0aeb436c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3221eb8f68a17340fd42a7010f2d9ec3f228ead5f355e278bd274d9f0aeb436c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3221eb8f68a17340fd42a7010f2d9ec3f228ead5f355e278bd274d9f0aeb436c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl
+mirror: doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'constructs a stub backend without a WebGPU adapter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'implements the RenderBackend trait end-to-end on a stub' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes draw_text_bg via Engine2DExtended' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

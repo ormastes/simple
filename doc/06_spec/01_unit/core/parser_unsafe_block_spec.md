@@ -184,51 +184,53 @@ Tests covering unsafe/danger block parsing (self-hosted).
 
 Requirements covered by the scenarios in this manual:
 
+- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-PARSER-UNSAFE`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `67bfe3339fe906b2158301f68589525414ff6b14a0f61aa63f964c236f291411`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `11ef1ef5d1df646c376ffc404e1f7209a8b9dfbbae50b7eeda490387b3e21d5d`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `67bfe3339fe906b2158301f68589525414ff6b14a0f61aa63f964c236f291411`.
+Source SHA-256: `11ef1ef5d1df646c376ffc404e1f7209a8b9dfbbae50b7eeda490387b3e21d5d`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `67bfe3339fe906b2158301f68589525414ff6b14a0f61aa63f964c236f291411`  
+Source SHA-256: `11ef1ef5d1df646c376ffc404e1f7209a8b9dfbbae50b7eeda490387b3e21d5d`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 85/100
+SSpec documentization score: 49/100
 source: test/01_unit/core/parser_unsafe_block_spec.spl
 mirror: doc/06_spec/01_unit/core/parser_unsafe_block_spec.md (current)
-findings: 7 blockers: 0
+findings: 7 blockers: 1
   narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=60
+  traceability=60 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
 doc/06_spec/01_unit/core/parser_unsafe_block_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/01_unit/core/parser_unsafe_block_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/core/parser_unsafe_block_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
-  why: Reviewers need selected lifecycle evidence, not inferred project state.
-  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
 test/01_unit/core/parser_unsafe_block_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/core/parser_unsafe_block_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses unsafe: and danger: blocks into EXPR_UNSAFE_BLOCK' has no retained capture or evidence
+test/01_unit/core/parser_unsafe_block_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/core/parser_unsafe_block_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses unsafe: and danger: blocks into EXPR_UNSAFE_BLOCK' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/core/parser_unsafe_block_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves plain unsafe/danger identifiers untouched' has no retained capture or evidence
+test/01_unit/core/parser_unsafe_block_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves plain unsafe/danger identifiers untouched' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/core/parser_unsafe_block_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records @unsafe(reason, capabilities) fn annotation metadata' has no retained capture or evidence
+test/01_unit/core/parser_unsafe_block_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records @unsafe(reason, capabilities) fn annotation metadata' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

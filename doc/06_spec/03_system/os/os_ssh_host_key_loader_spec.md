@@ -2,30 +2,6 @@
 
 > Tests for `load_rsa_pkcs8_from_file` (in `host_key_loader.spl`) and `SshDaemon.load_host_rsa_key` (in `sshd.spl`).
 
-<!-- sdn-diagram:id=os_ssh_host_key_loader_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=os_ssh_host_key_loader_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-os_ssh_host_key_loader_spec -> std
-os_ssh_host_key_loader_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=os_ssh_host_key_loader_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -46,7 +22,7 @@ Tests for `load_rsa_pkcs8_from_file` (in `host_key_loader.spl`) and `SshDaemon.l
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/03_system/os/os_ssh_host_key_loader_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -69,21 +45,21 @@ tag: system, ssh, crypto
 
 #### reads a PEM file and returns raw DER bytes equal to the known key
 
-1.  delete if exists
+- reads a PEM file and returns raw DER bytes equal to the known key
    - Expected: rt_file_write_text(pem_path, pem_content) is true
    - Expected: result.is_ok() is true
    - Expected: der_bytes equals `expected`
 
-2.  delete if exists
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reads a PEM file and returns raw DER bytes equal to the known key")
 # Arrange — write PEM to a tmp file
 val pem_path = "/tmp/os_ssh_host_key_loader_pem_test.pem"
 _delete_if_exists(pem_path)
@@ -108,22 +84,22 @@ _delete_if_exists(pem_path)
 
 #### reads a DER file and returns the bytes as-is
 
-1.  delete if exists
+- reads a DER file and returns the bytes as-is
    - Expected: rt_file_write_bytes(der_path, der_bytes) is true
    - Expected: result.is_ok() is true
    - Expected: got.len() > 100 is true
    - Expected: got equals `der_bytes`
 
-2.  delete if exists
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reads a DER file and returns the bytes as-is")
 # Arrange — write raw DER bytes to a tmp file
 val der_path = "/tmp/os_ssh_host_key_loader_der_test.der"
 _delete_if_exists(der_path)
@@ -148,17 +124,19 @@ _delete_if_exists(der_path)
 
 #### returns Err for a missing file
 
-1.  delete if exists
+- returns Err for a missing file
    - Expected: result.is_ok() is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns Err for a missing file")
 val missing_path = "/tmp/os_ssh_host_key_loader_no_such_file_xyz.pem"
 _delete_if_exists(missing_path)
 
@@ -173,20 +151,20 @@ expect(msg).to_contain("host key file not found")
 
 #### returns Err for a PEM file with all-non-base64 body
 
-1.  delete if exists
+- returns Err for a PEM file with all-non-base64 body
    - Expected: rt_file_write_text(bad_pem_path, bad_pem) is true
    - Expected: result.is_ok() is false
 
-2.  delete if exists
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns Err for a PEM file with all-non-base64 body")
 # The base64 decoder silently skips unknown characters (v >= 0 guard),
 # so we must use a body that is entirely non-alphabet characters so
 # the decoded output is empty, triggering the empty-decode Err path.
@@ -209,20 +187,20 @@ _delete_if_exists(bad_pem_path)
 
 #### returns Err for an empty file
 
-1.  delete if exists
+- returns Err for an empty file
    - Expected: rt_file_write_text(empty_path, "") is true
    - Expected: result.is_ok() is false
 
-2.  delete if exists
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns Err for an empty file")
 val empty_path = "/tmp/os_ssh_host_key_loader_empty_test.pem"
 _delete_if_exists(empty_path)
 expect(rt_file_write_text(empty_path, "")).to_equal(true)
@@ -240,19 +218,19 @@ _delete_if_exists(empty_path)
 
 #### returns Err for a PEM missing the END marker
 
-1.  delete if exists
+- returns Err for a PEM missing the END marker
    - Expected: rt_file_write_text(truncated_path, truncated_pem) is true
-
-2.  delete if exists
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns Err for a PEM missing the END marker")
 val truncated_path = "/tmp/os_ssh_host_key_loader_truncated_test.pem"
 _delete_if_exists(truncated_path)
 val truncated_pem = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBAA==\n"
@@ -277,25 +255,23 @@ _delete_if_exists(truncated_path)
 
 #### installs the RSA host key from a PEM file and returns Ok
 
-1.  delete if exists
+- installs the RSA host key from a PEM file and returns Ok
    - Expected: rt_file_write_text(pem_path, pem_content) is true
-
-2. var daemon =  test daemon
    - Expected: load_result.is_ok() is true
    - Expected: key_bytes.len() equals `expected.len()`
    - Expected: key_bytes equals `expected`
    - Expected: load_result.is_ok() is false
 
-3.  delete if exists
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("installs the RSA host key from a PEM file and returns Ok")
 # Arrange
 val pem_path = "/tmp/os_ssh_host_key_loader_daemon_test.pem"
 _delete_if_exists(pem_path)
@@ -325,19 +301,19 @@ _delete_if_exists(pem_path)
 
 #### returns Err when the path does not exist and does not change the key
 
-1.  delete if exists
-
-2. var daemon =  test daemon
+- returns Err when the path does not exist and does not change the key
    - Expected: load_result.is_ok() is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns Err when the path does not exist and does not change the key")
 # Arrange
 val missing = "/tmp/os_ssh_host_key_loader_daemon_missing_xyz.pem"
 _delete_if_exists(missing)
@@ -369,3 +345,51 @@ expect(daemon.host_rsa_pkcs8).to_be_nil()
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `96f3c2581310cd2e6299928d6fa26fb33e034b0de92a6ff86b68c640ac5ad6a8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `96f3c2581310cd2e6299928d6fa26fb33e034b0de92a6ff86b68c640ac5ad6a8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `96f3c2581310cd2e6299928d6fa26fb33e034b0de92a6ff86b68c640ac5ad6a8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/os/os_ssh_host_key_loader_spec.spl
+mirror: doc/06_spec/03_system/os/os_ssh_host_key_loader_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/os_ssh_host_key_loader_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/os_ssh_host_key_loader_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/os_ssh_host_key_loader_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads a PEM file and returns raw DER bytes equal to the known key' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/os_ssh_host_key_loader_spec.spl:150:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads a DER file and returns the bytes as-is' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/os_ssh_host_key_loader_spec.spl:182:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns Err for a missing file' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

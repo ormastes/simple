@@ -2,29 +2,6 @@
 
 > Validates the fail-closed gate for Simple in-application Vulkan RenderDoc evidence. The local host may not have RenderDoc installed, but the gate must record a deterministic non-pass state and accept only Simple `vulkan-engine2d` `.rdc` evidence.
 
-<!-- sdn-diagram:id=renderdoc_simple_gate_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=renderdoc_simple_gate_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-renderdoc_simple_gate_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=renderdoc_simple_gate_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 11 | 11 | 0 | 0 |
@@ -47,8 +24,8 @@ Validates the fail-closed gate for Simple in-application Vulkan RenderDoc eviden
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md |
 | Source | `test/03_system/check/renderdoc_simple_gate_spec.spl` |
-| Updated | 2026-07-27 |
-| Generator | Manual sync after bounded runtime/docgen limits |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -78,11 +55,14 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 - Passing gate evidence requires Simple backend, `vulkan-engine2d` scene, pass
   status, `RDOC` magic, an existing `.rdc` file, and the canonical
   `src/app/test/renderdoc_vulkan_capture.spl` probe program.
-- Passing gate evidence also requires the probe log-derived runtime backend to
-  be `vulkan`, RenderDoc availability/start markers, at least one recorded
-  capture, and a positive pixel count.
-- The producer's lowercase SHA-256 must equal hashes recomputed from the
-  regular `.rdc` file before and after replay inspection.
+- Passing gate evidence also requires the probe log-derived runtime backend,
+  positive device, active/start/end lifecycle, valid backend record hashes,
+  fresh owner/capture identity, and genuine Vulkan replay-open XML with
+  actions, pipelines, shaders, and resources.
+- The `.rdc` capture file must be a regular file, not a symlink to substituted
+  or stale evidence.
+- Producer SHA-256 evidence must match the regular `.rdc` bytes before and
+  after replay inspection.
 
 ## Scenarios
 
@@ -90,21 +70,26 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 
 #### times out the real replay gate path and discards stale replay evidence
 
-The replay inspector runs through portable `timeout`/`gtimeout` resolution with
-the bounded `RDOC_SIMPLE_REPLAY_TIMEOUT_SECS` setting. Exit 124 or 137 is
-retained in `rdoc_simple_gate_replay_command_exit`, marks
-`rdoc_simple_gate_replay_timed_out=1`, and fails with the typed
-`simple-replay-inspector-timeout` reason. A host-independent classifier
-self-test covers timeout and ordinary nonzero exits without launching Simple or
-RenderDoc.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- times out the real replay gate path and discards stale replay evidence
+   - Expected: code equals `1`
+   - Expected: _value_of(evidence, "rdoc_simple_gate_reason") equals `simple-replay-inspector-timeout`
+   - Expected: _value_of(evidence, "rdoc_simple_gate_replay_timed_out") equals `1`
+   - Expected: _value_of(evidence, "rdoc_simple_gate_replay_timeout_seconds") equals `1`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("times out the real replay gate path and discards stale replay evidence")
 val root = "build/test-renderdoc-simple-gate-timeout"
 val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/renderdoc/bin " + root + "/out/replay && " +
@@ -133,19 +118,19 @@ expect(replay_evidence.contains("stale_replay_marker=present")).to_be(false)
 
 #### rejects duplicate source and replay evidence keys at the shared parser boundary
 
-The gate's host-independent parser self-test requires one nonempty value for a
-key and rejects conflicting duplicate rows. The source contract also requires
-typed `duplicate-source-evidence-key` and `duplicate-replay-evidence-key`
-failures; last-write-wins `tail -n 1` parsing is forbidden. Runnable source:
-`test/03_system/check/renderdoc_simple_gate_spec.spl`.
+- rejects duplicate source and replay evidence keys at the shared parser boundary
+   - Expected: code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects duplicate source and replay evidence keys at the shared parser boundary")
 val command = "RDOC_SIMPLE_GATE_PARSER_SELF_TEST=1 sh scripts/check/check-renderdoc-simple-gate.shs"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -160,13 +145,24 @@ expect(gate).to_contain("duplicate-replay-evidence-key")
 
 #### writes typed non-pass evidence for missing or failed Simple capture
 
+- writes typed non-pass evidence for missing or failed Simple capture
+   - Expected: code equals `0`
+   - Expected: backend equals `simple`
+   - Expected: scene equals `vulkan-engine2d`
+   - Expected: capture_status equals `pass`
+   - Expected: magic equals `RDOC`
+   - Expected: runtime_backend equals `vulkan`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("writes typed non-pass evidence for missing or failed Simple capture")
 val command = "rm -rf build/test-renderdoc-simple-gate && RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate REPORT_PATH=build/test-renderdoc-simple-gate/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -219,13 +215,19 @@ else:
 
 #### rejects a synthetic magic file even with plausible producer metadata
 
+- rejects a synthetic magic file even with plausible producer metadata
+   - Expected: code equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects a synthetic magic file even with plausible producer metadata")
 val hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 val hash_c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -259,13 +261,19 @@ expect(evidence).to_contain("rdoc_simple_gate_replay_reason=renderdoccmd-missing
 
 #### rejects equal echoed IDs when the captured path names another frame
 
+- rejects equal echoed IDs when the captured path names another frame
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects equal echoed IDs when the captured path names another frame")
 val root = "build/test-renderdoc-simple-gate-frame-path"
 val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source && printf 'RDOCsynthetic simple capture\\n' > " + root + "/source/simple_gui_app-frame-8_0.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/simple_gui_app-frame-8_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-8\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' > " + root + "/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
@@ -281,13 +289,19 @@ expect(evidence).to_contain("rdoc_simple_gate_capture_identity_status=fail")
 
 #### rejects symlinked Simple RDOC artifacts before reading magic
 
+- rejects symlinked Simple RDOC artifacts before reading magic
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects symlinked Simple RDOC artifacts before reading magic")
 val root = "build/test-renderdoc-simple-gate-symlink-artifact"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
     "printf 'RDOCsynthetic simple capture\\n' > " + root + "/source/simple-real.rdc && ln -s simple-real.rdc " + root + "/source/simple.rdc && " +
@@ -307,13 +321,19 @@ expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=")
 
 #### reports every missing Simple runtime metadata field for partial RDOC evidence
 
+- reports every missing Simple runtime metadata field for partial RDOC evidence
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports every missing Simple runtime metadata field for partial RDOC evidence")
 val command = "rm -rf build/test-renderdoc-simple-gate-missing-runtime-metadata && mkdir -p build/test-renderdoc-simple-gate-missing-runtime-metadata/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-missing-runtime-metadata/out REPORT_PATH=build/test-renderdoc-simple-gate-missing-runtime-metadata/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -330,13 +350,19 @@ expect(evidence).to_contain("rdoc_simple_gate_missing_runtime_metadata=rdoc_simp
 
 #### rejects Simple captures whose file header is not RDOC
 
+- rejects Simple captures whose file header is not RDOC
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects Simple captures whose file header is not RDOC")
 val command = "rm -rf build/test-renderdoc-simple-gate-bad-file-magic && mkdir -p build/test-renderdoc-simple-gate-bad-file-magic/source && printf 'NOPEsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-bad-file-magic/out REPORT_PATH=build/test-renderdoc-simple-gate-bad-file-magic/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -352,13 +378,19 @@ expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=NOPE")
 
 #### rejects Simple captures from the wrong probe program
 
+- rejects Simple captures from the wrong probe program
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects Simple captures from the wrong probe program")
 val command = "rm -rf build/test-renderdoc-simple-gate-wrong-program && mkdir -p build/test-renderdoc-simple-gate-wrong-program/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/other_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-wrong-program/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-wrong-program/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-wrong-program/out REPORT_PATH=build/test-renderdoc-simple-gate-wrong-program/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -372,13 +404,19 @@ expect(evidence).to_contain("rdoc_simple_gate_reason=unexpected-program")
 
 #### rejects Simple captures without Vulkan runtime backend evidence
 
+- rejects Simple captures without Vulkan runtime backend evidence
+   - Expected: code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects Simple captures without Vulkan runtime backend evidence")
 val command = "rm -rf build/test-renderdoc-simple-gate-runtime-backend && mkdir -p build/test-renderdoc-simple-gate-runtime-backend/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=software\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-runtime-backend/out REPORT_PATH=build/test-renderdoc-simple-gate-runtime-backend/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -393,25 +431,21 @@ expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
 
 #### binds passing replay evidence to unchanged capture bytes
 
-The executable SSpec builds one deterministic fake replay seam. Its complete
-evidence creates a regular replay XML file and passes with equal current
-capture/XML hashes and byte counts. The receipt explicitly records passing XML
-file and hash status plus matching claimed/current XML hashes and byte counts.
-Missing, symlinked, or changed replay XML
-produces `replay-xml-missing`, `replay-xml-symlink`, or
-`replay-xml-hash-mismatch`. Removing the capture hash, replacing it with
-malformed text, or appending a byte to the `.rdc` produces
-`missing-capture-sha256`, `invalid-capture-sha256`, and
-`capture-sha256-mismatch`, respectively. Runnable source:
-`test/03_system/check/renderdoc_simple_gate_spec.spl`.
+- binds passing replay evidence to unchanged capture bytes
+   - Expected: code equals `0`
+   - Expected: expected equals `actual`
+   - Expected: expected.len() equals `64`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("binds passing replay evidence to unchanged capture bytes")
 val root = "build/test-renderdoc-simple-gate-hash"
 val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/renderdoc/bin && " +
@@ -467,9 +501,54 @@ expect(file_read(root + "/tamper/evidence.env")).to_contain("rdoc_simple_gate_re
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
-- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
-- **Research:** [doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md](doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md)
+- **Plan:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
+- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
+- **Research:** `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `174affbad2d5c9f8516f8de4d141adb917b4e972d5abc94413b8dad1302a42dc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `174affbad2d5c9f8516f8de4d141adb917b4e972d5abc94413b8dad1302a42dc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `174affbad2d5c9f8516f8de4d141adb917b4e972d5abc94413b8dad1302a42dc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/03_system/check/renderdoc_simple_gate_spec.spl
+mirror: doc/06_spec/03_system/check/renderdoc_simple_gate_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/renderdoc_simple_gate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/renderdoc_simple_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/renderdoc_simple_gate_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 12 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/renderdoc_simple_gate_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects duplicate source and replay evidence keys at the shared parser boundary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

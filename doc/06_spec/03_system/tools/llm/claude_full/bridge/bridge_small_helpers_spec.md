@@ -2,30 +2,6 @@
 
 > Checks the small bridge and grouped-message parity helpers added from the Claude CLI source mirror.
 
-<!-- sdn-diagram:id=bridge_small_helpers_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=bridge_small_helpers_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-bridge_small_helpers_spec -> std
-bridge_small_helpers_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=bridge_small_helpers_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 38 | 38 | 0 | 0 |
@@ -42,14 +18,14 @@ Checks the small bridge and grouped-message parity helpers added from the Claude
 | Field | Value |
 |-------|-------|
 | Category | Other |
-| Status | Active source; 0 scenarios executed in this tranche and no PASS claimed |
-| Requirements | `REQ-LLM-CARET-HIDDEN-008`, scoped only to bridge availability; other scenarios remain strict parts-bin parity |
+| Status | Active |
+| Requirements | REQ-LLM-CARET-HIDDEN-008, scoped only to the bridge |
 | Plan | N/A - target selected from strict checker output. |
 | Design | N/A - source mirror for Claude CLI bridge and message helpers. |
 | Research | N/A - upstream TypeScript files are the source reference. |
 | Source | `test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl` |
-| Updated | 2026-07-24 |
-| Generator | Manual requirement synchronization; docgen execution remains blocked |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -81,16 +57,15 @@ visibility, or admission.
 
 ## Scenarios
 
-### Claude full bridge small helpers
-
-| Source describe | Ordered scenarios |
-|---|---|
-| `supporting bridge small-helper capacity-wake parts-bin parity` | Capacity wake lifecycle |
-| `REQ-LLM-CARET-HIDDEN-008: bridge availability` | Bridge availability only |
-| `supporting bridge small-helper parts-bin parity` | Remaining 36 scenarios |
+### supporting bridge small-helper capacity-wake parts-bin parity
 
 #### should model capacity wake signal lifecycle
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should model capacity wake signal lifecycle
 - Create signal, cleanup it, wake next generation, and abort
    - Expected: signal.aborted is false
    - Expected: capacityWakeCleanup(signal) is true
@@ -103,10 +78,13 @@ visibility, or admission.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-LLM-CARET-HIDDEN-008
+# @req REQ-SSPEC-SYSTEM
+step("should model capacity wake signal lifecycle")
 step("Create signal, cleanup it, wake next generation, and abort")
 val initial = capacityWakeInitial()
 val signal = capacityWakeSignal(initial)
@@ -123,8 +101,11 @@ expect(current.aborted).to_equal(true)
 
 </details>
 
+### REQ-LLM-CARET-HIDDEN-008: bridge availability
+
 #### should gate bridge availability with explicit entitlement inputs
 
+- should gate bridge availability with explicit entitlement inputs
 - Return enabled state and disabled reasons without hidden config reads
    - Expected: isBridgeEnabled(enabled) is true
    - Expected: isBridgeEnabledBlocking(enabled) is true
@@ -134,7 +115,6 @@ expect(current.aborted).to_equal(true)
    - Expected: getBridgeDisabledReason(BridgeEntitlement.new(true, true, true, false, "org")) equals `Remote Control requires a full-scope login token. Long-lived tokens (from `cl... (full value in folded executable source)`
    - Expected: getBridgeDisabledReason(BridgeEntitlement.new(true, true, true, true, "")) equals `Unable to determine your organization for Remote Control eligibility. Run `cl... (full value in folded executable source)`
    - Expected: getBridgeDisabledReason(BridgeEntitlement.new(true, true, false, true, "org")) equals `Remote Control is not yet enabled for your account.`
-- var flags = BridgeFeatureFlags new
    - Expected: isEnvLessBridgeEnabled(flags) is true
    - Expected: isCseShimEnabled(flags) is true
    - Expected: checkBridgeMinVersion("1.0.0", "2.0.0", true) equals `Your version of Claude Code (1.0.0) is too old for Remote Control.\nVersion 2... (full value in folded executable source)`
@@ -145,10 +125,12 @@ expect(current.aborted).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should gate bridge availability with explicit entitlement inputs")
 step("Return enabled state and disabled reasons without hidden config reads")
 val enabled = BridgeEntitlement.new(true, true, true, true, "org")
 expect(isBridgeEnabled(enabled)).to_equal(true)
@@ -172,8 +154,11 @@ expect(isCcrMirrorEnabled(flags)).to_equal(true)
 
 </details>
 
+### supporting bridge small-helper parts-bin parity
+
 #### should validate env-less bridge config
 
+- should validate env-less bridge config
 - Use defaults, reject invalid timing floors, and apply upgrade nudges
    - Expected: defaults.init_retry_max_attempts equals `3`
    - Expected: defaults.http_timeout_ms equals `10000`
@@ -189,10 +174,12 @@ expect(isCcrMirrorEnabled(flags)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should validate env-less bridge config")
 step("Use defaults, reject invalid timing floors, and apply upgrade nudges")
 val defaults = EnvLessBridgeConfig.defaults()
 expect(defaults.init_retry_max_attempts).to_equal(3)
@@ -215,22 +202,24 @@ expect(shouldShowAppUpgradeMessage(true, upgrade)).to_equal(true)
 
 #### should normalize inbound user message images
 
+- should normalize inbound user message images
 - Convert malformed camel mediaType blocks and reject empty/non-user messages
    - Expected: extracted.present is true
    - Expected: extracted.blocks[0].media_type equals `image/jpeg`
    - Expected: extracted.blocks[1].media_type equals `image/png`
    - Expected: extractInboundMessageFields(InboundMessage.text("u2", "")).present is false
-- var assistant = InboundMessage text
    - Expected: extractInboundMessageFields(assistant).present is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should normalize inbound user message images")
 step("Convert malformed camel mediaType blocks and reject empty/non-user messages")
 val jpeg = InboundContentBlock.imageBlock("", "", "/9j/base64")
 val png = InboundContentBlock.imageBlock("", "image/png", "iVBORbase64")
@@ -248,6 +237,7 @@ expect(extractInboundMessageFields(assistant).present).to_equal(false)
 
 #### should resolve and prepend inbound attachments
 
+- should resolve and prepend inbound attachments
 - Filter valid attachments, sanitize names, and add path refs
    - Expected: extractInboundAttachments(msg).len() equals `1`
    - Expected: sanitizeInboundAttachmentFileName("../notes bad.md") equals `notes_bad.md`
@@ -260,10 +250,12 @@ expect(extractInboundMessageFields(assistant).present).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should resolve and prepend inbound attachments")
 step("Filter valid attachments, sanitize names, and add path refs")
 val attachment = InboundAttachment.new("abc123456789", "../notes bad.md")
 val msg = InboundAttachmentMessage.withAttachments([attachment, InboundAttachment.new("", "skip")])
@@ -284,6 +276,7 @@ expect(resolveInboundAttachments([attachment], noToken)).to_equal("")
 
 #### should expose bridge poll defaults
 
+- should expose bridge poll defaults
 - Read default intervals and boolean helpers
    - Expected: cfg.poll_interval_ms_not_at_capacity equals `2000`
    - Expected: cfg.poll_interval_ms_at_capacity equals `600000`
@@ -295,10 +288,12 @@ expect(resolveInboundAttachments([attachment], noToken)).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should expose bridge poll defaults")
 step("Read default intervals and boolean helpers")
 val cfg = defaultPollConfig()
 expect(cfg.poll_interval_ms_not_at_capacity).to_equal(2000)
@@ -312,6 +307,7 @@ expect(pollConfigKeepaliveEnabled(cfg)).to_equal(true)
 
 #### should render grouped tool-use state
 
+- should render grouped tool-use state
 - Hide without renderer, animate in-progress groups, and match result ids
    - Expected: hidden.visible is false
    - Expected: render.visible is true
@@ -325,10 +321,12 @@ expect(pollConfigKeepaliveEnabled(cfg)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render grouped tool-use state")
 step("Hide without renderer, animate in-progress groups, and match result ids")
 val done = GroupedToolUseItem.new("a", true, false, false, 0, true)
 val running = GroupedToolUseItem.new("b", false, false, true, 2, false)
@@ -347,6 +345,7 @@ expect(groupedToolUseResultFor("z", ["x", "a"])).to_equal(false)
 
 #### should render hook progress state
 
+- should render hook progress state
 - Hide completed or non-transcript tool hooks and render running hooks
    - Expected: hookProgressMessage(HookProgressMessageInput.new("PreToolUse", 1, 0, false)).visible is false
    - Expected: transcript.visible is true
@@ -359,10 +358,12 @@ expect(groupedToolUseResultFor("z", ["x", "a"])).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render hook progress state")
 step("Hide completed or non-transcript tool hooks and render running hooks")
 expect(hookProgressMessage(HookProgressMessageInput.new("PreToolUse", 1, 0, false)).visible).to_equal(false)
 val transcript = hookProgressMessage(HookProgressMessageInput.new("PostToolUse", 2, 0, true))
@@ -378,11 +379,12 @@ expect(hookProgressMessageLine(running)).to_equal("Running Notification hook..."
 
 #### should highlight thinking trigger text
 
+- should highlight thinking trigger text
 - Render brief user text and rainbow ultrathink spans
    - Expected: brief.layout equals `brief`
    - Expected: brief.label equals `You`
    - Expected: brief.timestamp equals `10:00`
-   - Expected: normal.pointer equals `"❯")`
+   - Expected: normal.pointer equals `❯`
    - Expected: normal.pointer_color equals `suggestion`
    - Expected: triggers.len() equals `1`
    - Expected: triggers[0].word equals `ultrathink`
@@ -392,10 +394,12 @@ expect(hookProgressMessageLine(running)).to_equal("Running Notification hook..."
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should highlight thinking trigger text")
 step("Render brief user text and rainbow ultrathink spans")
 val brief = highlightedThinkingText("think", true, "10:00", false, false, true)
 expect(brief.layout).to_equal("brief")
@@ -414,6 +418,7 @@ expect(highlightedThinkingRainbowColor(8)).to_equal("rainbow_orange")
 
 #### should compute bridge status utility values
 
+- should compute bridge status utility values
 - Build URLs, shimmer segments, footer labels, and OSC8 links
    - Expected: abbreviateActivity("123456789012345678901234567890XYZ") equals `123456789012345678901234567890`
    - Expected: buildBridgeConnectUrl("env1", "https://claude.example") equals `https://claude.example/code?bridge=env1`
@@ -432,10 +437,12 @@ expect(highlightedThinkingRainbowColor(8)).to_equal("rainbow_orange")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should compute bridge status utility values")
 step("Build URLs, shimmer segments, footer labels, and OSC8 links")
 expect(abbreviateActivity("123456789012345678901234567890XYZ")).to_equal("123456789012345678901234567890")
 expect(buildBridgeConnectUrl("env1", "https://claude.example")).to_equal("https://claude.example/code?bridge=env1")
@@ -456,6 +463,7 @@ expect(wrapWithOsc8Link("open", "https://x")).to_equal("\u001b]8;;https://x\u000
 
 #### should model code-session request and response validation
 
+- should model code-session request and response validation
 - Build headers, session create payloads, bridge URLs, and credential validation
    - Expected: headers.authorization equals `Bearer tok`
    - Expected: headers.anthropic_version equals `2023-06-01`
@@ -473,10 +481,12 @@ expect(wrapWithOsc8Link("open", "https://x")).to_equal("\u001b]8;;https://x\u000
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model code-session request and response validation")
 step("Build headers, session create payloads, bridge URLs, and credential validation")
 val headers = oauthHeaders("tok")
 expect(headers.authorization).to_equal("Bearer tok")
@@ -497,6 +507,7 @@ expect(parseRemoteCredentials("", "https://worker", 60, 2).valid).to_equal(false
 
 #### should identify null-rendering attachments
 
+- should identify null-rendering attachments
 - Filter invisible attachment messages before render counting
    - Expected: isNullRenderingAttachmentType("hook_success") is true
    - Expected: isNullRenderingAttachmentType("date_change") is true
@@ -508,10 +519,12 @@ expect(parseRemoteCredentials("", "https://worker", 60, 2).valid).to_equal(false
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should identify null-rendering attachments")
 step("Filter invisible attachment messages before render counting")
 expect(isNullRenderingAttachmentType("hook_success")).to_equal(true)
 expect(isNullRenderingAttachmentType("date_change")).to_equal(true)
@@ -524,6 +537,7 @@ expect(isNullRenderingAttachment(NullRenderingMessage.new("user", "hook_cancelle
 
 #### should list hidden model-visible features
 
+- should list hidden model-visible features
 - Pin every upstream isMeta/metaMessages surface hidden from users but sent to the model
    - Expected: features.len() equals `6`
    - Expected: hiddenModelVisibleFeatureNames() equals `[`
@@ -536,10 +550,12 @@ expect(isNullRenderingAttachment(NullRenderingMessage.new("user", "hook_cancelle
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should list hidden model-visible features")
 step("Pin every upstream isMeta/metaMessages surface hidden from users but sent to the model")
 val features = hiddenModelVisibleFeatures()
 expect(features.len()).to_equal(6)
@@ -564,6 +580,7 @@ expect(isHiddenModelVisibleFeature("ordinary-user-message")).to_equal(false)
 
 #### should model ask-user-question preview box sizing and truncation
 
+- should model ask-user-question preview box sizing and truncation
 - Apply default limits, truncate overlong previews, pad short previews, and retain source line parity
    - Expected: previewBoxSourceLinesModeled() equals `228`
    - Expected: preview.content_lines.len() equals `3`
@@ -573,8 +590,8 @@ expect(isHiddenModelVisibleFeature("ordinary-user-message")).to_equal(false)
    - Expected: preview.padding_needed equals `0`
    - Expected: preview.box_width equals `10`
    - Expected: preview.inner_width equals `6`
-   - Expected: preview.top_border equals `"┌────────┐")`
-   - Expected: preview.bottom_border equals `"└────────┘")`
+   - Expected: preview.top_border equals `┌────────┐`
+   - Expected: preview.bottom_border equals `└────────┘`
    - Expected: preview.highlight_enabled is false
    - Expected: paddedPreview.is_truncated is false
    - Expected: paddedPreview.padding_needed equals `2`
@@ -587,10 +604,12 @@ expect(isHiddenModelVisibleFeature("ordinary-user-message")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model ask-user-question preview box sizing and truncation")
 step("Apply default limits, truncate overlong previews, pad short previews, and retain source line parity")
 val preview = previewBox("line1\nline2\nline3", 2, 4, 6, 20, 80, true)
 expect(previewBoxSourceLinesModeled()).to_equal(228)
@@ -618,6 +637,7 @@ expect(paddedPreview.highlight_enabled).to_equal(true)
 
 #### should model small top-level component render gates
 
+- should model small top-level component render gates
 - Freeze offscreen content and gate assistant transcript timestamps
    - Expected: frozen.rendered equals `old`
    - Expected: frozen.updated_cache is false
@@ -637,10 +657,12 @@ expect(paddedPreview.highlight_enabled).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model small top-level component render gates")
 step("Freeze offscreen content and gate assistant transcript timestamps")
 val frozen = offscreenFreeze("new", "old", false, false)
 expect(frozen.rendered).to_equal("old")
@@ -665,12 +687,13 @@ expect(messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimes
 
 #### should model updater and notebook rejection components
 
+- should model updater and notebook rejection components
 - Render updater messages and rejected notebook edit summaries
    - Expected: packageManagerAutoUpdaterHasUpdate(packageState) is true
    - Expected: packageManagerAutoUpdaterCommand("winget") equals `winget upgrade Anthropic.ClaudeCode`
    - Expected: packageManagerAutoUpdaterMessage(packageState) equals `currentVersion: 1.0.0\nUpdate available! Run: brew upgrade claude-code`
    - Expected: nativeAutoUpdaterShouldRender(native) is true
-   - Expected: nativeAutoUpdaterStatusMessage(native) equals `"current: 1.0.0 · stable: 2.0.0\nChecking for updates")`
+   - Expected: nativeAutoUpdaterStatusMessage(native) equals `current: 1.0.0 · stable: 2.0.0\nChecking for updates`
    - Expected: nativeAutoUpdaterErrorType("Checksum mismatch") equals `checksum_mismatch`
    - Expected: nativeAutoUpdaterShouldRender(NativeAutoUpdaterState.new(true, "1.0.0", "2.0.0", "", "", "", true, false, true, "stable")) is false
    - Expected: notebookEditToolUseRejectedDisplayPath(notebook) equals `nb.ipynb`
@@ -681,10 +704,12 @@ expect(messageTimestamp(true, "2026-07-06T10:00:00Z", "assistant", [MessageTimes
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model updater and notebook rejection components")
 step("Render updater messages and rejected notebook edit summaries")
 val packageState = PackageManagerAutoUpdateState.new(true, "2.0.0", "", "1.0.0", "homebrew", true)
 expect(packageManagerAutoUpdaterHasUpdate(packageState)).to_equal(true)
@@ -708,21 +733,19 @@ expect(notebookEditToolUseRejectedRenderSummary(markdown)).to_contain("file.md")
 
 #### should model picker, passes, and question navigation components
 
+- should model picker, passes, and question navigation components
 - Map options, sort guest passes, and mark answered question tabs
    - Expected: options[0].label equals `Default`
    - Expected: options[0].description equals `Concise`
    - Expected: options[1].description equals `Claude completes coding tasks efficiently and provides concise responses`
-- var picker = OutputStylePickerView new
-- picker finish load
-- picker select
    - Expected: picker.is_loading is false
    - Expected: picker.selected_value equals `custom`
    - Expected: outputStylePickerHideChrome(false) is true
-   - Expected: passRender.title equals `"Guest passes · 2 left")`
+   - Expected: passRender.title equals `Guest passes · 2 left`
    - Expected: passRender.sorted_passes[0].is_available is true
    - Expected: passRender.sorted_passes[2].is_available is false
    - Expected: passRender.terms_url equals `https://support.claude.com/en/articles/13456702-claude-code-guest-passes`
-   - Expected: passRender.exit_hint equals `"Enter to copy link · Esc to cancel")`
+   - Expected: passRender.exit_hint equals `Enter to copy link · Esc to cancel`
    - Expected: passesCopyReferral("https://ref") equals `Referral link copied to clipboard!`
    - Expected: passesRender(true, false, [], "", false, "", false, "Esc").body equals `Loading guest pass information...`
    - Expected: nav.left_arrow_active is true
@@ -731,7 +754,7 @@ expect(notebookEditToolUseRejectedRenderSummary(markdown)).to_contain("file.md")
    - Expected: nav.tabs[1].selected is true
    - Expected: nav.submit_visible is true
    - Expected: submit.title equals `Review your answers`
-   - Expected: submit.warning equals `"⚠ You have not answered all questions")`
+   - Expected: submit.warning equals `⚠ You have not answered all questions`
    - Expected: submit.answer_lines[0].answer equals `No`
    - Expected: submit.options[0].value equals `submit`
    - Expected: submit.nav.tabs[1].selected is true
@@ -740,10 +763,12 @@ expect(notebookEditToolUseRejectedRenderSummary(markdown)).to_contain("file.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model picker, passes, and question navigation components")
 step("Map options, sort guest passes, and mark answered question tabs")
 val options = mapConfigsToOutputStyleOptions(["default", "custom"], [OutputStyleConfig.new("Default", "Concise"), OutputStyleConfig.new("", "")])
 expect(options[0].label).to_equal("Default")
@@ -783,6 +808,7 @@ expect(submit.nav.tabs[1].selected).to_equal(true)
 
 #### should model model picker and onboarding state
 
+- should model model picker and onboarding state
 - Normalize model selection state and advance onboarding flow
    - Expected: modelView.initial_value equals `__NO_PREFERENCE__`
    - Expected: modelView.visible_options equals `10`
@@ -792,15 +818,11 @@ expect(submit.nav.tabs[1].selected).to_equal(true)
    - Expected: modelView.footerLine(true, "Esc") equals `Press Esc again to exit`
    - Expected: modelPickerSelectionSummary(selection, false) equals `opus | medium | persisted`
    - Expected: cycleModelPickerEffort("high", "right", true) equals `max`
-- var onboarding = OnboardingFlowState new
    - Expected: onboardingStepCount(onboarding) equals `6`
    - Expected: onboardingCurrentStepId(onboarding) equals `preflight`
-- onboarding = onboardingAdvance
    - Expected: onboardingCurrentStepId(onboarding) equals `theme`
-- onboarding = onboardingSelectTheme
    - Expected: onboarding.theme_selected is true
    - Expected: onboardingCurrentStepId(onboarding) equals `api-key`
-- onboarding = onboardingApproveApiKey
    - Expected: onboarding.skip_oauth is true
    - Expected: onboardingSummary(onboarding) equals `oauth:3`
 
@@ -808,10 +830,12 @@ expect(submit.nav.tabs[1].selected).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model model picker and onboarding state")
 step("Normalize model selection state and advance onboarding flow")
 val modelView = ModelPickerView.new("", "claude-session", true, true, "", "max", false, 12)
 expect(modelView.initial_value).to_equal("__NO_PREFERENCE__")
@@ -841,6 +865,7 @@ expect(onboardingSummary(onboarding)).to_equal("oauth:3")
 
 #### should build bash permission select options
 
+- should build bash permission select options
 - Prefer editable prefixes, fall back to suggestions, and suppress duplicates
    - Expected: editable[0].type_name equals `input`
    - Expected: editable[0].value equals `yes`
@@ -857,10 +882,12 @@ expect(onboardingSummary(onboarding)).to_equal("oauth:3")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should build bash permission select options")
 step("Prefer editable prefixes, fall back to suggestions, and suppress duplicates")
 val suggestions = [BashPermissionSuggestion.new("addRules", "Bash", "Yes, and don't ask again for npm run")]
 val editable = bashToolUseOptions(suggestions, true, true, true, "npm run:*", true, true, true, "allow npm run", false, [], "")
@@ -882,15 +909,13 @@ expect(stripBashRedirections("npm test > out.txt")).to_equal("npm test")
 
 #### should model computer-use approval panels and responses
 
+- should model computer-use approval panels and responses
 - Route TCC permissions separately from app allowlist grants
    - Expected: tcc.panel equals `tcc`
    - Expected: tcc.title equals `Computer Use needs macOS permissions`
    - Expected: tcc.accessibility_status equals `not granted`
    - Expected: tcc.options[0].value equals `open_accessibility`
    - Expected: tcc.options[1].value equals `retry`
-- ComputerUseAppRequest resolvedApp
-- ComputerUseAppRequest resolvedApp
-- ComputerUseAppRequest unresolved
    - Expected: render.panel equals `app_list`
    - Expected: render.reason equals `Automate setup`
    - Expected: render.app_rows[0].state equals `checked`
@@ -909,10 +934,12 @@ expect(stripBashRedirections("npm test > out.txt")).to_equal("npm test")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model computer-use approval panels and responses")
 step("Route TCC permissions separately from app allowlist grants")
 val tcc = computerUseApproval(ComputerUseRequest.tcc(ComputerUseTccState.new(false, true)))
 expect(tcc.panel).to_equal("tcc")
@@ -947,6 +974,7 @@ expect(computerUseApprovalResponse(request, false).granted.len()).to_equal(0)
 
 #### should model enter-plan-mode permission response state
 
+- should model enter-plan-mode permission response state
 - Render plan-mode copy and map yes/no responses to tool callbacks
    - Expected: render.title equals `Enter plan mode?`
    - Expected: render.color equals `planMode`
@@ -966,10 +994,12 @@ expect(computerUseApprovalResponse(request, false).granted.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model enter-plan-mode permission response state")
 step("Render plan-mode copy and map yes/no responses to tool callbacks")
 val render = enterPlanModePermissionRequest("worker-1")
 expect(render.title).to_equal("Enter plan mode?")
@@ -993,6 +1023,7 @@ expect(cancel.value).to_equal("no")
 
 #### should model fallback permission request options and responses
 
+- should model fallback permission request options and responses
 - Strip MCP display suffixes, truncate descriptions, and map allow/reject choices
    - Expected: render.user_facing_name equals `Filesystem`
    - Expected: render.description equals `line1\nline2\nline3`
@@ -1010,10 +1041,12 @@ expect(cancel.value).to_equal("no")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model fallback permission request options and responses")
 step("Strip MCP display suffixes, truncate descriptions, and map allow/reject choices")
 val request = FallbackPermissionRequest.new("mcp__fs__read", "Filesystem (MCP)", "Read file", "line1\nline2\nline3\nline4", "Requires approval", "worker-2", "/repo", true, true)
 val render = fallbackPermissionRequest(request)
@@ -1035,6 +1068,7 @@ expect(fallbackPermissionRequestCancel(request).rejected).to_equal(true)
 
 #### should model exit-plan-mode approval options and responses
 
+- should model exit-plan-mode approval options and responses
 - Handle empty-plan confirmation, clear-context choices, and Ultraplan rejection
    - Expected: empty.title equals `Exit plan mode?`
    - Expected: empty.editor_hint equals `worker-3`
@@ -1054,10 +1088,12 @@ expect(fallbackPermissionRequestCancel(request).rejected).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should model exit-plan-mode approval options and responses")
 step("Handle empty-plan confirmation, clear-context choices, and Ultraplan rejection")
 val empty = exitPlanModePermissionRequest(true, false, false, "worker-3", "", "", false, false)
 expect(empty.title).to_equal("Exit plan mode?")
@@ -1082,6 +1118,7 @@ expect(exitPlanModePermissionCancel(false, false).rejected).to_equal(true)
 
 #### should format rate-limit upsell state
 
+- should format rate-limit upsell state
 - Select upsell copy and auto-open callback state from explicit inputs
    - Expected: getUpsellMessage(RateLimitUpsellParams.new(false, false, false, false, false, false)) equals ``
    - Expected: getUpsellMessage(RateLimitUpsellParams.new(true, true, true, false, false, false)) equals `/extra-usage to finish what you're working on.`
@@ -1096,10 +1133,12 @@ expect(exitPlanModePermissionCancel(false, false).rejected).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should format rate-limit upsell state")
 step("Select upsell copy and auto-open callback state from explicit inputs")
 expect(getUpsellMessage(RateLimitUpsellParams.new(false, false, false, false, false, false))).to_equal("")
 expect(getUpsellMessage(RateLimitUpsellParams.new(true, true, true, false, false, false))).to_equal("/extra-usage to finish what you're working on.")
@@ -1117,6 +1156,7 @@ expect(rateLimitMessageAfterEffect(inputs).hasOpenedInteractiveMenu).to_equal(tr
 
 #### should summarize task assignment messages
 
+- should summarize task assignment messages
 - Render task assignment border content and summary text
    - Expected: render.visible is true
    - Expected: render.header equals `Task #42 assigned by Ada`
@@ -1131,10 +1171,12 @@ expect(rateLimitMessageAfterEffect(inputs).hasOpenedInteractiveMenu).to_equal(tr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should summarize task assignment messages")
 step("Render task assignment border content and summary text")
 val render = tryRenderTaskAssignmentMessage("task:42|Ada|Fix parity|Use Simple")
 expect(render.visible).to_equal(true)
@@ -1151,6 +1193,7 @@ expect(getTaskAssignmentSummary("plain")).to_equal("")
 
 #### should summarize shutdown messages
 
+- should summarize shutdown messages
 - Render requests/rejections while approved messages stay caller-handled
    - Expected: request.visible is true
    - Expected: request.title equals `Shutdown request from Ada`
@@ -1168,10 +1211,12 @@ expect(getTaskAssignmentSummary("plain")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should summarize shutdown messages")
 step("Render requests/rejections while approved messages stay caller-handled")
 val request = tryRenderShutdownMessage("shutdown-request:Ada|Need deploy")
 expect(request.visible).to_equal(true)
@@ -1192,6 +1237,7 @@ expect(getShutdownMessageSummary("shutdown-rejected:Grace|Still running")).to_eq
 
 #### should summarize team memory counts
 
+- should summarize team memory counts
 - Format saved memory and collapsed read/search/write parts
    - Expected: teamMemSavedPart(0).present is false
    - Expected: saved.present is true
@@ -1205,10 +1251,12 @@ expect(getShutdownMessageSummary("shutdown-rejected:Grace|Still running")).to_eq
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should summarize team memory counts")
 step("Format saved memory and collapsed read/search/write parts")
 expect(teamMemSavedPart(0).present).to_equal(false)
 val saved = teamMemSavedPart(2)
@@ -1225,6 +1273,7 @@ expect(checkHasTeamMemOps(TeamMemCounts.new(0, 0, 0))).to_equal(false)
 
 #### should render user bash and agent notification tags
 
+- should render user bash and agent notification tags
 - Extract tagged bash input and agent status summaries
    - Expected: bash.visible is true
    - Expected: bash.input equals `make test`
@@ -1235,7 +1284,7 @@ expect(checkHasTeamMemOps(TeamMemCounts.new(0, 0, 0))).to_equal(false)
    - Expected: note.summary equals `Done`
    - Expected: note.color equals `success`
    - Expected: note.margin_top equals `1`
-   - Expected: userAgentNotificationLine(note) equals `"● Done")`
+   - Expected: userAgentNotificationLine(note) equals `● Done`
    - Expected: userAgentNotificationStatusColor("failed") equals `error`
    - Expected: userAgentNotificationStatusColor("killed") equals `warning`
    - Expected: userAgentNotificationMessage("plain", false).visible is false
@@ -1244,10 +1293,12 @@ expect(checkHasTeamMemOps(TeamMemCounts.new(0, 0, 0))).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render user bash and agent notification tags")
 step("Extract tagged bash input and agent status summaries")
 val bash = userBashInputMessage("<bash-input>make test</bash-input>", true)
 expect(bash.visible).to_equal(true)
@@ -1270,6 +1321,7 @@ expect(userAgentNotificationMessage("plain", false).visible).to_equal(false)
 
 #### should render user bash output, command, and image messages
 
+- should render user bash output, command, and image messages
 - Extract bash output tags, slash command tags, and image link metadata
    - Expected: output.stdout equals `/tmp/out\npreview`
    - Expected: output.stderr equals `err`
@@ -1291,10 +1343,12 @@ expect(userAgentNotificationMessage("plain", false).visible).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render user bash output, command, and image messages")
 step("Extract bash output tags, slash command tags, and image link metadata")
 val output = userBashOutputMessage("<bash-stdout><persisted-output>/tmp/out\npreview</persisted-output></bash-stdout><bash-stderr>err</bash-stderr>", true)
 expect(output.stdout).to_equal("/tmp/out\npreview")
@@ -1321,6 +1375,7 @@ expect(userImageMessage(0, "", false, true).label).to_equal("[Image]")
 
 #### should render user plan messages
 
+- should render user plan messages
 - Render plan content with plan-mode border
    - Expected: plan.header equals `Plan to implement`
    - Expected: plan.plan_content equals `1. Build\n2. Test`
@@ -1332,10 +1387,12 @@ expect(userImageMessage(0, "", false, true).label).to_equal("[Image]")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render user plan messages")
 step("Render plan content with plan-mode border")
 val plan = userPlanMessage("1. Build\n2. Test", true)
 expect(plan.header).to_equal("Plan to implement")
@@ -1349,24 +1406,27 @@ expect(userPlanMessage("No margin", false).margin_top).to_equal(0)
 
 #### should render plan approval messages
 
+- should render plan approval messages
 - Parse plan approval requests and responses
    - Expected: request.visible is true
    - Expected: request.title equals `Plan Approval Request from Ada`
    - Expected: request.body equals `Do it`
    - Expected: request.footer equals `Plan file: /tmp/plan.md`
-   - Expected: approved.title equals `"✓ Plan Approved by Ada")`
+   - Expected: approved.title equals `✓ Plan Approved by Ada`
    - Expected: rejected.body equals `Feedback: Too broad`
    - Expected: getPlanApprovalSummary("{\"type\":\"plan_approval_response\",\"approved\":false,\"feedback\":\"Too broad\"}") equals `[Plan Rejected] Too broad`
-   - Expected: formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completedTaskId\":\"42\",\"completedStatus\":\"done\",\"summary\":\"Waiting\"}") equals `"Agent idle · Task 42 done · Last DM: Waiting")`
+   - Expected: formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completedTaskId\":\"42\",\"completedStatus\":\"done\",\"summary\":\"Waiting\"}") equals `Agent idle · Task 42 done · Last DM: Waiting`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render plan approval messages")
 step("Parse plan approval requests and responses")
 val request = tryRenderPlanApprovalMessage("{\"type\":\"plan_approval_request\",\"from\":\"Ada\",\"planFilePath\":\"/tmp/plan.md\",\"planContent\":\"Do it\"}", "Claude")
 expect(request.visible).to_equal(true)
@@ -1385,6 +1445,7 @@ expect(formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completed
 
 #### should render rejected tool-use messages
 
+- should render rejected tool-use messages
 - Match fixed tool result render states and lookup helpers
    - Expected: canceled.interrupted_by_user is true
    - Expected: canceled.response_height equals `1`
@@ -1424,10 +1485,12 @@ expect(formatTeammateMessageContent("{\"type\":\"idle_notification\",\"completed
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render rejected tool-use messages")
 step("Match fixed tool result render states and lookup helpers")
 val canceled = userToolCanceledMessage()
 expect(canceled.interrupted_by_user).to_equal(true)
@@ -1477,13 +1540,14 @@ expect(userToolResultMessage(UserToolResultParam.new("missing", "ok", false), ro
 
 #### should render channel, memory, local command, and prompt user messages
 
+- should render channel, memory, local command, and prompt user messages
 - Cover worker-added message helpers
    - Expected: channel.visible is true
    - Expected: channel.display_source equals `linear`
    - Expected: channel.user equals `Ada`
    - Expected: channel.body equals `hello team`
    - Expected: channel.margin_top equals `1`
-   - Expected: userChannelMessageLine(channel) equals `"← linear · Ada: hello team")`
+   - Expected: userChannelMessageLine(channel) equals `← linear · Ada: hello team`
    - Expected: memory.visible is true
    - Expected: memory.marker equals `#`
    - Expected: memory.saving_text equals `Got it.`
@@ -1503,10 +1567,12 @@ expect(userToolResultMessage(UserToolResultParam.new("missing", "ok", false), ro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render channel, memory, local command, and prompt user messages")
 step("Cover worker-added message helpers")
 val channel = userChannelMessage("<channel source=\"mcp:linear\" user=\"Ada\">  hello\nteam  </channel>", true)
 expect(channel.visible).to_equal(true)
@@ -1539,6 +1605,7 @@ expect(userPromptMessage("", false, false, "", false, false, false, false, false
 
 #### should route user text messages
 
+- should route user text messages
 - Choose message renderer kind from tags and feature gates
    - Expected: userTextMessage("(no content)", false, false, "", false, "", false, false, false, false, false, false).visible is false
    - Expected: userTextMessage("raw", true, false, "plan", false, "10:00", false, false, false, false, false, false).kind equals `plan`
@@ -1561,10 +1628,12 @@ expect(userPromptMessage("", false, false, "", false, false, false, false, false
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should route user text messages")
 step("Choose message renderer kind from tags and feature gates")
 expect(userTextMessage("(no content)", false, false, "", false, "", false, false, false, false, false, false).visible).to_equal(false)
 expect(userTextMessage("raw", true, false, "plan", false, "10:00", false, false, false, false, false, false).kind).to_equal("plan")
@@ -1591,23 +1660,26 @@ expect(taskDone.entries[0].kind).to_equal("task-completed")
 
 #### should render system API error retry messages
 
+- should render system API error retry messages
 - Hide early retries, truncate non-verbose errors, and include timeout hint
    - Expected: systemAPIErrorMessage(3, "hidden", 1000, 5, false, 0, "").visible is false
    - Expected: render.visible is true
    - Expected: render.displayed_error equals `abcdef`
    - Expected: render.retry_in_seconds equals `3`
    - Expected: render.retry_unit equals `seconds`
-   - Expected: render.retry_line equals `"Retrying in 3 seconds... (attempt 4/5) · API_TIMEOUT_MS=30000ms, try increas... (full value in folded executable source)`
+   - Expected: render.retry_line equals `Retrying in 3 seconds... (attempt 4/5) · API_TIMEOUT_MS=30000ms, try increas... (full value in folded executable source)`
    - Expected: systemAPIErrorNextCountdownMs(1000) equals `2000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render system API error retry messages")
 step("Hide early retries, truncate non-verbose errors, and include timeout hint")
 expect(systemAPIErrorMessage(3, "hidden", 1000, 5, false, 0, "").visible).to_equal(false)
 val render = systemAPIErrorMessage(4, "abcdef", 2500, 5, false, 0, "30000")
@@ -1623,15 +1695,11 @@ expect(systemAPIErrorNextCountdownMs(1000)).to_equal(2000)
 
 #### should render system text messages
 
+- should render system text messages
 - Cover duration, memory, stop-hook, bridge, and filtered info states
-- var duration = SystemTextMessageInput new
-   - Expected: systemTextMessage(duration).text equals `"Worked for 1m 5s · 25 / 100 (25%) · 1 nudge")`
-- var memory = SystemTextMessageInput new
-   - Expected: systemTextMessage(memory).text equals `"Saved 1 memory · 1 team memory")`
-- var hook = SystemTextMessageInput new
-- hook hook infos = [SystemHookInfo new
+   - Expected: systemTextMessage(duration).text equals `Worked for 1m 5s · 25 / 100 (25%) · 1 nudge`
+   - Expected: systemTextMessage(memory).text equals `Saved 1 memory · 1 team memory`
    - Expected: systemTextMessage(hook).text equals `Ran 1 stop hook (700ms)`
-- var bridge = SystemTextMessageInput new
    - Expected: systemTextMessage(bridge).child_lines[1] equals `https://claude.example`
    - Expected: systemTextMessage(SystemTextMessageInput.new("plain", "info", "skip")).visible is false
 
@@ -1639,10 +1707,12 @@ expect(systemAPIErrorNextCountdownMs(1000)).to_equal(2000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render system text messages")
 step("Cover duration, memory, stop-hook, bridge, and filtered info states")
 var duration = SystemTextMessageInput.new("turn_duration", "info", "")
 duration.duration_ms = 65000
@@ -1669,6 +1739,7 @@ expect(systemTextMessage(SystemTextMessageInput.new("plain", "info", "skip")).vi
 
 #### should describe debug utility output
 
+- should describe debug utility output
 - Flatten, truncate, redact, and capture bridge skip metadata
    - Expected: debugFlatten("a\nb") equals `a\\nb`
    - Expected: redactSecretValue("short") equals `[REDACTED]`
@@ -1685,10 +1756,12 @@ expect(systemTextMessage(SystemTextMessageInput.new("plain", "info", "skip")).vi
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should describe debug utility output")
 step("Flatten, truncate, redact, and capture bridge skip metadata")
 expect(debugFlatten("a\nb")).to_equal("a\\nb")
 expect(redactSecretValue("short")).to_equal("[REDACTED]")
@@ -1708,6 +1781,7 @@ expect(debugTruncate("small")).to_equal("small")
 
 #### should pin source-modeled line counts
 
+- should pin source-modeled line counts
 - Expose modeled source sizes for parity checker
    - Expected: bridgeEnabledSourceLinesModeled() equals `202`
    - Expected: bridgeStatusUtilSourceLinesModeled() equals `163`
@@ -1772,10 +1846,12 @@ expect(debugTruncate("small")).to_equal("small")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should pin source-modeled line counts")
 step("Expose modeled source sizes for parity checker")
 expect(bridgeEnabledSourceLinesModeled()).to_equal(202)
 expect(bridgeStatusUtilSourceLinesModeled()).to_equal(163)
@@ -1852,10 +1928,80 @@ expect(groupedToolUseContentSourceLinesModeled()).to_equal(57)
 
 ## Related Documentation
 
-- **Requirements:** `REQ-LLM-CARET-HIDDEN-008`, scoped only to bridge availability; all other scenarios remain strict parts-bin parity.
-- **Plan:** [N/A - target selected from strict checker output.](N/A - target selected from strict checker output.)
-- **Design:** [N/A - source mirror for Claude CLI bridge and message helpers.](N/A - source mirror for Claude CLI bridge and message helpers.)
-- **Research:** [N/A - upstream TypeScript files are the source reference.](N/A - upstream TypeScript files are the source reference.)
+- **Requirements:** `REQ-LLM-CARET-HIDDEN-008, scoped only to the bridge`
+- **Plan:** `N/A - target selected from strict checker output.`
+- **Design:** `N/A - source mirror for Claude CLI bridge and message helpers.`
+- **Research:** `N/A - upstream TypeScript files are the source reference.`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-LLM-CARET-HIDDEN-008`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `91525b5bd41f1225334c88f9333a04d108a19b928b0b6cd7554e7b41e7d6bdc5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `91525b5bd41f1225334c88f9333a04d108a19b928b0b6cd7554e7b41e7d6bdc5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `91525b5bd41f1225334c88f9333a04d108a19b928b0b6cd7554e7b41e7d6bdc5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 103 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:102:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model capacity wake signal lifecycle' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model capacity wake signal lifecycle' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:120:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should gate bridge availability with explicit entitlement inputs' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:120:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should gate bridge availability with explicit entitlement inputs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:144:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate env-less bridge config' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:144:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should validate env-less bridge config' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:164:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should normalize inbound user message images' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:179:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve and prepend inbound attachments' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/bridge/bridge_small_helpers_spec.spl:197:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose bridge poll defaults' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

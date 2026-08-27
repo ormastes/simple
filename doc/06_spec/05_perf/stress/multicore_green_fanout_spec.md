@@ -2,29 +2,6 @@
 
 > This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately classifies runtime-pool use, work-stealing queue selection, and public counter evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
-<!-- sdn-diagram:id=multicore_green_fanout_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=multicore_green_fanout_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-multicore_green_fanout_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=multicore_green_fanout_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
@@ -48,7 +25,7 @@ This perf stress spec keeps the Simple concurrency rows comparable: OS threads, 
 | Design | N/A |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/05_perf/stress/multicore_green_fanout_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -85,6 +62,11 @@ Go-like M:N CPU-parallel evidence.
 
 #### matches OS-thread fanout/fanin checksum _(slow)_
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- matches OS-thread fanout/fanin checksum
 - Write and run the OS-thread fanout probe through direct simple run
    - Expected: stderr equals ``
    - Expected: stdout.trim() equals ``
@@ -94,10 +76,12 @@ Go-like M:N CPU-parallel evidence.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("matches OS-thread fanout/fanin checksum")
 step("Write and run the OS-thread fanout probe through direct simple run")
 val probe_path = unique_probe_path("mcg_thread_fanout")
 val (stdout, stderr, code) = run_probe(probe_path, thread_probe_source())
@@ -116,6 +100,7 @@ expect(code).to_equal(0)
 
 #### matches cooperative-green fanout checksum on the current carrier _(slow)_
 
+- matches cooperative-green fanout checksum on the current carrier
 - Write and run the cooperative-green fanout probe through direct simple run
    - Expected: stderr equals ``
    - Expected: stdout.trim() equals ``
@@ -125,10 +110,12 @@ expect(code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("matches cooperative-green fanout checksum on the current carrier")
 step("Write and run the cooperative-green fanout probe through direct simple run")
 val probe_path = unique_probe_path("mcg_coop_fanout")
 val (stdout, stderr, code) = run_probe(probe_path, cooperative_probe_source())
@@ -147,17 +134,11 @@ expect(code).to_equal(0)
 
 #### matches multicore-green fanout checksum and classifies M:N evidence _(slow)_
 
+- matches multicore-green fanout checksum and classifies M:N evidence
 - Prepare deterministic multicore-green fanout inputs
-- submitted before = multicore green submitted count
-- completed before = multicore green completed count
 - Spawn eight multicore-green workers
 - Count runtime-pool and inline-fallback evidence
 - Join multicore-green workers and classify evidence
-- submitted delta = multicore green submitted count
-- completed delta = multicore green completed count
-- pending count = multicore green pending count
-- busy count = multicore green busy count
-- blocked count = multicore green blocked count
 - Verify checksum and runtime evidence accounting
    - Expected: got equals `expected`
    - Expected: pool_used + inline_fallback equals `8`
@@ -190,10 +171,12 @@ expect(code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 95 lines folded for reproduction.
+Runnable source: 97 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("matches multicore-green fanout checksum and classifies M:N evidence")
 step("Prepare deterministic multicore-green fanout inputs")
 val iterations = 512
 val expected = fanout_expected(8, iterations)
@@ -309,8 +292,59 @@ else:
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
-- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
+- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
+- **Research:** `doc/01_research/local/multicore_green.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `78f55257c6d25062427b92708f33febe9b5084a39090840937f5cc88689a6843`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `78f55257c6d25062427b92708f33febe9b5084a39090840937f5cc88689a6843`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `78f55257c6d25062427b92708f33febe9b5084a39090840937f5cc88689a6843`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/05_perf/stress/multicore_green_fanout_spec.spl
+mirror: doc/06_spec/05_perf/stress/multicore_green_fanout_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/05_perf/stress/multicore_green_fanout_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/stress/multicore_green_fanout_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/stress/multicore_green_fanout_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 20 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/05_perf/stress/multicore_green_fanout_spec.spl:211:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches OS-thread fanout/fanin checksum' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/stress/multicore_green_fanout_spec.spl:221:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches cooperative-green fanout checksum on the current carrier' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/stress/multicore_green_fanout_spec.spl:231:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches multicore-green fanout checksum and classifies M:N evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

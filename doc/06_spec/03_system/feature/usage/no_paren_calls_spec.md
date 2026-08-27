@@ -2,29 +2,6 @@
 
 > No-parentheses function calls allow calling functions without wrapping arguments in parentheses, providing Ruby-style syntax for cleaner, more readable code. This feature supports simple function calls, trailing lambdas, colon-blocks, and works with identifiers, field access, and path expressions.
 
-<!-- sdn-diagram:id=no_paren_calls_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=no_paren_calls_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-no_paren_calls_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=no_paren_calls_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 26 | 26 | 0 | 0 |
@@ -45,7 +22,7 @@ No-parentheses function calls allow calling functions without wrapping arguments
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/no_paren_calls_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,6 +37,8 @@ calls, trailing lambdas, colon-blocks, and works with identifiers, field access,
 
 ```simple
 print "Hello"              # print("Hello")
+use std.spec.step
+
 val result = add 2, 3      # val result = add(2, 3)
 ```
 
@@ -79,6 +58,7 @@ map numbers \x: x * 2      # map(numbers, \x: x * 2)
 
 ```simple
 describe "Feature":
+    # @manual scenario evidence
 test code
 # describe("Feature", fn(): test code)
 ```
@@ -138,6 +118,8 @@ filter values \v: v > 0
 # With colon-block
 describe "Test":
 it "works":
+    # @req REQ-SSPEC-SYSTEM
+    step("works")
 expect(result).to_equal(10)
 
 # Multiple arguments
@@ -152,17 +134,19 @@ call arg1, arg2, arg3
 
 #### calls function with single argument
 
-1. fn double
+- calls function with single argument
    - Expected: result equals `10`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls function with single argument")
 fn double(x):
     x * 2
 
@@ -174,17 +158,19 @@ expect(result).to_equal(10)
 
 #### calls with literal argument
 
-1. fn identity
+- calls with literal argument
    - Expected: result equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls with literal argument")
 fn identity(x):
     x
 
@@ -196,17 +182,19 @@ expect(result).to_equal(42)
 
 #### calls with identifier argument
 
-1. fn identity
+- calls with identifier argument
    - Expected: result equals `100`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls with identifier argument")
 fn identity(x):
     x
 
@@ -221,17 +209,19 @@ expect(result).to_equal(100)
 
 #### calls with two arguments
 
-1. fn add
+- calls with two arguments
    - Expected: result equals `30`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls with two arguments")
 fn add(a, b):
     a + b
 
@@ -243,17 +233,19 @@ expect(result).to_equal(30)
 
 #### calls with three arguments
 
-1. fn add3
+- calls with three arguments
    - Expected: result equals `30`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls with three arguments")
 fn add3(a, b, c):
     a + b + c
 
@@ -265,17 +257,19 @@ expect(result).to_equal(30)
 
 #### mixes literals and identifiers
 
-1. fn multiply
+- mixes literals and identifiers
    - Expected: result equals `15`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mixes literals and identifiers")
 fn multiply(a, b):
     a * b
 
@@ -292,17 +286,19 @@ expect(result).to_equal(15)
 
 #### passes integer literal
 
-1. fn identity
+- passes integer literal
    - Expected: result equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes integer literal")
 fn identity(x):
     x
 
@@ -314,17 +310,19 @@ expect(result).to_equal(42)
 
 #### passes string literal
 
-1. fn identity
+- passes string literal
    - Expected: result equals `hello`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes string literal")
 fn identity(x):
     x
 
@@ -336,17 +334,19 @@ expect(result).to_equal("hello")
 
 #### passes boolean literal
 
-1. fn identity
+- passes boolean literal
    - Expected: result is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes boolean literal")
 fn identity(x):
     x
 
@@ -360,17 +360,19 @@ expect(result).to_equal(true)
 
 #### passes arithmetic expression
 
-1. fn square
+- passes arithmetic expression
    - Expected: result equals `25`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes arithmetic expression")
 fn square(x):
     x * x
 
@@ -382,17 +384,19 @@ expect(result).to_equal(25)
 
 #### passes multiple expressions
 
-1. fn add
+- passes multiple expressions
    - Expected: result equals `15`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes multiple expressions")
 fn add(a, b):
     a + b
 
@@ -408,18 +412,19 @@ expect(result).to_equal(15)
 
 #### nests parenthesized call
 
-1. fn double
-2. fn triple
+- nests parenthesized call
    - Expected: result equals `30`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("nests parenthesized call")
 fn double(x):
     x * 2
 
@@ -434,18 +439,19 @@ expect(result).to_equal(30)
 
 #### chains multiple functions
 
-1. fn add1
-2. fn add2
+- chains multiple functions
    - Expected: result equals `13`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains multiple functions")
 fn add1(x):
     x + 1
 
@@ -464,18 +470,19 @@ expect(result).to_equal(13)
 
 #### accepts trailing lambda
 
-1. fn apply
-2. f
+- accepts trailing lambda
    - Expected: result equals `10`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts trailing lambda")
 fn apply(x, f):
     f(x)
 
@@ -487,18 +494,19 @@ expect(result).to_equal(10)
 
 #### passes multiple args plus lambda
 
-1. fn fold
-2. acc = f
+- passes multiple args plus lambda
    - Expected: sum equals `6`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes multiple args plus lambda")
 fn fold(arr, init, f):
     var acc = init
     var i = 0
@@ -520,18 +528,19 @@ expect(sum).to_equal(6)
 
 #### uses no-paren with helper function
 
-1. fn get double func
-2. fn inner
+- uses no-paren with helper function
    - Expected: result equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses no-paren with helper function")
 fn get_double_func():
     fn inner(x):
         x * 2
@@ -550,17 +559,19 @@ expect(result).to_equal(42)
 
 #### works in val assignments
 
-1. fn double
+- works in val assignments
    - Expected: result equals `20`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works in val assignments")
 fn double(x):
     x * 2
 
@@ -572,18 +583,19 @@ expect(result).to_equal(20)
 
 #### works in var assignments
 
-1. fn add
-2. var result = add
+- works in var assignments
    - Expected: result equals `12`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works in var assignments")
 fn add(a, b):
     a + b
 
@@ -597,18 +609,19 @@ expect(result).to_equal(12)
 
 #### works in implicit returns
 
-1. fn wrapper
-2. fn inner
+- works in implicit returns
    - Expected: result equals `14`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works in implicit returns")
 fn wrapper(x):
     fn inner(n):
         n * 2
@@ -626,17 +639,19 @@ expect(result).to_equal(14)
 
 #### passes single string
 
-1. fn identity
+- passes single string
    - Expected: result equals `test`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes single string")
 fn identity(s):
     s
 
@@ -648,17 +663,19 @@ expect(result).to_equal("test")
 
 #### passes string with spaces
 
-1. fn identity
+- passes string with spaces
    - Expected: result equals `hello world`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes string with spaces")
 fn identity(s):
     s
 
@@ -674,18 +691,19 @@ expect(result).to_equal("hello world")
 
 #### mixes paren and no-paren
 
-1. fn add
-2. fn double
+- mixes paren and no-paren
    - Expected: result equals `13`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mixes paren and no-paren")
 fn add(a, b):
     a + b
 
@@ -700,19 +718,19 @@ expect(result).to_equal(13)
 
 #### chains multiple mixed calls
 
-1. fn add1
-2. fn add2
-3. fn add3
+- chains multiple mixed calls
    - Expected: result equals `16`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains multiple mixed calls")
 fn add1(x):
     x + 1
 
@@ -734,17 +752,19 @@ expect(result).to_equal(16)
 
 #### requires parens for zero args
 
-1. fn get value
+- requires parens for zero args
    - Expected: result equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires parens for zero args")
 fn get_value():
     42
 
@@ -758,17 +778,19 @@ expect(result).to_equal(42)
 
 #### passes single variable
 
-1. fn square
+- passes single variable
    - Expected: result equals `49`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes single variable")
 fn square(x):
     x * x
 
@@ -791,3 +813,54 @@ expect(result).to_equal(49)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `aabfbe20c946bf19ed1f2f6956646f0b954644a45ccfe36700ab048fd5cc0076`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `aabfbe20c946bf19ed1f2f6956646f0b954644a45ccfe36700ab048fd5cc0076`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `aabfbe20c946bf19ed1f2f6956646f0b954644a45ccfe36700ab048fd5cc0076`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/usage/no_paren_calls_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/no_paren_calls_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/no_paren_calls_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/no_paren_calls_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/no_paren_calls_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 21 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/usage/no_paren_calls_spec.spl:139:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls function with single argument' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/no_paren_calls_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls with literal argument' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/no_paren_calls_spec.spl:157:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls with identifier argument' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

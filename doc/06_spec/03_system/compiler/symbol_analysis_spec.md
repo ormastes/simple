@@ -1,30 +1,6 @@
 # Symbol Analysis Specification
 
-> _Reachability and dead-symbol behavior for linker symbol analysis._
-
-<!-- sdn-diagram:id=symbol_analysis_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=symbol_analysis_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-symbol_analysis_spec -> std
-symbol_analysis_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=symbol_analysis_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Symbol Analysis.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -38,17 +14,10 @@ symbol_analysis_spec -> compiler
 ## Scenarios
 
 ### Symbol Analysis
-_Reachability and dead-symbol behavior for linker symbol analysis._
 
 #### marks entry-point references reachable and reports dead symbols
 
-1. var analyzer = SymbolAnalyzer create
-2. analyzer add symbol
-3. analyzer add symbol
-4. analyzer add symbol
-5. analyzer add reference
-6. analyzer set entry point
-7.   = analyzer analyze
+- marks entry-point references reachable and reports dead symbols
    - Expected: stats.total_symbols equals `3`
    - Expected: stats.reachable_symbols equals `2`
    - Expected: stats.dead_symbols equals `1`
@@ -61,10 +30,13 @@ _Reachability and dead-symbol behavior for linker symbol analysis._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("marks entry-point references reachable and reports dead symbols")
+"""Entry points and call references should keep only connected symbols live."""
 var analyzer = SymbolAnalyzer.create()
 analyzer.add_symbol("main", SymbolVisibility.Export, 64, ".text")
 analyzer.add_symbol("helper", SymbolVisibility.Local, 32, ".text")
@@ -95,12 +67,12 @@ expect(removable[0]).to_equal("unused")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/symbol_analysis_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Symbol Analysis.
 - Symbol Analysis
 
 ## Scenario Summary
@@ -115,3 +87,48 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fdeb8df7895e5bdb7fe5ed325cac6fcc0b4593ee44a3225f4a4fc6b8cdbf9141`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fdeb8df7895e5bdb7fe5ed325cac6fcc0b4593ee44a3225f4a4fc6b8cdbf9141`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fdeb8df7895e5bdb7fe5ed325cac6fcc0b4593ee44a3225f4a4fc6b8cdbf9141`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/03_system/compiler/symbol_analysis_spec.spl
+mirror: doc/06_spec/03_system/compiler/symbol_analysis_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/compiler/symbol_analysis_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/compiler/symbol_analysis_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/compiler/symbol_analysis_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/compiler/symbol_analysis_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'marks entry-point references reachable and reports dead symbols' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

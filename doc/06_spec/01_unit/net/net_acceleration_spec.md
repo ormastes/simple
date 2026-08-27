@@ -2,29 +2,6 @@
 
 > Net Acceleration Remaining — Spipe Spec
 
-<!-- sdn-diagram:id=net_acceleration_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=net_acceleration_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-net_acceleration_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=net_acceleration_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -43,7 +20,7 @@ Net Acceleration Remaining — Spipe Spec
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/net/net_acceleration_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Net Acceleration Remaining — Spipe Spec
@@ -67,13 +44,19 @@ Plan: doc/03_plan/agent_tasks/net_acceleration_remaining_2026-04-21.md
 
 #### established result marks success true
 
+- established result marks success true
+   - Expected: r.success is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("established result marks success true")
 val r = make_connect_established()
 expect(r.success).to_equal(true)
 ```
@@ -82,13 +65,19 @@ expect(r.success).to_equal(true)
 
 #### in-progress result carries EINPROGRESS code
 
+- in-progress result carries EINPROGRESS code
+   - Expected: r.error_msg equals `EINPROGRESS`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("in-progress result carries EINPROGRESS code")
 val r = make_connect_in_progress()
 expect(r.error_msg).to_equal("EINPROGRESS")
 ```
@@ -97,13 +86,19 @@ expect(r.error_msg).to_equal("EINPROGRESS")
 
 #### refused result is a terminal outcome
 
+- refused result is a terminal outcome
+   - Expected: tcp_is_terminal(r) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("refused result is a terminal outcome")
 val r = make_connect_refused()
 expect(tcp_is_terminal(r)).to_equal(true)
 ```
@@ -112,28 +107,40 @@ expect(tcp_is_terminal(r)).to_equal(true)
 
 #### in-progress result is NOT terminal
 
+- in-progress result is NOT terminal
+   - Expected: tcp_is_terminal(r) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("in-progress result is NOT terminal")
 val r = make_connect_in_progress()
-expect(tcp_is_terminal(r) == false).to_equal(true)
+expect(tcp_is_terminal(r)).to_equal(false)
 ```
 
 </details>
 
 #### timed-out result carries ETIMEDOUT and is terminal
 
+- timed-out result carries ETIMEDOUT and is terminal
+   - Expected: r.error_msg equals `ETIMEDOUT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("timed-out result carries ETIMEDOUT and is terminal")
 val r = make_connect_timed_out()
 expect(r.error_msg).to_equal("ETIMEDOUT")
 ```
@@ -146,13 +153,19 @@ expect(r.error_msg).to_equal("ETIMEDOUT")
 
 #### data recv carries the correct byte count
 
+- data recv carries the correct byte count
+   - Expected: r.bytes_read equals `512`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("data recv carries the correct byte count")
 val r = make_recv_data(512)
 expect(r.bytes_read).to_equal(512)
 ```
@@ -161,13 +174,19 @@ expect(r.bytes_read).to_equal(512)
 
 #### would-block recv returns zero bytes
 
+- would-block recv returns zero bytes
+   - Expected: r.bytes_read equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("would-block recv returns zero bytes")
 val r = make_recv_would_block()
 expect(r.bytes_read).to_equal(0)
 ```
@@ -176,13 +195,19 @@ expect(r.bytes_read).to_equal(0)
 
 #### peer-closed recv sets peer_closed flag
 
+- peer-closed recv sets peer_closed flag
+   - Expected: r.peer_closed is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("peer-closed recv sets peer_closed flag")
 val r = make_recv_peer_closed()
 expect(r.peer_closed).to_equal(true)
 ```
@@ -191,13 +216,19 @@ expect(r.peer_closed).to_equal(true)
 
 #### reset recv sets was_reset flag
 
+- reset recv sets was_reset flag
+   - Expected: r.was_reset is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("reset recv sets was_reset flag")
 val r = make_recv_reset()
 expect(r.was_reset).to_equal(true)
 ```
@@ -208,13 +239,19 @@ expect(r.was_reset).to_equal(true)
 
 #### send buffer allows queuing within window
 
+- send buffer allows queuing within window
+   - Expected: send_buf_can_queue(buf, 1024) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("send buffer allows queuing within window")
 val buf = make_send_buf(4096, 2048)
 expect(send_buf_can_queue(buf, 1024)).to_equal(true)
 ```
@@ -227,13 +264,19 @@ expect(send_buf_can_queue(buf, 1024)).to_equal(true)
 
 #### ok outcome is writable
 
+- ok outcome is writable
+   - Expected: o.readiness.writable is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("ok outcome is writable")
 val o = make_connect_ok()
 expect(o.readiness.writable).to_equal(true)
 ```
@@ -242,28 +285,40 @@ expect(o.readiness.writable).to_equal(true)
 
 #### in-progress outcome is not ready
 
+- in-progress outcome is not ready
+   - Expected: o.ready is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("in-progress outcome is not ready")
 val o = make_connect_progress()
-expect(o.ready == false).to_equal(true)
+expect(o.ready).to_equal(false)
 ```
 
 </details>
 
 #### in-progress outcome label is in-progress
 
+- in-progress outcome label is in-progress
+   - Expected: outcome_label(o) equals `in-progress`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("in-progress outcome label is in-progress")
 val o = make_connect_progress()
 expect(outcome_label(o)).to_equal("in-progress")
 ```
@@ -272,13 +327,19 @@ expect(outcome_label(o)).to_equal("in-progress")
 
 #### refused outcome has error bit set
 
+- refused outcome has error bit set
+   - Expected: o.readiness.is_error is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("refused outcome has error bit set")
 val o = make_connect_err("ECONNREFUSED")
 expect(o.readiness.is_error).to_equal(true)
 ```
@@ -287,13 +348,19 @@ expect(o.readiness.is_error).to_equal(true)
 
 #### ok outcome label is connected
 
+- ok outcome label is connected
+   - Expected: outcome_label(o) equals `connected`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("ok outcome label is connected")
 val o = make_connect_ok()
 expect(outcome_label(o)).to_equal("connected")
 ```
@@ -306,13 +373,19 @@ expect(outcome_label(o)).to_equal("connected")
 
 #### portable backend routes to portable-read
 
+- portable backend routes to portable-read
+   - Expected: action.use_portable_read is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("portable backend routes to portable-read")
 val caps = make_caps_portable("portable-socket")
 val action = route_static_file(caps, true)
 expect(action.use_portable_read).to_equal(true)
@@ -322,13 +395,19 @@ expect(action.use_portable_read).to_equal(true)
 
 #### sendfile backend routes via sendfile
 
+- sendfile backend routes via sendfile
+   - Expected: action.use_sendfile is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("sendfile backend routes via sendfile")
 val caps = make_caps_sendfile("linux-io-uring")
 val action = route_static_file(caps, true)
 expect(action.use_sendfile).to_equal(true)
@@ -338,13 +417,19 @@ expect(action.use_sendfile).to_equal(true)
 
 #### zero-copy backend reports sendfile tier
 
+- zero-copy backend reports sendfile tier
+   - Expected: http_tier(caps) equals `zero-copy`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("zero-copy backend reports sendfile tier")
 val caps = make_caps_zero_copy("dma-engine")
 expect(http_tier(caps)).to_equal("zero-copy")
 ```
@@ -355,13 +440,19 @@ expect(http_tier(caps)).to_equal("zero-copy")
 
 #### rx descriptor ready transfers ownership to app
 
+- rx descriptor ready transfers ownership to app
+   - Expected: desc.owner.owner_name equals `app`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("rx descriptor ready transfers ownership to app")
 val desc = rx_ready(0, 64)
 expect(desc.owner.owner_name).to_equal("app")
 ```
@@ -370,13 +461,19 @@ expect(desc.owner.owner_name).to_equal("app")
 
 #### af-xdp ring config enables packet io
 
+- af-xdp ring config enables packet io
+   - Expected: cfg.supports_packet_io is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-NET
+step("af-xdp ring config enables packet io")
 val cfg = ring_cfg_afxdp(1024)
 expect(cfg.supports_packet_io).to_equal(true)
 ```
@@ -395,3 +492,54 @@ expect(cfg.supports_packet_io).to_equal(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-NET`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3aa3204855ae95901fe93d15f41e8b52f63665bc9b06d0020ab5d68ec3888e28`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3aa3204855ae95901fe93d15f41e8b52f63665bc9b06d0020ab5d68ec3888e28`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3aa3204855ae95901fe93d15f41e8b52f63665bc9b06d0020ab5d68ec3888e28`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/net/net_acceleration_spec.spl
+mirror: doc/06_spec/01_unit/net/net_acceleration_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/net/net_acceleration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/net/net_acceleration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/net/net_acceleration_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/net/net_acceleration_spec.spl:212:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'established result marks success true' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/net/net_acceleration_spec.spl:218:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'in-progress result carries EINPROGRESS code' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/net/net_acceleration_spec.spl:224:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'refused result is a terminal outcome' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

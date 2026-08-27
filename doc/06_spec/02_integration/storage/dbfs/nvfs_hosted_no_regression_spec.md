@@ -2,30 +2,6 @@
 
 > NVFS Hosted Seam Specification
 
-<!-- sdn-diagram:id=nvfs_hosted_no_regression_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=nvfs_hosted_no_regression_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-nvfs_hosted_no_regression_spec -> std
-nvfs_hosted_no_regression_spec -> test
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=nvfs_hosted_no_regression_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -44,7 +20,7 @@ NVFS Hosted Seam Specification
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/dbfs/nvfs_hosted_no_regression_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 NVFS Hosted Seam Specification
@@ -58,16 +34,23 @@ filesystem regression seam used by FAT32 and DBFS.
 
 #### NVFS volume mounts without error
 
-1. assert mount root is dir
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- NVFS volume mounts without error
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("NVFS volume mounts without error")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val mt = make_nvfs_mounted()
 assert_mount_root_is_dir(mt, "/nvfs")
 ```
@@ -76,16 +59,19 @@ assert_mount_root_is_dir(mt, "/nvfs")
 
 #### stat on NVFS root returns is_dir=true
 
-1. assert mount root slash is dir
+- stat on NVFS root returns is_dir=true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stat on NVFS root returns is_dir=true")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val mt = make_nvfs_mounted()
 assert_mount_root_slash_is_dir(mt, "/nvfs")
 ```
@@ -96,16 +82,19 @@ assert_mount_root_slash_is_dir(mt, "/nvfs")
 
 #### readdir on NVFS root returns a stable empty-or-better listing
 
-1. assert readdir on root is stable
+- readdir on NVFS root returns a stable empty-or-better listing
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("readdir on NVFS root returns a stable empty-or-better listing")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val mt = make_nvfs_mounted()
 assert_readdir_on_root_is_stable(mt, "/nvfs")
 ```
@@ -114,16 +103,19 @@ assert_readdir_on_root_is_stable(mt, "/nvfs")
 
 #### open on an NVFS path returns a valid handle
 
-1. assert open returns handle
+- open on an NVFS path returns a valid handle
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("open on an NVFS path returns a valid handle")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val mt = make_nvfs_mounted()
 assert_open_returns_handle(mt, "/nvfs/README.TXT")
 ```
@@ -132,16 +124,19 @@ assert_open_returns_handle(mt, "/nvfs/README.TXT")
 
 #### read on NVFS returns empty content rather than erroring
 
-1. assert read returns empty or better
+- read on NVFS returns empty content rather than erroring
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("read on NVFS returns empty content rather than erroring")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val mt = make_nvfs_mounted()
 assert_read_returns_empty_or_better(mt, "/nvfs/README.TXT")
 ```
@@ -160,3 +155,46 @@ assert_read_returns_empty_or_better(mt, "/nvfs/README.TXT")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c483fd1a7fdb65af28b6ed53f7b5b4beab0e9313f6b03fdb2bc1a35717f33993`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c483fd1a7fdb65af28b6ed53f7b5b4beab0e9313f6b03fdb2bc1a35717f33993`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c483fd1a7fdb65af28b6ed53f7b5b4beab0e9313f6b03fdb2bc1a35717f33993`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/02_integration/storage/dbfs/nvfs_hosted_no_regression_spec.spl
+mirror: doc/06_spec/02_integration/storage/dbfs/nvfs_hosted_no_regression_spec.md (current)
+findings: 3 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=87; blocker cap makes effective=49
+doc/06_spec/02_integration/storage/dbfs/nvfs_hosted_no_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/storage/dbfs/nvfs_hosted_no_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/storage/dbfs/nvfs_hosted_no_regression_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+<!-- sspec-maintain:scorecard:end -->

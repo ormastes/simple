@@ -1,30 +1,6 @@
 # 28 Setup Headless Specification
 
-> <details>
-
-<!-- sdn-diagram:id=28_setup_headless_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=28_setup_headless_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-28_setup_headless_spec -> std
-28_setup_headless_spec -> test
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=28_setup_headless_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32 setup headless.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,13 +19,18 @@
 
 #### SYStem.Up in headless mode
 
+- SYStem.Up in headless mode
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("SYStem.Up in headless mode")
 val result = t32_hw_run_cmd(client, "SYStem.Up")
 match result:
     Ok(_): expect("cmd ok").to_contain("ok")
@@ -60,13 +41,18 @@ match result:
 
 #### AREA operations work headless
 
+- AREA operations work headless
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("AREA operations work headless")
 if not t32_hw_has_area():
     expect("AREA not available in this T32 version").to_contain("not available")
     return
@@ -92,13 +78,18 @@ match view:
 
 #### PRINT works headless on all versions
 
+- PRINT works headless on all versions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("PRINT works headless on all versions")
 # PRINT is available in all T32 versions
 val result = t32_hw_run_cmd(client, "PRINT \"headless_universal\"")
 match result:
@@ -110,18 +101,19 @@ match result:
 
 #### eval works in headless
 
-1. Ok
-2. Err
+- eval works in headless
    - Expected: "VERSION.BUILD() failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("eval works in headless")
 val result = t32_hw_eval(client, "VERSION.BUILD()")
 match result:
     Ok(v):
@@ -139,12 +131,12 @@ match result:
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/t32_hw/28_setup_headless_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering T32 setup headless.
 - T32 setup headless
 
 ## Scenario Summary
@@ -159,3 +151,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ea72218f3683a2903d2153a67fc087909dcda546a332e297103cddcead1d4d72`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ea72218f3683a2903d2153a67fc087909dcda546a332e297103cddcead1d4d72`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ea72218f3683a2903d2153a67fc087909dcda546a332e297103cddcead1d4d72`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/t32_hw/28_setup_headless_spec.spl
+mirror: doc/06_spec/02_integration/t32_hw/28_setup_headless_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/t32_hw/28_setup_headless_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/t32_hw/28_setup_headless_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/t32_hw/28_setup_headless_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'SYStem.Up in headless mode' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/t32_hw/28_setup_headless_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AREA operations work headless' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/t32_hw/28_setup_headless_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'PRINT works headless on all versions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

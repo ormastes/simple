@@ -24,7 +24,7 @@ This comprehensive suite extends the bounded CLI contract with deterministic sin
 | Design | doc/05_design/llm_caret_claude_cli_harden.md |
 | Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
 | Source | `test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -132,6 +132,7 @@ Long scenarios are executable and folded; there are no skip-only helpers.
 
 #### should return exact text in the response _(slow)_
 
+- should return exact text in the response
 - Invoke the provider with an exact-text prompt
    - Expected: exit_code equals `0`
 
@@ -139,10 +140,12 @@ Long scenarios are executable and folded; there are no skip-only helpers.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should return exact text in the response")
 step("Invoke the provider with an exact-text prompt")
 val result = call_claude_simple("Reply with exactly: HELLO_SIMPLE")
 val stdout = result.0 ?? ""
@@ -165,16 +168,19 @@ expect(content).to_contain("HELLO_SIMPLE")
 
 #### should handle simple math _(slow)_
 
+- should handle simple math
 - Invoke the provider with deterministic arithmetic
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle simple math")
 step("Invoke the provider with deterministic arithmetic")
 val result = call_claude_simple("What is 2 + 2? Reply with ONLY the number.")
 val stdout = result.0 ?? ""
@@ -194,16 +200,19 @@ expect(content).to_contain("4")
 
 #### should return a model name _(slow)_
 
+- should return a model name
 - Inspect structured provider identity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should return a model name")
 step("Inspect structured provider identity")
 val result = call_claude_simple("Say hi")
 val stdout = result.0 ?? ""
@@ -226,16 +235,19 @@ expect(has_identity).to_be(true)
 
 #### should return a session_id for tracking _(slow)_
 
+- should return a session_id for tracking
 - Inspect the structured session identifier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should return a session_id for tracking")
 step("Inspect the structured session identifier")
 val result = call_claude_simple("Say hello")
 val stdout = result.0 ?? ""
@@ -255,16 +267,19 @@ expect(session_id.len()).to_be_greater_than(0)
 
 #### should report token usage _(slow)_
 
+- should report token usage
 - Inspect structured token usage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should report token usage")
 step("Inspect structured token usage")
 val result = call_claude_simple("Say ok")
 val stdout = result.0 ?? ""
@@ -288,16 +303,19 @@ expect(total).to_be_greater_than(0)
 
 #### should follow a pirate persona system prompt _(slow)_
 
+- should follow a pirate persona system prompt
 - Invoke the provider with a persona system prompt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should follow a pirate persona system prompt")
 step("Invoke the provider with a persona system prompt")
 val result = call_claude(
     "What are you?",
@@ -323,16 +341,19 @@ expect(lower).to_contain("arr")
 
 #### should follow a CSV format constraint _(slow)_
 
+- should follow a CSV format constraint
 - Invoke the provider with a CSV-only system prompt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should follow a CSV format constraint")
 step("Invoke the provider with a CSV-only system prompt")
 val result = call_claude(
     "List 3 fruits",
@@ -359,6 +380,7 @@ expect(content).to_contain(",")
 
 #### should maintain context across 6 turns with session resume _(slow)_
 
+- should maintain context across 6 turns with session resume
 - Resume one deterministic conversation across six turns
    - Expected: first.2 equals `0`
    - Expected: result.2 equals `0`
@@ -367,10 +389,12 @@ expect(content).to_contain(",")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should maintain context across 6 turns with session resume")
 step("Resume one deterministic conversation across six turns")
 val first = call_long_claude("Remember project code ORBIT-73.", "", "", 1)
 expect(first.2).to_equal(0)
@@ -404,6 +428,7 @@ while turn <= 6:
 
 #### should build a progressive code tutor explanation _(slow)_
 
+- should build a progressive code tutor explanation
 - Resume one deterministic tutor conversation across five turns
    - Expected: first.2 equals `0`
    - Expected: fifth.2 equals `0`
@@ -412,10 +437,12 @@ while turn <= 6:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should build a progressive code tutor explanation")
 step("Resume one deterministic tutor conversation across five turns")
 val first = call_long_claude("Explain an immutable value in one sentence.", "", "", 1)
 expect(first.2).to_equal(0)
@@ -448,6 +475,7 @@ expect(fifth.2).to_equal(0)
 
 #### should maintain mutable shopping-list state _(slow)_
 
+- should maintain mutable shopping-list state
 - Resume one deterministic stateful conversation across five turns
    - Expected: first.2 equals `0`
    - Expected: fifth.2 equals `0`
@@ -456,10 +484,12 @@ expect(fifth.2).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should maintain mutable shopping-list state")
 step("Resume one deterministic stateful conversation across five turns")
 val first = call_long_claude("Start a shopping list with apples, bread, and coffee.", "", "", 1)
 expect(first.2).to_equal(0)
@@ -496,18 +526,20 @@ expect(fifth.2).to_equal(0)
 
 #### should handle repetition requests _(slow)_
 
+- should handle repetition requests
 - Ask for an exact repetition count
-- idx = idx + found idx + search len
    - Expected: count equals `5`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle repetition requests")
 step("Ask for an exact repetition count")
 val result = call_claude_simple("Repeat PLATYPUS exactly 5 times separated by spaces. Nothing else.")
 val stdout = result.0 ?? ""
@@ -540,16 +572,19 @@ expect(count).to_equal(5)
 
 #### should handle exact phrase requests _(slow)_
 
+- should handle exact phrase requests
 - Ask for an exact phrase
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle exact phrase requests")
 step("Ask for an exact phrase")
 val result = call_claude_simple("Reply with exactly: hello world test")
 val stdout = result.0 ?? ""
@@ -585,3 +620,73 @@ expect(lower).to_contain("hello world test")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-LLM-CARET-FULL-003`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b99d95169bad6f70cae4e7e3eeab4b8ff546e482d130b34024eaf8c7d33c3576`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b99d95169bad6f70cae4e7e3eeab4b8ff546e482d130b34024eaf8c7d33c3576`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b99d95169bad6f70cae4e7e3eeab4b8ff546e482d130b34024eaf8c7d33c3576`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/llm_caret_live_comprehensive_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/llm_caret_live_comprehensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/llm_caret_live_comprehensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:281:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should return exact text in the response' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:281:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should return exact text in the response' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:295:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should handle simple math' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:295:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should handle simple math' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:306:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should return a model name' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:306:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should return a model name' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:320:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should return a session_id for tracking' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:331:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should report token usage' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/llm_caret_live_comprehensive_spec.spl:350:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should follow a pirate persona system prompt' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

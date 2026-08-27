@@ -1,166 +1,154 @@
 # CSS flex gap zero cascade
 
-> Static candidate manual — runtime unclaimed. This hand-reviewed mirror
-> records expected oracles from the executable SSpec; it is not generated PASS
-> evidence.
+> This scenario proves both that a later valid `gap:0` declaration resets an earlier positive Flex gap and that a later malformed declaration does not erase an earlier valid `gap:4px`. Both cases cross the dispatch and full Style reconstruction paths; an invalid-only row remains the zero-gap control.
 
-Requirements: REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004,
-REQ-WEB-BROWSER-021.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Fixture
+<details>
+<summary>Full Scenario Manual</summary>
 
-```html
-<style>
-html,body{margin:0;width:12px;height:22px;background:#fff}
-.row{display:flex;width:12px;height:2px}
-.positive{gap:4px}
-.red{width:4px;height:2px;background:#dc2626}
-.blue{width:4px;height:2px;background:#2563eb}
-</style>
-<div id="dispatch-row" class="row positive" style="gap:0">
-  <div id="dispatch-red" class="red"></div>
-  <div id="dispatch-blue" class="blue"></div>
-</div>
-<div id="full-row" class="row positive" style="gap:0;visibility:visible">
-  <div id="full-red" class="red"></div>
-  <div id="full-blue" class="blue"></div>
-</div>
-<div id="duplicate-dispatch-row" class="row" style="gap:4px;gap:bogus">
-  <div id="duplicate-dispatch-red" class="red"></div>
-  <div id="duplicate-dispatch-blue" class="blue"></div>
-</div>
-<div id="duplicate-full-row" class="row" style="gap:4px;gap:bogus;visibility:visible">
-  <div id="duplicate-full-red" class="red"></div>
-  <div id="duplicate-full-blue" class="blue"></div>
-</div>
-<div id="invalid-only-row" class="row" style="gap:bogus">
-  <div id="invalid-only-red" class="red"></div>
-  <div id="invalid-only-blue" class="blue"></div>
-</div>
-<div id="syntax-dispatch-row" class="row"
-     style="gap:4px;gap:-9px;gap:7.5px;gap:8em;gap:10pxjunk">
-  <div id="syntax-dispatch-red" class="red"></div>
-  <div id="syntax-dispatch-blue" class="blue"></div>
-</div>
-<div id="syntax-full-row" class="row"
-     style="gap:4px;gap:-9px;gap:7.5px;gap:8em;gap:10pxjunk;visibility:visible">
-  <div id="syntax-full-red" class="red"></div>
-  <div id="syntax-full-blue" class="blue"></div>
-</div>
-<div id="initial-row" class="row positive" style="gap:initial">
-  <div id="initial-red" class="red"></div>
-  <div id="initial-blue" class="blue"></div>
-</div>
-<div id="unset-row" class="row positive" style="gap:unset">
-  <div id="unset-red" class="red"></div>
-  <div id="unset-blue" class="blue"></div>
-</div>
-<div id="inherit-row" class="row positive" style="gap:inherit">
-  <div id="inherit-red" class="red"></div>
-  <div id="inherit-blue" class="blue"></div>
-</div>
-<div id="inherit-full-row" class="row positive"
-     style="gap:inherit;visibility:visible">
-  <div id="inherit-full-red" class="red"></div>
-  <div id="inherit-full-blue" class="blue"></div>
-</div>
+# CSS flex gap zero cascade
+
+This scenario proves both that a later valid `gap:0` declaration resets an earlier positive Flex gap and that a later malformed declaration does not erase an earlier valid `gap:4px`. Both cases cross the dispatch and full Style reconstruction paths; an invalid-only row remains the zero-gap control.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
+| Plan | doc/03_plan/sys_test/css_gap_zero_cascade.md |
+| Source | `test/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This scenario proves both that a later valid `gap:0` declaration resets an
+earlier positive Flex gap and that a later malformed declaration does not
+erase an earlier valid `gap:4px`. Both cases cross the dispatch and full Style
+reconstruction paths; an invalid-only row remains the zero-gap control.
+
+All rows lower through shared Web semantic/layout state into the existing
+canonical `DrawIrComposition` and Engine2D executor. No private painter,
+parallel Web IR, Draw IR command, or backend path is introduced.
+
+## Standards contract
+
+CSS Box Alignment admits zero as a non-negative gap. A valid later declaration
+wins, while a malformed declaration is discarded before winner selection.
+Malformed-only and negative gaps remain outside the accepted subset.
+
+## Exact fixture
+
+The viewport is 12 by 22 pixels. The first two 12-by-2 Flex rows reset a 4px
+stylesheet gap to zero. The next two retain `gap:4px` before a malformed
+duplicate through the dispatch and full reconstruction paths. Further rows
+reject signed, decimal, foreign-unit, and trailing-junk values, reset
+`initial`/`unset`, reset a positive class at terminal parent-default `inherit`
+through both declaration paths, and keep invalid-only controls at zero.
+
+General nonzero inherited gaps remain RED until computed parent gap state is
+available. `revert` and `revert-layer` also remain RED until origin and layer
+state is represented; this scenario does not approximate either keyword.
+
+## Evidence boundary
+
+The SSpec asserts parsed nodes, computed gap fields, exact semantic boxes,
+canonical Draw IR rectangle geometry and color, zero skipped commands, and
+all 264 framebuffer pixels. Runtime PASS is claimed only after a qualified
+pure-Simple execution; static review alone is not runtime evidence.
+
+## Scenarios
+
+### REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade
+
+#### should reset positive Flex gaps through both declaration paths
+
+**Scenario capture:** artifact after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WEB-BROWSER-003/004/021
 ```
 
-## Parse the split-cascade zero-gap fixture
+</details>
 
-Expected semantic row nodes are `div#dispatch-row`, `div#full-row`,
-`div#duplicate-dispatch-row`, `div#duplicate-full-row`, and
-`div#invalid-only-row`, both `syntax-*` rows, and the `initial`, `unset`, and
-both `inherit` controls. The composition source kind is expected to be
-`html_ast`.
+## Scenario Summary
 
-## Resolve zero-gap Web layout geometry
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-The zero-reset rows expose `[gap_px,row_gap_px,column_gap_px]` as `[0,0,0]`.
-Both duplicate-declaration rows expose `[4,4,4]`; the invalid-only negative
-control exposes `[0,0,0]`. Both syntax rows retain `[4,4,4]` after rejecting
-signed, decimal, foreign-unit, and trailing-junk duplicates. `initial` and
-`unset` reset to `[0,0,0]`. Both terminal parent-default `inherit` controls
-reset the positive class gap to zero through the dispatch and full
-reconstruction paths; nonzero parent inheritance is not claimed because the
-current Style input has no parent computed-gap channel.
 
-| Component | Expected box `[x,y,w,h]` |
-|---|---|
-| `dispatch-row` | `[0,0,12,2]` |
-| `dispatch-red` | `[0,0,4,2]` |
-| `dispatch-blue` | `[4,0,4,2]` |
-| `full-row` | `[0,2,12,2]` |
-| `full-red` | `[0,2,4,2]` |
-| `full-blue` | `[4,2,4,2]` |
-| `duplicate-dispatch-row` | `[0,4,12,2]` |
-| `duplicate-dispatch-red` | `[0,4,4,2]` |
-| `duplicate-dispatch-blue` | `[8,4,4,2]` |
-| `duplicate-full-row` | `[0,6,12,2]` |
-| `duplicate-full-red` | `[0,6,4,2]` |
-| `duplicate-full-blue` | `[8,6,4,2]` |
-| `invalid-only-row` | `[0,8,12,2]` |
-| `invalid-only-red` | `[0,8,4,2]` |
-| `invalid-only-blue` | `[4,8,4,2]` |
-| `syntax-dispatch-row` | `[0,10,12,2]` |
-| `syntax-dispatch-red` | `[0,10,4,2]` |
-| `syntax-dispatch-blue` | `[8,10,4,2]` |
-| `syntax-full-row` | `[0,12,12,2]` |
-| `syntax-full-red` | `[0,12,4,2]` |
-| `syntax-full-blue` | `[8,12,4,2]` |
-| `initial-row` | `[0,14,12,2]` |
-| `initial-red` | `[0,14,4,2]` |
-| `initial-blue` | `[4,14,4,2]` |
-| `unset-row` | `[0,16,12,2]` |
-| `unset-red` | `[0,16,4,2]` |
-| `unset-blue` | `[4,16,4,2]` |
-| `inherit-row` | `[0,18,12,2]` |
-| `inherit-red` | `[0,18,4,2]` |
-| `inherit-blue` | `[4,18,4,2]` |
-| `inherit-full-row` | `[0,20,12,2]` |
-| `inherit-full-red` | `[0,20,4,2]` |
-| `inherit-full-blue` | `[4,20,4,2]` |
+## Related Documentation
 
-## Emit adjacent canonical Draw IR rectangles
+- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+- **Plan:** `doc/03_plan/sys_test/css_gap_zero_cascade.md`
 
-All twenty-two colored items are expected to remain ordinary canonical `rect`
-commands. Red commands use `0xFFDC2626`; blue commands use `0xFF2563EB`.
-Their command geometry exactly matches the child boxes above, proving that no
-private painter or backend-specific gap correction is involved.
 
-## Render exact zero-gap Engine2D pixels
+</details>
 
-Expected skipped-command count: `0`.
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-Expected full framebuffer length: `264`. Every pixel is checked. Each listed
-pattern occupies both scanlines of its row, with `R=0xFFDC2626`,
-`B=0xFF2563EB`, and `W=0xFFFFFFFF`.
+Requirements covered by the scenarios in this manual:
 
-| Row y | Exact 12-pixel pattern |
-|---:|---|
-| 0 | `RRRRBBBBWWWW` |
-| 2 | `RRRRBBBBWWWW` |
-| 4 | `RRRRWWWWBBBB` |
-| 6 | `RRRRWWWWBBBB` |
-| 8 | `RRRRBBBBWWWW` |
-| 10 | `RRRRWWWWBBBB` |
-| 12 | `RRRRWWWWBBBB` |
-| 14 | `RRRRBBBBWWWW` |
-| 16 | `RRRRBBBBWWWW` |
-| 18 | `RRRRBBBBWWWW` |
-| 20 | `RRRRBBBBWWWW` |
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004/021`
+<!-- sspec-maintain:traceability:end -->
 
-## Claim boundary
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-This scenario claims strict nonnegative integer/`px` parsing, last-valid
-duplicate recovery, `initial`/`unset` reset, and terminal parent-default
-`inherit` behavior for Flex `gap` through both declaration paths. General
-nonzero `inherit`, `revert`, and `revert-layer` remain RED until parent
-computed-gap and origin/layer provenance reach this owner. Percentage gaps,
-multi-column `normal`, and complete CSS Box Alignment parity remain outside
-this slice.
+- Canonical SPipe generation for source `b6776f4067e9b779412f184cc5800e3e774745db0fcdbf235d456e7c493aba95`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-## Evidence provenance
+Source SHA-256: `b6776f4067e9b779412f184cc5800e3e774745db0fcdbf235d456e7c493aba95`.
+<!-- sspec-maintain:provenance:end -->
 
-No runtime, bootstrap, or docgen was invoked for this candidate. All values
-above are expected static oracles pending qualified pure-Simple execution.
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b6776f4067e9b779412f184cc5800e3e774745db0fcdbf235d456e7c493aba95`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.spl:168:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should reset positive Flex gaps through both declaration paths' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/flex_gap_zero_cascade_spec.spl:168:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reset positive Flex gaps through both declaration paths' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

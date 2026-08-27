@@ -1,29 +1,6 @@
 # Physics 3d Smoke Specification
 
-> 1. var config = default physics config 3d
-
-<!-- sdn-diagram:id=physics_3d_smoke_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=physics_3d_smoke_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-physics_3d_smoke_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=physics_3d_smoke_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Physics2 3D Smoke Test.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,23 +17,24 @@ physics_3d_smoke_spec -> std
 
 #### sphere falls under gravity
 
-1. var config = default physics config 3d
-2. var world = PhysicsWorld3D create
-3. world add dynamic body
-4. world add sphere collider
-5. step 3d
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- sphere falls under gravity
    - Expected: pos.y < 10.0 is true
    - Expected: pos.y > -50.0 is true
-6. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sphere falls under gravity")
 var config = default_physics_config_3d()
 var world = PhysicsWorld3D.create(config)
 world.add_dynamic_body(make_node(0), 0.0, 10.0, 0.0, 1.0)
@@ -72,23 +50,20 @@ world.destroy()
 
 #### x and z unchanged for vertical drop
 
-1. var config = default physics config 3d
-2. var world = PhysicsWorld3D create
-3. world add dynamic body
-4. world add sphere collider
-5. step 3d
+- x and z unchanged for vertical drop
    - Expected: math_abs(pos.x - 3.0) < 0.01 is true
    - Expected: math_abs(pos.z - (-2.0)) < 0.01 is true
-6. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("x and z unchanged for vertical drop")
 var config = default_physics_config_3d()
 var world = PhysicsWorld3D.create(config)
 world.add_dynamic_body(make_node(0), 3.0, 10.0, -2.0, 1.0)
@@ -104,30 +79,26 @@ world.destroy()
 
 #### body count correct
 
-1. var config = default physics config 3d
-2. var world = PhysicsWorld3D create
-3. world add dynamic body
-4. world add sphere collider
-5. world add static body
-6. world add box collider
-   - Expected: world.body_count() == 2 is true
-7. world destroy
+- body count correct
+   - Expected: world.body_count() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("body count correct")
 var config = default_physics_config_3d()
 var world = PhysicsWorld3D.create(config)
 world.add_dynamic_body(make_node(0), 0.0, 5.0, 0.0, 1.0)
 world.add_sphere_collider(make_node(0), 0.5)
 world.add_static_body(make_node(1), 0.0, 0.0, 0.0)
 world.add_box_collider(make_node(1), 5.0, 0.5, 5.0)
-expect(world.body_count() == 2).to_equal(true)
+expect(world.body_count()).to_equal(2)
 world.destroy()
 ```
 
@@ -135,22 +106,19 @@ world.destroy()
 
 #### velocity increases during fall
 
-1. var config = default physics config 3d
-2. var world = PhysicsWorld3D create
-3. world add dynamic body
-4. world add sphere collider
-5. step 3d
+- velocity increases during fall
    - Expected: vel.y < -0.1 is true
-6. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("velocity increases during fall")
 var config = default_physics_config_3d()
 var world = PhysicsWorld3D.create(config)
 world.add_dynamic_body(make_node(0), 0.0, 10.0, 0.0, 1.0)
@@ -170,12 +138,12 @@ world.destroy()
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/engine/physics_3d_smoke_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Physics2 3D Smoke Test.
 - Physics2 3D Smoke Test
 
 ## Scenario Summary
@@ -190,3 +158,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `683bfbde62a75bb889d4e1ff370c16c35dee1c90a06bccdefed69018096cafb9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `683bfbde62a75bb889d4e1ff370c16c35dee1c90a06bccdefed69018096cafb9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `683bfbde62a75bb889d4e1ff370c16c35dee1c90a06bccdefed69018096cafb9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/engine/physics_3d_smoke_spec.spl
+mirror: doc/06_spec/03_system/engine/physics_3d_smoke_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/engine/physics_3d_smoke_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/engine/physics_3d_smoke_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/engine/physics_3d_smoke_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/engine/physics_3d_smoke_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sphere falls under gravity' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/engine/physics_3d_smoke_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'x and z unchanged for vertical drop' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/engine/physics_3d_smoke_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'body count correct' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,29 +2,6 @@
 
 > obj?.field               # Safe field access - returns Option
 
-<!-- sdn-diagram:id=optional_chaining_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=optional_chaining_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-optional_chaining_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=optional_chaining_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -44,7 +21,7 @@ obj?.field               # Safe field access - returns Option
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/optional_chaining_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -72,16 +49,18 @@ obj?.field?.nested?.deep # Safe chaining - short-circuits on None
 
 #### returns Some when value is present
 
-1. expect result == Some
+- returns Some when value is present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns Some when value is present")
 class Profile:
     bio: text
 
@@ -99,13 +78,18 @@ expect result == Some("Hello")
 
 #### returns None when intermediate value is None
 
+- returns None when intermediate value is None
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns None when intermediate value is None")
 class Profile:
     bio: text
 
@@ -122,13 +106,18 @@ expect result == None
 
 #### works with deeply nested structures
 
+- works with deeply nested structures
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with deeply nested structures")
 class Address:
     city: text
 
@@ -148,13 +137,18 @@ expect profile_opt != None
 
 #### short-circuits on first None in chain
 
+- short-circuits on first None in chain
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("short-circuits on first None in chain")
 class Address:
     city: text
 
@@ -176,17 +170,18 @@ expect result == None
 
 #### calls method when value is Some
 
-1. fn get doubled
-2. expect result == Some
+- calls method when value is Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls method when value is Some")
 class Container:
     value: i64
 
@@ -201,16 +196,18 @@ expect result == Some(42)
 
 #### returns None when Option is None
 
-1. fn get doubled
+- returns None when Option is None
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns None when Option is None")
 class Container:
     value: i64
 
@@ -225,17 +222,18 @@ expect result == None
 
 #### works with chained method calls
 
-1. fn increment
-2. expect result == Some
+- works with chained method calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with chained method calls")
 class Wrapper:
     value: i64
 
@@ -252,17 +250,18 @@ expect result == Some(Wrapper(value: 3))
 
 #### handles methods with parameters
 
-1. fn add
-2. expect result == Some
+- handles methods with parameters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles methods with parameters")
 class Calculator:
     value: i64
 
@@ -279,17 +278,18 @@ expect result == Some(15)
 
 #### combines field and method access
 
-1. fn double count
-2. expect result == Some
+- combines field and method access
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines field and method access")
 class Data:
     count: i64
 
@@ -307,16 +307,18 @@ expect result == Some(10)
 
 #### chains field access followed by field access
 
-1. expect result == Some
+- chains field access followed by field access
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains field access followed by field access")
 class Inner:
     name: text
 
@@ -337,13 +339,18 @@ expect result == Some("test")
 
 #### provides fallback when chaining returns None
 
+- provides fallback when chaining returns None
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides fallback when chaining returns None")
 class Profile:
     bio: text
 
@@ -360,13 +367,18 @@ expect result == "No bio"
 
 #### uses actual value when chaining succeeds
 
+- uses actual value when chaining succeeds
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses actual value when chaining succeeds")
 class Profile:
     bio: text
 
@@ -382,13 +394,18 @@ expect result == "Developer"
 
 #### chains multiple fallbacks
 
+- chains multiple fallbacks
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains multiple fallbacks")
 class Settings:
     theme: Option<text>
 
@@ -406,17 +423,18 @@ expect result == "dark"
 
 #### wraps return value in Option
 
-1. fn status
-2. expect result == Some
+- wraps return value in Option
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("wraps return value in Option")
 class Service:
     fn status() -> i64: 200
 
@@ -430,17 +448,18 @@ expect result == Some(200)
 
 #### preserves complex types through chaining
 
-1. fn get items
-2. expect result == Some
+- preserves complex types through chaining
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves complex types through chaining")
 class DataContainer:
     items: List<i64>
 
@@ -457,18 +476,18 @@ expect result == Some([1, 2, 3])
 
 #### works with collection methods
 
-1. fn find item
-2. self items filter
-3. expect result == Some
+- works with collection methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with collection methods")
 class Item:
     name: text
 
@@ -487,17 +506,18 @@ expect result == Some(Item(name: "sword"))
 
 #### handles None in collection operations
 
-1. fn find item
-2. self items filter
+- handles None in collection operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles None in collection operations")
 class Item:
     name: text
 
@@ -518,16 +538,18 @@ expect result == None
 
 #### simplifies conditional access patterns
 
-1. expect email == Some
+- simplifies conditional access patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("simplifies conditional access patterns")
 class User:
     name: text
     email: Option<text>
@@ -542,16 +564,18 @@ expect email == Some("ALICE@EXAMPLE.COM")
 
 #### provides defensive programming in data processing
 
-1. expect detail == Some
+- provides defensive programming in data processing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides defensive programming in data processing")
 class LogEntry:
     message: text
     details: Option<text>
@@ -566,16 +590,18 @@ expect detail == Some("File not found")
 
 #### enables safe navigation in unknown data structures
 
-1. expect key exists == Some
+- enables safe navigation in unknown data structures
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("enables safe navigation in unknown data structures")
 class Config:
     settings: Option<Dict<text, text>>
 
@@ -599,3 +625,51 @@ expect key_exists == Some("value")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a175f3b631dc958fe58ca76a8ac5ef4df47eaa92759679c8a139f4cf257975e4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a175f3b631dc958fe58ca76a8ac5ef4df47eaa92759679c8a139f4cf257975e4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a175f3b631dc958fe58ca76a8ac5ef4df47eaa92759679c8a139f4cf257975e4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/optional_chaining_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/optional_chaining_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/optional_chaining_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/optional_chaining_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/optional_chaining_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns Some when value is present' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/optional_chaining_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns None when intermediate value is None' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/optional_chaining_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'works with deeply nested structures' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

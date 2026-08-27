@@ -932,3 +932,7 @@ default lane on both the old and the new binary.
   does not change compiler behaviour. Scan cost ~20s (census dominates).
 - Deliberate-update path `--generate-baseline`, documented as reviewed-updates-only
   in `.claude/rules/vcs.md` alongside the divergence-baseline warning.
+
+## 2026-08-26 ag-batch: rt_hash_sha256 extern breaks test_host_env spec
+
+`test/01_unit/app/test_host_env_spec.spl` scenario "rejects stale or substituted SIMD source compiler and receipt provenance" fails with `semantic: unknown extern function: rt_hash_sha256` — pre-existing at HEAD (proven via in-place `git show HEAD:` restore, Results: 4 total, 3 passed, 1 failed). Left RED; blocks the sspec modernization oracle rewrite for this spec.

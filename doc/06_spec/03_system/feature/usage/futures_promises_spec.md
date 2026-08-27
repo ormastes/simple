@@ -2,29 +2,6 @@
 
 > This spec validates the full Promises API for asynchronous programming in Simple. Promises represent eventual values with three states: `Pending`, `Resolved(value)`, and `Rejected(error)`. The API supports creation via `Promise.new` with executor callbacks, transformation via `map` and `flat_map`, error recovery via `catch`, and multi-promise coordination via `all` (wait for all) and `race` (first settled wins). The spec also tests `future(expr)` with `await` for simple deferred values, and verifies that promise resolution is idempotent (only the first `resolve` or `reject` takes effect).
 
-<!-- sdn-diagram:id=futures_promises_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=futures_promises_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-futures_promises_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=futures_promises_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 15 | 15 | 0 | 0 |
@@ -44,7 +21,7 @@ This spec validates the full Promises API for asynchronous programming in Simple
 | Category | Runtime |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/futures_promises_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,6 +37,8 @@ that promise resolution is idempotent (only the first `resolve` or `reject` take
 ## Syntax
 
 ```simple
+use std.spec.step
+
 val p = Promise.new(\resolve, reject: resolve(42))
 val p2 = Promise.resolved(21).map(_1 * 2)          # map transforms value
 val p3 = Promise.rejected("error").catch(\e: 42)    # catch recovers
@@ -92,13 +71,18 @@ expect await f == 60                     # future with await
 
 #### creates future from immediate value
 
+- creates future from immediate value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates future from immediate value")
 val f = future(42)
 expect await f == 42
 ```
@@ -107,13 +91,18 @@ expect await f == 42
 
 #### creates future from computation
 
+- creates future from computation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates future from computation")
 val f = future(10 + 20 + 30)
 expect await f == 60
 ```
@@ -124,13 +113,18 @@ expect await f == 60
 
 #### resolves promise to value
 
+- resolves promise to value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves promise to value")
 val p = Promise.new(\resolve, reject: resolve(42))
 match p.state:
     case PromiseState.Resolved(v):
@@ -143,17 +137,18 @@ match p.state:
 
 #### fulfills promise once
 
-1. resolve
-2. resolve
+- fulfills promise once
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fulfills promise once")
 var resolve_count = 0
 val p = Promise.new(\resolve, reject:
     resolve(10)
@@ -174,13 +169,18 @@ match p.state:
 
 #### maps future to new value
 
+- maps future to new value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maps future to new value")
 val p = Promise.resolved(21)
 val p2 = p.map(_1 * 2)
 match p2.state:
@@ -194,13 +194,18 @@ match p2.state:
 
 #### chains multiple map operations
 
+- chains multiple map operations
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains multiple map operations")
 val p = Promise.resolved(5)
 val p2 = p.map(_1 * 2).map(_1 + 10).map(_1 * 3)
 match p2.state:
@@ -216,13 +221,18 @@ match p2.state:
 
 #### flattens nested futures
 
+- flattens nested futures
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("flattens nested futures")
 val p = Promise.resolved(10)
 val p2 = p.flat_map(Promise.resolved(_1 * 2))
 match p2.state:
@@ -236,16 +246,18 @@ match p2.state:
 
 #### chains async operations with flatMap
 
-1.  flat map
+- chains async operations with flatMap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains async operations with flatMap")
 val p = Promise.resolved(5)
 val p2 = p.flat_map(Promise.resolved(_1 * 2))
           .flat_map(Promise.resolved(_1 + 10))
@@ -264,13 +276,18 @@ match p2.state:
 
 #### captures exception in failed future
 
+- captures exception in failed future
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures exception in failed future")
 val p = Promise.rejected("error occurred")
 match p.state:
     case PromiseState.Rejected(e):
@@ -283,13 +300,18 @@ match p.state:
 
 #### propagates errors through chain
 
+- propagates errors through chain
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("propagates errors through chain")
 val p = Promise.rejected("original error")
 val p2 = p.map(_1 * 2)
 match p2.state:
@@ -305,13 +327,18 @@ match p2.state:
 
 #### recovers with fallback value
 
+- recovers with fallback value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("recovers with fallback value")
 val p = Promise.rejected("error")
 val p2 = p.catch(\e: 42)
 match p2.state:
@@ -325,13 +352,18 @@ match p2.state:
 
 #### retries failed future
 
+- retries failed future
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("retries failed future")
 val p = Promise.rejected("first attempt")
 val p2 = p.catch(\e: Promise.resolved(100))
 match p2.state:
@@ -347,13 +379,18 @@ match p2.state:
 
 #### combines multiple futures
 
+- combines multiple futures
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines multiple futures")
 val p1 = Promise.resolved(10)
 val p2 = Promise.resolved(20)
 val p3 = Promise.resolved(30)
@@ -369,13 +406,18 @@ match combined.state:
 
 #### handles timeout on future
 
+- handles timeout on future
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles timeout on future")
 # Test race condition - first resolved wins
 val p1 = Promise.resolved(42)
 val p2 = Promise.resolved(100)
@@ -391,13 +433,18 @@ match winner.state:
 
 #### cancels pending future
 
+- cancels pending future
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("cancels pending future")
 # Test race with rejection - first settled wins
 val p1 = Promise.rejected("timeout")
 val p2 = Promise.resolved(42)
@@ -423,3 +470,51 @@ match result.state:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3e8827b120bd55b393c852ca15695cf3f00b9b07f23a2dc02ef6f6cbe07daf7c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3e8827b120bd55b393c852ca15695cf3f00b9b07f23a2dc02ef6f6cbe07daf7c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3e8827b120bd55b393c852ca15695cf3f00b9b07f23a2dc02ef6f6cbe07daf7c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/futures_promises_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/futures_promises_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/futures_promises_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/futures_promises_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/futures_promises_spec.spl:168:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates future from immediate value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/futures_promises_spec.spl:174:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates future from computation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/futures_promises_spec.spl:185:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves promise to value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

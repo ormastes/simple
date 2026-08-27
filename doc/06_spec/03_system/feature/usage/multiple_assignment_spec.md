@@ -1,29 +1,6 @@
 # Multiple Assignment (Destructuring) Specification
 
-> val (x, y) = get_point()
-
-<!-- sdn-diagram:id=multiple_assignment_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=multiple_assignment_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-multiple_assignment_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=multiple_assignment_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ multiple_assignment_spec
 
 # Multiple Assignment (Destructuring) Specification
 
-val (x, y) = get_point()
+use std.spec.step
 
 ## At a Glance
 
@@ -44,13 +21,15 @@ val (x, y) = get_point()
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/multiple_assignment_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
 
 ```simple
 # Tuple destructuring
+use std.spec.step
+
 val (x, y) = get_point()
 val (first, second, ...rest) = items
 
@@ -76,13 +55,18 @@ val {name, age} = person
 
 #### destructures a pair
 
+- destructures a pair
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures a pair")
 val pair = (10, 20)
 val a = pair[0]
 val b = pair[1]
@@ -94,13 +78,18 @@ expect b == 20
 
 #### destructures a triple
 
+- destructures a triple
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures a triple")
 val triple = (1, 2, 3)
 val x = triple[0]
 val y = triple[1]
@@ -114,13 +103,18 @@ expect z == 3
 
 #### uses destructured values in expressions
 
+- uses destructured values in expressions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses destructured values in expressions")
 val point = (3, 4)
 val x = point[0]
 val y = point[1]
@@ -132,17 +126,18 @@ expect distance_squared == 25
 
 #### destructures function return value
 
-1. fn get coordinates
-2.
+- destructures function return value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures function return value")
 fn get_coordinates() -> (i64, i64):
     (100, 200)
 val _result = get_coordinates()
@@ -158,13 +153,18 @@ expect y == 200
 
 #### ignores first element with wildcard
 
+- ignores first element with wildcard
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ignores first element with wildcard")
 val triple = (1, 2, 3)
 # _ = triple[0]  # ignored
 val b = triple[1]
@@ -177,13 +177,18 @@ expect c == 3
 
 #### ignores middle element with wildcard
 
+- ignores middle element with wildcard
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ignores middle element with wildcard")
 val triple = (1, 2, 3)
 val a = triple[0]
 # _ = triple[1]  # ignored
@@ -196,13 +201,18 @@ expect c == 3
 
 #### ignores last element with wildcard
 
+- ignores last element with wildcard
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ignores last element with wildcard")
 val triple = (1, 2, 3)
 val a = triple[0]
 val b = triple[1]
@@ -215,13 +225,18 @@ expect b == 2
 
 #### ignores multiple elements
 
+- ignores multiple elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ignores multiple elements")
 val quad = (1, 2, 3, 4)
 val a = quad[0]
 # _ = quad[1]  # ignored
@@ -237,13 +252,18 @@ expect d == 4
 
 #### destructures nested tuples
 
+- destructures nested tuples
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures nested tuples")
 val nested = ((1, 2), 3)
 val _inner = nested[0]
 val a = _inner[0]
@@ -258,13 +278,18 @@ expect c == 3
 
 #### destructures deeply nested tuples
 
+- destructures deeply nested tuples
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures deeply nested tuples")
 val deep = (((1, 2), 3), 4)
 val _outer = deep[0]
 val _inner = _outer[0]
@@ -284,13 +309,18 @@ expect d == 4
 
 #### destructures fixed-size array
 
+- destructures fixed-size array
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures fixed-size array")
 val arr = [10, 20, 30]
 val a = arr[0]
 val b = arr[1]
@@ -304,13 +334,18 @@ expect c == 30
 
 #### destructures with wildcard
 
+- destructures with wildcard
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures with wildcard")
 val arr = [1, 2, 3]
 val x = arr[0]
 # _ = arr[1]  # ignored
@@ -325,13 +360,18 @@ expect z == 3
 
 #### creates mutable bindings
 
+- creates mutable bindings
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates mutable bindings")
 val pair = (5, 10)
 var a = pair[0]
 var b = pair[1]
@@ -345,13 +385,18 @@ expect b == 11
 
 #### allows partial mutation
 
+- allows partial mutation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows partial mutation")
 val triple = (1, 2, 3)
 var x = triple[0]
 var y = triple[1]
@@ -368,13 +413,18 @@ expect z == 3
 
 #### destructures tuples with different types
 
+- destructures tuples with different types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures tuples with different types")
 val mixed = ("hello", 42)
 val name = mixed[0]
 val count = mixed[1]
@@ -386,13 +436,18 @@ expect count == 42
 
 #### destructures nested mixed types
 
+- destructures nested mixed types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures nested mixed types")
 val data = (("Alice", 30), true)
 val _inner = data[0]
 val name = _inner[0]
@@ -412,17 +467,18 @@ expect active == true
 
 #### destructures in for loop
 
-1. fn sum pairs
-2. expect sum pairs
+- destructures in for loop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures in for loop")
 # Tuple destructuring inside for loop body is not supported
 # in interpreter mode. Use indexed access instead.
 val pairs = [(1, 2), (3, 4), (5, 6)]
@@ -441,17 +497,18 @@ expect sum_pairs(pairs) == 21
 
 #### uses destructured values for computation
 
-1. fn sum points
-2. expect sum points
+- uses destructured values for computation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses destructured values for computation")
 val points = [(0, 0), (3, 4), (6, 8)]
 fn sum_points(points) -> i64:
     var total = 0
@@ -475,3 +532,51 @@ expect sum_points(points) == 21
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0925250c64244959c80c36d078b1c5d0189a7de4f97efbd48ae980d150629aa1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0925250c64244959c80c36d078b1c5d0189a7de4f97efbd48ae980d150629aa1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0925250c64244959c80c36d078b1c5d0189a7de4f97efbd48ae980d150629aa1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/multiple_assignment_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/multiple_assignment_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/multiple_assignment_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/multiple_assignment_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/multiple_assignment_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'destructures a pair' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/multiple_assignment_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'destructures a triple' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/multiple_assignment_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses destructured values in expressions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

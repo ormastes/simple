@@ -1,31 +1,6 @@
 # Db Benchmark Suite Specification
 
-> 1. var db = PureDatabase memory deferred
-
-<!-- sdn-diagram:id=db_benchmark_suite_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=db_benchmark_suite_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-db_benchmark_suite_spec -> std
-db_benchmark_suite_spec -> nogc_sync_mut
-db_benchmark_suite_spec -> test
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=db_benchmark_suite_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Phase 8: Head-to-Head Benchmark Suite, W1: Bulk INSERT 200 — SQL vs Direct API, W2: Point SELECT — SQL vs get() (hash index), W3: Range Scan — SQL vs scan_range() (RowBitmap), W4: Full Scan — SQL vs scan_all(), W5: Delete — SQL vs delete_by_key(), W6: Mixed OLTP (80% read, 20% write).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -44,27 +19,19 @@ db_benchmark_suite_spec -> test
 
 #### compares SQL INSERT vs put() for 200 rows
 
-1. var db = PureDatabase memory deferred
-2. db exec sql
-3. db exec sql
-4. db exec sql
-5. db checkpoint
-6. db put
-7. db checkpoint
-8. print
-9. print
-10. print
+- compares SQL INSERT vs put() for 200 rows
    - Expected: true is true
-11. db close
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("compares SQL INSERT vs put() for 200 rows")
 var db = PureDatabase.memory_deferred().unwrap()
 db.exec_sql("CREATE TABLE w1_sql (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
 db.exec_sql("CREATE TABLE w1_api (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
@@ -99,24 +66,19 @@ db.close().unwrap()
 
 #### compares SQL PK lookup vs direct API get()
 
-1. var db = PureDatabase memory deferred
-2. db exec sql
-3. db put
-4. db checkpoint
-   - Expected: r.? is true
-5. print
-6. print
-7. print
-8. db close
+- compares SQL PK lookup vs direct API get()
+   - Expected: r != nil is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("compares SQL PK lookup vs direct API get()")
 var db = PureDatabase.memory_deferred().unwrap()
 db.exec_sql("CREATE TABLE w2 (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
 var i = 0
@@ -139,7 +101,7 @@ var k = 0
 while k < 100:
     val idx2 = k * 2
     val r = db.get("w2", "id", DbValue.Integer(value: idx2 as i64)).unwrap()
-    expect(r.?).to_equal(true)
+    expect(r != nil).to_equal(true)
     k = k + 1
 val t1_api = bench_now_ns()
 
@@ -157,23 +119,18 @@ db.close().unwrap()
 
 #### compares SQL range vs bitmap-accelerated scan_range()
 
-1. var db = PureDatabase memory deferred
-2. db exec sql
-3. db put
-4. db checkpoint
-5. print
-6. print
-7. print
-8. db close
+- compares SQL range vs bitmap-accelerated scan_range()
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("compares SQL range vs bitmap-accelerated scan_range()")
 var db = PureDatabase.memory_deferred().unwrap()
 db.exec_sql("CREATE TABLE w3 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
 var i = 0
@@ -211,23 +168,18 @@ db.close().unwrap()
 
 #### compares SQL SELECT * vs typed scan_all()
 
-1. var db = PureDatabase memory deferred
-2. db exec sql
-3. db put
-4. db checkpoint
-5. print
-6. print
-7. print
-8. db close
+- compares SQL SELECT * vs typed scan_all()
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("compares SQL SELECT * vs typed scan_all()")
 var db = PureDatabase.memory_deferred().unwrap()
 db.exec_sql("CREATE TABLE w4 (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)").unwrap()
 var i = 0
@@ -265,30 +217,18 @@ db.close().unwrap()
 
 #### compares SQL DELETE vs direct delete_by_key()
 
-1. var db sql = PureDatabase memory deferred
-2. db sql exec sql
-3. var db api = PureDatabase memory deferred
-4. db api exec sql
-5. db sql exec sql
-6. db api put
-7. db sql checkpoint
-8. db api checkpoint
-9. db sql exec sql
-10. db api delete by key
-11. print
-12. print
-13. print
-14. db sql close
-15. db api close
+- compares SQL DELETE vs direct delete_by_key()
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("compares SQL DELETE vs direct delete_by_key()")
 var db_sql = PureDatabase.memory_deferred().unwrap()
 db_sql.exec_sql("CREATE TABLE w5s (id INTEGER PRIMARY KEY, name TEXT)").unwrap()
 var db_api = PureDatabase.memory_deferred().unwrap()
@@ -331,23 +271,19 @@ db_api.close().unwrap()
 
 #### measures mixed workload with typed API
 
-1. var db = PureDatabase memory deferred
-2. db exec sql
-3. db put
-4. db checkpoint
-5. db put
-6. print
+- measures mixed workload with typed API
    - Expected: true is true
-7. db close
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-PERF
+step("measures mixed workload with typed API")
 var db = PureDatabase.memory_deferred().unwrap()
 db.exec_sql("CREATE TABLE w6 (id INTEGER PRIMARY KEY, name TEXT, counter INTEGER)").unwrap()
 var i = 0
@@ -385,12 +321,12 @@ db.close().unwrap()
 | Category | Other |
 | Status | Active |
 | Source | `test/05_perf/bench/db_benchmark_suite_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Phase 8: Head-to-Head Benchmark Suite, W1: Bulk INSERT 200 — SQL vs Direct API, W2: Point SELECT — SQL vs get() (hash index), W3: Range Scan — SQL vs scan_range() (RowBitmap), W4: Full Scan — SQL vs scan_all(), W5: Delete — SQL vs delete_by_key(), W6: Mixed OLTP (80% read, 20% write).
 - Phase 8: Head-to-Head Benchmark Suite
 - W1: Bulk INSERT 200 — SQL vs Direct API
 - W2: Point SELECT — SQL vs get() (hash index)
@@ -411,3 +347,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c68232a60cba5b69d39be29476916d27d96535b12928ab1ba5c6f88761d03ebc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c68232a60cba5b69d39be29476916d27d96535b12928ab1ba5c6f88761d03ebc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c68232a60cba5b69d39be29476916d27d96535b12928ab1ba5c6f88761d03ebc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/05_perf/bench/db_benchmark_suite_spec.spl
+mirror: doc/06_spec/05_perf/bench/db_benchmark_suite_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/05_perf/bench/db_benchmark_suite_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/bench/db_benchmark_suite_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/bench/db_benchmark_suite_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares SQL INSERT vs put() for 200 rows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/bench/db_benchmark_suite_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares SQL PK lookup vs direct API get()' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/05_perf/bench/db_benchmark_suite_spec.spl:113:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares SQL range vs bitmap-accelerated scan_range()' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

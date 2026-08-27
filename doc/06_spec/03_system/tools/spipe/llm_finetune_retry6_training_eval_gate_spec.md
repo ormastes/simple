@@ -2,32 +2,9 @@
 
 > Retry6 is the real training/eval handoff gate after retry5 licensed cache review. It must stay WARN unless retry5 is ready, the model manifest is deployable, and the target eval reaches the selected 90.0 accuracy threshold.
 
-<!-- sdn-diagram:id=llm_finetune_retry6_training_eval_gate_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=llm_finetune_retry6_training_eval_gate_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-llm_finetune_retry6_training_eval_gate_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=llm_finetune_retry6_training_eval_gate_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +18,6 @@ Retry6 is the real training/eval handoff gate after retry5 licensed cache review
 | Field | Value |
 |-------|-------|
 | Feature IDs | #SP-FINETUNE-RETRY6-001 |
-| Requirement IDs | REQ-SP-FINETUNE-RETRY6-001 |
 | Category | Tooling |
 | Difficulty | 2/5 |
 | Status | Implemented |
@@ -50,7 +26,7 @@ Retry6 is the real training/eval handoff gate after retry5 licensed cache review
 | Design | doc/05_design/app/spipe/spipe_llm_finetune_process.md |
 | Research | doc/01_research/app/editor/spipe_llm_finetune_process.md |
 | Source | `test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -167,63 +143,37 @@ acceptance review.
 
 #### blocks below-target eval even when retry5 cache review is ready
 
-- file write
-- file write
-   - Expected: exit_code equals `0`
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val base_dir = "build/test/llm_finetune_retry6_gate"
-val retry5_manifest = write_retry5_ready_manifest(base_dir)
-val model_manifest = base_dir + "/model_manifest.json"
-val eval_result = base_dir + "/eval_result.json"
-file_write(model_manifest, "{\"deployable\":true,\"artifact\":\"fixture\"}\n")
-file_write(eval_result, "{\"target_accuracy\":89.9,\"result\":\"below-target\"}\n")
-
-val (output, exit_code) = run([
-    "llm_backed_app_server_dry_run_retry6",
-    "llm_backed_app_server_dry_run_retry5",
-    model_manifest,
-    eval_result,
-    RETRY5_ATTEMPT,
-    retry5_manifest,
-])
-
-expect(exit_code).to_equal(0)
-expect(output).to_contain("upstream_review_status=PASS retry5-review-handoff")
-expect(output).to_contain("training_allowed=true")
-expect(output).to_contain("model_manifest_exists=true")
-expect(output).to_contain("model_manifest_deployable=true")
-expect(output).to_contain("eval_result_exists=true")
-expect(output).to_contain("target_accuracy=89.9")
-expect(output).to_contain("target_eval_reached=false")
-expect(output).to_contain("result=BLOCKED_MODEL_OR_TARGET_EVAL_INCOMPLETE")
-expect(output).to_contain("acceptance_allowed=false")
-expect(output).to_contain("STATUS: WARN retry6-training-eval-gate")
+# @req REQ-SP-FINETUNE-RETRY6-001
 ```
 
 </details>
 
 #### hands off for normal review only after deployable model and target eval pass
 
-- file write
-- file write
+- hands off for normal review only after deployable model and target eval pass
    - Expected: exit_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hands off for normal review only after deployable model and target eval pass")
 val base_dir = "build/test/llm_finetune_retry6_gate_pass"
 val retry5_manifest = write_retry5_ready_manifest(base_dir)
 val model_manifest = base_dir + "/model_manifest.json"
@@ -250,12 +200,71 @@ expect(output).to_contain("STATUS: WARN retry6-training-eval-gate")
 
 </details>
 
+#### surfaces retry6 target eval fields through fine-tune status
+
+- surfaces retry6 target eval fields through fine-tune status
+   - Expected: exit_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("surfaces retry6 target eval fields through fine-tune status")
+val (output, exit_code) = run_spipe_command(["fine-tune-status", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(0)
+expect(output).to_contain("data_check_execution=warn")
+expect(output).to_contain("data_check_status=\"STATUS: WARN retry6-training-eval-gate\"")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("required_accuracy=90.0")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+expect(output).to_contain("STATUS: WARN llm-finetune-status")
+```
+
+</details>
+
+#### surfaces retry6 target eval fields through fine-tune doctor
+
+- surfaces retry6 target eval fields through fine-tune doctor
+   - Expected: exit_code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("surfaces retry6 target eval fields through fine-tune doctor")
+val (output, exit_code) = run_spipe_command(["fine-tune-doctor", RETRY6_ATTEMPT_ID])
+
+expect(exit_code).to_equal(1)
+expect(output).to_contain("WARN data_check_execution STATUS: WARN retry6-training-eval-gate")
+expect(output).to_contain("result=BLOCKED_UPSTREAM_LICENSED_DATA_NOT_READY")
+expect(output).to_contain("target_accuracy=missing")
+expect(output).to_contain("required_accuracy=90.0")
+expect(output).to_contain("target_eval_reached=false")
+expect(output).to_contain("acceptance_allowed=false")
+expect(output).to_contain("STATUS: WARN llm-finetune-doctor")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -263,10 +272,65 @@ expect(output).to_contain("STATUS: WARN retry6-training-eval-gate")
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/language/tools/spipe_llm_finetune_process.md](doc/02_requirements/language/tools/spipe_llm_finetune_process.md)
-- **Plan:** [doc/03_plan/ml/spipe_llm_finetune_process.md](doc/03_plan/ml/spipe_llm_finetune_process.md)
-- **Design:** [doc/05_design/app/spipe/spipe_llm_finetune_process.md](doc/05_design/app/spipe/spipe_llm_finetune_process.md)
-- **Research:** [doc/01_research/app/editor/spipe_llm_finetune_process.md](doc/01_research/app/editor/spipe_llm_finetune_process.md)
+- **Requirements:** `doc/02_requirements/language/tools/spipe_llm_finetune_process.md`
+- **Plan:** `doc/03_plan/ml/spipe_llm_finetune_process.md`
+- **Design:** `doc/05_design/app/spipe/spipe_llm_finetune_process.md`
+- **Research:** `doc/01_research/app/editor/spipe_llm_finetune_process.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-SP-FINETUNE-RETRY6-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ace0e028350ddf18fa8b79b0443a06ae7c6ba861cdef633c6072d8af61a52bf7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ace0e028350ddf18fa8b79b0443a06ae7c6ba861cdef633c6072d8af61a52bf7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ace0e028350ddf18fa8b79b0443a06ae7c6ba861cdef633c6072d8af61a52bf7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+
+SSpec documentization score: 85/100
+source: test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl
+mirror: doc/06_spec/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=90 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl:168:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'blocks below-target eval even when retry5 cache review is ready' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl:201:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hands off for normal review only after deployable model and target eval pass' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl:227:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'surfaces retry6 target eval fields through fine-tune status' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/spipe/llm_finetune_retry6_training_eval_gate_spec.spl:242:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'surfaces retry6 target eval fields through fine-tune doctor' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

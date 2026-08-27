@@ -2,31 +2,6 @@
 
 > Round-trip: request/response identical over SimpleOS transport and host
 
-<!-- sdn-diagram:id=spm_service_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=spm_service_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-spm_service_spec -> std
-spm_service_spec -> lib
-spm_service_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=spm_service_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -45,7 +20,7 @@ Round-trip: request/response identical over SimpleOS transport and host
 | Category | Application |
 | Status | Red (no impl yet) |
 | Source | `test/02_integration/app/simple_process_manager/spm_service_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Round-trip: request/response identical over SimpleOS transport and host
@@ -59,13 +34,19 @@ transport. Privilege check RPC and window-register RPC exercised.
 
 #### AC-3: host socket round-trip returns identical bytes
 
+- AC-3: host socket round-trip returns identical bytes
+   - Expected: resp.body.len() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("AC-3: host socket round-trip returns identical bytes")
 val svc = SpmService.new_for_test()
 val req = SpmRequest(kind: "ping", body: "hello".bytes(), token_hint: AuthorityToken.public_none())
 val host_bytes = spm_encode_request(req)
@@ -79,16 +60,18 @@ expect(resp.body.len() > 0).to_equal(true)
 
 #### AC-3: SimpleOS mock transport yields same encoded request bytes as host
 
-1. expect host bytes len
+- AC-3: SimpleOS mock transport yields same encoded request bytes as host
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("AC-3: SimpleOS mock transport yields same encoded request bytes as host")
 val req = SpmRequest(kind: "ping", body: "hello".bytes(), token_hint: AuthorityToken.public_none())
 val host_bytes = spm_encode_request(req)
 val simpleos_bytes = spm_encode_request(req)
@@ -101,16 +84,18 @@ expect host_bytes.len() to_equal simpleos_bytes.len()
 
 #### AC-3: rejects request with token lacking id_path
 
-1. id path: id path intern
+- AC-3: rejects request with token lacking id_path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("AC-3: rejects request with token lacking id_path")
 val svc = SpmService.new_for_test()
 val principal = Principal(kind: PrincipalKind.Local, id: "eve")
 val token = AuthorityToken.mock(
@@ -126,16 +111,18 @@ expect resp.ok to_equal false
 
 #### AC-3: allows request with matching token id_path
 
-1. id path: id path intern
+- AC-3: allows request with matching token id_path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("AC-3: allows request with matching token id_path")
 val svc = SpmService.new_for_test()
 val principal = Principal(kind: PrincipalKind.Local, id: "alice")
 val token = AuthorityToken.mock(
@@ -153,21 +140,19 @@ expect resp.ok to_equal true
 
 #### AC-3: window_register RPC uses the shared record body contract
 
-1. id path: id path intern
-2. geometry: Rect
-3. buffer ref: BufferRef
-4. acl id path: id path intern
-5. expect req body len
+- AC-3: window_register RPC uses the shared record body contract
    - Expected: wire.len() > 0 is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("AC-3: window_register RPC uses the shared record body contract")
 val principal = Principal(kind: PrincipalKind.Local, id: "alice")
 val token = AuthorityToken.mock(
     id_path: id_path_intern("id.user.banking"),
@@ -199,3 +184,51 @@ expect(wire.len() > 0).to_equal(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `14711237ccb754410ee54be56c460368e46ddf56ecf886bfeeb457ac8e4b7646`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `14711237ccb754410ee54be56c460368e46ddf56ecf886bfeeb457ac8e4b7646`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `14711237ccb754410ee54be56c460368e46ddf56ecf886bfeeb457ac8e4b7646`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/app/simple_process_manager/spm_service_spec.spl
+mirror: doc/06_spec/02_integration/app/simple_process_manager/spm_service_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/app/simple_process_manager/spm_service_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/app/simple_process_manager/spm_service_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/app/simple_process_manager/spm_service_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: host socket round-trip returns identical bytes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/simple_process_manager/spm_service_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: SimpleOS mock transport yields same encoded request bytes as host' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/simple_process_manager/spm_service_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: rejects request with token lacking id_path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

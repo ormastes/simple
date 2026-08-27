@@ -1,30 +1,6 @@
 # Server Accept Specification
 
-> <details>
-
-<!-- sdn-diagram:id=server_accept_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=server_accept_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-server_accept_spec -> std
-server_accept_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=server_accept_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering process_client_hello, select_cipher_suite, select_named_group, build_server_hello byte structure, build_encrypted_extensions_server_side, build_certificate, build_certificate_verify_signing_input, build_certificate_verify byte structure, tls13_accept prerequisite gate, tls13_prepare_server_handshake_from_record_for_test.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,34 @@ server_accept_spec -> os
 
 #### parses random, cipher_suites, key_share, supported_versions
 
-<details>
-<summary>Executable SPipe</summary>
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-Runnable source: 13 lines folded for reproduction.
+
+- parses random, cipher_suites, key_share, supported_versions
+   - Expected: ch.random.len().to_u64() equals `32u64`
+   - Expected: ch.cipher_suites.len().to_u64() equals `2u64`
+   - Expected: ch.cipher_suites[0u64] equals `0x1301u16`
+   - Expected: ch.cipher_suites[1u64] equals `0x1303u16`
+   - Expected: ch.named_groups.len().to_u64() equals `2u64`
+   - Expected: ch.named_groups[0u64] equals `0x001Du16`
+   - Expected: ch.named_groups[1u64] equals `0x0017u16`
+   - Expected: ch.key_share_groups.len().to_u64() equals `1u64`
+   - Expected: ch.key_share_groups[0u64] equals `0x001Du16`
+   - Expected: ch.x25519_key_share.len().to_u64() equals `32u64`
+   - Expected: ch.p256_key_share.len().to_u64() equals `0u64`
+   - Expected: ch.has_supported_versions_tls13 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses random, cipher_suites, key_share, supported_versions")
 val ch = process_client_hello(_ch_body_x25519_only())
 expect(ch.random.len().to_u64()).to_equal(32u64)
 expect(ch.cipher_suites.len().to_u64()).to_equal(2u64)
@@ -67,13 +64,21 @@ expect(ch.has_supported_versions_tls13).to_equal(true)
 
 #### returns empty CH on truncated body
 
-<details>
-<summary>Executable SPipe</summary>
+- returns empty CH on truncated body
+   - Expected: ch.random.len().to_u64() equals `0u64`
+   - Expected: ch.cipher_suites.len().to_u64() equals `0u64`
+   - Expected: ch.has_supported_versions_tls13 is false
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns empty CH on truncated body")
 val ch = process_client_hello(_ch_body_truncated())
 expect(ch.random.len().to_u64()).to_equal(0u64)
 expect(ch.cipher_suites.len().to_u64()).to_equal(0u64)
@@ -84,13 +89,20 @@ expect(ch.has_supported_versions_tls13).to_equal(false)
 
 #### drops key_share entries whose key_len mismatches the named group
 
-<details>
-<summary>Executable SPipe</summary>
+- drops key_share entries whose key_len mismatches the named group
+   - Expected: contains_x25519 is false
+   - Expected: ch.x25519_key_share.len().to_u64() equals `0u64`
 
-Runnable source: 14 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("drops key_share entries whose key_len mismatches the named group")
 # CH where X25519 key_share carries klen=16 (bogus) — group must
 # NOT appear in ks_groups, otherwise select_named_group would
 # later return X25519 with an empty share.
@@ -113,23 +125,19 @@ expect(ch.x25519_key_share.len().to_u64()).to_equal(0u64)
 
 #### picks the server's preferred suite that the client offered
 
-1. client push
-
-2. client push
-
-3. server push
-
-4. server push
+- picks the server's preferred suite that the client offered
    - Expected: select_cipher_suite(client, server) equals `0x1303u16`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("picks the server's preferred suite that the client offered")
 var client: [u16] = []
 client.push(0x1301u16)
 client.push(0x1303u16)
@@ -144,19 +152,19 @@ expect(select_cipher_suite(client, server)).to_equal(0x1303u16)
 
 #### returns 0u16 when no overlap
 
-1. client push
-
-2. server push
+- returns 0u16 when no overlap
    - Expected: select_cipher_suite(client, server) equals `0u16`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns 0u16 when no overlap")
 var client: [u16] = []
 client.push(0x9999u16)
 var server: [u16] = []
@@ -168,19 +176,19 @@ expect(select_cipher_suite(client, server)).to_equal(0u16)
 
 #### rejects non-mandatory suite codes even if both lists agree
 
-1. client push
-
-2. server push
+- rejects non-mandatory suite codes even if both lists agree
    - Expected: select_cipher_suite(client, server) equals `0u16`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects non-mandatory suite codes even if both lists agree")
 # 0x9999 is not in the 0x1301/0x1302/0x1303 allowlist
 var client: [u16] = []
 client.push(0x9999u16)
@@ -195,23 +203,19 @@ expect(select_cipher_suite(client, server)).to_equal(0u16)
 
 #### prefers X25519 over P-256 when both offered
 
-1. ks push
-
-2. ks push
-
-3. server push
-
-4. server push
+- prefers X25519 over P-256 when both offered
    - Expected: select_named_group(ks, server) equals `0x001Du16`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("prefers X25519 over P-256 when both offered")
 var ks: [u16] = []
 ks.push(0x001Du16)
 ks.push(0x0017u16)
@@ -225,21 +229,19 @@ expect(select_named_group(ks, server)).to_equal(0x001Du16)
 
 #### returns 0u16 when CH key_share has no acceptable group (HRR-needed)
 
-1. ks push
-
-2. server push
-
-3. server push
+- returns 0u16 when CH key_share has no acceptable group (HRR-needed)
    - Expected: select_named_group(ks, server) equals `0u16`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns 0u16 when CH key_share has no acceptable group (HRR-needed)")
 var ks: [u16] = []
 ks.push(0x0018u16)  # secp384r1 — not in our supported list
 var server: [u16] = []
@@ -252,21 +254,19 @@ expect(select_named_group(ks, server)).to_equal(0u16)
 
 #### falls back to P-256 when X25519 key_share absent
 
-1. ks push
-
-2. server push
-
-3. server push
+- falls back to P-256 when X25519 key_share absent
    - Expected: select_named_group(ks, server) equals `0x0017u16`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("falls back to P-256 when X25519 key_share absent")
 var ks: [u16] = []
 ks.push(0x0017u16)
 var server: [u16] = []
@@ -281,32 +281,47 @@ expect(select_named_group(ks, server)).to_equal(0x0017u16)
 
 #### emits handshake header type=2 + 3-byte length
 
-<details>
-<summary>Executable SPipe</summary>
+- emits handshake header type=2 + 3-byte length
+   - Expected: sh[0u64] equals `0x02u8`
+   - Expected: (sh.len().to_u64() - 4u64) equals `len_val`
 
-Runnable source: 6 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits handshake header type=2 + 3-byte length")
 val sh = build_server_hello(_server_random_32(), 0x1301u16, 0x001Du16, _x25519_pub_32())
 # type byte
 expect(sh[0u64]).to_equal(0x02u8)
 # length is 3 bytes; total bytes = 4 + length_value
 val len_val: u64 = (sh[1u64].to_u64() << 16) | (sh[2u64].to_u64() << 8) | sh[3u64].to_u64()
-expect((sh.len().to_u64() - 4u64) == len_val).to_equal(true)
+expect((sh.len().to_u64() - 4u64)).to_equal(len_val)
 ```
 
 </details>
 
 #### encodes legacy_version=0x0303 and copies server_random
 
-<details>
-<summary>Executable SPipe</summary>
+- encodes legacy_version=0x0303 and copies server_random
+   - Expected: sh[4u64] equals `0x03u8`
+   - Expected: sh[5u64] equals `0x03u8`
+   - Expected: ok is true
 
-Runnable source: 12 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes legacy_version=0x0303 and copies server_random")
 val sh = build_server_hello(_server_random_32(), 0x1301u16, 0x001Du16, _x25519_pub_32())
 expect(sh[4u64]).to_equal(0x03u8)
 expect(sh[5u64]).to_equal(0x03u8)
@@ -325,13 +340,22 @@ expect(ok).to_equal(true)
 
 #### encodes legacy_session_id_len=0 + cipher_suite + compression=0x00
 
-<details>
-<summary>Executable SPipe</summary>
+- encodes legacy_session_id_len=0 + cipher_suite + compression=0x00
+   - Expected: sh[38u64] equals `0x00u8`
+   - Expected: sh[39u64] equals `0x13u8`
+   - Expected: sh[40u64] equals `0x03u8`
+   - Expected: sh[41u64] equals `0x00u8`
 
-Runnable source: 8 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes legacy_session_id_len=0 + cipher_suite + compression=0x00")
 val sh = build_server_hello(_server_random_32(), 0x1303u16, 0x001Du16, _x25519_pub_32())
 # offset 4 + 2 + 32 = 38: legacy_session_id_len
 expect(sh[38u64]).to_equal(0x00u8)
@@ -346,13 +370,19 @@ expect(sh[41u64]).to_equal(0x00u8)
 
 #### encodes a non-zero extensions length
 
-<details>
-<summary>Executable SPipe</summary>
+- encodes a non-zero extensions length
+   - Expected: ext_len > 0u64 is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes a non-zero extensions length")
 val sh = build_server_hello(_server_random_32(), 0x1301u16, 0x001Du16, _x25519_pub_32())
 # extensions_len at offset 42..44
 val ext_len: u64 = (sh[42u64].to_u64() << 8) | sh[43u64].to_u64()
@@ -363,13 +393,20 @@ expect(ext_len > 0u64).to_equal(true)
 
 #### is deterministic — same inputs produce identical bytes
 
-<details>
-<summary>Executable SPipe</summary>
+- is deterministic — same inputs produce identical bytes
+   - Expected: a.len() equals `b.len()`
+   - Expected: same is true
 
-Runnable source: 10 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is deterministic — same inputs produce identical bytes")
 val a = build_server_hello(_server_random_32(), 0x1301u16, 0x001Du16, _x25519_pub_32())
 val b = build_server_hello(_server_random_32(), 0x1301u16, 0x001Du16, _x25519_pub_32())
 expect(a.len()).to_equal(b.len())
@@ -388,7 +425,7 @@ expect(same).to_equal(true)
 
 #### emits handshake type=8 + length=2 + zero-length extensions list
 
-1. server pkcs8:  ed25519 pkcs8
+- emits handshake type=8 + length=2 + zero-length extensions list
    - Expected: ee[0u64] equals `0x08u8`
    - Expected: ee[1u64] equals `0x00u8`
    - Expected: ee[2u64] equals `0x00u8`
@@ -399,12 +436,14 @@ expect(same).to_equal(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits handshake type=8 + length=2 + zero-length extensions list")
 val cfg = Tls13ServerConfig(
     cert_chain: [],
     server_pkcs8: _ed25519_pkcs8(),
@@ -430,27 +469,21 @@ expect(ee.len().to_u64()).to_equal(6u64)
 
 #### emits handshake type=11 with non-zero body
 
-1. leaf push
-
-2. leaf push
-
-3. leaf push
-
-4. leaf push
-
-5. cert chain push
+- emits handshake type=11 with non-zero body
    - Expected: msg[0u64] equals `0x0Bu8`
    - Expected: body_len > 0u64 is true
    - Expected: msg[4u64] equals `0x00u8`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits handshake type=11 with non-zero body")
 var cert_chain: [[u8]] = []
 var leaf: [u8] = []
 leaf.push(0xCAu8)
@@ -473,13 +506,19 @@ expect(msg[4u64]).to_equal(0x00u8)
 
 #### starts with 64 bytes of 0x20
 
-<details>
-<summary>Executable SPipe</summary>
+- starts with 64 bytes of 0x20
+   - Expected: ok is true
 
-Runnable source: 8 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts with 64 bytes of 0x20")
 val sig_in = build_certificate_verify_signing_input(_transcript_hash_32())
 var ok = true
 var i: u64 = 0
@@ -494,13 +533,22 @@ expect(ok).to_equal(true)
 
 #### embeds 'TLS 1.3, server CertificateVerify' starting at offset 64
 
-<details>
-<summary>Executable SPipe</summary>
+- embeds 'TLS 1.3, server CertificateVerify' starting at offset 64
+   - Expected: sig_in[64u64] equals `0x54u8`
+   - Expected: sig_in[65u64] equals `0x4Cu8`
+   - Expected: sig_in[66u64] equals `0x53u8`
+   - Expected: sig_in[67u64] equals `0x20u8`
 
-Runnable source: 6 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("embeds 'TLS 1.3, server CertificateVerify' starting at offset 64")
 val sig_in = build_certificate_verify_signing_input(_transcript_hash_32())
 # First 4 bytes of context string: T L S space
 expect(sig_in[64u64]).to_equal(0x54u8)
@@ -513,13 +561,19 @@ expect(sig_in[67u64]).to_equal(0x20u8)
 
 #### places 0x00 separator at offset 64+33 = 97
 
-<details>
-<summary>Executable SPipe</summary>
+- places 0x00 separator at offset 64+33 = 97
+   - Expected: sig_in[97u64] equals `0x00u8`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("places 0x00 separator at offset 64+33 = 97")
 val sig_in = build_certificate_verify_signing_input(_transcript_hash_32())
 expect(sig_in[97u64]).to_equal(0x00u8)
 ```
@@ -528,13 +582,20 @@ expect(sig_in[97u64]).to_equal(0x00u8)
 
 #### appends transcript hash after separator
 
-<details>
-<summary>Executable SPipe</summary>
+- appends transcript hash after separator
+   - Expected: sig_in.len().to_u64() equals `130u64`
+   - Expected: ok is true
 
-Runnable source: 12 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("appends transcript hash after separator")
 val sig_in = build_certificate_verify_signing_input(_transcript_hash_32())
 # Total length = 64 + 33 + 1 + 32 = 130
 expect(sig_in.len().to_u64()).to_equal(130u64)
@@ -555,13 +616,24 @@ expect(ok).to_equal(true)
 
 #### emits CertificateVerify only when a real signature is available
 
-<details>
-<summary>Executable SPipe</summary>
+- emits CertificateVerify only when a real signature is available
+   - Expected: cv.len().to_u64() equals `0u64`
+   - Expected: cv[0u64] equals `0x0Fu8`
+   - Expected: cv[4u64] equals `0x08u8`
+   - Expected: cv[5u64] equals `0x07u8`
+   - Expected: sig_len equals `ref_sig.len().to_u64()`
+   - Expected: body_len equals `4u64 + sig_len`
 
-Runnable source: 16 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("emits CertificateVerify only when a real signature is available")
 val cv = build_certificate_verify(_transcript_hash_32(), _ed25519_pkcs8(), 0x0807u16)
 if cv.len() == 0u64:
     expect(cv.len().to_u64()).to_equal(0u64)
@@ -584,21 +656,24 @@ else:
 
 #### round-trips signature bytes when CertificateVerify signing succeeds
 
-1. sig push
+- round-trips signature bytes when CertificateVerify signing succeeds
+   - Expected: cv.len().to_u64() equals `0u64`
    - Expected: sig.len().to_u64() equals `ref_sig.len().to_u64()`
    - Expected: same is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("round-trips signature bytes when CertificateVerify signing succeeds")
 # Sign + verify via the same Ed25519 pkcs8 fixture; we extract the
 # 32-byte raw public key from the pkcs8 fixture by deriving it
-# via ed25519_sign+ed25519_verify directly. This test is an
+# via ed25519_sign+ed25519_verify_native directly. This test is an
 # end-to-end byte-level check that build_certificate_verify
 # produces a real signature, not zeros.
 val cv = build_certificate_verify(_transcript_hash_32(), _ed25519_pkcs8(), 0x0807u16)
@@ -632,18 +707,18 @@ else:
 
 #### rejects invalid socket fds before touching server material
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
+- rejects invalid socket fds before touching server material
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid socket fds before touching server material")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -652,23 +727,25 @@ val cfg = Tls13ServerConfig(
 )
 match tls13_accept(-1, cfg):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("invalid_socket_fd")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### rejects missing certificate chains with a concrete reason
 
-1. server pkcs8:  ed25519 pkcs8
+- rejects missing certificate chains with a concrete reason
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects missing certificate chains with a concrete reason")
 val cfg = Tls13ServerConfig(
     cert_chain: [],
     server_pkcs8: _ed25519_pkcs8(),
@@ -677,25 +754,25 @@ val cfg = Tls13ServerConfig(
 )
 match tls13_accept(3, cfg):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("missing_certificate_chain")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### reaches the server crypto blocker after validating a ClientHello record
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
+- reaches the server crypto blocker after validating a ClientHello record
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reaches the server crypto blocker after validating a ClientHello record")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -704,25 +781,25 @@ val cfg = Tls13ServerConfig(
 )
 match tls13_accept_client_hello_record_for_test(_client_hello_record(_ch_body_x25519_only()), cfg):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("server_crypto_pending")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### rejects missing ClientHello record bytes before parsing handshake
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
+- rejects missing ClientHello record bytes before parsing handshake
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects missing ClientHello record bytes before parsing handshake")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -731,25 +808,25 @@ val cfg = Tls13ServerConfig(
 )
 match tls13_accept_client_hello_record_for_test([], cfg):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("no_client_hello_record")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### rejects non-handshake records at the record boundary
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
+- rejects non-handshake records at the record boundary
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects non-handshake records at the record boundary")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -758,31 +835,25 @@ val cfg = Tls13ServerConfig(
 )
 match tls13_accept_client_hello_record_for_test([0x17u8, 0x03u8, 0x03u8, 0x00u8, 0x01u8, 0x00u8], cfg):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("expected_handshake_record")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### fails closed when CertificateVerify cannot be signed
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
-
-3.  client hello record
-
-4.  server random 32
-
-5.  server scalar 32
+- fails closed when CertificateVerify cannot be signed
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails closed when CertificateVerify cannot be signed")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -796,29 +867,25 @@ match tls13_accept_client_hello_record_with_server_material_for_test(
     _server_scalar_32()
 ):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("certificate_verify_failed")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### rejects invalid explicit server random before encrypted flight
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
-
-3.  client hello record
-
-4.  server scalar 32
+- rejects invalid explicit server random before encrypted flight
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid explicit server random before encrypted flight")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -832,7 +899,7 @@ match tls13_accept_client_hello_record_with_server_material_for_test(
     _server_scalar_32()
 ):
     case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("invalid_server_random")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
@@ -841,22 +908,18 @@ match tls13_accept_client_hello_record_with_server_material_for_test(
 
 #### stops before server flight material when CertificateVerify signing fails
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
-
-3.  client hello record
-
-4.  server scalar 32
+- stops before server flight material when CertificateVerify signing fails
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("stops before server flight material when CertificateVerify signing fails")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -869,29 +932,25 @@ match tls13_prepare_server_handshake_from_record_for_test(
     _server_scalar_32()
 ):
     case Tls13ServerHandshakeResult.Failed(reason): expect(reason).to_equal("certificate_verify_failed")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### does not emit encrypted server flight records without CertificateVerify
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
-
-3.  client hello record
-
-4.  server scalar 32
+- does not emit encrypted server flight records without CertificateVerify
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("does not emit encrypted server flight records without CertificateVerify")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -904,27 +963,25 @@ match tls13_prepare_server_handshake_from_record_for_test(
     _server_scalar_32()
 ):
     case Tls13ServerHandshakeResult.Failed(reason): expect(reason).to_equal("certificate_verify_failed")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
 
 #### rejects invalid offline server scalar length
 
-1. cert chain: [ cert der fixture
-
-2. server pkcs8:  ed25519 pkcs8
-
-3.  client hello record
+- rejects invalid offline server scalar length
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid offline server scalar length")
 val cfg = Tls13ServerConfig(
     cert_chain: [_cert_der_fixture()],
     server_pkcs8: _ed25519_pkcs8(),
@@ -937,7 +994,7 @@ match tls13_prepare_server_handshake_from_record_for_test(
     [0x01u8]
 ):
     case Tls13ServerHandshakeResult.Failed(reason): expect(reason).to_equal("invalid_server_scalar")
-    case _: expect(false).to_equal(true)
+    case _: fail("unexpected TLS13 server accept result branch")
 ```
 
 </details>
@@ -949,12 +1006,12 @@ match tls13_prepare_server_handshake_from_record_for_test(
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/server_accept_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering process_client_hello, select_cipher_suite, select_named_group, build_server_hello byte structure, build_encrypted_extensions_server_side, build_certificate, build_certificate_verify_signing_input, build_certificate_verify byte structure, tls13_accept prerequisite gate, tls13_prepare_server_handshake_from_record_for_test.
 - process_client_hello
 - select_cipher_suite
 - select_named_group
@@ -978,3 +1035,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `65660ec1878cb87ba3a35eae4ad9b3a0c0141f3aecc9340648dc788970973dfa`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `65660ec1878cb87ba3a35eae4ad9b3a0c0141f3aecc9340648dc788970973dfa`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `65660ec1878cb87ba3a35eae4ad9b3a0c0141f3aecc9340648dc788970973dfa`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/tls13/server_accept_spec.spl
+mirror: doc/06_spec/01_unit/os/tls13/server_accept_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/tls13/server_accept_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/tls13/server_accept_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/tls13/server_accept_spec.spl:330:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses random, cipher_suites, key_share, supported_versions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/tls13/server_accept_spec.spl:347:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns empty CH on truncated body' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/tls13/server_accept_spec.spl:355:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'drops key_share entries whose key_len mismatches the named group' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

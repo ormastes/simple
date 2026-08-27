@@ -2,29 +2,6 @@
 
 > This planning spec replaces the subset contract with the full pure-Simple target.
 
-<!-- sdn-diagram:id=common_compression_framework_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=common_compression_framework_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-common_compression_framework_spec -> deterministic fixtures, and assert typed success and failure results without subset-only caveats
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=common_compression_framework_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 <details>
 <summary>Full Scenario Manual</summary>
 
@@ -39,7 +16,7 @@ This planning spec replaces the subset contract with the full pure-Simple target
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/lib/feature/common_compression_framework_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 This planning spec replaces the subset contract with the full pure-Simple target.
@@ -167,3 +144,77 @@ Implementation note
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-001`
+- `REQ-008A:`
+- `REQ-001/REQ-002/REQ-006/REQ-007:`
+- `REQ-003/REQ-004:`
+- `REQ-006A/REQ-008A/REQ-012:`
+- `REQ-006/REQ-006A/REQ-008/REQ-008A:`
+- `REQ-009:`
+- `REQ-009A:`
+- `REQ-009B:`
+- `REQ-009C:`
+- `REQ-009D:`
+- `REQ-010:`
+- `REQ-010A:`
+- `REQ-010B:`
+- `REQ-010C:`
+- `REQ-010D:`
+- `REQ-011:`
+- `REQ-011A:`
+- `REQ-011B:`
+- `REQ-011C:`
+- `REQ-011D:`
+- `REQ-013:`
+- `REQ-013A:`
+- `REQ-013B:`
+- `REQ-014:`
+- `REQ-014A:`
+- `REQ-014B:`
+- `REQ-005/REQ-009/REQ-010/REQ-011/REQ-012`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e541794df38ac700293120cca34d7b8b80982afca3faf1a4883040a96e598acc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e541794df38ac700293120cca34d7b8b80982afca3faf1a4883040a96e598acc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e541794df38ac700293120cca34d7b8b80982afca3faf1a4883040a96e598acc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **81/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/lib/feature/common_compression_framework_spec.spl
+mirror: doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md (current)
+findings: 4 blockers: 2
+  narrative=100 structure=100 oracle=50
+  traceability=60 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=81; blocker cap makes effective=49
+doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/lib/feature/common_compression_framework_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/lib/feature/common_compression_framework_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+<!-- sspec-maintain:scorecard:end -->

@@ -20,7 +20,7 @@ Keeps the WPT-derived compatibility corpus and adds exact semantic/layout,
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/selector_color_subset_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Keeps the WPT-derived compatibility corpus and adds exact semantic/layout,
@@ -38,13 +38,19 @@ ordinary pseudo chains, `:where()` zero specificity, and recursion bounds.
 
 #### covers type selector matching
 
+- covers type selector matching
+   - Expected: _renders_color("div { width: 12px; height: 8px; background-color: #2563eb; }", "<div></div>", 0xFF2563EBu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers type selector matching")
 expect(_renders_color("div { width: 12px; height: 8px; background-color: #2563eb; }", "<div></div>", 0xFF2563EBu32)).to_equal(true)
 ```
 
@@ -58,13 +64,19 @@ expect(_renders_color("div { width: 12px; height: 8px; background-color: #2563eb
 
 #### covers universal selector matching
 
+- covers universal selector matching
+   - Expected: _renders_color("* { width: 12px; height: 8px; background-color: #0f766e; }", "<div></div>", 0xFF0F766Eu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers universal selector matching")
 expect(_renders_color("* { width: 12px; height: 8px; background-color: #0f766e; }", "<div></div>", 0xFF0F766Eu32)).to_equal(true)
 ```
 
@@ -78,13 +90,19 @@ expect(_renders_color("* { width: 12px; height: 8px; background-color: #0f766e; 
 
 #### covers class selector matching
 
+- covers class selector matching
+   - Expected: _renders_color(".card { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers class selector matching")
 expect(_renders_color(".card { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32)).to_equal(true)
 ```
 
@@ -98,13 +116,19 @@ expect(_renders_color(".card { width: 12px; height: 8px; background-color: #16a3
 
 #### covers id selector matching
 
+- covers id selector matching
+   - Expected: _renders_color("#hero { width: 12px; height: 8px; background-color: #dc2626; }", "<div id='hero'></div>", 0xFFDC2626u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers id selector matching")
 expect(_renders_color("#hero { width: 12px; height: 8px; background-color: #dc2626; }", "<div id='hero'></div>", 0xFFDC2626u32)).to_equal(true)
 ```
 
@@ -118,13 +142,19 @@ expect(_renders_color("#hero { width: 12px; height: 8px; background-color: #dc26
 
 #### covers selector-list matching
 
+- covers selector-list matching
+   - Expected: _renders_color("section, .card { width: 12px; height: 8px; background-color: #0891b2; }", "<div class='card'></div>", 0xFF0891B2u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers selector-list matching")
 expect(_renders_color("section, .card { width: 12px; height: 8px; background-color: #0891b2; }", "<div class='card'></div>", 0xFF0891B2u32)).to_equal(true)
 ```
 
@@ -138,13 +168,19 @@ expect(_renders_color("section, .card { width: 12px; height: 8px; background-col
 
 #### covers tag class compound selector matching
 
+- covers tag class compound selector matching
+   - Expected: _renders_color("div.card { width: 12px; height: 8px; background-color: #7c3aed; }", "<div class='card'></div>", 0xFF7C3AEDu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers tag class compound selector matching")
 expect(_renders_color("div.card { width: 12px; height: 8px; background-color: #7c3aed; }", "<div class='card'></div>", 0xFF7C3AEDu32)).to_equal(true)
 ```
 
@@ -158,13 +194,19 @@ expect(_renders_color("div.card { width: 12px; height: 8px; background-color: #7
 
 #### covers multi class selector matching
 
+- covers multi class selector matching
+   - Expected: _renders_color(".card.primary { width: 12px; height: 8px; background-color: #0f766e; }", "<div class='primary card'></div>", 0xFF0F766Eu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers multi class selector matching")
 expect(_renders_color(".card.primary { width: 12px; height: 8px; background-color: #0f766e; }", "<div class='primary card'></div>", 0xFF0F766Eu32)).to_equal(true)
 ```
 
@@ -178,13 +220,19 @@ expect(_renders_color(".card.primary { width: 12px; height: 8px; background-colo
 
 #### covers tag id compound selector matching
 
+- covers tag id compound selector matching
+   - Expected: _renders_color("div#hero { width: 12px; height: 8px; background-color: #be123c; }", "<div id='hero'></div>", 0xFFBE123Cu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers tag id compound selector matching")
 expect(_renders_color("div#hero { width: 12px; height: 8px; background-color: #be123c; }", "<div id='hero'></div>", 0xFFBE123Cu32)).to_equal(true)
 ```
 
@@ -198,13 +246,19 @@ expect(_renders_color("div#hero { width: 12px; height: 8px; background-color: #b
 
 #### covers later class rule ordering
 
+- covers later class rule ordering
+   - Expected: _renders_color(".card { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #9333ea; }", "<div class='card'></div>", 0xFF9333EAu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers later class rule ordering")
 expect(_renders_color(".card { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #9333ea; }", "<div class='card'></div>", 0xFF9333EAu32)).to_equal(true)
 ```
 
@@ -218,13 +272,19 @@ expect(_renders_color(".card { width: 12px; height: 8px; background-color: #2563
 
 #### covers class selector token boundaries
 
+- covers class selector token boundaries
+   - Expected: _renders_color(".card-title { width: 12px; height: 8px; background-color: #2563eb; } .card { width: 12px; height: 8px; background-color: #ea580c; }", "<div class='card'></div>", 0xFFEA580Cu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers class selector token boundaries")
 expect(_renders_color(".card-title { width: 12px; height: 8px; background-color: #2563eb; } .card { width: 12px; height: 8px; background-color: #ea580c; }", "<div class='card'></div>", 0xFFEA580Cu32)).to_equal(true)
 ```
 
@@ -238,13 +298,19 @@ expect(_renders_color(".card-title { width: 12px; height: 8px; background-color:
 
 #### covers :is selector-list matching
 
+- covers :is selector-list matching
+   - Expected: _renders_color(":is(section, .card) { width: 12px; height: 8px; background-color: #2563eb; }", "<div class='card'></div>", 0xFF2563EBu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers :is selector-list matching")
 expect(_renders_color(":is(section, .card) { width: 12px; height: 8px; background-color: #2563eb; }", "<div class='card'></div>", 0xFF2563EBu32)).to_equal(true)
 ```
 
@@ -258,13 +324,19 @@ expect(_renders_color(":is(section, .card) { width: 12px; height: 8px; backgroun
 
 #### covers :where selector-list matching
 
+- covers :where selector-list matching
+   - Expected: _renders_color(":where(section, .card) { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers :where selector-list matching")
 expect(_renders_color(":where(section, .card) { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32)).to_equal(true)
 ```
 
@@ -278,13 +350,19 @@ expect(_renders_color(":where(section, .card) { width: 12px; height: 8px; backgr
 
 #### covers partial :not selector-list exclusion
 
+- covers partial :not selector-list exclusion
+   - Expected: _renders_color("div:not(.disabled, #archived) { width: 12px; height: 8px; background-color: #0891b2; }", "<div class='card'></div>", 0xFF0891B2u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :not selector-list exclusion")
 expect(_renders_color("div:not(.disabled, #archived) { width: 12px; height: 8px; background-color: #0891b2; }", "<div class='card'></div>", 0xFF0891B2u32)).to_equal(true)
 ```
 
@@ -298,13 +376,19 @@ expect(_renders_color("div:not(.disabled, #archived) { width: 12px; height: 8px;
 
 #### covers partial :has descendant matching
 
+- covers partial :has descendant matching
+   - Expected: _renders_color("div:has(.badge) { width: 12px; height: 8px; background-color: #7c3aed; }", "<div><span class='badge'></span></div>", 0xFF7C3AEDu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :has descendant matching")
 expect(_renders_color("div:has(.badge) { width: 12px; height: 8px; background-color: #7c3aed; }", "<div><span class='badge'></span></div>", 0xFF7C3AEDu32)).to_equal(true)
 ```
 
@@ -318,13 +402,20 @@ expect(_renders_color("div:has(.badge) { width: 12px; height: 8px; background-co
 
 #### covers partial :has direct child matching
 
+- covers partial :has direct child matching
+   - Expected: _renders_color("div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }", "<div><span class='badge'></span></div>", 0xFF0E7490u32) is true
+   - Expected: _renders_color("div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }", "<div><section><span class='badge'></span></section></div>", 0xFF0E7490u32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :has direct child matching")
 expect(_renders_color("div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }", "<div><span class='badge'></span></div>", 0xFF0E7490u32)).to_equal(true)
 expect(_renders_color("div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }", "<div><section><span class='badge'></span></section></div>", 0xFF0E7490u32)).to_equal(false)
 ```
@@ -339,13 +430,19 @@ expect(_renders_color("div:has(> .badge) { width: 12px; height: 8px; background-
 
 #### covers descendant combinator matching
 
+- covers descendant combinator matching
+   - Expected: _renders_color(".scope .target { width: 12px; height: 8px; background-color: #2563eb; }", "<section class='scope'><div class='target'></div></section>", 0xFF2563EBu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers descendant combinator matching")
 expect(_renders_color(".scope .target { width: 12px; height: 8px; background-color: #2563eb; }", "<section class='scope'><div class='target'></div></section>", 0xFF2563EBu32)).to_equal(true)
 ```
 
@@ -359,13 +456,19 @@ expect(_renders_color(".scope .target { width: 12px; height: 8px; background-col
 
 #### covers descendant combinator sibling rejection
 
+- covers descendant combinator sibling rejection
+   - Expected: _renders_color(".scope .target { width: 12px; height: 8px; background-color: #ea580c; }", "<section class='scope'></section><div class='target'></div>", 0xFFEA580Cu32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers descendant combinator sibling rejection")
 expect(_renders_color(".scope .target { width: 12px; height: 8px; background-color: #ea580c; }", "<section class='scope'></section><div class='target'></div>", 0xFFEA580Cu32)).to_equal(false)
 ```
 
@@ -379,13 +482,19 @@ expect(_renders_color(".scope .target { width: 12px; height: 8px; background-col
 
 #### covers direct child combinator matching
 
+- covers direct child combinator matching
+   - Expected: _renders_color("body > .target { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='target'></div>", 0xFF16A34Au32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers direct child combinator matching")
 expect(_renders_color("body > .target { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='target'></div>", 0xFF16A34Au32)).to_equal(true)
 ```
 
@@ -399,13 +508,19 @@ expect(_renders_color("body > .target { width: 12px; height: 8px; background-col
 
 #### covers ancestor child combinator matching
 
+- covers ancestor child combinator matching
+   - Expected: _renders_color(".scope > .target { width: 12px; height: 8px; background-color: #0891b2; }", "<section class='scope'><div class='target'></div></section>", 0xFF0891B2u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers ancestor child combinator matching")
 expect(_renders_color(".scope > .target { width: 12px; height: 8px; background-color: #0891b2; }", "<section class='scope'><div class='target'></div></section>", 0xFF0891B2u32)).to_equal(true)
 ```
 
@@ -419,13 +534,19 @@ expect(_renders_color(".scope > .target { width: 12px; height: 8px; background-c
 
 #### covers ancestor child combinator nested descendant rejection
 
+- covers ancestor child combinator nested descendant rejection
+   - Expected: _renders_color(".scope > .target { width: 12px; height: 8px; background-color: #be123c; }", "<section class='scope'><article><div class='target'></div></article></section>", 0xFFBE123Cu32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers ancestor child combinator nested descendant rejection")
 expect(_renders_color(".scope > .target { width: 12px; height: 8px; background-color: #be123c; }", "<section class='scope'><article><div class='target'></div></article></section>", 0xFFBE123Cu32)).to_equal(false)
 ```
 
@@ -439,13 +560,19 @@ expect(_renders_color(".scope > .target { width: 12px; height: 8px; background-c
 
 #### covers direct child combinator nested descendant rejection
 
+- covers direct child combinator nested descendant rejection
+   - Expected: _renders_color("body > .target { width: 12px; height: 8px; background-color: #dc2626; }", "<section><div class='target'></div></section>", 0xFFDC2626u32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers direct child combinator nested descendant rejection")
 expect(_renders_color("body > .target { width: 12px; height: 8px; background-color: #dc2626; }", "<section><div class='target'></div></section>", 0xFFDC2626u32)).to_equal(false)
 ```
 
@@ -459,13 +586,19 @@ expect(_renders_color("body > .target { width: 12px; height: 8px; background-col
 
 #### covers adjacent sibling combinator matching
 
+- covers adjacent sibling combinator matching
+   - Expected: _renders_color(".source + .target { width: 12px; height: 8px; background-color: #7c3aed; }", "<div class='source'></div><div class='target'></div>", 0xFF7C3AEDu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers adjacent sibling combinator matching")
 expect(_renders_color(".source + .target { width: 12px; height: 8px; background-color: #7c3aed; }", "<div class='source'></div><div class='target'></div>", 0xFF7C3AEDu32)).to_equal(true)
 ```
 
@@ -479,13 +612,19 @@ expect(_renders_color(".source + .target { width: 12px; height: 8px; background-
 
 #### covers adjacent sibling combinator non-adjacent rejection
 
+- covers adjacent sibling combinator non-adjacent rejection
+   - Expected: _renders_color(".source + .target { width: 12px; height: 8px; background-color: #be123c; }", "<div class='source'></div><section></section><div class='target'></div>", 0xFFBE123Cu32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers adjacent sibling combinator non-adjacent rejection")
 expect(_renders_color(".source + .target { width: 12px; height: 8px; background-color: #be123c; }", "<div class='source'></div><section></section><div class='target'></div>", 0xFFBE123Cu32)).to_equal(false)
 ```
 
@@ -499,13 +638,19 @@ expect(_renders_color(".source + .target { width: 12px; height: 8px; background-
 
 #### covers general sibling combinator matching
 
+- covers general sibling combinator matching
+   - Expected: _renders_color(".source ~ .target { width: 12px; height: 8px; background-color: #0d9488; }", "<div class='source'></div><section></section><div class='target'></div>", 0xFF0D9488u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers general sibling combinator matching")
 expect(_renders_color(".source ~ .target { width: 12px; height: 8px; background-color: #0d9488; }", "<div class='source'></div><section></section><div class='target'></div>", 0xFF0D9488u32)).to_equal(true)
 ```
 
@@ -519,13 +664,19 @@ expect(_renders_color(".source ~ .target { width: 12px; height: 8px; background-
 
 #### covers general sibling combinator preceding-source rejection
 
+- covers general sibling combinator preceding-source rejection
+   - Expected: _renders_color(".source ~ .target { width: 12px; height: 8px; background-color: #e11d48; }", "<div class='target'></div><div class='source'></div>", 0xFFE11D48u32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers general sibling combinator preceding-source rejection")
 expect(_renders_color(".source ~ .target { width: 12px; height: 8px; background-color: #e11d48; }", "<div class='target'></div><div class='source'></div>", 0xFFE11D48u32)).to_equal(false)
 ```
 
@@ -539,13 +690,19 @@ expect(_renders_color(".source ~ .target { width: 12px; height: 8px; background-
 
 #### covers partial :empty selector matching
 
+- covers partial :empty selector matching
+   - Expected: _renders_color("div:empty { width: 12px; height: 8px; background-color: #0f766e; }", "<div></div>", 0xFF0F766Eu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :empty selector matching")
 expect(_renders_color("div:empty { width: 12px; height: 8px; background-color: #0f766e; }", "<div></div>", 0xFF0F766Eu32)).to_equal(true)
 ```
 
@@ -559,13 +716,19 @@ expect(_renders_color("div:empty { width: 12px; height: 8px; background-color: #
 
 #### covers partial :first-child selector matching
 
+- covers partial :first-child selector matching
+   - Expected: _renders_color(".target:first-child { width: 12px; height: 8px; background-color: #1d4ed8; }", "<div class='target'></div><div></div>", 0xFF1D4ED8u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :first-child selector matching")
 expect(_renders_color(".target:first-child { width: 12px; height: 8px; background-color: #1d4ed8; }", "<div class='target'></div><div></div>", 0xFF1D4ED8u32)).to_equal(true)
 ```
 
@@ -579,13 +742,19 @@ expect(_renders_color(".target:first-child { width: 12px; height: 8px; backgroun
 
 #### covers partial :last-child selector matching
 
+- covers partial :last-child selector matching
+   - Expected: _renders_color(".target:last-child { width: 12px; height: 8px; background-color: #be123c; }", "<div></div><div class='target'></div>", 0xFFBE123Cu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :last-child selector matching")
 expect(_renders_color(".target:last-child { width: 12px; height: 8px; background-color: #be123c; }", "<div></div><div class='target'></div>", 0xFFBE123Cu32)).to_equal(true)
 ```
 
@@ -599,13 +768,19 @@ expect(_renders_color(".target:last-child { width: 12px; height: 8px; background
 
 #### covers partial :only-child selector matching
 
+- covers partial :only-child selector matching
+   - Expected: _renders_color(".target:only-child { width: 12px; height: 8px; background-color: #9333ea; }", "<div class='target'></div>", 0xFF9333EAu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :only-child selector matching")
 expect(_renders_color(".target:only-child { width: 12px; height: 8px; background-color: #9333ea; }", "<div class='target'></div>", 0xFF9333EAu32)).to_equal(true)
 ```
 
@@ -619,13 +794,20 @@ expect(_renders_color(".target:only-child { width: 12px; height: 8px; background
 
 #### covers partial :nth-child odd and even matching
 
+- covers partial :nth-child odd and even matching
+   - Expected: _renders_color("div:nth-child(even) { width: 12px; height: 8px; background-color: #0e7490; }", "<div></div><div></div>", 0xFF0E7490u32) is true
+   - Expected: _renders_color(".target:nth-child(odd) { width: 12px; height: 8px; background-color: #0e7490; }", "<div></div><div class='target'></div>", 0xFF0E7490u32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :nth-child odd and even matching")
 expect(_renders_color("div:nth-child(even) { width: 12px; height: 8px; background-color: #0e7490; }", "<div></div><div></div>", 0xFF0E7490u32)).to_equal(true)
 expect(_renders_color(".target:nth-child(odd) { width: 12px; height: 8px; background-color: #0e7490; }", "<div></div><div class='target'></div>", 0xFF0E7490u32)).to_equal(false)
 ```
@@ -640,13 +822,20 @@ expect(_renders_color(".target:nth-child(odd) { width: 12px; height: 8px; backgr
 
 #### covers partial :nth-child an plus b matching
 
+- covers partial :nth-child an plus b matching
+   - Expected: _renders_color(positive_rule, "<div></div><div></div><div class='target'></div>", 0xFF7C2D12u32) is true
+   - Expected: _renders_color(positive_rule, "<div></div><div class='target'></div><div></div>", 0xFF7C2D12u32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers partial :nth-child an plus b matching")
 val positive_formula = "2n" + r"+1"
 val positive_rule = ".target:nth-child(" + positive_formula + ") { width: 12px; height: 8px; background-color: #7c2d12; }"
 expect(_renders_color(positive_rule, "<div></div><div></div><div class='target'></div>", 0xFF7C2D12u32)).to_equal(true)
@@ -663,13 +852,19 @@ expect(_renders_color(positive_rule, "<div></div><div class='target'></div><div>
 
 #### covers simple rules nested inside CSS layer blocks
 
+- covers simple rules nested inside CSS layer blocks
+   - Expected: _renders_color("@layer components { .card { width: 12px; height: 8px; background-color: #0f766e; } }", "<div class='card'></div>", 0xFF0F766Eu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers simple rules nested inside CSS layer blocks")
 expect(_renders_color("@layer components { .card { width: 12px; height: 8px; background-color: #0f766e; } }", "<div class='card'></div>", 0xFF0F766Eu32)).to_equal(true)
 ```
 
@@ -683,13 +878,19 @@ expect(_renders_color("@layer components { .card { width: 12px; height: 8px; bac
 
 #### covers simple parent selector CSS nesting
 
+- covers simple parent selector CSS nesting
+   - Expected: _renders_color(".card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }", "<div class='card primary'></div>", 0xFF7E22CEu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers simple parent selector CSS nesting")
 expect(_renders_color(".card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }", "<div class='card primary'></div>", 0xFF7E22CEu32)).to_equal(true)
 ```
 
@@ -703,13 +904,19 @@ expect(_renders_color(".card { &.primary { width: 12px; height: 8px; background-
 
 #### covers attribute presence selector matching
 
+- covers attribute presence selector matching
+   - Expected: _renders_color("[data-card] { width: 12px; height: 8px; background-color: #0e7490; }", "<div data-card='true'></div>", 0xFF0E7490u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers attribute presence selector matching")
 expect(_renders_color("[data-card] { width: 12px; height: 8px; background-color: #0e7490; }", "<div data-card='true'></div>", 0xFF0E7490u32)).to_equal(true)
 ```
 
@@ -723,13 +930,19 @@ expect(_renders_color("[data-card] { width: 12px; height: 8px; background-color:
 
 #### covers exact attribute value selector matching
 
+- covers exact attribute value selector matching
+   - Expected: _renders_color("div[data-state='active'] { width: 12px; height: 8px; background-color: #4d7c0f; }", "<div data-state='active'></div>", 0xFF4D7C0Fu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers exact attribute value selector matching")
 expect(_renders_color("div[data-state='active'] { width: 12px; height: 8px; background-color: #4d7c0f; }", "<div data-state='active'></div>", 0xFF4D7C0Fu32)).to_equal(true)
 ```
 
@@ -743,13 +956,19 @@ expect(_renders_color("div[data-state='active'] { width: 12px; height: 8px; back
 
 #### covers exact quoted attribute value selectors containing spaces
 
+- covers exact quoted attribute value selectors containing spaces
+   - Expected: _renders_color("[data-label='primary action'] { width: 12px; height: 8px; background-color: #0f766e; }", "<div data-label='primary action'></div>", 0xFF0F766Eu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers exact quoted attribute value selectors containing spaces")
 expect(_renders_color("[data-label='primary action'] { width: 12px; height: 8px; background-color: #0f766e; }", "<div data-label='primary action'></div>", 0xFF0F766Eu32)).to_equal(true)
 ```
 
@@ -763,13 +982,19 @@ expect(_renders_color("[data-label='primary action'] { width: 12px; height: 8px;
 
 #### covers attribute prefix selector matching
 
+- covers attribute prefix selector matching
+   - Expected: _renders_color("div[data-route^='/app'] { width: 12px; height: 8px; background-color: #0f5e9c; }", "<div data-route='/app/home'></div>", 0xFF0F5E9Cu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers attribute prefix selector matching")
 expect(_renders_color("div[data-route^='/app'] { width: 12px; height: 8px; background-color: #0f5e9c; }", "<div data-route='/app/home'></div>", 0xFF0F5E9Cu32)).to_equal(true)
 ```
 
@@ -783,13 +1008,20 @@ expect(_renders_color("div[data-route^='/app'] { width: 12px; height: 8px; backg
 
 #### covers attribute suffix selector matching
 
+- covers attribute suffix selector matching
+   - Expected: _renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }", "<div data-route='/app/settings'></div>", 0xFF065F46u32) is true
+   - Expected: _renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }", "<div data-route='/app/settings/profile'></div>", 0xFF065F46u32) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers attribute suffix selector matching")
 expect(_renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }", "<div data-route='/app/settings'></div>", 0xFF065F46u32)).to_equal(true)
 expect(_renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }", "<div data-route='/app/settings/profile'></div>", 0xFF065F46u32)).to_equal(false)
 ```
@@ -804,13 +1036,19 @@ expect(_renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; 
 
 #### covers attribute substring selector matching
 
+- covers attribute substring selector matching
+   - Expected: _renders_color("[data-tags*='beta'] { width: 12px; height: 8px; background-color: #9d174d; }", "<div data-tags='alpha-beta-release'></div>", 0xFF9D174Du32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers attribute substring selector matching")
 expect(_renders_color("[data-tags*='beta'] { width: 12px; height: 8px; background-color: #9d174d; }", "<div data-tags='alpha-beta-release'></div>", 0xFF9D174Du32)).to_equal(true)
 ```
 
@@ -824,13 +1062,19 @@ expect(_renders_color("[data-tags*='beta'] { width: 12px; height: 8px; backgroun
 
 #### covers attribute whitespace token selector matching
 
+- covers attribute whitespace token selector matching
+   - Expected: _renders_color("[data-flags~='selected'] { width: 12px; height: 8px; background-color: #7c2d12; }", "<div data-flags='primary selected visible'></div>", 0xFF7C2D12u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers attribute whitespace token selector matching")
 expect(_renders_color("[data-flags~='selected'] { width: 12px; height: 8px; background-color: #7c2d12; }", "<div data-flags='primary selected visible'></div>", 0xFF7C2D12u32)).to_equal(true)
 ```
 
@@ -844,13 +1088,19 @@ expect(_renders_color("[data-flags~='selected'] { width: 12px; height: 8px; back
 
 #### covers attribute dash match selector matching
 
+- covers attribute dash match selector matching
+   - Expected: _renders_color("div[lang|='en'] { width: 12px; height: 8px; background-color: #155e75; }", "<div lang='en-US'></div>", 0xFF155E75u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers attribute dash match selector matching")
 expect(_renders_color("div[lang|='en'] { width: 12px; height: 8px; background-color: #155e75; }", "<div lang='en-US'></div>", 0xFF155E75u32)).to_equal(true)
 ```
 
@@ -864,13 +1114,19 @@ expect(_renders_color("div[lang|='en'] { width: 12px; height: 8px; background-co
 
 #### covers case insensitive attribute selector matching
 
+- covers case insensitive attribute selector matching
+   - Expected: _renders_color("div[data-mode='dialog' i] { width: 12px; height: 8px; background-color: #4338ca; }", "<div data-mode='Dialog'></div>", 0xFF4338CAu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers case insensitive attribute selector matching")
 expect(_renders_color("div[data-mode='dialog' i] { width: 12px; height: 8px; background-color: #4338ca; }", "<div data-mode='Dialog'></div>", 0xFF4338CAu32)).to_equal(true)
 ```
 
@@ -884,13 +1140,19 @@ expect(_renders_color("div[data-mode='dialog' i] { width: 12px; height: 8px; bac
 
 #### covers explicit case sensitive attribute selector matching
 
+- covers explicit case sensitive attribute selector matching
+   - Expected: _renders_color("div[data-mode='Dialog' s] { width: 12px; height: 8px; background-color: #1d4ed8; }", "<div data-mode='Dialog'></div>", 0xFF1D4ED8u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers explicit case sensitive attribute selector matching")
 expect(_renders_color("div[data-mode='Dialog' s] { width: 12px; height: 8px; background-color: #1d4ed8; }", "<div data-mode='Dialog'></div>", 0xFF1D4ED8u32)).to_equal(true)
 ```
 
@@ -901,21 +1163,7 @@ expect(_renders_color("div[data-mode='Dialog' s] { width: 12px; height: 8px; bac
 
 #### should score every functional and ordinary pseudo in a chain
 
-- " is-target:is
-   - Artifact capture: after_step
-- " not-target:not
-   - Artifact capture: after_step
-- " has-target:has
-   - Artifact capture: after_step
-- " where-target:where
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes by len
-   - Artifact capture: after_step
-- fail
+- should score every functional and ordinary pseudo in a chain
    - Artifact capture: after_step
 - Choose winners with complete chained pseudo specificity
    - Artifact capture: after_step
@@ -923,13 +1171,7 @@ expect(_renders_color("div[data-mode='Dialog' s] { width: 12px; height: 8px; bac
    - Expected: inspected.hit_index.boxes.by[where_node] equals `24`
 - Lower selector winners through canonical Draw IR
    - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read exact selector pixels through both renderers
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -940,22 +1182,24 @@ expect(_renders_color("div[data-mode='Dialog' s] { width: 12px; height: 8px; bac
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 128 lines folded for reproduction.
+Runnable source: 130 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should score every functional and ordinary pseudo in a chain")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "div{width:12px;height:8px}" +
-    ".is-target:is(.chosen,#never):first-child{background:#dc2626}" +
-    "#is-target{background:#2563eb}" +
-    ".not-target:not(.disabled):nth-child(2){background:#16a34a}" +
-    ".not-target{background:#ea580c}" +
-    ".has-target:has(#has-child):nth-child(3){background:#9333ea}" +
-    "#has-target{background:#0e7490}" +
+    ".is-target:is(.chosen,#never):first-child{{background:#dc2626}}" +
+    "#is-target{{background:#2563eb}}" +
+    ".not-target:not(.disabled):nth-child(2){{background:#16a34a}}" +
+    ".not-target{{background:#ea580c}}" +
+    ".has-target:has(#has-child):nth-child(3){{background:#9333ea}}" +
+    "#has-target{{background:#0e7490}}" +
     ".where-target:where(#where-target):nth-child(4){" +
     "background:#dc2626}" +
-    "#where-target{background:#0e7490}</style>" +
+    "#where-target{{background:#0e7490}}</style>" +
     "<div id='is-target' class='is-target chosen'></div>" +
     "<div id='not-target' class='not-target'></div>" +
     "<div id='has-target' class='has-target'>" +
@@ -1078,13 +1322,7 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 #### should admit selector depth thirty-two and reject deeper chains
 
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes by len
-   - Artifact capture: after_step
-- fail
+- should admit selector depth thirty-two and reject deeper chains
    - Artifact capture: after_step
 - Apply only selectors within functional and chain budgets
    - Artifact capture: after_step
@@ -1092,13 +1330,7 @@ expect(compatibility_pixels).to_equal(engine_pixels)
    - Expected: inspected.hit_index.boxes.by[chain_node] equals `16`
 - Preserve selector boundary decisions in canonical Draw IR
    - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read exact selector boundary pixels through both renderers
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -1109,10 +1341,12 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 96 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should admit selector depth thirty-two and reject deeper chains")
 val admitted = _nested_selector(32, "depth-limit")
 val rejected = _nested_selector(33, "depth-over")
 var ordinary_chain = ".chain"
@@ -1123,11 +1357,11 @@ while count < 33:
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "div{width:12px;height:8px}" +
-    "#depth-limit,#depth-over{background:#ea580c}" +
-    ".chain{background:#16a34a}" +
-    admitted + "{background:#9333ea}" +
-    rejected + "{background:#9333ea}" +
-    ordinary_chain + "{background:#dc2626}</style>" +
+    "#depth-limit,#depth-over{{background:#ea580c}}" +
+    ".chain{{background:#16a34a}}" +
+    admitted + "{{background:#9333ea}}" +
+    rejected + "{{background:#9333ea}}" +
+    ordinary_chain + "{{background:#dc2626}}</style>" +
     "<div id='depth-limit'></div><div id='depth-over'></div>" +
     "<div id='chain' class='chain'></div>"
 )
@@ -1215,33 +1449,13 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 #### should admit sixteen selector options and reject seventeen
 
-- " list16:is
-   - Artifact capture: after_step
-- " list17:is
-   - Artifact capture: after_step
-- "#has16:has
-   - Artifact capture: after_step
-- "#has17:has
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes by len
-   - Artifact capture: after_step
-- fail
+- should admit sixteen selector options and reject seventeen
    - Artifact capture: after_step
 - Invalidate whole over-cap and malformed selectors
    - Artifact capture: after_step
 - Preserve exact option-cap decisions in canonical Draw IR
    - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read exact cap pixels and prove residual red is absent
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -1252,10 +1466,12 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 186 lines folded for reproduction.
+Runnable source: 188 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should admit sixteen selector options and reject seventeen")
 val list16 = _selector_option_list(16)
 val list17 = _selector_option_list(17)
 val has16 = _selector_list_with_match(16, "#child16")
@@ -1265,14 +1481,14 @@ val groups17 = _selector_list_with_match(17, "#group17")
 val html = (
     "<style>html,body{margin:0;background:#fff}" +
     "div{width:12px;height:8px;background:#16a34a}" +
-    ".list16:is(" + list16 + "){background:#dc2626}" +
-    ".list17:is(" + list17 + "){background:#dc2626}" +
-    "#has16:has(" + has16 + "){background:#dc2626}" +
-    "#has17:has(" + has17 + "){background:#dc2626}" +
-    groups16 + "{background:#dc2626}" +
-    groups17 + "{background:#dc2626}" +
-    ".prefix:hovered{background:#dc2626}" +
-    ".malformed:is(.malformed{background:#dc2626}</style>" +
+    ".list16:is(" + list16 + "){{background:#dc2626}}" +
+    ".list17:is(" + list17 + "){{background:#dc2626}}" +
+    "#has16:has(" + has16 + "){{background:#dc2626}}" +
+    "#has17:has(" + has17 + "){{background:#dc2626}}" +
+    groups16 + "{{background:#dc2626}}" +
+    groups17 + "{{background:#dc2626}}" +
+    ".prefix:hovered{{background:#dc2626}}" +
+    ".malformed:is(.malformed{{background:#dc2626}}</style>" +
     "<div id='list16' class='list16 chosen'></div>" +
     "<div id='list17' class='list17 chosen'></div>" +
     "<div id='prefix' class='prefix'></div>" +
@@ -1450,6 +1666,7 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 #### covers six digit hex color
 
+- covers six digit hex color
 - Render a body with a six-digit hexadecimal background color
 - Verify the exact rendered color
    - Expected: _body_renders_color("background-color:#2563eb", 0xFF2563EBu32) is true
@@ -1458,10 +1675,12 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers six digit hex color")
 step("Render a body with a six-digit hexadecimal background color")
 step("Verify the exact rendered color")
 expect(_body_renders_color("background-color:#2563eb", 0xFF2563EBu32)).to_equal(true)
@@ -1474,13 +1693,19 @@ expect(_body_renders_color("background-color:#2563eb", 0xFF2563EBu32)).to_equal(
 
 #### covers shorthand hex color
 
+- covers shorthand hex color
+   - Expected: _body_renders_color("background-color:#0f8", 0xFF00FF88u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers shorthand hex color")
 expect(_body_renders_color("background-color:#0f8", 0xFF00FF88u32)).to_equal(true)
 ```
 
@@ -1494,13 +1719,19 @@ expect(_body_renders_color("background-color:#0f8", 0xFF00FF88u32)).to_equal(tru
 
 #### covers legacy rgb function color
 
+- covers legacy rgb function color
+   - Expected: _body_renders_color("background-color:rgb(5, 150, 105)", 0xFF059669u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers legacy rgb function color")
 expect(_body_renders_color("background-color:rgb(5, 150, 105)", 0xFF059669u32)).to_equal(true)
 ```
 
@@ -1514,13 +1745,19 @@ expect(_body_renders_color("background-color:rgb(5, 150, 105)", 0xFF059669u32)).
 
 #### covers modern space separated rgb function color
 
+- covers modern space separated rgb function color
+   - Expected: _body_renders_color("background-color:rgb(5 150 105)", 0xFF059669u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers modern space separated rgb function color")
 expect(_body_renders_color("background-color:rgb(5 150 105)", 0xFF059669u32)).to_equal(true)
 ```
 
@@ -1534,13 +1771,19 @@ expect(_body_renders_color("background-color:rgb(5 150 105)", 0xFF059669u32)).to
 
 #### covers rgba compositing over white
 
+- covers rgba compositing over white
+   - Expected: _body_renders_color("background-color:rgba(0, 0, 0, 0.5)", 0xFF808080u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers rgba compositing over white")
 expect(_body_renders_color("background-color:rgba(0, 0, 0, 0.5)", 0xFF808080u32)).to_equal(true)
 ```
 
@@ -1554,13 +1797,19 @@ expect(_body_renders_color("background-color:rgba(0, 0, 0, 0.5)", 0xFF808080u32)
 
 #### covers hsl function color
 
+- covers hsl function color
+   - Expected: _body_renders_color("background-color:hsl(120, 100%, 25%)", 0xFF008000u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers hsl function color")
 expect(_body_renders_color("background-color:hsl(120, 100%, 25%)", 0xFF008000u32)).to_equal(true)
 ```
 
@@ -1574,13 +1823,19 @@ expect(_body_renders_color("background-color:hsl(120, 100%, 25%)", 0xFF008000u32
 
 #### covers named CSS color
 
+- covers named CSS color
+   - Expected: _body_renders_color("background-color:rebeccapurple", 0xFF663399u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers named CSS color")
 expect(_body_renders_color("background-color:rebeccapurple", 0xFF663399u32)).to_equal(true)
 ```
 
@@ -1594,13 +1849,19 @@ expect(_body_renders_color("background-color:rebeccapurple", 0xFF663399u32)).to_
 
 #### covers transparent compositing to white
 
+- covers transparent compositing to white
+   - Expected: _body_renders_color("background-color:transparent", 0xFFFFFFFFu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers transparent compositing to white")
 expect(_body_renders_color("background-color:transparent", 0xFFFFFFFFu32)).to_equal(true)
 ```
 
@@ -1614,13 +1875,19 @@ expect(_body_renders_color("background-color:transparent", 0xFFFFFFFFu32)).to_eq
 
 #### covers function color background shorthand
 
+- covers function color background shorthand
+   - Expected: _body_renders_color("background:rgb(5, 150, 105) no-repeat", 0xFF059669u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers function color background shorthand")
 expect(_body_renders_color("background:rgb(5, 150, 105) no-repeat", 0xFF059669u32)).to_equal(true)
 ```
 
@@ -1634,13 +1901,19 @@ expect(_body_renders_color("background:rgb(5, 150, 105) no-repeat", 0xFF059669u3
 
 #### covers color-first background shorthand
 
+- covers color-first background shorthand
+   - Expected: _body_renders_color("background:rebeccapurple no-repeat", 0xFF663399u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers color-first background shorthand")
 expect(_body_renders_color("background:rebeccapurple no-repeat", 0xFF663399u32)).to_equal(true)
 ```
 
@@ -1654,13 +1927,19 @@ expect(_body_renders_color("background:rebeccapurple no-repeat", 0xFF663399u32))
 
 #### covers url background shorthand fallback color
 
+- covers url background shorthand fallback color
+   - Expected: _body_renders_color("background:url(hero.png) #0f8 no-repeat", 0xFF00FF88u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers url background shorthand fallback color")
 expect(_body_renders_color("background:url(hero.png) #0f8 no-repeat", 0xFF00FF88u32)).to_equal(true)
 ```
 
@@ -1674,13 +1953,19 @@ expect(_body_renders_color("background:url(hero.png) #0f8 no-repeat", 0xFF00FF88
 
 #### covers CSS custom property fallback colors
 
+- covers CSS custom property fallback colors
+   - Expected: _renders_color(".card { width: 12px; height: 8px; background-color: var(--missing-panel, #2563eb); }", "<div class='card'></div>", 0xFF2563EBu32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers CSS custom property fallback colors")
 expect(_renders_color(".card { width: 12px; height: 8px; background-color: var(--missing-panel, #2563eb); }", "<div class='card'></div>", 0xFF2563EBu32)).to_equal(true)
 ```
 
@@ -1694,13 +1979,19 @@ expect(_renders_color(".card { width: 12px; height: 8px; background-color: var(-
 
 #### covers CSS custom property fallback colors in background shorthand
 
+- covers CSS custom property fallback colors in background shorthand
+   - Expected: _renders_color(".card { width: 12px; height: 8px; background: var(--missing-panel, #0891b2) no-repeat; }", "<div class='card'></div>", 0xFF0891B2u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers CSS custom property fallback colors in background shorthand")
 expect(_renders_color(".card { width: 12px; height: 8px; background: var(--missing-panel, #0891b2) no-repeat; }", "<div class='card'></div>", 0xFF0891B2u32)).to_equal(true)
 ```
 
@@ -1714,13 +2005,19 @@ expect(_renders_color(".card { width: 12px; height: 8px; background: var(--missi
 
 #### covers later background-color overriding shorthand
 
+- covers later background-color overriding shorthand
+   - Expected: _body_renders_color("background:#0f8; background-color:rebeccapurple", 0xFF663399u32) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers later background-color overriding shorthand")
 expect(_body_renders_color("background:#0f8; background-color:rebeccapurple", 0xFF663399u32)).to_equal(true)
 ```
 
@@ -1741,3 +2038,70 @@ expect(_body_renders_color("background:#0f8; background-color:rebeccapurple", 0x
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cc9053f89a9b27ee2696c49c1923cac6b6f6efa4c1fb916070704f133960a92f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cc9053f89a9b27ee2696c49c1923cac6b6f6efa4c1fb916070704f133960a92f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cc9053f89a9b27ee2696c49c1923cac6b6f6efa4c1fb916070704f133960a92f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/selector_color_subset_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/selector_color_subset_spec.md (current)
+findings: 10 blockers: 1
+  narrative=100 structure=85 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=78; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/selector_color_subset_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/selector_color_subset_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:124:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'covers type selector matching' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'covers universal selector matching' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:134:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'covers class selector matching' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:348:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should score every functional and ordinary pseudo in a chain' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:483:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit selector depth thirty-two and reject deeper chains' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/selector_color_subset_spec.spl:586:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit sixteen selector options and reject seventeen' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # X86 32 Interrupt Specification
 
-> _Hosted coverage for the future i386 int 0x80 runtime bridge._
-
-<!-- sdn-diagram:id=x86_32_interrupt_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=x86_32_interrupt_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-x86_32_interrupt_spec -> std
-x86_32_interrupt_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=x86_32_interrupt_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering x86_32 interrupt runtime bridge.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -38,17 +14,23 @@ x86_32_interrupt_spec -> os
 ## Scenarios
 
 ### x86_32 interrupt runtime bridge
-_Hosted coverage for the future i386 int 0x80 runtime bridge._
 
 #### fails cleanly before runtime installation
+
+- fails cleanly before runtime installation
+   - Expected: result.is_err() is true
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("fails cleanly before runtime installation")
+"""Dispatch should report missing runtime instead of fabricating success."""
 val result = x86_32_dispatch_context(syscall_context(4u32))
 expect(result.is_err()).to_equal(true)
 expect(result.err().unwrap()).to_contain("runtime is not installed")
@@ -58,7 +40,7 @@ expect(result.err().unwrap()).to_contain("runtime is not installed")
 
 #### installs runtime through the HAL wrapper
 
-1. intr install runtime
+- installs runtime through the HAL wrapper
    - Expected: intr.runtime_installed() is true
    - Expected: x86_32_runtime_installed() is true
 
@@ -66,10 +48,13 @@ expect(result.err().unwrap()).to_contain("runtime is not installed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("installs runtime through the HAL wrapper")
+"""The x86_32 interrupt HAL owns runtime installation entrypoints."""
 val intr = X86_32Interrupt()
 intr.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
 expect(intr.runtime_installed()).to_equal(true)
@@ -80,7 +65,7 @@ expect(x86_32_runtime_installed()).to_equal(true)
 
 #### dispatches getpid through a trapped context
 
-1. intr install runtime
+- dispatches getpid through a trapped context
    - Expected: result.is_err() is false
    - Expected: updated.eax equals `0u32`
    - Expected: updated.eip equals `0x1002u32`
@@ -89,10 +74,13 @@ expect(x86_32_runtime_installed()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("dispatches getpid through a trapped context")
+"""A successful syscall writes eax and advances eip past int 0x80."""
 val intr = X86_32Interrupt()
 intr.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
 val result = x86_32_dispatch_context(syscall_context(4u32))
@@ -106,8 +94,7 @@ expect(updated.eip).to_equal(0x1002u32)
 
 #### dispatches brk query through a trapped context
 
-1. brk reset for test
-2. intr install runtime
+- dispatches brk query through a trapped context
    - Expected: result.is_err() is false
    - Expected: updated.eax equals `0x30000000u32`
    - Expected: updated.eip equals `0x1002u32`
@@ -116,10 +103,13 @@ expect(updated.eip).to_equal(0x1002u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("dispatches brk query through a trapped context")
+"""The x86_32 bridge carries nontrivial process syscalls through int 0x80."""
 brk_reset_for_test()
 val intr = X86_32Interrupt()
 intr.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
@@ -134,7 +124,7 @@ expect(updated.eip).to_equal(0x1002u32)
 
 #### exposes a primitive ABI for future assembly stubs
 
-1. intr install runtime
+- exposes a primitive ABI for future assembly stubs
    - Expected: x86_32_dispatch_installed_syscall_abi(4u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32) equals `0`
    - Expected: x86_32_dispatch_installed_syscall_abi(99u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32) equals `-38`
 
@@ -142,10 +132,13 @@ expect(updated.eip).to_equal(0x1002u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("exposes a primitive ABI for future assembly stubs")
+"""The ABI helper returns syscall results as signed i32 values."""
 val intr = X86_32Interrupt()
 intr.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
 expect(x86_32_dispatch_installed_syscall_abi(4u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)).to_equal(0)
@@ -161,12 +154,12 @@ expect(x86_32_dispatch_installed_syscall_abi(99u32, 0u32, 0u32, 0u32, 0u32, 0u32
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering x86_32 interrupt runtime bridge.
 - x86_32 interrupt runtime bridge
 
 ## Scenario Summary
@@ -181,3 +174,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3d7398f384f55a7b61fd4e6ab3c6b0a62ed468f9ebebef17a7b9fe15044dc9ac`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3d7398f384f55a7b61fd4e6ab3c6b0a62ed468f9ebebef17a7b9fe15044dc9ac`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3d7398f384f55a7b61fd4e6ab3c6b0a62ed468f9ebebef17a7b9fe15044dc9ac`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/arch/x86_32_interrupt_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/arch/x86_32_interrupt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/arch/x86_32_interrupt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails cleanly before runtime installation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'installs runtime through the HAL wrapper' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/arch/x86_32_interrupt_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches getpid through a trapped context' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

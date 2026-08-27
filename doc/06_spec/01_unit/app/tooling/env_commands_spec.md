@@ -1,29 +1,6 @@
-# Environment Commands Specification
+# Env Commands Specification
 
-> Unit tests for environment command handling module. Validates CLI argument parsing, subcommand detection, and execution of environment management operations.
-
-<!-- sdn-diagram:id=env_commands_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=env_commands_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-env_commands_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=env_commands_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering env_commands module compilation, subcommand detection, argument length validation, force flag detection, optional shell parameter, subcommand extraction, exit code conventions, error message format, help text formatting, name parameter extraction, match pattern validation.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,41 +9,7 @@ env_commands_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Environment Commands Specification
-
-Unit tests for environment command handling module. Validates CLI argument parsing, subcommand detection, and execution of environment management operations.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | Environment Management |
-| Category | Tooling |
-| Difficulty | 2/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/tooling/env_commands_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Unit tests for environment command handling module. Validates CLI argument parsing,
-subcommand detection, and execution of environment management operations.
-
-## Key Features
-
-- Subcommand parsing (create, activate, list, remove, info)
-- Argument validation and bounds checking
-- Force flag detection
-- Optional shell parameter handling
-- Error message formatting and exit code conventions
-- Help text generation and structure
-- Pattern matching for command variants
-
-## Related Specifications
-
-- [CLI Design](../../../docs/design/cli.md)
-- [Environment Management](../../../docs/design/env_management.md)
+# Env Commands Specification
 
 ## Scenarios
 
@@ -74,13 +17,22 @@ subcommand detection, and execution of environment management operations.
 
 #### compiles successfully
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- compiles successfully
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compiles successfully")
 expect 1 + 1 == 2
 ```
 
@@ -90,13 +42,18 @@ expect 1 + 1 == 2
 
 #### detects create subcommand
 
+- detects create subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects create subcommand")
 val cmd = "create"
 expect cmd == "create"
 ```
@@ -105,13 +62,18 @@ expect cmd == "create"
 
 #### detects activate subcommand
 
+- detects activate subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects activate subcommand")
 val cmd = "activate"
 expect cmd == "activate"
 ```
@@ -120,13 +82,18 @@ expect cmd == "activate"
 
 #### detects list subcommand
 
+- detects list subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects list subcommand")
 val cmd = "list"
 expect cmd == "list"
 ```
@@ -135,13 +102,18 @@ expect cmd == "list"
 
 #### detects remove subcommand
 
+- detects remove subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects remove subcommand")
 val cmd = "remove"
 expect cmd == "remove"
 ```
@@ -150,13 +122,18 @@ expect cmd == "remove"
 
 #### detects info subcommand
 
+- detects info subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects info subcommand")
 val cmd = "info"
 expect cmd == "info"
 ```
@@ -167,16 +144,18 @@ expect cmd == "info"
 
 #### create requires 3 args minimum
 
-1. expect args len
+- create requires 3 args minimum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("create requires 3 args minimum")
 val args = ["simple", "env", "myenv"]
 expect args.len() >= 3 == true
 ```
@@ -185,16 +164,18 @@ expect args.len() >= 3 == true
 
 #### activate requires 3 args minimum
 
-1. expect args len
+- activate requires 3 args minimum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("activate requires 3 args minimum")
 val args = ["simple", "env", "myenv"]
 expect args.len() >= 3 == true
 ```
@@ -203,16 +184,18 @@ expect args.len() >= 3 == true
 
 #### remove requires 3 args minimum
 
-1. expect args len
+- remove requires 3 args minimum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("remove requires 3 args minimum")
 val args = ["simple", "env", "myenv"]
 expect args.len() >= 3 == true
 ```
@@ -221,16 +204,18 @@ expect args.len() >= 3 == true
 
 #### info requires 3 args minimum
 
-1. expect args len
+- info requires 3 args minimum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("info requires 3 args minimum")
 val args = ["simple", "env", "myenv"]
 expect args.len() >= 3 == true
 ```
@@ -239,16 +224,18 @@ expect args.len() >= 3 == true
 
 #### list requires only 2 args
 
-1. expect args len
+- list requires only 2 args
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("list requires only 2 args")
 val args = ["simple", "env"]
 expect args.len() >= 2 == true
 ```
@@ -259,13 +246,18 @@ expect args.len() >= 2 == true
 
 #### detects --force flag
 
+- detects --force flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects --force flag")
 val args = ["simple", "env", "remove", "myenv", "--force"]
 val has_force = args.any(_1 == "--force")
 expect has_force == true
@@ -275,13 +267,18 @@ expect has_force == true
 
 #### no force flag when absent
 
+- no force flag when absent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("no force flag when absent")
 val args = ["simple", "env", "remove", "myenv"]
 val has_force = args.any(_1 == "--force")
 expect has_force == false
@@ -293,13 +290,18 @@ expect has_force == false
 
 #### detects shell when present
 
+- detects shell when present
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects shell when present")
 val args = ["simple", "env", "activate", "myenv", "bash"]
 val has_shell = args.len() > 3
 expect has_shell == true
@@ -309,13 +311,18 @@ expect has_shell == true
 
 #### no shell when absent
 
+- no shell when absent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("no shell when absent")
 val args = ["simple", "env", "activate", "myenv"]
 val has_shell = args.len() > 3
 expect has_shell == false
@@ -327,17 +334,18 @@ expect has_shell == false
 
 #### extracts subcommand from index 1
 
-1. Some
-2. expect subcommand is some
+- extracts subcommand from index 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts subcommand from index 1")
 val args = ["simple", "env", "create", "name"]
 val subcommand = if args.len() > 1:
     Some(args[1])
@@ -350,17 +358,18 @@ expect subcommand.is_some() == true
 
 #### returns None when no subcommand
 
-1. Some
-2. expect subcommand is none
+- returns None when no subcommand
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns None when no subcommand")
 val args = ["simple"]
 val subcommand = if args.len() > 1:
     Some(args[1])
@@ -375,13 +384,18 @@ expect subcommand.is_none() == true
 
 #### success returns 0
 
+- success returns 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("success returns 0")
 val exit_code = 0
 expect exit_code == 0
 ```
@@ -390,13 +404,18 @@ expect exit_code == 0
 
 #### error returns 1
 
+- error returns 1
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("error returns 1")
 val exit_code = 1
 expect exit_code == 1
 ```
@@ -407,16 +426,18 @@ expect exit_code == 1
 
 #### error prefix format
 
-1. expect msg starts with
+- error prefix format
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("error prefix format")
 val msg = "error: env create requires a name"
 expect msg.starts_with("error:") == true
 ```
@@ -425,16 +446,18 @@ expect msg.starts_with("error:") == true
 
 #### usage prefix format
 
-1. expect msg starts with
+- usage prefix format
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("usage prefix format")
 val msg = "Usage: simple env create <name>"
 expect msg.starts_with("Usage:") == true
 ```
@@ -445,17 +468,18 @@ expect msg.starts_with("Usage:") == true
 
 #### validates command examples
 
-1. expect example contains
-2. expect example contains
+- validates command examples
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates command examples")
 val example = "simple env create <name>"
 expect example.contains("env") == true
 expect example.contains("create") == true
@@ -465,16 +489,18 @@ expect example.contains("create") == true
 
 #### validates help structure
 
-1. expect header contains
+- validates help structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates help structure")
 val header = "Simple Environment Management"
 expect header.contains("Environment") == true
 ```
@@ -485,13 +511,18 @@ expect header.contains("Environment") == true
 
 #### extracts name from index 2
 
+- extracts name from index 2
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts name from index 2")
 val args = ["simple", "env", "create", "myenv"]
 val name = args[2]
 expect name == "myenv"
@@ -501,13 +532,18 @@ expect name == "myenv"
 
 #### handles different names
 
+- handles different names
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles different names")
 val args = ["simple", "env", "activate", "testenv"]
 val name = args[2]
 expect name == "testenv"
@@ -519,16 +555,18 @@ expect name == "testenv"
 
 #### matches create variant
 
-1. Some
+- matches create variant
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches create variant")
 val cmd = Some("create")
 val is_create = match cmd:
     Some("create") => true
@@ -540,13 +578,18 @@ expect is_create == true
 
 #### matches None variant
 
+- matches None variant
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches None variant")
 val cmd: Option<text> = None
 val is_none = match cmd:
     None => true
@@ -555,6 +598,31 @@ expect is_none == true
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/tooling/env_commands_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering env_commands module compilation, subcommand detection, argument length validation, force flag detection, optional shell parameter, subcommand extraction, exit code conventions, error message format, help text formatting, name parameter extraction, match pattern validation.
+- env_commands module compilation
+- subcommand detection
+- argument length validation
+- force flag detection
+- optional shell parameter
+- subcommand extraction
+- exit code conventions
+- error message format
+- help text formatting
+- name parameter extraction
+- match pattern validation
 
 ## Scenario Summary
 
@@ -568,3 +636,51 @@ expect is_none == true
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ae3f0912b0285ecd707238a869599047f3e32265ea0bb96f38a8fd92ba16721c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ae3f0912b0285ecd707238a869599047f3e32265ea0bb96f38a8fd92ba16721c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ae3f0912b0285ecd707238a869599047f3e32265ea0bb96f38a8fd92ba16721c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/env_commands_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/env_commands_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/env_commands_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/env_commands_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/env_commands_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles successfully' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/env_commands_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects create subcommand' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/env_commands_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects activate subcommand' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

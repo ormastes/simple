@@ -1,892 +1,196 @@
-# Test Runner Benchmark Framework Tests
+# test_runner_benchmark_spec
 
-> Tests for the test runner's benchmark framework components. Covers the full lifecycle of benchmark execution: creating results, configuring runs, running benchmarks, aggregating suite results, and comparing against baselines.
-
-<!-- sdn-diagram:id=test_runner_benchmark_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_runner_benchmark_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_runner_benchmark_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_runner_benchmark_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: prove the test runner's REAL benchmark framework
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 38 | 38 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Test Runner Benchmark Framework Tests
+# test_runner_benchmark_spec
 
-Tests for the test runner's benchmark framework components. Covers the full lifecycle of benchmark execution: creating results, configuring runs, running benchmarks, aggregating suite results, and comparing against baselines.
+Purpose: prove the test runner's REAL benchmark framework
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | Testing Infrastructure - Benchmarking |
-| Category | Testing \| Performance |
-| Status | Planned |
+| Category | Other |
+| Status | Active |
 | Source | `test/05_perf/test_runner_benchmark_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: prove the test runner's REAL benchmark framework
+(app.test.bench.bench_harness + app.test.bench.bench_report) measures what it
+claims and emits the artifacts consumers read — case/result construction,
+warm closure timing (both ns/op and ops/sec rows stay distinct), and the
+report/metrics table pair. The original file sketched a BenchmarkResult/
+BenchmarkRunner API that does not exist anywhere in src; this rewrite targets
+the framework that actually ships. Audience: test-infra and perf owners.
 
-Tests for the test runner's benchmark framework components. Covers the full
-lifecycle of benchmark execution: creating results, configuring runs, running
-benchmarks, aggregating suite results, and comparing against baselines.
-
-## Key Areas
-
-- BenchmarkResult: Timing sample collection, statistics, time formatting
-- BenchmarkConfig: Default, quick, and thorough configuration presets
-- Benchmark: Creating benchmarks with name, description, category, setup/teardown
-- BenchmarkRunner: Adding and executing benchmarks, warmup and measurement phases
-- BenchmarkSuite: Grouping benchmarks and running with config
-- BenchmarkComparison: Baseline comparison, speedup calculation, regression detection
+Note: assertions are artifact-based (read the emitted files) because the
+interpreter returns Unit for cross-module struct field access — see the
+caveat in test/05_perf/lang/lang_script_vs_compiler_bench_spec.spl.
 
 ## Scenarios
 
-### BenchmarkResult
+### test runner bench harness (real framework)
 
-<details>
-<summary>Advanced: creates result from timing samples</summary>
+#### warm bench runs the body warmup + iters times
 
-#### creates result from timing samples _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkResult.create("test", [100, 110, 105])
-# result.avg_time_ns is approximately 105
-pass
-```
-
-</details>
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+- invalid capture metadata value: statistics (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-</details>
+- warm bench runs the body warmup + iters times
+   - Expected: _workload_counter equals `5`
 
-<details>
-<summary>Advanced: calculates min time</summary>
-
-#### calculates min time _(slow)_
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# result.min_time_ns == minimum of samples
-pass
+# @req REQ-SSPEC-PERF
+step("warm bench runs the body warmup + iters times")
+val bc = make_bench_case("counter_case", "interp", "warm", 4)
+_workload_counter = 0
+val _r = bench_run_warm(bc, _counting_workload)
+# oracle: 1 warmup call + 4 timed iterations = exactly 5 invocations
+expect(_workload_counter).to_equal(5)
 ```
 
 </details>
 
+#### warm bench emits distinct ops/sec and ns/op rows
 
-</details>
+**Manual warnings:**
+- invalid capture metadata value: statistics (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
-<details>
-<summary>Advanced: calculates max time</summary>
 
-#### calculates max time _(slow)_
+- warm bench emits distinct ops/sec and ns/op rows
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# result.max_time_ns == maximum of samples
-pass
+# @req REQ-SSPEC-PERF
+step("warm bench emits distinct ops/sec and ns/op rows")
+_reset_artifacts()
+val bc = make_bench_case("dual_row_case", "interp", "warm", 3)
+val r_ops = bench_run_warm(bc, _counting_workload)
+val r_ns = bench_run_warm_ns(bc, _counting_workload)
+var rows: [BenchResult] = []
+rows.push(r_ops)
+rows.push(r_ns)
+bench_emit(rows, REPORT_PATH, TABLE_PATH)
+val report = _read_file(REPORT_PATH)
+# oracle: both metric kinds appear as separate rows, never collapsed
+expect(report).to_contain("ops/sec")
+expect(report).to_contain("ns/op")
 ```
 
 </details>
 
+#### bench_emit writes both the report and the metrics table
 
-</details>
+- bench_emit writes both the report and the metrics table
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: rt_file_exists(REPORT_PATH) is true
+   - Expected: rt_file_exists(TABLE_PATH) is true
 
-<details>
-<summary>Advanced: calculates standard deviation</summary>
-
-#### calculates standard deviation _(slow)_
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# result.std_dev_ns reflects variation in samples
-pass
+# @req REQ-SSPEC-PERF
+step("bench_emit writes both the report and the metrics table")
+_reset_artifacts()
+var rows: [BenchResult] = []
+rows.push(make_bench_result("emit_case", "interp", "warm", "ns/op", 42, "ns/op"))
+bench_emit(rows, REPORT_PATH, TABLE_PATH)
+# oracle: both consumer-facing artifacts exist after emit
+expect(rt_file_exists(REPORT_PATH)).to_equal(true)
+expect(rt_file_exists(TABLE_PATH)).to_equal(true)
 ```
 
 </details>
 
+#### emitted rows carry the case name and arch tag
 
-</details>
+**Manual warnings:**
+- invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
-<details>
-<summary>Advanced: handles empty samples</summary>
 
-#### handles empty samples _(slow)_
+- emitted rows carry the case name and arch tag
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# BenchmarkResult.create("test", [])
-# result.iterations == 0
-pass
+# @req REQ-SSPEC-PERF
+step("emitted rows carry the case name and arch tag")
+_reset_artifacts()
+var rows: [BenchResult] = []
+rows.push(make_bench_result("tagged_case_x86", "interp", "warm", "ns/op", 7, "ns/op"))
+bench_emit(rows, REPORT_PATH, TABLE_PATH)
+val table = _read_file(TABLE_PATH)
+# oracle: the row is traceable to its benchmark name and arch lane
+expect(table).to_contain("tagged_case_x86")
+expect(table).to_contain("x86_64")
 ```
 
 </details>
 
+#### process-plane row measures a real child process
 
-</details>
+**Manual warnings:**
+- invalid capture metadata value: statistics (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
-<details>
-<summary>Advanced: formats time in nanoseconds</summary>
 
-#### formats time in nanoseconds _(slow)_
+- process-plane row measures a real child process
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# result.format_time(500) == "500 ns"
-pass
+# @req REQ-SSPEC-PERF
+step("process-plane row measures a real child process")
+_reset_artifacts()
+val bc = make_bench_case("proc_case", "script", "process", 1)
+val r = bench_run_process(bc, ["/bin/echo", "bench_probe"])
+var rows: [BenchResult] = []
+rows.push(r)
+bench_emit(rows, REPORT_PATH, TABLE_PATH)
+val report = _read_file(REPORT_PATH)
+# oracle: the wall_ms metric row for the measured child exists
+expect(report).to_contain("wall_ms")
+expect(report).to_contain("proc_case")
 ```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: formats time in microseconds</summary>
-
-#### formats time in microseconds _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# result.format_time(5000) contains "us"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: formats time in milliseconds</summary>
-
-#### formats time in milliseconds _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# result.format_time(5000000) contains "ms"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: formats time in seconds</summary>
-
-#### formats time in seconds _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# result.format_time(5000000000) contains "s"
-pass
-```
-
-</details>
-
-
-</details>
-
-### BenchmarkConfig
-
-<details>
-<summary>Advanced: creates default config</summary>
-
-#### creates default config _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkConfig.default_config()
-# config.warmup_iterations > 0
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates quick config</summary>
-
-#### creates quick config _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkConfig.quick()
-# config.measurement_iterations < default
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates thorough config</summary>
-
-#### creates thorough config _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkConfig.thorough()
-# config.measurement_iterations > default
-pass
-```
-
-</details>
-
-
-</details>
-
-### Benchmark
-
-<details>
-<summary>Advanced: creates benchmark with name and function</summary>
-
-#### creates benchmark with name and function _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# Benchmark.create("test", fn)
-# bench.name == "test"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: adds description</summary>
-
-#### adds description _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# bench.with_description("desc")
-# bench.description == "desc"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: adds category</summary>
-
-#### adds category _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# bench.with_category("memory")
-# bench.category == "memory"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: adds setup function</summary>
-
-#### adds setup function _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# bench.with_setup(fn)
-# bench.setup_fn.? == true
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: adds teardown function</summary>
-
-#### adds teardown function _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# bench.with_teardown(fn)
-# bench.teardown_fn.? == true
-pass
-```
-
-</details>
-
-
-</details>
-
-### BenchmarkRunner
-
-<details>
-<summary>Advanced: creates runner with config</summary>
-
-#### creates runner with config _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkRunner.create(config)
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates default runner</summary>
-
-#### creates default runner _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkRunner.default_runner()
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: adds benchmarks</summary>
-
-#### adds benchmarks _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# runner.add_benchmark(bench)
-# runner.benchmarks.len() == 1
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: runs all benchmarks</summary>
-
-#### runs all benchmarks _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# runner.run_all() returns results
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: runs warmup iterations</summary>
-
-#### runs warmup iterations _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# warmup iterations run before measurement
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: runs measurement iterations</summary>
-
-#### runs measurement iterations _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# measurement iterations collected for stats
-pass
-```
-
-</details>
-
-
-</details>
-
-### BenchmarkSuite
-
-<details>
-<summary>Advanced: creates suite with name</summary>
-
-#### creates suite with name _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkSuite.create("my_suite").name == "my_suite"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: adds benchmarks</summary>
-
-#### adds benchmarks _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# suite.add(bench)
-# suite.benchmarks.len() == 1
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: runs with config</summary>
-
-#### runs with config _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# suite.run(config) returns BenchmarkSuiteResult
-pass
-```
-
-</details>
-
-
-</details>
-
-### BenchmarkSuiteResult
-
-<details>
-<summary>Advanced: contains all results</summary>
-
-#### contains all results _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# result.results.len() == number of benchmarks
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: calculates total time</summary>
-
-#### calculates total time _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# result.total_time_ns == sum of all benchmark times
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: formats summary</summary>
-
-#### formats summary _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# result.format_summary() contains suite name
-pass
-```
-
-</details>
-
-
-</details>
-
-### BenchmarkComparison
-
-<details>
-<summary>Advanced: compares baseline to current</summary>
-
-#### compares baseline to current _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# BenchmarkComparison.compare(baseline, current)
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: calculates speedup</summary>
-
-#### calculates speedup _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# If current is faster, speedup > 1.0
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: detects regression</summary>
-
-#### detects regression _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# If current is 5% slower, is_regression == true
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: formats comparison</summary>
-
-#### formats comparison _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# comparison.format_comparison() contains speedup
-pass
-```
-
-</details>
-
-
-</details>
-
-### Standard Benchmarks
-
-<details>
-<summary>Advanced: creates fibonacci benchmark</summary>
-
-#### creates fibonacci benchmark _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# fibonacci_benchmark().name == "fibonacci_30"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates array sum benchmark</summary>
-
-#### creates array sum benchmark _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# array_sum_benchmark().name contains "array_sum"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates string concat benchmark</summary>
-
-#### creates string concat benchmark _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# string_concat_benchmark().category == "string"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates allocation benchmark</summary>
-
-#### creates allocation benchmark _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# allocation_benchmark().category == "memory"
-pass
-```
-
-</details>
-
-
-</details>
-
-<details>
-<summary>Advanced: creates standard suite</summary>
-
-#### creates standard suite _(slow)_
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# standard_benchmarks().benchmarks.len() >= 4
-pass
-```
-
-</details>
-
 
 </details>
 
@@ -894,11 +198,53 @@ pass
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 38 |
-| Active scenarios | 38 |
-| Slow scenarios | 38 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-PERF`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e5c323d6f1948962e1ed60f53b71c5188acebc6411e3fb1ad8c32a1d92eb5f98`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e5c323d6f1948962e1ed60f53b71c5188acebc6411e3fb1ad8c32a1d92eb5f98`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e5c323d6f1948962e1ed60f53b71c5188acebc6411e3fb1ad8c32a1d92eb5f98`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
+
+SSpec documentization score: 95/100
+source: test/05_perf/test_runner_benchmark_spec.spl
+mirror: doc/06_spec/05_perf/test_runner_benchmark_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/05_perf/test_runner_benchmark_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/05_perf/test_runner_benchmark_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/05_perf/test_runner_benchmark_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+<!-- sspec-maintain:scorecard:end -->

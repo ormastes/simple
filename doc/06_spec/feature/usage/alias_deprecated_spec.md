@@ -1,5 +1,16 @@
 # Alias and Deprecated Feature Specification
 
+> This specification covers the alias and deprecation features: 1. Type alias: `alias NewName = OldName` for classes/structs/enums 2. Function alias: `fn new_name = old_name` for functions and methods 3. @deprecated decorator with enforcement and suggestions
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 56 | 56 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Alias and Deprecated Feature Specification
+
 This specification covers the alias and deprecation features: 1. Type alias: `alias NewName = OldName` for classes/structs/enums 2. Function alias: `fn new_name = old_name` for functions and methods 3. @deprecated decorator with enforcement and suggestions
 
 ## At a Glance
@@ -10,19 +21,9 @@ This specification covers the alias and deprecation features: 1. Type alias: `al
 | Category | Language \| Syntax |
 | Difficulty | 2/5 |
 | Status | In Progress |
-| Source | `test/03_system/feature/usage/alias_deprecated_spec.spl` |
-| Updated | 2026-04-07 |
-| Generator | `simple spipe-docgen` (Rust) |
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 56 |
-| Active scenarios | 56 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Source | `test/feature/usage/alias_deprecated_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -34,16 +35,22 @@ This specification covers the alias and deprecation features:
 ## Syntax
 
 ```simple
+# Type alias
 alias Point2D = Point
 alias Optional = Option
+
+# Function alias
+use std.spec.step
 
 fn println = print
 fn each = iter
 
+# Deprecation with suggestion
 @deprecated("Use println instead")
 fn print(msg):
 ...
 
+# Chained aliases
 impl List:
 fn each = iter
 fn forEach = each
@@ -74,266 +81,452 @@ fn forEach = each
 The alias feature is implemented at the parser and HIR lowering levels.
 Deprecation warnings are collected during lowering and reported after compilation.
 
-expect(true).to_equal(true)  # Should produce error
-
-    it "allows alias with same name as original in different scope":
-        # This is a valid shadowing scenario
-        val source = """
-struct Point:
-    x: i64
-    y: i64
-
-fn test():
-    alias Point = OtherPoint
-
-expect(true).to_equal(true)  # Should produce error
-
-    it "rejects alias conflicting with existing function":
-        # Cannot create alias with same name as existing function
-        val source = """
-fn existing():
-    42
-
-fn existing = other_func
-
-expect(true).to_equal(true)
-
-
-# ============================================================================
-# Test Group 9: Deprecation Edge Cases
-# ============================================================================
-
-describe "Deprecation Edge Cases":
-    # ## Deprecation Edge Cases
-    #
-    # Tests for boundary conditions in deprecation handling.
-
-    it "handles empty deprecation message":
-        # @deprecated("") should still work
-        val source = "@deprecated(\"\")\nfn old_func(): 42"
-        expect(true).to_equal(true)
-
-    it "handles deprecation with special characters in message":
-        # Message with quotes, newlines, etc.
-        val source = "@deprecated(\"Use 'new_func' instead\\nSee docs.\")\nfn old_func(): 42"
-        expect(true).to_equal(true)
-
-    it "handles deprecated alias pointing to deprecated function":
-        # Both the alias and target are deprecated
-        val source = """
-@deprecated("Use new_impl instead")
-fn old_impl():
-    42
-
-@deprecated("Use new_func instead")
-fn old_func = old_impl
-
-expect(true).to_equal(true)
-
-    it "handles multiple decorators with deprecated":
-        # @deprecated combined with other decorators
-        val source = """
-@deprecated("Use v2 instead")
-@pure
-fn old_pure_func():
-    42
-
-expect(true).to_equal(true)
-
-
-# ============================================================================
-# Test Group 10: Alias Chain Edge Cases
-# ============================================================================
-
-describe "Alias Chain Edge Cases":
-    # ## Alias Chain Edge Cases
-    #
-    # Tests for complex alias resolution scenarios.
-
-    it "rejects circular alias chain":
-        # A -> B -> A should be detected and rejected
-        val source = """
-alias A = B
-alias B = A
-
-expect(true).to_equal(true)  # Should produce error
-
-    it "handles deep alias chain":
-        # A -> B -> C -> D -> E (5 levels) should work
-        val source = """
-struct Base:
-    x: i64
-
-alias Level1 = Base
-alias Level2 = Level1
-alias Level3 = Level2
-alias Level4 = Level3
-alias Level5 = Level4
-
-expect(true).to_equal(true)
-
-    it "handles function alias chain":
-        # fn a = b, fn b = c, fn c = impl
-        val source = """
-fn base_impl():
-    42
-
-fn level1 = base_impl
-fn level2 = level1
-fn level3 = level2
-
-expect(true).to_equal(true)
-
-    it "handles alias to qualified type":
-        # Alias using fully qualified name
-        val source = "alias MyList = std.collections.List"
-        expect(true).to_equal(true)
-
-    it "handles exported alias":
-        # pub alias should be visible to importing modules
-        val source = """
-pub alias PublicAlias = InternalType
-
-struct InternalType:
-    x: i64
-
-expect(true).to_equal(true)
-
-
-# ============================================================================
-# Test Group 13: Alias with Generics Edge Cases
-# ============================================================================
-
-describe "Alias with Generics Edge Cases":
-    # ## Alias with Generics
-    #
-    # Tests for aliases involving generic types.
-
-    it "handles alias to partially applied generic":
-        # alias StringMap<V> = Map<String, V>
-        val source = "alias StringMap<V> = Map<String, V>"
-        expect(true).to_equal(true)
-
-    it "handles alias to fully applied generic":
-        # alias IntList = List<Int>
-        val source = "alias IntList = List<Int>"
-        expect(true).to_equal(true)
-
-    it "handles alias preserving all type parameters":
-        # alias MyMap<K, V> = Map<K, V>
-        val source = "alias MyMap<K, V> = Map<K, V>"
-        expect(true).to_equal(true)
-
-    it "handles nested generic alias":
-        # alias NestedList<T> = List<List<T>>
-        val source = "alias NestedList<T> = List<List<T>>"
-        expect(true).to_equal(true)
-
-    it "rejects alias with mismatched type parameters":
-        # alias Bad<T, U> = List<T> (U unused - may warn or error)
-        val source = "alias Bad<T, U> = List<T>"
-        expect(true).to_equal(true)  # Implementation decision
-
-
-# ============================================================================
-# Test Group 14: Deprecation Suggestion Edge Cases
-# ============================================================================
-
-describe "Deprecation Suggestion Edge Cases":
-    # ## Deprecation Suggestion Logic
-    #
-    # Tests for the suggestion algorithm when deprecated items are used.
-
-    it "suggests non-deprecated alias when available":
-        # Using deprecated A should suggest non-deprecated B
-        val source = """
-fn impl():
-    42
-
-@deprecated("Use new_func instead")
-fn old_func = impl
-
-fn new_func = impl
-
-# Using alias1 should suggest original
-        expect(true).to_equal(true)
-
-    it "handles suggestion when original is also deprecated":
-        # Edge case: original deprecated, alias not deprecated
-        val source = """
-@deprecated("Internal - use public_api instead")
-fn internal_impl():
-    42
-
-fn public_api = internal_impl
-
-## Evidence
-
-| Category | Count |
-|----------|------:|
-| Artifacts | 1 |
-
-### Artifacts
-
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/alias_deprecated/result.json` |
-
 ## Scenarios
 
+### Type Alias Parsing
+
+#### parses simple type alias
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
 - parses simple type alias
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("parses simple type alias")
+# The parser should accept: alias Point2D = Point
+val source = "alias Point2D = Point"
+# This test verifies parsing succeeds
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### parses type alias with uppercase names
+
 - parses type alias with uppercase names
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("parses type alias with uppercase names")
+# Aliases should use PascalCase names
+val source = "alias Optional = Option"
+expect(true).to_equal(true)
+```
+
+</details>
+
+### Function Alias Parsing
+
+#### parses function alias
+
 - parses function alias
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("parses function alias")
+# The parser should accept: fn println = print
+val source = "fn println = print"
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### parses function alias with lowercase names
+
 - parses function alias with lowercase names
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("parses function alias with lowercase names")
+# Function aliases should use snake_case names
+val source = "fn each = iter"
+expect(true).to_equal(true)
+```
+
+</details>
+
+### Deprecation Decorator
+
+#### parses deprecated decorator without message
+
 - parses deprecated decorator without message
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("parses deprecated decorator without message")
+val source = "@deprecated\nalias OldPoint = Point"
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### parses deprecated decorator with message
+
 - parses deprecated decorator with message
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("parses deprecated decorator with message")
+val source = "@deprecated(\"Use NewPoint instead\")\nalias OldPoint = Point"
+expect(true).to_equal(true)
+```
+
+</details>
+
+### Alias Resolution
+
+#### resolves type alias to original type
+
 - resolves type alias to original type
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("resolves type alias to original type")
+# alias Point2D = Point should resolve Point2D to Point
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### resolves function alias to original function
+
 - resolves function alias to original function
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("resolves function alias to original function")
+# fn println = print should make println call print
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### resolves chained aliases
+
 - resolves chained aliases
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("resolves chained aliases")
+# A -> B -> C should resolve A to C
+expect(true).to_equal(true)
+```
+
+</details>
+
+### Deprecation Warnings
+
+#### generates warning for deprecated function usage
+
 - generates warning for deprecated function usage
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("generates warning for deprecated function usage")
+# Using a deprecated function should generate a warning
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### includes deprecation message in warning
+
 - includes deprecation message in warning
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("includes deprecation message in warning")
+# Warning should include the message from @deprecated("...")
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### suggests non-deprecated alternative
+
 - suggests non-deprecated alternative
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("suggests non-deprecated alternative")
+# Warning should suggest a non-deprecated alias
+expect(true).to_equal(true)
+```
+
+</details>
+
+### Alias Integration
+
+#### supports library migration pattern
+
 - supports library migration pattern
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("supports library migration pattern")
+# Old API marked deprecated, new API as alias
+# @deprecated("Use newFunc instead")
+# fn oldFunc = implementation
+# fn newFunc = oldFunc  # Non-deprecated alias
+expect(true).to_equal(true)
+```
+
+</details>
+
+#### supports method aliasing in impl blocks
+
 - supports method aliasing in impl blocks
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("supports method aliasing in impl blocks")
+# impl List:
+#     fn each = iter
+#     fn forEach = each
+expect(true).to_equal(true)
+```
+
+</details>
+
+### Type Alias Edge Cases
+
+#### rejects self-referential alias
+
 - rejects self-referential alias
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("rejects self-referential alias")
+# alias Foo = Foo should be an error
+# This would create an infinite loop in resolution
+val source = "alias Foo = Foo"
+expect(true).to_equal(true)  # Should produce error
+```
+
+</details>
+
+#### rejects alias to non-existent type
+
 - rejects alias to non-existent type
+   - Expected: true is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("rejects alias to non-existent type")
+# alias NewType = NonExistent should error
+val source = "alias NewType = NonExistent"
+expect(true).to_equal(true)  # Should produce error
+```
+
+</details>
+
+#### rejects duplicate alias names
+
 - rejects duplicate alias names
-- allows alias with same name as original in different scope
-- handles alias to generic type
-- handles alias with visibility modifier
-- rejects self-referential function alias
-- rejects alias to non-existent function
-- rejects duplicate function alias names
-- rejects alias conflicting with existing function
-- allows function alias with visibility modifier
-- handles alias to method in impl block
-- handles empty deprecation message
-- handles deprecation with special characters in message
-- handles deprecated alias pointing to deprecated function
-- handles non-deprecated alias to deprecated function
-- handles multiple decorators with deprecated
-- handles deprecation on type alias
-- rejects circular alias chain
-- rejects longer circular alias chain
-- handles deep alias chain
-- resolves alias chain with deprecation in middle
-- handles function alias chain
-- rejects alias without equals sign
-- rejects alias without target
-- rejects alias without name
-- rejects function alias without target
-- rejects alias with invalid identifier
-- rejects alias keyword as variable name
-- handles alias to imported type
-- handles alias to qualified type
-- handles exported alias
-- handles re-exporting via alias
-- handles alias to partially applied generic
-- handles alias to fully applied generic
-- handles alias preserving all type parameters
-- handles nested generic alias
-- rejects alias with mismatched type parameters
-- suggests non-deprecated alias when available
-- suggests original when all aliases are deprecated
-- handles suggestion when original is also deprecated
-- does not suggest itself
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("rejects duplicate alias names")
+# Defining the same alias twice should error
+val source = """
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 56 |
+| Active scenarios | 56 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-FEATURE`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c6442e53d13585112f248072cbd2876758f2fd02eee0ab4cc36753e861849c43`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c6442e53d13585112f248072cbd2876758f2fd02eee0ab4cc36753e861849c43`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c6442e53d13585112f248072cbd2876758f2fd02eee0ab4cc36753e861849c43`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/feature/usage/alias_deprecated_spec.spl
+mirror: doc/06_spec/feature/usage/alias_deprecated_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/feature/usage/alias_deprecated_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/feature/usage/alias_deprecated_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/feature/usage/alias_deprecated_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses simple type alias' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/alias_deprecated_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses type alias with uppercase names' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/alias_deprecated_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses function alias' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

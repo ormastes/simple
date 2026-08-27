@@ -1,30 +1,6 @@
 # Nvme Freestanding Controller Specification
 
-> <details>
-
-<!-- sdn-diagram:id=nvme_freestanding_controller_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=nvme_freestanding_controller_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-nvme_freestanding_controller_spec -> std
-nvme_freestanding_controller_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=nvme_freestanding_controller_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering freestanding NVMe controller resources.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,26 @@ nvme_freestanding_controller_spec -> os
 
 #### builds system-driver controller evidence without hosted syscalls
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds system-driver controller evidence without hosted syscalls
+   - Expected: missing_probe.driver_placement equals `system-driver`
+   - Expected: missing_probe.grant_kind equals `kernel-owned-resource`
+   - Expected: missing_probe.namespace_mode equals `system-kernel-namespace`
+   - Expected: nvme_transfer_readiness_reason(missing_probe) equals `missing-nvme-completion`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds system-driver controller evidence without hosted syscalls")
 val resources = _system_resources()
 val controller = nvme_freestanding_controller_from_resources(resources).unwrap()
 val missing_probe = nvme_freestanding_transfer_evidence(controller, false, false, false, false)
@@ -62,13 +51,20 @@ expect(nvme_transfer_readiness_reason(missing_probe)).to_equal("missing-nvme-com
 
 #### only reports ready after actual completion and reversible sector probes are supplied
 
+- only reports ready after actual completion and reversible sector probes are supplied
+   - Expected: nvme_sector_probe_reason(probe) equals `ready`
+   - Expected: nvme_transfer_readiness_reason(ready) equals `ready`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("only reports ready after actual completion and reversible sector probes are supplied")
 val controller = nvme_freestanding_controller_from_resources(_system_resources()).unwrap()
 val probe = nvme_sector_probe_result(0u64, 512u64, 0u32, true, true, true, true)
 val ready = nvme_freestanding_transfer_evidence_from_probe(controller, probe)
@@ -81,13 +77,19 @@ expect(nvme_transfer_readiness_reason(ready)).to_equal("ready")
 
 #### rejects probe evidence that bypasses shared transfer logic
 
+- rejects probe evidence that bypasses shared transfer logic
+   - Expected: nvme_sector_probe_reason(probe) equals `nvme-sector-probe-not-shared-transfer`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects probe evidence that bypasses shared transfer logic")
 val controller = nvme_freestanding_controller_from_resources(_system_resources()).unwrap()
 val probe = nvme_sector_probe_result(0u64, 512u64, 0u32, true, true, true, false)
 val evidence = nvme_freestanding_transfer_evidence_from_probe(controller, probe)
@@ -100,23 +102,21 @@ expect(nvme_transfer_readiness_reason(evidence)).to_contain("missing-common-driv
 
 #### rejects invalid controller resources before transfer evidence can be built
 
-1. var resources =  system resources
-2. resources admin =  queue
+- rejects invalid controller resources before transfer evidence can be built
    - Expected: nvme_freestanding_controller_resource_reason(resources) equals `nvme-freestanding-admin-qid-not-zero`
-3. resources =  system resources
-4. resources io =  queue
    - Expected: nvme_freestanding_controller_resource_reason(resources) equals `nvme-freestanding-io-qid-zero`
-5. resources =  system resources
    - Expected: nvme_freestanding_controller_from_resources(resources).unwrap_err() equals `nvme-freestanding-dma-not-isolated`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects invalid controller resources before transfer evidence can be built")
 var resources = _system_resources()
 resources.admin = _queue(1u16, 0x200000u64)
 expect(nvme_freestanding_controller_resource_reason(resources)).to_equal("nvme-freestanding-admin-qid-not-zero")
@@ -139,12 +139,12 @@ expect(nvme_freestanding_controller_from_resources(resources).unwrap_err()).to_e
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering freestanding NVMe controller resources.
 - freestanding NVMe controller resources
 
 ## Scenario Summary
@@ -159,3 +159,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `16b98a1bb33bcdabf20fef96b7027094942564c0e02da9a882240496a2594fca`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `16b98a1bb33bcdabf20fef96b7027094942564c0e02da9a882240496a2594fca`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `16b98a1bb33bcdabf20fef96b7027094942564c0e02da9a882240496a2594fca`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl
+mirror: doc/06_spec/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'only reports ready after actual completion and reversible sector probes are supplied' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects probe evidence that bypasses shared transfer logic' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/drivers/nvme/nvme_freestanding_controller_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects invalid controller resources before transfer evidence can be built' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Ed25519 Ssh Exchange Hash Specification
 
-> <details>
-
-<!-- sdn-diagram:id=ed25519_ssh_exchange_hash_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ed25519_ssh_exchange_hash_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ed25519_ssh_exchange_hash_spec -> std
-ed25519_ssh_exchange_hash_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ed25519_ssh_exchange_hash_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Ed25519 SSH exchange-hash signing.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,24 @@ ed25519_ssh_exchange_hash_spec -> os
 
 #### matches the known RFC8032 seed signature for the live SSH exchange hash
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- matches the known RFC8032 seed signature for the live SSH exchange hash
+   - Expected: signature equals `expected_signature`
+   - Expected: ed25519_verify(public_key, exchange_hash, signature) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches the known RFC8032 seed signature for the live SSH exchange hash")
 val seed: [u8] = [
     0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
     0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
@@ -85,13 +72,20 @@ expect(ed25519_verify(public_key, exchange_hash, signature)).to_equal(true)
 
 #### matches the known RFC8032 seed signature for the RV64 live alpha mismatch hash
 
+- matches the known RFC8032 seed signature for the RV64 live alpha mismatch hash
+   - Expected: signature equals `expected_signature`
+   - Expected: ed25519_verify(public_key, exchange_hash, signature) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches the known RFC8032 seed signature for the RV64 live alpha mismatch hash")
 val seed: [u8] = [
     0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
     0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
@@ -129,13 +123,20 @@ expect(ed25519_verify(public_key, exchange_hash, signature)).to_equal(true)
 
 #### matches the known RFC8032 seed signature for the latest RV64 live exchange hash
 
+- matches the known RFC8032 seed signature for the latest RV64 live exchange hash
+   - Expected: signature equals `expected_signature`
+   - Expected: ed25519_verify(public_key, exchange_hash, signature) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches the known RFC8032 seed signature for the latest RV64 live exchange hash")
 val seed: [u8] = [
     0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
     0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
@@ -173,13 +174,20 @@ expect(ed25519_verify(public_key, exchange_hash, signature)).to_equal(true)
 
 #### matches the direct Ed25519 reference for the RV64 diagnostic exchange hash
 
+- matches the direct Ed25519 reference for the RV64 diagnostic exchange hash
+   - Expected: signature equals `expected_signature`
+   - Expected: ed25519_verify(public_key, exchange_hash, signature) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches the direct Ed25519 reference for the RV64 diagnostic exchange hash")
 val seed: [u8] = [
     0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
     0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
@@ -222,12 +230,12 @@ expect(ed25519_verify(public_key, exchange_hash, signature)).to_equal(true)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Ed25519 SSH exchange-hash signing.
 - Ed25519 SSH exchange-hash signing
 
 ## Scenario Summary
@@ -242,3 +250,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `27072aad6e91eb021466599cc165ecb0e02653392208aa881b11d662426eaea8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `27072aad6e91eb021466599cc165ecb0e02653392208aa881b11d662426eaea8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `27072aad6e91eb021466599cc165ecb0e02653392208aa881b11d662426eaea8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.spl
+mirror: doc/06_spec/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the known RFC8032 seed signature for the live SSH exchange hash' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the known RFC8032 seed signature for the RV64 live alpha mismatch hash' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/ed25519_ssh_exchange_hash_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the known RFC8032 seed signature for the latest RV64 live exchange hash' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

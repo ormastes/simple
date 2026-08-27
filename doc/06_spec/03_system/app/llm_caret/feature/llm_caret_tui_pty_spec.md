@@ -1,133 +1,75 @@
 # LLM Caret Live PTY Qualification
 
-> Launches the shipped cached Caret artifact through a real host PTY and
-> explicit `--plain` stdin with the offline dummy provider. Missing
-> prerequisites and incomplete routing evidence fail closed.
+> Launch the shipped cached `bin/caret` wrapper with the offline dummy provider.
 
 | Tests | Active | Skipped | Pending |
-|-------|-------:|--------:|--------:|
-| 9 | 9 | 0 | 0 |
-
-This manual records zero executed scenarios and does not claim PASS because
-cached process execution is blocked until a qualified Caret artifact exists.
+|-------|--------|---------|--------:|
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # LLM Caret Live PTY Qualification
 
+Launch the shipped cached `bin/caret` wrapper with the offline dummy provider.
+
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Application / TUI |
-| Status | Active; execution requires a qualified cached Caret artifact |
-| Requirements | REQ-LLM-CARET-TUI-HARDEN-007, REQ-LLM-CARET-TUI-HARDEN-009, REQ-LLM-CARET-HIDDEN-008, NFR-LLM-CARET-TUI-006 |
-| Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
+| Category | Application |
+| Status | Active |
+| Requirements | REQ-LLM-CARET-TUI-HARDEN-007, |
+| Plan | doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` |
-| Updated | 2026-07-24 |
-| Generator | Manual synchronization; docgen execution remains a qualification gate |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope
 
-The checker invokes only `bin/caret`, disables its source fallback, and pins
-the wrapper override to the exact repository-cached native artifact whose
-binary, clean committed source, target, and build-runtime hashes were verified.
-The provenance must also attest `runtime=pure-simple-self-hosted`,
-`runtime_probe=pass`, and `rust_seed_used=false`; missing or different values
-fail closed.
-All chat work uses `--provider dummy`; the checker removes its enumerated known
-provider/cloud credential variables from the child environment. The dummy
-provider requires no provider credential or network.
-`script(1)` owns the pseudo-terminal and a child wrapper records
-`stty -g` and geometry before and after Caret.
-
-The checker rejects missing cache, `script(1)`, `stty`, `cmp`, markers, ANSI TUI
-rendering, plain-output purity, edited UTF-8 text, geometry, or restoration.
-It also drives the real TUI root-command path with no hidden-feature
-environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=false`, with
-`LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled registry command.
-The retained transcripts must show canonical and alias unknown-command
-concealment for both unset and explicit-false admission, sanitized
-debug-command execution only when enabled, and disabled-command rejection.
-The explicit-false alias transcript must not contain the hidden tool-call hook.
-Those cases use a fixed 12x80 PTY so inherited geometry cannot truncate the
-exact semantic lines. Every PTY case must also retain an explicit `caret_exit=0`
-child marker; `script -e` is only supplemental exit propagation.
-The promptless case is narrower: it proves that the shipped root metadata
-admits `/compact`, `/summarize`, `/init`, and `/bootstrap`, including the two
-canonical/alias pairs. Each command runs once through the real TUI and once
-through explicit `--plain` stdin. Both routes reject `Unknown command:` and
-`Assistant:` semantic output and reject any entries under the isolated
-`HOME/.llm_caret/sessions` directory. Plain cases additionally require zero
-exit, empty stderr, and no ANSI bytes. These checks do not promote the
-corresponding leaf feature gates from parts-bin evidence or claim that their
-feature implementations are shipped.
-Forced TUI on non-TTY stdin must fail before emitting escape bytes with
-`terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
-watchdog; timeout evidence is retained and fails the case without retry. The
-outer SSpec process bound is 240 seconds for the eight-case hidden group and
-eight-case promptless group, and 120 seconds for every other scenario.
+Launch the shipped cached `bin/caret` wrapper with the offline dummy provider.
+The host `script(1)` utility supplies a real PTY. The checker fails closed when
+the cached artifact, PTY utility, terminal control, output markers, or terminal
+restoration evidence is missing.
+The hidden case drives default, explicitly false, explicitly enabled, and
+disabled root-command admission through that same real TUI boundary without
+contacting a provider.
+The promptless case proves shipped root metadata and alias reachability for
+`/compact`, `/summarize`, `/init`, and `/bootstrap` through both the real TUI
+and explicit `--plain` stdin. Both routes reject model output and session-file
+effects; their leaf feature gates remain parts-bin evidence outside this
+qualification.
 
 **TUI Captures:**
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`
 
-For each executed case, `typescript.txt` is the canonical raw ANSI terminal
-screen capture. The same case directory retains `input.bin`, `pty-runner.sh`,
-`script-stdout.txt`, `script-stderr.txt`, and `timeout.txt` when applicable.
-These are terminal transcripts, not raster screenshots; a visual PASS requires
-the actual captured ANSI frame plus the checker’s alternate-screen, cursor,
-geometry, and transcript assertions.
-
-The hard-panic/signal path remains outside this lane until the runtime exposes a
-qualified atexit/signal restoration owner. EOF here means the PTY driver's
-stdin closes normally; it is not evidence for an uncatchable runtime abort.
-
 ## Scenarios
+
+### LLM Caret Live PTY Qualification
 
 ### REQ-LLM-CARET-TUI-HARDEN-007: renderer routing uses real terminal state
 
 #### should route forced and automatic TTY sessions while keeping piped auto output plain
-
-- Open the caret TUI.
-- Send a prompt through the visible input.
-  - Expected: forced and automatic PTY sessions render and exit.
-  - Expected: piped auto mode completes `/exit` with stdout exactly `> `,
-    empty stderr, and no ANSI byte.
-- Check transcript and status.
-  - Expected: the checker reports `evidence_status=PASS` and exits zero.
-
-<details>
-<summary>Executable SSpec</summary>
-
-```simple
-step("Open the caret TUI")
-val result = run_caret_pty_case("routing")
-step("Send a prompt through the visible input")
-expect(result.stdout).to_contain("case=forced-tui-route status=PASS")
-expect(result.stdout).to_contain("case=auto-tty-route status=PASS")
-expect(result.stdout).to_contain("case=piped-auto-plain status=PASS")
-step("Check transcript and status")
-expect(result.stdout).to_contain("evidence_status=PASS")
-expect(result.exit_code).to_equal(0)
-```
-
-</details>
-
 ### REQ-LLM-CARET-TUI-HARDEN-009: terminal lifecycle is restored
 
 #### should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF
 
-- Open the caret TUI.
-- Send each modeled exit through the PTY input.
-  - Expected: `/exit`, Ctrl-C, Ctrl-D, and closed input all terminate cleanly.
-- Check transcript and status.
-  - Expected: every case has equal pre/post terminal modes and zero failures.
+- should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF")
 step("Open the caret TUI")
 val result = run_caret_pty_case("lifecycle")
 step("Send a prompt through the visible input")
@@ -144,16 +86,22 @@ expect(result.exit_code).to_equal(0)
 
 #### should preserve UTF-8 editing navigation and bounded terminal geometry
 
-- Open the caret TUI.
-- Insert U+754C, move left/end, submit, and repeat at 12 rows by 50 columns.
-- Check transcript and status.
-  - Expected: capture contains `a界c!`, frame ANSI, a row-12 status draw, no
-    row-13 draw, and unchanged geometry.
+- should preserve UTF-8 editing navigation and bounded terminal geometry
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve UTF-8 editing navigation and bounded terminal geometry")
 step("Open the caret TUI")
 val result = run_caret_pty_case("editing")
 step("Send a prompt through the visible input")
@@ -168,21 +116,22 @@ expect(result.exit_code).to_equal(0)
 
 #### should recover from malformed UTF-8 without leaking invalid bytes
 
-- Open the caret TUI at the fixed 12x80 PTY geometry.
-- Send the malformed two-byte UTF-8 sequence `C0 AF`, submit it, then submit
-  the valid line `utf8-recovery-ok` and `/exit`.
-  - Expected: the raw malformed bytes never appear in `typescript.txt`; the
-    subsequent valid transcript line is `You: utf8-recovery-ok`.
-- Check transcript and terminal restoration.
-  - Expected: the child records `caret_exit=0`, alternate screen and cursor
-    state are restored, geometry and raw-mode baseline match, and the checker
-    reports zero failures. This is a bounded recovery outcome, not replacement
-    of malformed input with a displayed surrogate.
+- should recover from malformed UTF-8 without leaking invalid bytes
+- Open the caret TUI
+- Send malformed bytes then a valid prompt through the visible input
+- Check transcript and terminal restoration
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should recover from malformed UTF-8 without leaking invalid bytes")
 step("Open the caret TUI")
 val result = run_caret_pty_case("invalid-utf8-recovery")
 step("Send malformed bytes then a valid prompt through the visible input")
@@ -199,16 +148,22 @@ expect(result.exit_code).to_equal(0)
 
 #### should reject forced TUI before terminal mutation when raw mode is unavailable
 
-- Open the caret TUI without a PTY.
-- Send `/exit` on piped stdin.
-- Check transcript and status.
-  - Expected: nonzero Caret exit, no ANSI, and the raw-mode error marker.
-  - Expected: the checker converts the observed rejection into a passing case.
+- should reject forced TUI before terminal mutation when raw mode is unavailable
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject forced TUI before terminal mutation when raw mode is unavailable")
 step("Open the caret TUI")
 val result = run_caret_pty_case("raw-failure")
 step("Send a prompt through the visible input")
@@ -222,22 +177,22 @@ expect(result.exit_code).to_equal(0)
 
 #### should show a redacted offline Claude provider error while restoring the terminal
 
-- Load the cached Caret artifact.
-  - Expected: the wrapper is pinned to a provenance-qualified pure-Simple
-    artifact before the PTY child starts.
-- Invoke the offline Caret CLI provider.
-  - Expected: the fixture submits `fixture-error`; its Claude CLI process exits
-    with the deterministic authorization error, Caret renders a `[REDACTED:`
-    error marker, and no `sk-ant-fixture-secret` appears in the ANSI capture or
-    script streams.
-- Check captured output and status.
-  - Expected: the terminal mode and requested 12x80 geometry are restored,
-    the child records `caret_exit=0`, and the checker reports zero failures.
+- should show a redacted offline Claude provider error while restoring the terminal
+- Load the cached Caret artifact
+- Invoke the offline Caret CLI provider
+- Check captured output and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should show a redacted offline Claude provider error while restoring the terminal")
 step("Load the cached Caret artifact")
 val result = run_caret_pty_case("provider-error")
 step("Invoke the offline Caret CLI provider")
@@ -252,27 +207,57 @@ expect(result.exit_code).to_equal(0)
 
 </details>
 
-### REQ-LLM-CARET-HIDDEN-008: hidden command admission reaches the real TUI
+### REQ-LLM-CARET-FULL-003: offline Claude CLI reaches the cached TUI
 
-#### should enforce hidden canonical alias and explicit false admission through the real TUI
+#### should show the offline Claude response through the visible TUI
 
-- Enable the hidden-feature fixture.
-  - Expected: canonical and alias default state renders the matching
-    unknown-command response.
-  - Expected: explicit `false` renders matching canonical and alias
-    `system: Unknown command: /debug-tool-call (try /help)` and
-    `system: Unknown command: /debug_tool_call (try /help)` concealment, with
-    no hidden tool-call hook.
-  - Expected: canonical and alias enabled fixtures render
-    `system: tool call id=call-1 name=Read input_bytes=27`.
-  - Expected: canonical and alias disabled commands remain rejected.
-- Check the hidden-feature gate.
-  - Expected: all eight PTY cases pass with zero failures.
+- should show the offline Claude response through the visible TUI
+- Open the cached caret TUI with offline Claude CLI fixture
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should show the offline Claude response through the visible TUI")
+step("Open the cached caret TUI with offline Claude CLI fixture")
+val result = run_caret_pty_case("offline-claude")
+step("Send a prompt through the visible input")
+expect(result.stdout).to_contain("case=offline-claude status=PASS")
+step("Check transcript and status")
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.stdout).to_contain("failed_cases=0")
+expect(result.exit_code).to_equal(0)
+```
+
+</details>
+
+### REQ-LLM-CARET-HIDDEN-008: hidden command admission reaches the real TUI
+
+#### should enforce hidden canonical alias and explicit false admission through the real TUI
+
+- should enforce hidden canonical alias and explicit false admission through the real TUI
+- Enable the hidden-feature fixture
+- Check the hidden-feature gate
+   - Expected: result.exit_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should enforce hidden canonical alias and explicit false admission through the real TUI")
 step("Enable the hidden-feature fixture")
 val result = run_caret_pty_case("hidden")
 expect(result.stdout).to_contain(
@@ -312,22 +297,22 @@ expect(result.exit_code).to_equal(0)
 
 #### should reach compact summarize init and bootstrap aliases through shipped TUI and plain roots
 
-- Open the caret TUI.
-- Send the four promptless slash commands through the visible input and
-  explicit `--plain` stdin.
-  - Expected: `/compact`, `/summarize`, `/init`, and `/bootstrap` each reach
-    the shipped root metadata through both routes and report eight passing
-    checker cases.
-  - Expected: aliases produce only their canonical result; no route produces
-    unknown-command or assistant output or creates a session artifact.
-- Check transcript and status.
-  - Expected: the checker reports complete evidence, zero failed cases, and
-    exits zero.
+- should reach compact summarize init and bootstrap aliases through shipped TUI and plain roots
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reach compact summarize init and bootstrap aliases through shipped TUI and plain roots")
 step("Open the caret TUI")
 val result = run_caret_pty_case("promptless")
 step("Send a prompt through the visible input")
@@ -367,18 +352,22 @@ expect(result.exit_code).to_equal(0)
 
 #### should prove cached offline qualification prerequisites fail closed
 
-- Open the qualification boundary.
-- Resolve the clean-source artifact, its build runtime, and host PTY
-  implementation.
-- Check transcript and status.
-  - Expected: output names the manifest, matched source revision, binary and
-    runtime hashes, target, exact wrapper pin, script style, and artifact root.
-  - Expected: any missing prerequisite exits nonzero instead of skipping.
+- should prove cached offline qualification prerequisites fail closed
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should prove cached offline qualification prerequisites fail closed")
 step("Open the caret TUI")
 val result = run_caret_pty_case("prerequisites")
 step("Send a prompt through the visible input")
@@ -403,48 +392,101 @@ expect(result.exit_code).to_equal(0)
 
 </details>
 
-</details>
+## Scenario Summary
 
-<details>
-<summary>Executable helper source</summary>
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 10 |
+| Active scenarios | 10 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-The authoritative executable source is
-`test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl`. The complete
-shared checker helper is reproduced below; scenario bodies are reproduced
-above without truncation.
 
-```simple
-use app.io.mod.{process_run_timeout}
+## Related Documentation
 
-struct CaretPtyEvidence:
-    stdout: text
-    stderr: text
-    exit_code: i32
+- **Requirements:** `REQ-LLM-CARET-TUI-HARDEN-007,`
+- **Plan:** `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md`
 
-fn caret_pty_case_timeout_ms(case_name: text) -> i64:
-    if case_name == "hidden" or case_name == "promptless":
-        return 240000
-    120000
-
-fn run_caret_pty_case(case_name: text) -> CaretPtyEvidence:
-    val (stdout, stderr, exit_code) = process_run_timeout(
-        "sh",
-        [
-            "scripts/check/check-llm-caret-tui-pty.shs",
-            "--case",
-            case_name
-        ],
-        caret_pty_case_timeout_ms(case_name)
-    )
-    CaretPtyEvidence(
-        stdout: stdout,
-        stderr: stderr,
-        exit_code: exit_code
-    )
-```
-
-It declares no leaf runtime extern. Hidden and promptless checker groups have a
-240-second hard bound; every other checker invocation has a 120-second hard
-bound.
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-LLM-CARET-TUI-HARDEN-007`
+- `REQ-LLM-CARET-TUI-HARDEN-009`
+- `REQ-LLM-CARET-HIDDEN-008`
+- `REQ-LLM-CARET-FULL-003`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4b8890d1ac37605cf2d911fbff81f1f9c8d265052bd82ad2e7e9fd26ffc091bb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4b8890d1ac37605cf2d911fbff81f1f9c8d265052bd82ad2e7e9fd26ffc091bb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4b8890d1ac37605cf2d911fbff81f1f9c8d265052bd82ad2e7e9fd26ffc091bb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md (current)
+findings: 14 blockers: 1
+  narrative=100 structure=60 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=74; blocker cap makes effective=49
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 4 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:70:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should route forced and automatic TTY sessions while keeping piped auto output plain' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:70:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route forced and automatic TTY sessions while keeping piped auto output plain' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:89:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:103:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve UTF-8 editing navigation and bounded terminal geometry' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve UTF-8 editing navigation and bounded terminal geometry' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:115:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should recover from malformed UTF-8 without leaking invalid bytes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:115:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should recover from malformed UTF-8 without leaking invalid bytes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:129:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject forced TUI before terminal mutation when raw mode is unavailable' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:140:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show a redacted offline Claude provider error while restoring the terminal' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

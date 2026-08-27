@@ -1,29 +1,6 @@
 # Diff Patch Specification
 
-> 1. expect patches len
-
-<!-- sdn-diagram:id=diff_patch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=diff_patch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-diff_patch_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=diff_patch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering diff_trees identical, diff_trees property changes, diff_trees kind changes, diff_trees layout changes, diff_trees visibility changes, diff_trees child changes.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,16 +17,22 @@ diff_patch_spec -> common
 
 #### produces empty patch list for identical trees
 
-1. expect patches len
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- produces empty patch list for identical trees
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces empty patch list for identical trees")
 val old_tree = WidgetNode.new("id1", "text")
 val new_tree = WidgetNode.new("id1", "text")
 val patches = diff_trees(old_tree, new_tree)
@@ -62,20 +45,18 @@ expect patches.len() to_equal 0
 
 #### produces UpdateProp patch for changed property
 
-1. var old node = WidgetNode new
-2. old node = old node set prop
-3. var new node = WidgetNode new
-4. new node = new node set prop
-5. expect patches len
+- produces UpdateProp patch for changed property
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces UpdateProp patch for changed property")
 var old_node = WidgetNode.new("prop1", "text")
 old_node = old_node.set_prop("content", "Hello")
 var new_node = WidgetNode.new("prop1", "text")
@@ -92,20 +73,18 @@ expect patch.prop_value to_equal "World"
 
 #### produces RemoveProp patch for removed property
 
-1. var old node = WidgetNode new
-2. old node = old node set prop
-3. old node = old node set prop
-4. var new node = WidgetNode new
-5. new node = new node set prop
+- produces RemoveProp patch for removed property
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces RemoveProp patch for removed property")
 var old_node = WidgetNode.new("prop2", "text")
 old_node = old_node.set_prop("content", "Hello")
 old_node = old_node.set_prop("color", "red")
@@ -124,20 +103,18 @@ expect found_remove to_equal true
 
 #### produces UpdateProp patch for added property
 
-1. var old node = WidgetNode new
-2. old node = old node set prop
-3. var new node = WidgetNode new
-4. new node = new node set prop
-5. new node = new node set prop
+- produces UpdateProp patch for added property
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces UpdateProp patch for added property")
 var old_node = WidgetNode.new("prop3", "text")
 old_node = old_node.set_prop("content", "Hello")
 var new_node = WidgetNode.new("prop3", "text")
@@ -158,16 +135,18 @@ expect found_update to_equal true
 
 #### produces ReplaceNode patch for changed kind
 
-1. expect patches len
+- produces ReplaceNode patch for changed kind
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces ReplaceNode patch for changed kind")
 val old_node = WidgetNode.new("kind1", "text")
 val new_node = WidgetNode.new("kind1", "button")
 val patches = diff_trees(old_node, new_node)
@@ -181,19 +160,18 @@ expect patches[0].kind to_equal PatchKind.ReplaceNode
 
 #### produces UpdateLayout patch for changed layout
 
-1. var old node = WidgetNode new
-2. old node = old node set layout
-3. var new node = WidgetNode new
-4. new node = new node set layout
+- produces UpdateLayout patch for changed layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces UpdateLayout patch for changed layout")
 var old_node = WidgetNode.new("lay1", "panel")
 old_node = old_node.set_layout("vbox")
 var new_node = WidgetNode.new("lay1", "panel")
@@ -212,18 +190,18 @@ expect found_layout to_equal true
 
 #### produces UpdateVisibility patch for changed visibility
 
-1. var old node = WidgetNode new
-2. var new node = WidgetNode new
-3. new node = new node set visible
+- produces UpdateVisibility patch for changed visibility
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces UpdateVisibility patch for changed visibility")
 var old_node = WidgetNode.new("vis1", "panel")
 var new_node = WidgetNode.new("vis1", "panel")
 new_node = new_node.set_visible(false)
@@ -241,17 +219,18 @@ expect found_vis to_equal true
 
 #### produces InsertChild patch for added child
 
-1. var new node = WidgetNode new
-2. new node = new node add child
+- produces InsertChild patch for added child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces InsertChild patch for added child")
 val old_node = WidgetNode.new("par1", "panel")
 var new_node = WidgetNode.new("par1", "panel")
 val child = WidgetNode.new("par1_child", "text")
@@ -269,17 +248,18 @@ expect found_insert to_equal true
 
 #### produces RemoveChild patch for removed child
 
-1. var old node = WidgetNode new
-2. old node = old node add child
+- produces RemoveChild patch for removed child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces RemoveChild patch for removed child")
 var old_node = WidgetNode.new("par2", "panel")
 val child = WidgetNode.new("par2_child", "text")
 old_node = old_node.add_child(child)
@@ -297,20 +277,18 @@ expect found_remove to_equal true
 
 #### produces no patches when children are identical
 
-1. var old node = WidgetNode new
-2. old node = old node add child
-3. var new node = WidgetNode new
-4. new node = new node add child
-5. expect patches len
+- produces no patches when children are identical
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces no patches when children are identical")
 var old_node = WidgetNode.new("par3", "panel")
 val child_old = WidgetNode.new("par3_kid", "text")
 old_node = old_node.add_child(child_old)
@@ -330,12 +308,12 @@ expect patches.len() to_equal 0
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/diff_patch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering diff_trees identical, diff_trees property changes, diff_trees kind changes, diff_trees layout changes, diff_trees visibility changes, diff_trees child changes.
 - diff_trees identical
 - diff_trees property changes
 - diff_trees kind changes
@@ -355,3 +333,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `001e130aad3e961ebeab58b6a4d3e743cb8f20ef499b68ffb15316c3d6e84e7b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `001e130aad3e961ebeab58b6a4d3e743cb8f20ef499b68ffb15316c3d6e84e7b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `001e130aad3e961ebeab58b6a4d3e743cb8f20ef499b68ffb15316c3d6e84e7b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/diff_patch_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/diff_patch_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/diff_patch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/diff_patch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/diff_patch_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces empty patch list for identical trees' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/diff_patch_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces UpdateProp patch for changed property' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/diff_patch_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces RemoveProp patch for removed property' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Contract Runtime Specification
 
-> fn transfer(from: i64, to: i64, amount: i64) -> (i64, i64):
-
-<!-- sdn-diagram:id=contract_runtime_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=contract_runtime_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-contract_runtime_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=contract_runtime_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ contract_runtime_spec
 
 # Contract Runtime Specification
 
-fn transfer(from: i64, to: i64, amount: i64) -> (i64, i64):
+use std.spec.step
 
 ## At a Glance
 
@@ -44,12 +21,14 @@ fn transfer(from: i64, to: i64, amount: i64) -> (i64, i64):
 | Category | Type System \| Contracts |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/contract_runtime_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Contract Syntax
 
 ```simple
+use std.spec.step
+
 fn transfer(from: i64, to: i64, amount: i64) -> (i64, i64):
 in:
 amount > 0
@@ -69,19 +48,22 @@ res.1 == old(to) + amount
 
 #### captures simple parameter value
 
-1. fn increment
-2. out
-3. ret == old
-4. expect increment
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- captures simple parameter value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures simple parameter value")
 fn increment(x: i64) -> i64:
     out(ret):
         ret == old(x) + 1
@@ -93,19 +75,18 @@ expect increment(41) == 42
 
 #### captures multiple parameters
 
-1. fn swap and sum
-2. out
-3. ret == old
-4. expect swap and sum
+- captures multiple parameters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures multiple parameters")
 fn swap_and_sum(a: i64, b: i64) -> i64:
     out(ret):
         ret == old(a) + old(b)
@@ -117,20 +98,18 @@ expect swap_and_sum(20, 22) == 42
 
 #### captures field access
 
-1. me increment
-2. out
-3. self value == old
-4. var c = Counter
-5. c increment
+- captures field access
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures field access")
 class Counter:
     value: i64
 
@@ -148,19 +127,18 @@ expect c.value == 42
 
 #### captures complex expression
 
-1. fn double and square
-2. out
-3. ret ==
-4. expect double and square
+- captures complex expression
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures complex expression")
 fn double_and_square(x: i64) -> i64:
     out(ret):
         ret == (old(x) * 2) * (old(x) * 2)
@@ -175,17 +153,18 @@ expect double_and_square(3) == 36
 
 #### validates basic precondition
 
-1. fn divide
-2. expect divide
+- validates basic precondition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates basic precondition")
 fn divide(a: i64, b: i64) -> i64:
     in:
         b != 0
@@ -197,17 +176,18 @@ expect divide(84, 2) == 42
 
 #### validates multiple preconditions
 
-1. fn bounded divide
-2. expect bounded divide
+- validates multiple preconditions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates multiple preconditions")
 fn bounded_divide(a: i64, b: i64, max: i64) -> i64:
     in:
         b != 0
@@ -225,18 +205,18 @@ expect bounded_divide(84, 2, 100) == 42
 
 #### validates basic postcondition
 
-1. fn abs value
-2. out
-3. expect abs value
+- validates basic postcondition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates basic postcondition")
 fn abs_value(x: i64) -> i64:
     out(ret):
         ret >= 0
@@ -251,18 +231,18 @@ expect abs_value(-42) == 42
 
 #### validates multiple postconditions
 
-1. fn compute positive
-2. out
-3. expect compute positive
+- validates multiple postconditions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates multiple postconditions")
 fn compute_positive(x: i64) -> i64:
     out(ret):
         ret > 0
@@ -278,17 +258,18 @@ expect compute_positive(32) == 42
 
 #### validates basic invariant
 
-1. fn process
-2. expect process
+- validates basic invariant
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates basic invariant")
 fn process(x: i64) -> i64:
     invariant:
         x >= 0
@@ -302,21 +283,18 @@ expect process(41) == 42
 
 #### validates transfer function
 
-1. fn transfer
-2. out
-3. res 0 == old
-4. res 1 == old
-5. res 0 + res 1 == old
-6.
+- validates transfer function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates transfer function")
 fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (i64, i64):
     in:
         amount > 0
@@ -341,19 +319,18 @@ expect to == 80
 
 #### validates custom binding in postcondition
 
-1. fn compute
-2. out
-3. res > old
-4. expect compute
+- validates custom binding in postcondition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates custom binding in postcondition")
 fn compute(x: i64) -> i64:
     out(res):
         res > old(x)
@@ -367,21 +344,18 @@ expect compute(32) == 42
 
 #### handles multiple references to same old()
 
-1. fn double check
-2. out
-3. ret == old
-4. ret > old
-5. ret - old
-6. expect double check
+- handles multiple references to same old()
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles multiple references to same old()")
 fn double_check(x: i64) -> i64:
     out(ret):
         ret == old(x) * 2
@@ -395,22 +369,18 @@ expect double_check(21) == 42
 
 #### handles old() with different params
 
-1. fn combine
-2. out
-3. ret > old
-4. ret > old
-5. ret > old
-6. ret == old
-7. expect combine
+- handles old() with different params
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles old() with different params")
 fn combine(x: i64, y: i64, z: i64) -> i64:
     out(ret):
         ret > old(x)
@@ -427,18 +397,18 @@ expect combine(10, 15, 17) == 42
 
 #### parses error postcondition
 
-1. fn divide safe
-2. out
-3. expect divide safe
+- parses error postcondition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses error postcondition")
 fn divide_safe(a: i64, b: i64) -> i64:
     in:
         b != 0
@@ -452,18 +422,18 @@ expect divide_safe(84, 2) == 42
 
 #### validates success and error postconditions
 
-1. fn validate age
-2. out
-3. expect validate age
+- validates success and error postconditions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates success and error postconditions")
 fn validate_age(age: i64) -> bool:
     in:
         age >= 0
@@ -482,22 +452,18 @@ expect validate_age(21) == true
 
 #### validates nested old expressions
 
-1. fn complex math
-2. out
-3. ret ==
-4. ret > old
-5. ret > old
-6.
-7. expect complex math
+- validates nested old expressions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates nested old expressions")
 fn complex_math(x: i64, y: i64) -> i64:
     out(ret):
         ret == (old(x) + old(y)) * 2
@@ -511,20 +477,18 @@ expect complex_math(10, 11) == 42
 
 #### validates arithmetic contracts
 
-1. fn increment by ten
-2. out
-3. ret == old
-4. ret - old
-5. expect increment by ten
+- validates arithmetic contracts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates arithmetic contracts")
 fn increment_by_ten(x: i64) -> i64:
     out(ret):
         ret == old(x) + 10
@@ -537,20 +501,18 @@ expect increment_by_ten(32) == 42
 
 #### validates comparison chain contracts
 
-1. fn clamp
-2. out
-3. expect clamp
-4. expect clamp
-5. expect clamp
+- validates comparison chain contracts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates comparison chain contracts")
 fn clamp(x: i64, min: i64, max: i64) -> i64:
     in:
         min <= max
@@ -576,21 +538,18 @@ expect clamp(-10, 0, 100) == 0
 
 #### validates full contract
 
-1. fn full contract
-2. out
-3. ret > old
-4. ret > old
-5. ret == old
-6. expect full contract
+- validates full contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates full contract")
 fn full_contract(x: i64, y: i64) -> i64:
     in:
         x > 0
@@ -612,18 +571,18 @@ expect full_contract(20, 22) == 42
 
 #### validates boolean logic contract
 
-1. fn validate range
-2. out
-3. expect validate range
+- validates boolean logic contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates boolean logic contract")
 fn validate_range(x: i64, y: i64) -> bool:
     in:
         x >= 0
@@ -638,18 +597,18 @@ expect validate_range(10, 20) == true
 
 #### validates negation contract
 
-1. fn ensure nonzero
-2. out
-3. expect ensure nonzero
+- validates negation contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates negation contract")
 fn ensure_nonzero(x: i64) -> i64:
     in:
         x != 0
@@ -665,18 +624,18 @@ expect ensure_nonzero(42) == 42
 
 #### validates conditional contract
 
-1. fn abs with contract
-2. out
-3. expect abs with contract
+- validates conditional contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates conditional contract")
 fn abs_with_contract(x: i64) -> i64:
     out(ret):
         ret >= 0
@@ -691,19 +650,18 @@ expect abs_with_contract(-42) == 42
 
 #### validates early return contract
 
-1. fn early exit
-2. out
-3. expect early exit
-4. expect early exit
+- validates early return contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates early return contract")
 fn early_exit(x: i64) -> i64:
     in:
         x >= 0
@@ -722,19 +680,18 @@ expect early_exit(42) == 42
 
 #### captures arithmetic in old()
 
-1. fn double and increment
-2. out
-3. ret ==
-4. expect double and increment
+- captures arithmetic in old()
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures arithmetic in old()")
 fn double_and_increment(x: i64) -> i64:
     out(ret):
         ret == (old(x) * 2) + 1
@@ -747,18 +704,18 @@ expect double_and_increment(20) == 41
 
 #### references parameter in postcondition
 
-1. fn sum with check
-2. out
-3. expect sum with check
+- references parameter in postcondition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("references parameter in postcondition")
 fn sum_with_check(a: i64, b: i64) -> i64:
     out(ret):
         ret >= a
@@ -781,3 +738,51 @@ expect sum_with_check(20, 22) == 42
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fea5ff4e4b2379c2ce348993cd4bd40a0fd3536d79bff5e35019b54ee0d6499a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fea5ff4e4b2379c2ce348993cd4bd40a0fd3536d79bff5e35019b54ee0d6499a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fea5ff4e4b2379c2ce348993cd4bd40a0fd3536d79bff5e35019b54ee0d6499a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/contract_runtime_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/contract_runtime_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/contract_runtime_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/contract_runtime_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/contract_runtime_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'captures simple parameter value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/contract_runtime_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'captures multiple parameters' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/contract_runtime_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'captures field access' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

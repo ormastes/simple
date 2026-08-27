@@ -1,29 +1,6 @@
-# AST Expression Conversion Specification
+# Ast Convert Expr Specification
 
-> AST expression conversion transforms parse tree (CST) expressions to interpreter AST. It handles all expression types including literals, operators, calls, collections, control flow, and special expressions.
-
-<!-- sdn-diagram:id=ast_convert_expr_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ast_convert_expr_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ast_convert_expr_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ast_convert_expr_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering convert_expression Entry Point, convert_binary_expression - Arithmetic, convert_binary_expression - Comparison, convert_binary_expression - Logical & Bitwise, convert_unary_expression, Call Expression Conversion, Access Expression Conversion, Collection Literal Conversion, Lambda Expression Conversion, Control Flow Expression Conversion, Conversion Error Handling.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,47 +9,7 @@ ast_convert_expr_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# AST Expression Conversion Specification
-
-AST expression conversion transforms parse tree (CST) expressions to interpreter AST. It handles all expression types including literals, operators, calls, collections, control flow, and special expressions.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #3031-3060 |
-| Category | Interpreter |
-| Difficulty | 4/5 |
-| Status | In Progress |
-| Source | `test/01_unit/app/interpreter/ast_convert_expr_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-AST expression conversion transforms parse tree (CST) expressions to interpreter AST.
-It handles all expression types including literals, operators, calls, collections,
-control flow, and special expressions.
-
-## Key Features
-
-- Literal conversion (int, float, string, bool, nil)
-- Binary operators (17 types: arithmetic, comparison, logical, bitwise)
-- Unary operators (5 types: neg, not, bit_not, ref, deref)
-- Call expressions (functions and methods)
-- Collection literals (arrays, dicts, tuples)
-- Lambda expressions with parameter lists
-- Control flow (if, match, range)
-- Special expressions (await, try, parenthesized)
-
-## Implementation
-
-File: `/home/ormastes/dev/pub/simple/src/app/interpreter/ast_convert_expr.spl`
-
-## Test Note
-
-These tests validate successful conversion from parse tree nodes to AST expressions.
-Full AST structure validation requires integration tests with actual parser output.
+# Ast Convert Expr Specification
 
 ## Scenarios
 
@@ -80,13 +17,22 @@ Full AST structure validation requires integration tests with actual parser outp
 
 #### converts integer literals
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- converts integer literals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts integer literals")
 # Test that integer nodes are recognized
 # Actual conversion requires parser integration
 pass
@@ -96,13 +42,18 @@ pass
 
 #### converts float literals
 
+- converts float literals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts float literals")
 # Test that float nodes are recognized
 pass
 ```
@@ -111,13 +62,18 @@ pass
 
 #### converts string literals
 
+- converts string literals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts string literals")
 # Test that string nodes are recognized
 pass
 ```
@@ -126,13 +82,18 @@ pass
 
 #### converts boolean literals
 
+- converts boolean literals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts boolean literals")
 # Test that boolean nodes are recognized
 pass
 ```
@@ -141,13 +102,18 @@ pass
 
 #### converts nil literals
 
+- converts nil literals
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts nil literals")
 # Test that nil nodes are recognized
 pass
 ```
@@ -156,13 +122,18 @@ pass
 
 #### converts identifiers
 
+- converts identifiers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts identifiers")
 # Test that identifier nodes are recognized
 pass
 ```
@@ -173,13 +144,18 @@ pass
 
 #### recognizes addition operator
 
+- recognizes addition operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes addition operator")
 # Tests operator recognition for +
 pass
 ```
@@ -188,13 +164,18 @@ pass
 
 #### recognizes subtraction operator
 
+- recognizes subtraction operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes subtraction operator")
 # Tests operator recognition for -
 pass
 ```
@@ -203,13 +184,18 @@ pass
 
 #### recognizes multiplication operator
 
+- recognizes multiplication operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes multiplication operator")
 # Tests operator recognition for *
 pass
 ```
@@ -218,13 +204,18 @@ pass
 
 #### recognizes division operator
 
+- recognizes division operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes division operator")
 # Tests operator recognition for /
 pass
 ```
@@ -233,13 +224,18 @@ pass
 
 #### recognizes modulo operator
 
+- recognizes modulo operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes modulo operator")
 # Tests operator recognition for %
 pass
 ```
@@ -248,13 +244,18 @@ pass
 
 #### recognizes power operator
 
+- recognizes power operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes power operator")
 # Tests operator recognition for **
 pass
 ```
@@ -265,13 +266,18 @@ pass
 
 #### recognizes equality operator
 
+- recognizes equality operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes equality operator")
 # Tests operator recognition for ==
 pass
 ```
@@ -280,13 +286,18 @@ pass
 
 #### recognizes inequality operator
 
+- recognizes inequality operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes inequality operator")
 # Tests operator recognition for !=
 pass
 ```
@@ -295,13 +306,18 @@ pass
 
 #### recognizes less than operator
 
+- recognizes less than operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes less than operator")
 # Tests operator recognition for <
 pass
 ```
@@ -310,13 +326,18 @@ pass
 
 #### recognizes less than or equal operator
 
+- recognizes less than or equal operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes less than or equal operator")
 # Tests operator recognition for <=
 pass
 ```
@@ -325,13 +346,18 @@ pass
 
 #### recognizes greater than operator
 
+- recognizes greater than operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes greater than operator")
 # Tests operator recognition for >
 pass
 ```
@@ -340,13 +366,18 @@ pass
 
 #### recognizes greater than or equal operator
 
+- recognizes greater than or equal operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes greater than or equal operator")
 # Tests operator recognition for >=
 pass
 ```
@@ -357,13 +388,18 @@ pass
 
 #### recognizes logical and operator
 
+- recognizes logical and operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes logical and operator")
 # Tests operator recognition for and
 pass
 ```
@@ -372,13 +408,18 @@ pass
 
 #### recognizes logical or operator
 
+- recognizes logical or operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes logical or operator")
 # Tests operator recognition for or
 pass
 ```
@@ -387,13 +428,18 @@ pass
 
 #### recognizes bitwise and operator
 
+- recognizes bitwise and operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes bitwise and operator")
 # Tests operator recognition for &
 pass
 ```
@@ -402,13 +448,18 @@ pass
 
 #### recognizes bitwise or operator
 
+- recognizes bitwise or operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes bitwise or operator")
 # Tests operator recognition for |
 pass
 ```
@@ -417,13 +468,18 @@ pass
 
 #### recognizes bitwise xor operator
 
+- recognizes bitwise xor operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes bitwise xor operator")
 # Tests operator recognition for ^
 pass
 ```
@@ -432,13 +488,18 @@ pass
 
 #### recognizes left shift operator
 
+- recognizes left shift operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes left shift operator")
 # Tests operator recognition for <<
 pass
 ```
@@ -447,13 +508,18 @@ pass
 
 #### recognizes right shift operator
 
+- recognizes right shift operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes right shift operator")
 # Tests operator recognition for >>
 pass
 ```
@@ -464,13 +530,18 @@ pass
 
 #### recognizes negation operator
 
+- recognizes negation operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes negation operator")
 # Tests operator recognition for -
 pass
 ```
@@ -479,13 +550,18 @@ pass
 
 #### recognizes logical not operator
 
+- recognizes logical not operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes logical not operator")
 # Tests operator recognition for not
 pass
 ```
@@ -494,13 +570,18 @@ pass
 
 #### recognizes bitwise not operator
 
+- recognizes bitwise not operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes bitwise not operator")
 # Tests operator recognition for ~
 pass
 ```
@@ -509,13 +590,18 @@ pass
 
 #### recognizes reference operator
 
+- recognizes reference operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes reference operator")
 # Tests operator recognition for &
 pass
 ```
@@ -524,13 +610,18 @@ pass
 
 #### recognizes dereference operator
 
+- recognizes dereference operator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes dereference operator")
 # Tests operator recognition for *
 pass
 ```
@@ -541,13 +632,18 @@ pass
 
 #### converts function calls via convert_call_expression
 
+- converts function calls via convert_call_expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts function calls via convert_call_expression")
 # Tests function call node conversion
 pass
 ```
@@ -556,13 +652,18 @@ pass
 
 #### extracts call arguments via convert_arguments
 
+- extracts call arguments via convert_arguments
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts call arguments via convert_arguments")
 # Tests argument list extraction
 pass
 ```
@@ -571,13 +672,18 @@ pass
 
 #### converts method calls via convert_method_call
 
+- converts method calls via convert_method_call
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts method calls via convert_method_call")
 # Tests method call node conversion
 pass
 ```
@@ -588,13 +694,18 @@ pass
 
 #### converts index expressions via convert_index_expression
 
+- converts index expressions via convert_index_expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts index expressions via convert_index_expression")
 # Tests array/dict indexing
 pass
 ```
@@ -603,13 +714,18 @@ pass
 
 #### converts field access via convert_field_expression
 
+- converts field access via convert_field_expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts field access via convert_field_expression")
 # Tests struct field access
 pass
 ```
@@ -620,13 +736,18 @@ pass
 
 #### converts array literals via convert_array_literal
 
+- converts array literals via convert_array_literal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts array literals via convert_array_literal")
 # Tests array literal conversion
 pass
 ```
@@ -635,13 +756,18 @@ pass
 
 #### converts dict literals via convert_dict_literal
 
+- converts dict literals via convert_dict_literal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts dict literals via convert_dict_literal")
 # Tests dict literal conversion
 pass
 ```
@@ -650,13 +776,18 @@ pass
 
 #### converts dict entries via convert_dict_entry
 
+- converts dict entries via convert_dict_entry
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts dict entries via convert_dict_entry")
 # Tests key-value pair conversion
 pass
 ```
@@ -665,13 +796,18 @@ pass
 
 #### converts tuple literals via convert_tuple_literal
 
+- converts tuple literals via convert_tuple_literal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts tuple literals via convert_tuple_literal")
 # Tests tuple literal conversion
 pass
 ```
@@ -682,13 +818,18 @@ pass
 
 #### converts lambda expressions via convert_lambda
 
+- converts lambda expressions via convert_lambda
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts lambda expressions via convert_lambda")
 # Tests lambda expression conversion
 pass
 ```
@@ -697,13 +838,18 @@ pass
 
 #### extracts lambda parameters via convert_lambda_params
 
+- extracts lambda parameters via convert_lambda_params
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("extracts lambda parameters via convert_lambda_params")
 # Tests parameter list extraction
 pass
 ```
@@ -714,13 +860,18 @@ pass
 
 #### converts if expressions via convert_if_expression
 
+- converts if expressions via convert_if_expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts if expressions via convert_if_expression")
 # Tests if-then-else conversion
 pass
 ```
@@ -729,13 +880,18 @@ pass
 
 #### converts match expressions via convert_match_expression
 
+- converts match expressions via convert_match_expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts match expressions via convert_match_expression")
 # Tests pattern matching conversion
 pass
 ```
@@ -744,13 +900,18 @@ pass
 
 #### converts match arms via convert_match_arm
 
+- converts match arms via convert_match_arm
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts match arms via convert_match_arm")
 # Tests case clause conversion
 pass
 ```
@@ -759,13 +920,18 @@ pass
 
 #### converts range expressions via convert_range_expression
 
+- converts range expressions via convert_range_expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts range expressions via convert_range_expression")
 # Tests range literal conversion
 pass
 ```
@@ -776,13 +942,18 @@ pass
 
 #### returns error for unknown expression kind
 
+- returns error for unknown expression kind
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for unknown expression kind")
 # Tests unknown node type handling
 pass
 ```
@@ -791,13 +962,18 @@ pass
 
 #### returns error for incomplete binary expression
 
+- returns error for incomplete binary expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete binary expression")
 # Tests missing operand detection
 pass
 ```
@@ -806,13 +982,18 @@ pass
 
 #### returns error for incomplete unary expression
 
+- returns error for incomplete unary expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete unary expression")
 # Tests missing operand detection
 pass
 ```
@@ -821,13 +1002,18 @@ pass
 
 #### returns error for call missing callee
 
+- returns error for call missing callee
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for call missing callee")
 # Tests invalid call expression
 pass
 ```
@@ -836,13 +1022,18 @@ pass
 
 #### returns error for method call missing object
 
+- returns error for method call missing object
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for method call missing object")
 # Tests invalid method call
 pass
 ```
@@ -851,13 +1042,18 @@ pass
 
 #### returns error for incomplete index expression
 
+- returns error for incomplete index expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete index expression")
 # Tests missing index detection
 pass
 ```
@@ -866,13 +1062,18 @@ pass
 
 #### returns error for field access missing object
 
+- returns error for field access missing object
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for field access missing object")
 # Tests invalid field access
 pass
 ```
@@ -881,13 +1082,18 @@ pass
 
 #### returns error for incomplete dict entry
 
+- returns error for incomplete dict entry
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete dict entry")
 # Tests missing key or value
 pass
 ```
@@ -896,13 +1102,18 @@ pass
 
 #### returns error for lambda missing body
 
+- returns error for lambda missing body
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for lambda missing body")
 # Tests incomplete lambda
 pass
 ```
@@ -911,13 +1122,18 @@ pass
 
 #### returns error for incomplete if expression
 
+- returns error for incomplete if expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete if expression")
 # Tests missing branch detection
 pass
 ```
@@ -926,13 +1142,18 @@ pass
 
 #### returns error for match missing value
 
+- returns error for match missing value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for match missing value")
 # Tests invalid match expression
 pass
 ```
@@ -941,13 +1162,18 @@ pass
 
 #### returns error for incomplete match arm
 
+- returns error for incomplete match arm
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete match arm")
 # Tests invalid case clause
 pass
 ```
@@ -956,13 +1182,18 @@ pass
 
 #### returns error for incomplete range expression
 
+- returns error for incomplete range expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for incomplete range expression")
 # Tests missing start or end
 pass
 ```
@@ -971,13 +1202,18 @@ pass
 
 #### returns error for empty parenthesized expression
 
+- returns error for empty parenthesized expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for empty parenthesized expression")
 # Tests invalid parentheses
 pass
 ```
@@ -986,13 +1222,18 @@ pass
 
 #### returns error for await missing expression
 
+- returns error for await missing expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for await missing expression")
 # Tests invalid await
 pass
 ```
@@ -1001,18 +1242,48 @@ pass
 
 #### returns error for try missing expression
 
+- returns error for try missing expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for try missing expression")
 # Tests invalid try
 pass
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/interpreter/ast_convert_expr_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering convert_expression Entry Point, convert_binary_expression - Arithmetic, convert_binary_expression - Comparison, convert_binary_expression - Logical & Bitwise, convert_unary_expression, Call Expression Conversion, Access Expression Conversion, Collection Literal Conversion, Lambda Expression Conversion, Control Flow Expression Conversion, Conversion Error Handling.
+- convert_expression Entry Point
+- convert_binary_expression - Arithmetic
+- convert_binary_expression - Comparison
+- convert_binary_expression - Logical & Bitwise
+- convert_unary_expression
+- Call Expression Conversion
+- Access Expression Conversion
+- Collection Literal Conversion
+- Lambda Expression Conversion
+- Control Flow Expression Conversion
+- Conversion Error Handling
 
 ## Scenario Summary
 
@@ -1026,3 +1297,55 @@ pass
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e279a7e8284709ff64acafc0cf589e298e3d0e1a8462b91528729771347a1636`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e279a7e8284709ff64acafc0cf589e298e3d0e1a8462b91528729771347a1636`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e279a7e8284709ff64acafc0cf589e298e3d0e1a8462b91528729771347a1636`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/interpreter/ast_convert_expr_spec.spl
+mirror: doc/06_spec/01_unit/app/interpreter/ast_convert_expr_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=50
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=82; blocker cap makes effective=49
+doc/06_spec/01_unit/app/interpreter/ast_convert_expr_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/interpreter/ast_convert_expr_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/interpreter/ast_convert_expr_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/01_unit/app/interpreter/ast_convert_expr_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts integer literals' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/interpreter/ast_convert_expr_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts float literals' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/interpreter/ast_convert_expr_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts string literals' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

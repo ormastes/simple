@@ -1,253 +1,408 @@
 # Engine2D Font Surface Verification
 
-> Canonical manual mirror for
-> `test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl`.
+> Drives the public Engine2D requested-backend facade with the pinned Noto Sans
 
-| Scenarios | Active | Passed now | Blocked now |
-|---|---:|---:|---:|
-| CPU / `cpu_simd` glyph alpha | 1 | 0 | 1 |
-| Vulkan device readback | 1 | 0 | 1 |
-| DrawIR canonical consumer | 1 | 0 | 1 |
-| Replayed DrawIR identity | 1 | 0 | 1 |
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 4 | 4 | 0 | 0 |
 
-## Status
+<details>
+<summary>Full Scenario Manual</summary>
 
-**BLOCKED — no current pure-Simple execution receipt or retained framebuffer
-captures exist for this specification.**
+# Engine2D Font Surface Verification
 
-The source spec defines the required absolute oracles, but this spec/manual
-update did not run docgen, the test runner, a native build, or a graphics
-device. Nothing in this manual upgrades an unexecuted row to PASS.
+Drives the public Engine2D requested-backend facade with the pinned Noto Sans
 
-## Purpose
+## At a Glance
 
-This scenario drives the public `Engine2D.create_requested_backend` facade with:
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-- the pinned Noto Sans Mono asset;
-- the semantic text `Simple 2D`;
-- a 128×72 packed-ARGB framebuffer;
-- an exact CPU pixel oracle;
-- a requested `cpu_simd` native glyph-alpha lane;
-- a requested Vulkan device lane.
+Drives the public Engine2D requested-backend facade with the pinned Noto Sans
+Mono asset. The CPU lane is the exact packed-ARGB oracle. On x86_64, the
+`cpu_simd` request must preserve every absolute framebuffer
+pixel while proving native glyph-alpha rows; Vulkan must disclose real device
+submission and readback or fail as unavailable.
 
-The captured artifact directory, when a future run succeeds, is:
+## Scenarios
 
-```text
-build/test-artifacts/03_system/app/simple_2d/feature/
-└── engine2d_font_surface_verification/
-    ├── cpu.argb
-    ├── cpu_simd.argb
-    ├── draw_ir_cpu.argb
-    └── vulkan.argb
+### Engine2D pinned-font rendering surfaces
+
+#### keeps the cpu_simd request pixel-exact with native glyph alpha rows
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Primary flow (expected show, folded, detail, or skip)
+
+
+- keeps the cpu_simd request pixel-exact with native glyph alpha rows
+   - Artifact capture: after_step
+- Load the pinned multilingual font manifest
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: file_hash_sha256(FONT_PATH) equals `FONT_SHA256`
+   - Expected: TEXT equals `Simple 2D`
+- Accept exact-face-bound simple-script shaping
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: cpu.backend equals `cpu`
+   - Expected: cpu.source equals `cpu_mirror`
+   - Expected: cpu.execution_target equals `cpu`
+- Prepare one shared font batch for 2D and 3D
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: simd.backend equals `cpu_simd`
+   - Expected: simd.source equals `cpu_mirror`
+   - Expected: simd.execution_target equals `cpu_simd`
+- Emit the selected font composite program and plan compilation
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: simd.pixels equals `cpu.pixels`
+- Prove native submission and device readback
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 8 expected checks
+   - Expected: cpu.pixels.len() equals `WIDTH * HEIGHT`
+   - Expected: simd.painted equals `cpu.painted`
+   - Expected: simd.partial equals `cpu.partial`
+   - Expected: simd.min_x equals `cpu.min_x`
+   - Expected: simd.min_y equals `cpu.min_y`
+   - Expected: simd.max_x equals `cpu.max_x`
+   - Expected: simd.max_y equals `cpu.max_y`
+   - Expected: simd.simd_native_hits equals `simd.simd_alpha_hits`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the cpu_simd request pixel-exact with native glyph alpha rows")
+"""The canonical CPU engine and cpu_simd request consume one semantic string and one selected face.
+
+The comparison is exact over all 9,216 absolute packed-ARGB pixels; a
+checksum, tolerance, or separately painted SIMD fixture is insufficient.
+"""
+expect(_is_interpreter_mode()).to_be(false)
+step("Load the pinned multilingual font manifest")
+expect(file_hash_sha256(FONT_PATH)).to_equal(FONT_SHA256)
+expect(TEXT).to_equal("Simple 2D")
+
+step("Accept exact-face-bound simple-script shaping")
+val cpu = require_render("cpu")
+expect(cpu.backend).to_equal("cpu")
+expect(cpu.source).to_equal("cpu_mirror")
+expect(cpu.execution_target).to_equal("cpu")
+expect(cpu.attempts).to_contain("cpu:success")
+
+step("Prepare one shared font batch for 2D and 3D")
+val simd = require_render("cpu_simd")
+expect(simd.backend).to_equal("cpu_simd")
+expect(simd.source).to_equal("cpu_mirror")
+expect(simd.execution_target).to_equal("cpu_simd")
+expect(simd.attempts).to_contain("cpu_simd:success")
+
+step("Emit the selected font composite program and plan compilation")
+expect(simd.pixels).to_equal(cpu.pixels)
+
+step("Prove native submission and device readback")
+expect(cpu.pixels.len()).to_equal(WIDTH * HEIGHT)
+expect(cpu.painted).to_be_greater_than(0)
+expect(cpu.partial).to_be_greater_than(0)
+expect(simd.painted).to_equal(cpu.painted)
+expect(simd.partial).to_equal(cpu.partial)
+expect(simd.min_x).to_equal(cpu.min_x)
+expect(simd.min_y).to_equal(cpu.min_y)
+expect(simd.max_x).to_equal(cpu.max_x)
+expect(simd.max_y).to_equal(cpu.max_y)
+expect(simd.simd_alpha_hits).to_be_greater_than(0)
+expect(simd.simd_native_hits).to_be_greater_than(0)
+expect(simd.simd_native_hits).to_equal(simd.simd_alpha_hits)
+expect(cpu.min_x).to_be_greater_than(7)
+expect(cpu.min_y).to_be_greater_than(7)
+expect(cpu.max_x).to_be_less_than(WIDTH)
+expect(cpu.max_y).to_be_less_than(HEIGHT)
+retain_capture("cpu", cpu.pixels)
+retain_capture("cpu_simd", simd.pixels)
 ```
 
-Artifact names describe requests, not proof. `cpu_simd.argb` is not evidence of
-SIMD execution unless separate native SIMD provenance exists. `vulkan.argb` is
-not Vulkan proof unless the scenario also observes device-origin readback and
-positive device handles.
+</details>
 
-## Capability Truth Table
+#### renders the same absolute pixels only after Vulkan device readback
 
-| Row | Required observation | Current truth |
-|---|---|---|
-| CPU oracle | backend `cpu`, source `cpu_mirror`, execution target `cpu`, exact 9,216 pixels | **BLOCKED: not executed** |
-| `cpu_simd` request | native-mode x86_64 backend label `cpu_simd`, source `cpu_mirror`, execution target `cpu_simd`, provider alpha-hit plus C-runtime row-hit, exact CPU parity | **BLOCKED: not executed** |
-| Vulkan | backend and execution target `vulkan`, `device_readback`, positive backend handle and device identity, exact CPU parity | **BLOCKED: no device execution receipt** |
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Vulkan device row (expected show, folded, detail, or skip)
 
-### CPU SIMD glyph-alpha proof
 
-The `cpu_simd` scenario deliberately expects:
+- renders the same absolute pixels only after Vulkan device readback
+   - Artifact capture: after_step
+- Load the pinned multilingual font manifest
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: file_hash_sha256(FONT_PATH) equals `FONT_SHA256`
+   - Expected: TEXT equals `Simple 2D`
+- Accept exact-face-bound simple-script shaping
+   - Artifact capture: after_step
+- Prepare one shared font batch for 2D and 3D
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: vulkan.backend equals `vulkan`
+   - Expected: vulkan.execution_target equals `vulkan`
+   - Expected: vulkan.attempts equals `vulkan:fence-device-identity-readback-proven`
+- Emit the selected font composite program and plan compilation
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: vulkan.pixels equals `cpu.pixels`
+- Prove native submission and device readback
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 7 expected checks
+   - Expected: vulkan.source equals `device_readback`
+   - Expected: vulkan.painted equals `cpu.painted`
+   - Expected: vulkan.partial equals `cpu.partial`
+   - Expected: vulkan.min_x equals `cpu.min_x`
+   - Expected: vulkan.min_y equals `cpu.min_y`
+   - Expected: vulkan.max_x equals `cpu.max_x`
+   - Expected: vulkan.max_y equals `cpu.max_y`
 
-```text
-backend=cpu_simd
-source=cpu_mirror
-execution_target=cpu_simd
-attempts contains cpu_simd:success
-simd_alpha_hits>0
-simd_native_hits>0
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 34 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders the same absolute pixels only after Vulkan device readback")
+"""Vulkan cannot pass through software fallback, a CPU mirror, or backend-name relabeling.
+
+A host without an accelerated, fenced Vulkan font compositor reports a
+failing unavailable row so the capability remains visible.
+"""
+step("Load the pinned multilingual font manifest")
+expect(file_hash_sha256(FONT_PATH)).to_equal(FONT_SHA256)
+expect(TEXT).to_equal("Simple 2D")
+
+step("Accept exact-face-bound simple-script shaping")
+val cpu = require_render("cpu")
+
+step("Prepare one shared font batch for 2D and 3D")
+val vulkan = require_render("vulkan")
+expect(vulkan.backend).to_equal("vulkan")
+expect(vulkan.execution_target).to_equal("vulkan")
+expect(vulkan.attempts).to_equal("vulkan:fence-device-identity-readback-proven")
+
+step("Emit the selected font composite program and plan compilation")
+expect(vulkan.pixels).to_equal(cpu.pixels)
+
+step("Prove native submission and device readback")
+expect(vulkan.source).to_equal("device_readback")
+expect(vulkan.backend_handle).to_be_greater_than(0)
+expect(vulkan.device_identity).to_be_greater_than(0)
+expect(vulkan.painted).to_equal(cpu.painted)
+expect(vulkan.partial).to_equal(cpu.partial)
+expect(vulkan.min_x).to_equal(cpu.min_x)
+expect(vulkan.min_y).to_equal(cpu.min_y)
+expect(vulkan.max_x).to_equal(cpu.max_x)
+expect(vulkan.max_y).to_equal(cpu.max_y)
+retain_capture("vulkan", vulkan.pixels)
 ```
 
-That row is required to run in native mode. It proves the selected x86_64
-`cpu_simd` backend used both the provider alpha route and the C-runtime SIMD
-row kernel after the clear counter was reset, while preserving CPU pixels
-exactly. Its readback remains `cpu_mirror`; it is never device-readback or
-Vulkan evidence. RV64 remains CPU until an RVV glyph-alpha implementation
-exists.
+</details>
 
-### Vulkan naming is not device proof
+#### submits resolved DrawIR text through the canonical font consumer
 
-The Vulkan scenario fails unless all of these facts hold together:
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: DrawIR production boundary (expected show, folded, detail, or skip)
 
-```text
-backend=vulkan
-execution_target=vulkan
-source=device_readback
-backend_handle>0
-device_identity>0
-vulkan_pixels==cpu_pixels
+
+- submits resolved DrawIR text through the canonical font consumer
+   - Artifact capture: after_step
+- Trace the production font and event boundary
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: metrics.advances.len() equals `TEXT.len()`
+   - Expected: command.text_value equals `TEXT`
+   - Expected: command.computed_style.len() equals `5`
+- Submit the boundary output to its canonical consumer
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: result.rendered_command_count equals `2`
+   - Expected: result.skipped_command_count equals `0`
+   - Expected: result.readback_source equals `cpu_mirror`
+- Correlate visible pixels and input with one frame identity
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: result.pixels equals `direct.pixels`
+   - Expected: result.pixels.len() equals `WIDTH * HEIGHT`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("submits resolved DrawIR text through the canonical font consumer")
+step("Trace the production font and event boundary")
+val metrics = resolve_font_metrics(FONT_PATH, TEXT, 24)
+expect(metrics.valid).to_be(true)
+expect(metrics.identity).to_contain("NotoSansMono")
+expect(metrics.advances.len()).to_equal(TEXT.len())
+val command = draw_ir_text_resolved_font("font-surface-text", 8, 8, TEXT, FG,
+    metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 24)
+expect(command.text_value).to_equal(TEXT)
+expect(command.computed_style.len()).to_equal(5)
+
+step("Submit the boundary output to its canonical consumer")
+val embedding = draw_ir_embedding_config("", "font-surface", 0, 0, WIDTH, HEIGHT, 0, 1000, true)
+val composition = draw_ir_composition("font-surface-frame", "engine2d-font-surface", "cpu", [
+    draw_ir_batch("font-surface-batch", "cpu", embedding, [
+        draw_ir_rect("font-surface-background", 0, 0, WIDTH, HEIGHT, BG), command
+    ])
+])
+var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+expect(engine.load_font(FONT_PATH)).to_be(true)
+val result = engine2d_draw_ir_adv_composition(engine, composition, false)
+expect(result.rendered_command_count).to_equal(2)
+expect(result.skipped_command_count).to_equal(0)
+expect(result.readback_source).to_equal("cpu_mirror")
+
+step("Correlate visible pixels and input with one frame identity")
+val direct = require_render("cpu")
+expect(result.pixels).to_equal(direct.pixels)
+expect(result.pixels.len()).to_equal(WIDTH * HEIGHT)
+retain_capture("draw_ir_cpu", result.pixels)
+engine.shutdown()
 ```
 
-A software fallback, CPU mirror, emitted shader, backend-name relabel, upload-
-only receipt, or unavailable Vulkan device remains BLOCKED.
+</details>
 
-## Primary Flow
+<details>
+<summary>Advanced: rejects inconsistent DrawIR font advances before rendering</summary>
 
-The shared font flow uses the repository’s frozen operator vocabulary.
+#### rejects inconsistent DrawIR font advances before rendering
 
-1. **Load the pinned multilingual font manifest**
-   - Hash
-     `assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`.
-   - Require SHA-256
-     `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
-   - Bind the semantic text exactly as `Simple 2D`.
+- rejects inconsistent DrawIR font advances before rendering
+- Trace the production font and event boundary
+- Submit the boundary output to its canonical consumer
+- Reject disconnected stale or replayed evidence
+   - Expected: result.readback_source equals `preflight_rejected`
+   - Expected: result.rendered_command_count equals `0`
+   - Expected: result.skipped_command_count equals `1`
+   - Expected: result.pixels.len() equals `0`
+   - Expected: engine.read_pixels() equals `[BG; WIDTH * HEIGHT]`
 
-2. **Accept exact-face-bound simple-script shaping**
-   - Request the CPU reference surface.
-   - Require CPU backend and `cpu_mirror` provenance.
-   - Require the font execution attempt to end in `cpu:success`.
 
-3. **Prepare one shared font batch for 2D and 3D**
-   - Request either `cpu_simd` or `vulkan` through the same Engine2D facade.
-   - Do not introduce another renderer, atlas, cache, or private font path.
-   - Require `cpu_simd:success` and a positive native glyph-alpha hit count.
+<details>
+<summary>Executable SSpec</summary>
 
-4. **Emit the selected font composite program and plan compilation**
-   - Compare the complete requested framebuffer with the CPU framebuffer.
-   - Require equality of every packed-ARGB pixel; checksums and tolerances are
-     insufficient.
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-5. **Prove native submission and device readback**
-   - Require 9,216 pixels and a nonempty antialiased glyph region.
-   - Retain the exact ARGB capture.
-   - For Vulkan, additionally require device readback and positive native
-     handles.
-   - For `cpu_simd`, require native glyph-alpha provenance while retaining CPU
-     readback provenance.
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects inconsistent DrawIR font advances before rendering")
+step("Trace the production font and event boundary")
+val metrics = resolve_font_metrics(FONT_PATH, TEXT, 24)
+expect(metrics.valid).to_be(true)
+var replayed = draw_ir_text_resolved_font("font-surface-replay", 8, 8, TEXT, FG,
+    metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 24)
+replayed.computed_style[2].value = "1"
 
-## Scenario 1: CPU / `cpu_simd` Glyph Alpha
+step("Submit the boundary output to its canonical consumer")
+val embedding = draw_ir_embedding_config("", "font-surface", 0, 0, WIDTH, HEIGHT, 0, 1000, true)
+val composition = draw_ir_composition("font-surface-replayed-frame", "engine2d-font-surface", "cpu", [
+    draw_ir_batch("font-surface-replayed-batch", "cpu", embedding, [
+        draw_ir_rect("font-surface-background", 0, 0, WIDTH, HEIGHT, BG), replayed
+    ])
+])
+var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+engine.clear(BG)
 
-**User-visible outcome:** the `cpu_simd` request produces the exact CPU glyph
-frame after native SIMD glyph-alpha blending.
-
-Absolute assertions:
-
-- framebuffer length is `128 * 72`;
-- at least one pixel differs from background;
-- at least one partially covered antialias pixel exists;
-- painted count and partial count equal the CPU oracle;
-- minimum and maximum painted bounds equal the CPU oracle;
-- glyph bounds remain inside the framebuffer;
-- all 9,216 pixels equal the CPU oracle;
-- execution target is `cpu_simd`, its attempt is `cpu_simd:success`, and its
-  native alpha-hit count is positive;
-- `cpu.argb` and `cpu_simd.argb` are retained only after those assertions.
-
-**Current result: BLOCKED.** No runner result or capture was produced in this
-documentation-only follow-up.
-
-## Scenario 2: Vulkan Device Readback
-
-**User-visible outcome:** Vulkan produces the same absolute glyph frame only
-after real device submission and readback.
-
-Absolute assertions:
-
-- backend and font execution target both equal `vulkan`;
-- attempts include a Vulkan attempt;
-- all pixels equal the CPU oracle;
-- readback source equals `device_readback`;
-- backend handle and device identity are positive;
-- painted count, partial count, and glyph bounds equal CPU;
-- `vulkan.argb` is retained only after those assertions.
-
-**Current result: BLOCKED.** No current Vulkan device receipt or capture exists.
-Unavailable Vulkan must fail the scenario; it is never converted to PASS.
-
-## Scenario 3: DrawIR Canonical Consumer
-
-**User-visible outcome:** a resolved `DrawIrText` command carries the pinned
-face identity and advances through `Engine2D`'s normal DrawIR executor, then
-produces the exact same 128×72 CPU frame as the direct `draw_text` oracle.
-
-The scenario uses the frozen boundary flow:
-
-1. **Trace the production font and event boundary**
-   - Resolve the pinned face metrics for `Simple 2D`.
-   - Require the resolved Noto Sans Mono identity and one advance per text
-     character.
-
-2. **Submit the boundary output to its canonical consumer**
-   - Build one `DrawIrComposition` containing the opaque background and the
-     resolved text command.
-   - Execute it through `engine2d_draw_ir_adv_composition`, which dispatches
-     resolved text to `Engine2D.draw_text_with_advances` and its transient
-     `FontRenderer` batch path.
-
-3. **Correlate visible pixels and input with one frame identity**
-   - Require two rendered commands, zero skipped commands, CPU-mirror
-     readback, and equality with the direct CPU oracle.
-   - Retain `draw_ir_cpu.argb` only after the full-frame equality assertion.
-
-**Current result: BLOCKED.** This is executable boundary coverage, but no
-current pure-Simple receipt or retained capture exists. Source wiring alone is
-not a pixel claim.
-
-## Scenario 4: Inconsistent DrawIR Advance Rejection
-
-**User-visible outcome:** a resolved text command whose encoded advances no
-longer match its text length and declared width is rejected before rendering.
-
-The fresh-device preflight returns `preflight_rejected`, renders zero commands,
-returns no pixels, and leaves the caller's all-background framebuffer unchanged.
-This is a disconnected-payload oracle, not device-pixel evidence.
-
-**Current result: BLOCKED.** The assertion has not been executed in the
-pure-Simple runner.
-
-## Operator Command
-
-Run only with the pure-Simple self-hosted binary:
-
-```bash
-SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
-bin/release/x86_64-unknown-linux-gnu/simple test \
-test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl \
---mode=native
+step("Reject disconnected stale or replayed evidence")
+val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(engine, composition, [])
+expect(result.readback_source).to_equal("preflight_rejected")
+expect(result.rendered_command_count).to_equal(0)
+expect(result.skipped_command_count).to_equal(1)
+expect(result.pixels.len()).to_equal(0)
+expect(engine.read_pixels()).to_equal([BG; WIDTH * HEIGHT])
+engine.shutdown()
 ```
 
-Before accepting evidence, record the resolved binary path, version, SHA-256,
-exit code, retained ARGB paths, selected backend, execution target, readback
-source, backend handle, and device identity.
+</details>
 
-## Pass and Block Rules
 
-PASS requires both requested rows to satisfy their own assertions in a current
-run, plus the DrawIR canonical-consumer and malformed-payload rejection rows.
-The `cpu_simd` row requires the native glyph-alpha hit assertion; CPU mirror
-readback remains distinct from GPU evidence.
+</details>
 
-The feature remains BLOCKED when any of these is true:
+## Scenario Summary
 
-- the pure-Simple runner was not executed;
-- zero scenarios executed;
-- the font hash differs;
-- `cpu_simd` does not report a positive glyph-alpha hit count;
-- Vulkan is unavailable;
-- Vulkan uses `cpu_mirror`;
-- either Vulkan handle is zero;
-- any requested framebuffer pixel differs from CPU;
-- a retained capture is missing.
-- a resolved DrawIR command does not reproduce the direct CPU frame;
-- inconsistent DrawIR advances reach rendering or mutate the framebuffer.
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 4 |
+| Active scenarios | 4 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
 ## Traceability
 
-- Requirements: AC-1, AC-6, AC-7, AC-8, AC-9
-- Executable spec:
-  `test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl`
-- Font implementation owner: `FontRenderer` and transient `FontRenderBatch`
-- Composition owner: `DrawIrComposition`
-- Text execution owner: Engine2D `draw_text`
-- Production boundary: `DrawIrText` -> `Engine2D.draw_text_with_advances` ->
-  `FontRenderer` -> backend submission/readback
-- Current documentation status: manual present, execution BLOCKED
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `88efc070e5f1bd1c3b862b8b72c1139170b4b532cca7fde6ffa80b54619799b9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `88efc070e5f1bd1c3b862b8b72c1139170b4b532cca7fde6ffa80b54619799b9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `88efc070e5f1bd1c3b862b8b72c1139170b4b532cca7fde6ffa80b54619799b9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl
+mirror: doc/06_spec/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl:133:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the cpu_simd request pixel-exact with native glyph alpha rows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl:186:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders the same absolute pixels only after Vulkan device readback' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl:225:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'submits resolved DrawIR text through the canonical font consumer' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

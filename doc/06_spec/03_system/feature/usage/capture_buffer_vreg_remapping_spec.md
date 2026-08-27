@@ -2,29 +2,6 @@
 
 > This specification covers advanced virtual register (vreg) remapping and capture buffer management at the runtime level. These are internal optimization features that affect how the interpreter manages memory and registers during function execution.
 
-<!-- sdn-diagram:id=capture_buffer_vreg_remapping_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=capture_buffer_vreg_remapping_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-capture_buffer_vreg_remapping_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=capture_buffer_vreg_remapping_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 46 | 46 | 0 | 0 |
@@ -45,7 +22,7 @@ This specification covers advanced virtual register (vreg) remapping and capture
 | Difficulty | 4/5 |
 | Status | Planned |
 | Source | `test/03_system/feature/usage/capture_buffer_vreg_remapping_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -85,16 +62,22 @@ execution.
 
 #### creates capture buffer for single captured variable
 
-1. expect closure
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates capture buffer for single captured variable
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates capture buffer for single captured variable")
 val x = 10
 val closure = \: x
 expect closure() == 10
@@ -104,16 +87,18 @@ expect closure() == 10
 
 #### creates capture buffer for multiple variables
 
-1. expect closure
+- creates capture buffer for multiple variables
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates capture buffer for multiple variables")
 val a = 5
 val b = 15
 val closure = \: a + b
@@ -124,16 +109,18 @@ expect closure() == 20
 
 #### captures variable in nested closure
 
-1. expect inner
+- captures variable in nested closure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures variable in nested closure")
 val outer = 100
 val f = \: \: outer
 val inner = f()
@@ -144,16 +131,18 @@ expect inner() == 100
 
 #### captures in lambda with parameters
 
-1. expect double
+- captures in lambda with parameters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures in lambda with parameters")
 val factor = 2
 val double = \x: x * factor
 expect double(5) == 10
@@ -165,16 +154,18 @@ expect double(5) == 10
 
 #### captures value at definition time
 
-1. expect closure
+- captures value at definition time
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures value at definition time")
 val x = 10
 val closure = \: x
 # x may be modified after, but closure retains captured value
@@ -188,17 +179,18 @@ expect closure() == 10
 
 #### captures in loop iteration
 
-1. closures push
-2. expect closures len
+- captures in loop iteration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures in loop iteration")
 var closures = []
 for i in [0, 1, 2]:
     closures.push(\: i)
@@ -213,17 +205,18 @@ expect closures.len() == 3
 
 #### captures different scopes separately
 
-1. expect f
-2. expect g
+- captures different scopes separately
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures different scopes separately")
 val x = 1
 val f = \: x
 val y = 2
@@ -238,35 +231,8 @@ expect g() == 2
 
 #### allocates vreg for simple variable
 
-<details>
-<summary>Executable SSpec</summary>
+- allocates vreg for simple variable
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val x = 42
-expect x == 42
-```
-
-</details>
-
-#### allocates vreg for expression result
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = 10 + 20
-expect result == 30
-```
-
-</details>
-
-#### allocates vregs for multiple values
 
 <details>
 <summary>Executable SSpec</summary>
@@ -275,6 +241,48 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates vreg for simple variable")
+val x = 42
+expect x == 42
+```
+
+</details>
+
+#### allocates vreg for expression result
+
+- allocates vreg for expression result
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates vreg for expression result")
+val result = 10 + 20
+expect result == 30
+```
+
+</details>
+
+#### allocates vregs for multiple values
+
+- allocates vregs for multiple values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates vregs for multiple values")
 val a = 1
 val b = 2
 val c = 3
@@ -285,13 +293,18 @@ expect a + b + c == 6
 
 #### allocates vreg for array element
 
+- allocates vreg for array element
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates vreg for array element")
 val arr = [10, 20, 30]
 val first = arr[0]
 expect first == 10
@@ -303,13 +316,18 @@ expect first == 10
 
 #### reuses vreg in sequential statements
 
+- reuses vreg in sequential statements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reuses vreg in sequential statements")
 val a = 10
 val b = 20          # a is dead, can reuse its vreg
 expect b == 20
@@ -319,13 +337,18 @@ expect b == 20
 
 #### reuses vreg after value is no longer needed
 
+- reuses vreg after value is no longer needed
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reuses vreg after value is no longer needed")
 var x = 5
 x = x + 10          # Old value can be reused
 expect x == 15
@@ -335,13 +358,18 @@ expect x == 15
 
 #### does not reuse interfering vregs
 
+- does not reuse interfering vregs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("does not reuse interfering vregs")
 val a = 10
 val b = a + 20      # a is still live, must use different vreg
 expect b == 30
@@ -351,13 +379,18 @@ expect b == 30
 
 #### reuses vregs in branches
 
+- reuses vregs in branches
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reuses vregs in branches")
 val cond = true
 val x = if cond: 10 else: 20
 expect x == 10
@@ -369,13 +402,18 @@ expect x == 10
 
 #### detects live range of simple variable
 
+- detects live range of simple variable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects live range of simple variable")
 val x = 5
 val y = x + 1       # x is live here
 expect y == 6
@@ -385,13 +423,18 @@ expect y == 6
 
 #### detects live range extends to final use
 
+- detects live range extends to final use
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects live range extends to final use")
 val a = 10
 val b = 20
 val c = a + b       # Both a and b are live
@@ -402,13 +445,18 @@ expect c == 30
 
 #### detects live range ends after last use
 
+- detects live range ends after last use
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects live range ends after last use")
 val temp = 100
 val result = temp * 2  # temp is dead after this
 expect result == 200
@@ -418,13 +466,18 @@ expect result == 200
 
 #### handles nested live ranges
 
+- handles nested live ranges
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles nested live ranges")
 val outer = 5
 val inner = outer + 10
 val combined = outer + inner
@@ -440,13 +493,18 @@ expect combined == 20
 
 #### remaps vregs in loop iterations
 
+- remaps vregs in loop iterations
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("remaps vregs in loop iterations")
 var sum = 0
 for i in [1, 2, 3]:
     val local = i * 2    # Can reuse vreg each iteration
@@ -464,13 +522,18 @@ expect sum == 12
 
 #### handles nested loops with remapping
 
+- handles nested loops with remapping
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles nested loops with remapping")
 var count = 0
 for i in [0, 1]:
     for j in [0, 1]:
@@ -488,17 +551,18 @@ expect count == 4
 
 #### preserves values across loop iterations
 
-1. accumulated push
-2. expect accumulated len
+- preserves values across loop iterations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves values across loop iterations")
 var accumulated = []
 for i in [1, 2, 3]:
     accumulated.push(i)
@@ -514,16 +578,18 @@ expect accumulated.len() == 3
 
 #### captures value despite vreg reuse
 
-1. expect closure
+- captures value despite vreg reuse
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures value despite vreg reuse")
 val captured = 42
 val closure = \: captured
 # Even if captured's vreg was reused, closure should work
@@ -534,16 +600,18 @@ expect closure() == 42
 
 #### captures multiple values with remapping
 
-1. expect f
+- captures multiple values with remapping
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures multiple values with remapping")
 val a = 10
 val b = 20
 val f = \: a + b
@@ -558,17 +626,18 @@ expect f() == 30
 
 #### captures in loop with vreg remapping
 
-1. closures push
-2. expect closures len
+- captures in loop with vreg remapping
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures in loop with vreg remapping")
 var closures = []
 for i in [10, 20, 30]:
     val current = i
@@ -585,13 +654,18 @@ expect closures.len() == 3
 
 #### detects interference between live ranges
 
+- detects interference between live ranges
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects interference between live ranges")
 val a = 10
 val b = a + 5       # a interferes with b
 val c = a + b       # All three interfere
@@ -602,13 +676,18 @@ expect c == 25
 
 #### detects no interference for sequential values
 
+- detects no interference for sequential values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects no interference for sequential values")
 val a = 10
 val _ = a
 val b = 20          # No interference - a is dead
@@ -619,13 +698,18 @@ expect b == 20
 
 #### handles complex interference patterns
 
+- handles complex interference patterns
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles complex interference patterns")
 val a = 1
 val b = a + 1
 val c = a + b
@@ -639,18 +723,18 @@ expect d == 5
 
 #### maintains captured values across calls
 
-1. expect add
-2. expect add
-3. expect add
+- maintains captured values across calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains captured values across calls")
 val base = 100
 val add = \x: base + x
 expect add(5) == 105
@@ -662,18 +746,18 @@ expect add(5) == 105
 
 #### isolates different capture buffers
 
-1. fn make closure
-2. expect f1
-3. expect f2
+- isolates different capture buffers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("isolates different capture buffers")
 fn make_closure(x):
     \: x
 val f1 = make_closure(1)
@@ -686,16 +770,18 @@ expect f2() == 2
 
 #### handles closure returning closure
 
-1. expect add5
+- handles closure returning closure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles closure returning closure")
 val make_adder = \n: \x: n + x
 val add5 = make_adder(5)
 expect add5(3) == 8
@@ -707,13 +793,18 @@ expect add5(3) == 8
 
 #### handles many live values
 
+- handles many live values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles many live values")
 val a = 1
 val b = 2
 val c = 3
@@ -727,13 +818,18 @@ expect result == 15
 
 #### handles complex expressions with many values
 
+- handles complex expressions with many values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles complex expressions with many values")
 val result = ((1 + 2) * (3 + 4)) + ((5 + 6) * (7 + 8))
 expect result == 186
 ```
@@ -744,16 +840,18 @@ expect result == 186
 
 #### preserves local values across function call
 
-1. fn double
+- preserves local values across function call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves local values across function call")
 fn double(x):
     x * 2
 
@@ -767,18 +865,18 @@ expect c == 20
 
 #### preserves values in nested calls
 
-1. fn f
-2. fn g
-3. f
+- preserves values in nested calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves values in nested calls")
 fn f(x):
     x + 1
 
@@ -796,13 +894,18 @@ expect result == 12
 
 #### produces correct result after vreg reuse
 
+- produces correct result after vreg reuse
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produces correct result after vreg reuse")
 val arr = [1, 2, 3, 4, 5]
 var sum = 0
 for i in arr:
@@ -814,13 +917,18 @@ expect sum == 15
 
 #### preserves value semantics
 
+- preserves value semantics
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves value semantics")
 val x = 42
 val y = x
 expect y == 42
@@ -830,13 +938,18 @@ expect y == 42
 
 #### maintains mutation semantics
 
+- maintains mutation semantics
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains mutation semantics")
 var count = 0
 count = count + 1
 count = count + 1
@@ -849,16 +962,18 @@ expect count == 2
 
 #### captures in deeply nested closures
 
-1. expect deep fn3
+- captures in deeply nested closures
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures in deeply nested closures")
 val deep_val = 1
 val deep_fn1 = \: deep_val
 val deep_fn2 = \: deep_fn1()
@@ -870,16 +985,18 @@ expect deep_fn3() == 1
 
 #### captures the same variable multiple times
 
-1. expect triple fn
+- captures the same variable multiple times
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures the same variable multiple times")
 val triple_val = 10
 val triple_fn = \: triple_val + triple_val + triple_val
 expect triple_fn() == 30
@@ -889,16 +1006,18 @@ expect triple_fn() == 30
 
 #### captures from multiple scopes via lambda
 
-1. expect inner f
+- captures from multiple scopes via lambda
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures from multiple scopes via lambda")
 val outer = 100
 val make_inner = \:
     val inner = outer + 1
@@ -913,13 +1032,18 @@ expect inner_f() == 101
 
 #### stores mixed-type captures
 
+- stores mixed-type captures
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("stores mixed-type captures")
 val i = 10
 val f = 3.14
 val s = "text"
@@ -932,16 +1056,18 @@ expect result == "10, 3.14, text"
 
 #### captures different sized values
 
-1. expect closure
+- captures different sized values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures different sized values")
 val a: i32 = 1
 val b: i64 = 2
 val closure = \: a + b
@@ -954,13 +1080,18 @@ expect closure() == 3
 
 #### processes many captures efficiently
 
+- processes many captures efficiently
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("processes many captures efficiently")
 val values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 var sum = 0
 for v in values:
@@ -972,17 +1103,18 @@ expect sum == 55
 
 #### handles array of closures
 
-1. closures push
-2. expect closures len
+- handles array of closures
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles array of closures")
 var closures = []
 for i in [0, 1, 2, 3, 4]:
     val current = i
@@ -994,16 +1126,18 @@ expect closures.len() == 5
 
 #### processes filtered captures
 
-1. expect evens len
+- processes filtered captures
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("processes filtered captures")
 val values = [1, 2, 3, 4, 5]
 val evens = values.filter(_1 % 2 == 0)
 expect evens.len() == 2
@@ -1023,3 +1157,51 @@ expect evens.len() == 2
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d086d434ef4646afffec8745a1602c9837b0f7c2b17cf0e948296cce5bf64591`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d086d434ef4646afffec8745a1602c9837b0f7c2b17cf0e948296cce5bf64591`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d086d434ef4646afffec8745a1602c9837b0f7c2b17cf0e948296cce5bf64591`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/capture_buffer_vreg_remapping_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/capture_buffer_vreg_remapping_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/capture_buffer_vreg_remapping_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/capture_buffer_vreg_remapping_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/capture_buffer_vreg_remapping_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates capture buffer for single captured variable' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/capture_buffer_vreg_remapping_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates capture buffer for multiple variables' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/capture_buffer_vreg_remapping_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'captures variable in nested closure' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

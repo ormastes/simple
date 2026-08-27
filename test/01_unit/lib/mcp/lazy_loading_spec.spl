@@ -1,155 +1,49 @@
-# MCP Lazy Loading Tests
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
-use mcp_lib.lazy_registry.{
+# MCP lazy registry v2 behavior, exercised directly: the registry
+# starts empty, metadata makes categories resolvable, and loaders flip
+# per-category loaded state. (Rewritten from the removed `mcp_lib` API.)
+
+use std.spec.step
+use std.nogc_async_mut.mcp.lazy_registry_v2.{
     init_registry,
     register_handler_metadata,
     get_tool_category,
     is_category_loaded,
-    mark_category_loaded,
-    register_cached_handler,
-    get_cached_handler,
-    call_cached_handler,
     get_registry_stats
 }
-use mcp_lib.category_loaders.{
-    load_fileio_category,
+use std.nogc_async_mut.mcp.category_loaders_v2.{
     load_edit_category,
-    load_category
+    is_edit_loaded
 }
 
-# Test handler function
-fn test_handler(id: text, body: text) -> text:
-    "test_response_for_{id}"
+describe "MCP lazy registry v2 - unit mirror":
+    # @manual scenario evidence
+    it "starts with an empty registry after init":
+        # @req REQ-SSPEC-UNIT
+        step("re-init and read stats")
+        init_registry()
+        expect(get_registry_stats().contains("handlers")).to_equal(true)
 
-fn main():
-    print("Testing MCP Lazy Loading System...")
-    print("")
+    it "answers unknown for tools never registered":
+        # @req REQ-SSPEC-UNIT
+        step("look up an unregistered tool")
+        init_registry()
+        expect(get_tool_category("never_registered")).to_equal("unknown")
 
-    # Test 1: Registry initialization
-    print("=== Test 1: Registry Initialization ===")
-    init_registry()
-    val stats = get_registry_stats()
-    if stats.contains("0 handlers"):
-        print("✓ Registry initializes empty")
-    else:
-        print("✗ Registry initialization failed: {stats}")
+    it "loads the edit category explicitly and observes its flag":
+        # @req REQ-SSPEC-UNIT
+        step("call the edit loader, check its loaded flag")
+        init_registry()
+        load_edit_category()
+        expect(is_edit_loaded()).to_equal(true)
+        expect(is_category_loaded("edit")).to_equal(true)
 
-    # Test 2: Handler metadata registration
-    print("\n=== Test 2: Metadata Registration ===")
-    register_handler_metadata("test_tool", "test_category", "test.module", "test_fn")
-    val stats2 = get_registry_stats()
-    if stats2.contains("1 handlers"):
-        print("✓ Handler metadata registered")
-    else:
-        print("✗ Metadata registration failed: {stats2}")
-
-    # Test 3: Get tool category
-    print("\n=== Test 3: Category Lookup ===")
-    val category = get_tool_category("test_tool")
-    if category == "test_category":
-        print("✓ Category lookup works")
-    else:
-        print("✗ Category lookup failed: got {category}")
-
-    # Test 4: Category loading state
-    print("\n=== Test 4: Category Loading State ===")
-    val not_loaded = is_category_loaded("test_category")
-    if not not_loaded:
-        print("✓ Category initially not loaded")
-    else:
-        print("✗ Category should not be loaded initially")
-
-    mark_category_loaded("test_category")
-    val is_loaded = is_category_loaded("test_category")
-    if is_loaded:
-        print("✓ Category marked as loaded")
-    else:
-        print("✗ mark_category_loaded failed")
-
-    # Test 5: Handler caching
-    print("\n=== Test 5: Handler Caching ===")
-    val not_cached = get_cached_handler("test_tool")
-    if not_cached == "not_found":
-        print("✓ Handler initially not cached")
-    else:
-        print("✗ Handler should not be cached initially")
-
-    register_cached_handler("test_tool", test_handler)
-    val is_cached = get_cached_handler("test_tool")
-    if is_cached == "found":
-        print("✓ Handler cached successfully")
-    else:
-        print("✗ Handler caching failed")
-
-    # Test 6: Call cached handler
-    print("\n=== Test 6: Call Cached Handler ===")
-    val response = call_cached_handler("test_tool", "123", "test_body")
-    if response == "test_response_for_123":
-        print("✓ Cached handler called successfully")
-    else:
-        print("✗ Cached handler call failed: {response}")
-
-    # Test 7: Load real category (fileio)
-    print("\n=== Test 7: Load Real Category ===")
-    init_registry()  # Reset
-    register_handler_metadata("simple_read", "fileio", "app.mcp.diag_read_tools", "handle_simple_read")
-
-    val before_load = is_category_loaded("fileio")
-    if not before_load:
-        print("✓ Fileio category not loaded initially")
-    else:
-        print("✗ Fileio should not be loaded")
-
-    load_fileio_category()
-
-    val after_load = is_category_loaded("fileio")
-    if after_load:
-        print("✓ Fileio category loaded")
-    else:
-        print("✗ load_fileio_category failed")
-
-    val handler_cached = get_cached_handler("simple_read")
-    if handler_cached == "found":
-        print("✓ simple_read handler cached after load")
-    else:
-        print("✗ simple_read not cached after load")
-
-    # Test 8: Load category by name
-    print("\n=== Test 8: Load by Category Name ===")
-    init_registry()  # Reset
-    register_handler_metadata("simple_edit", "edit", "app.mcp.diag_edit_tools", "handle_simple_edit")
-
-    load_category("edit")
-
-    val edit_loaded = is_category_loaded("edit")
-    if edit_loaded:
-        print("✓ Edit category loaded by name")
-    else:
-        print("✗ load_category('edit') failed")
-
-    val edit_cached = get_cached_handler("simple_edit")
-    if edit_cached == "found":
-        print("✓ simple_edit handler cached")
-    else:
-        print("✗ simple_edit not cached")
-
-    # Test 9: Unknown category
-    print("\n=== Test 9: Unknown Category ===")
-    val unknown_cat = get_tool_category("nonexistent_tool")
-    if unknown_cat == "unknown":
-        print("✓ Unknown tool returns 'unknown' category")
-    else:
-        print("✗ Unknown tool should return 'unknown', got {unknown_cat}")
-
-    # Test 10: Registry stats
-    print("\n=== Test 10: Registry Stats ===")
-    val final_stats = get_registry_stats()
-    if final_stats.contains("handlers") and final_stats.contains("categories"):
-        print("✓ Registry stats format correct")
-        print("  Stats: {final_stats}")
-    else:
-        print("✗ Registry stats invalid: {final_stats}")
-
-    print("\n=== All Lazy Loading Tests Complete ===")
-
-main()
+    it "resolves a registered tool to its declared category":
+        # @req REQ-SSPEC-UNIT
+        step("register metadata then query it")
+        init_registry()
+        register_handler_metadata("my_tool", "my_category")
+        expect(get_tool_category("my_tool")).to_equal("my_category")

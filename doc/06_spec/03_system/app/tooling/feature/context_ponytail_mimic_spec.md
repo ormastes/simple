@@ -2,32 +2,9 @@
 
 > This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local context-mode mimic and Ponytail mimic pair. It proves the CLI, app MCP, lower MCP, operator guide, and verification guard all describe the same public contract.
 
-<!-- sdn-diagram:id=context_ponytail_mimic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=context_ponytail_mimic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-context_ponytail_mimic_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=context_ponytail_mimic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,7 +24,7 @@ This system spec verifies REQ-012, REQ-013, REQ-014, and REQ-015 for the local c
 | Design | doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md |
 | Research | doc/01_research/local/llm_tooling_context_ponytail_mimic.md |
 | Source | `test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl` |
-| Updated | 2026-06-26 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -68,7 +45,7 @@ contract.
 
 1. Index one source into an embedded SQL context database.
 2. Query that database with `--source-filter=<path>`.
-3. Confirm live app MCP `tools/list` advertises the replacement tools and schema fields.
+3. Confirm app MCP and lower MCP advertise the same file-optional contract.
 
 ## Scenarios
 
@@ -76,13 +53,22 @@ contract.
 
 #### REQ-012 exposes source-less SQL context DB query through the CLI
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- REQ-012 exposes source-less SQL context DB query through the CLI
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-012 exposes source-less SQL context DB query through the CLI")
 val cli = read("src/app/context/main.spl")
 expect(cli).to_contain("context_args_allow_sourceless_sql_query(args)")
 expect(cli).to_contain("context_sql_query_packs_by_source([], \"\", sourceless_query, sourceless_source_filter, sourceless_db_path, sourceless_format)")
@@ -93,8 +79,7 @@ expect(cli).to_contain("--source-filter=")
 
 #### REQ-012 and REQ-014 execute persisted source-less SQL CLI queries
 
-- dir create all
-- file write
+- REQ-012 and REQ-014 execute persisted source-less SQL CLI queries
    - Expected: index_code equals `0`
    - Expected: query_code equals `0`
 
@@ -102,10 +87,12 @@ expect(cli).to_contain("--source-filter=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-012 and REQ-014 execute persisted source-less SQL CLI queries")
 dir_create_all("build/test/context_ponytail_system")
 val source_path = "build/test/context_ponytail_system/alpha.spl"
 val db_path = "build/test/context_ponytail_system/context_cli.db"
@@ -128,24 +115,23 @@ expect(query_output).to_contain("alpha_only")
 
 #### REQ-013 and REQ-015 expose SQL query and source filter through app MCP
 
+- REQ-013 and REQ-015 expose SQL query and source filter through app MCP
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-013 and REQ-015 expose SQL query and source filter through app MCP")
 val handler = read("src/app/mcp/main_lazy_query_tools.spl")
 val table = read("src/app/mcp/tool_table.spl")
 val static_tools = read("src/app/mcp/main_static_tools.spl")
 val dispatch = read("src/app/mcp/main_dispatch.spl")
-expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
-expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
-expect(handler).to_contain("Missing required parameter: file")
-expect(handler).to_contain("ctx_args.push(\"--query=\" + query)")
-expect(handler).to_contain("ctx_args.push(\"--sql\")")
-expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
-expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
+_expect_context_handler_contract(handler)
 expect(table).to_contain("tool_entry(\"simple_context\"")
 expect(table).to_contain("Source file path; required except when sql=true and query is non-empty")
 expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by stored source path\")")
@@ -158,17 +144,19 @@ expect(dispatch).to_contain("return handle_simple_context(id, body)")
 
 #### REQ-013 and REQ-015 advertise context and Ponytail through live app MCP tools list
 
-- process run
+- REQ-013 and REQ-015 advertise context and Ponytail through live app MCP tools list
    - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-013 and REQ-015 advertise context and Ponytail through live app MCP tools list")
 val input = _mcp_initialize_line("list-1") + _mcp_initialized_line() + _mcp_tools_list_line("list-2")
 val (output, code) = _run_app_mcp_jsonl_all_tools(input)
 expect(code).to_equal(0)
@@ -185,8 +173,7 @@ expect(output).to_contain("\"source_filter\"")
 
 #### REQ-013 executes source-less SQL context DB query through app MCP
 
-- dir create all
-- file write
+- REQ-013 executes source-less SQL context DB query through app MCP
    - Expected: index_code equals `0`
    - Expected: code equals `0`
 
@@ -194,10 +181,12 @@ expect(output).to_contain("\"source_filter\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-013 executes source-less SQL context DB query through app MCP")
 dir_create_all("build/test/context_ponytail_system")
 val source_path = "build/test/context_ponytail_system/mcp_alpha.spl"
 val db_path = "build/test/context_ponytail_system/context_mcp.db"
@@ -222,22 +211,22 @@ expect(output).to_contain("mcp_alpha_only")
 
 #### REQ-013 and REQ-015 expose SQL query and source filter through lower MCP
 
+- REQ-013 and REQ-015 expose SQL query and source filter through lower MCP
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-013 and REQ-015 expose SQL query and source filter through lower MCP")
 val handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
 val schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
 val dispatch = read("src/lib/nogc_async_mut/mcp/main_lazy.spl")
-expect(handler).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
-expect(handler).to_contain("if file == \"\" and not sourceless_sql_query")
-expect(handler).to_contain("Missing required parameter: file")
-expect(handler).to_contain("ctx_args.push(\"--sql\")")
-expect(handler).to_contain("ctx_args.push(\"--db=\" + db_path)")
-expect(handler).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
+_expect_context_handler_contract(handler)
 expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
 expect(schema).to_contain("Source file path; required except when sql=true and query is non-empty")
 expect(schema).to_contain("jp(\"source_filter\", jo2")
@@ -248,15 +237,44 @@ expect(dispatch).to_contain("handle_simple_context(id, body)")
 
 </details>
 
-#### documents source-less SQL as the only file-optional replacement shape
+#### keeps app and lower MCP context and Ponytail handler contracts in parity
+
+- keeps app and lower MCP context and Ponytail handler contracts in parity
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps app and lower MCP context and Ponytail handler contracts in parity")
+val app_handler = read("src/app/mcp/main_lazy_query_tools.spl")
+val lower_handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
+_expect_context_handler_contract(app_handler)
+_expect_context_handler_contract(lower_handler)
+_expect_ponytail_handler_contract(app_handler, "ponytail_simplification_report(file)")
+_expect_ponytail_handler_contract(lower_handler, "ponytail_simplification_report_source(file, source)")
+```
+
+</details>
+
+#### documents source-less SQL as the only file-optional replacement shape
+
+- documents source-less SQL as the only file-optional replacement shape
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("documents source-less SQL as the only file-optional replacement shape")
 val guide = read("doc/07_guide/app/mcp/mcp.md")
 val design = read("doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md")
 val architecture = read("doc/04_architecture/app/tools/llm_tooling_context_ponytail_mimic.md")
@@ -270,13 +288,18 @@ expect(architecture).to_contain("The replacement contract is the shared")
 
 #### REQ-014 preserves SQL source filter documentation and absence-safe public output
 
+- REQ-014 preserves SQL source filter documentation and absence-safe public output
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("REQ-014 preserves SQL source filter documentation and absence-safe public output")
 val context_ops = read("src/app/io/context_ops.spl")
 val guide = read("doc/07_guide/app/mcp/mcp.md")
 val guard = read("scripts/check/check-llm-tooling-public-absence-rendering.shs")
@@ -288,31 +311,39 @@ expect(guide).to_contain("source_filter")
 expect(guard).to_contain("llm_tooling_context_ponytail_mimic.md")
 expect(guard).to_contain("context_generate_spec.md")
 expect(guard).to_contain("ponytail_audit_spec.md")
-expect(guard).to_contain("Public absence-rendering gate")
+expect(guard).to_contain("llm_tooling_public_absence_rendering_required_gates=nil_marker_absent,option_none_absent,empty_string_absent")
+expect(guard).to_contain("write_evidence \"fail\" \"public_absence_marker_found\"")
+expect(guard).to_contain("write_evidence \"pass\" \"absence_markers_absent\"")
 ```
 
 </details>
 
 #### exposes Ponytail audit and simplification modes through app and lower MCP
 
+- exposes Ponytail audit and simplification modes through app and lower MCP
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exposes Ponytail audit and simplification modes through app and lower MCP")
 val app_handler = read("src/app/mcp/main_lazy_query_tools.spl")
 val app_table = read("src/app/mcp/tool_table.spl")
 val lower_handler = read("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl")
 val lower_schema = read("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl")
 expect(app_handler).to_contain("ponytail_audit")
 expect(app_handler).to_contain("ponytail_simplification_report")
-expect(app_handler).to_contain("Invalid mode: ")
+_expect_ponytail_handler_contract(app_handler, "ponytail_simplification_report(file)")
 expect(app_handler).to_contain("_render_ponytail_mcp(file, mode, result, format)")
 expect(app_table).to_contain("prop_str(\"mode\", \"Mode: audit/review, simplification/simplify\")")
 expect(lower_handler).to_contain("ponytail_audit_source")
 expect(lower_handler).to_contain("ponytail_simplification_report_source")
+_expect_ponytail_handler_contract(lower_handler, "ponytail_simplification_report_source(file, source)")
 expect(lower_handler).to_contain("_mcp_render_ponytail_report")
 expect(lower_schema).to_contain("make_tool_schema(name: \"simple_ponytail\"")
 expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
@@ -324,8 +355,8 @@ expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -333,10 +364,65 @@ expect(lower_schema).to_contain("Mode: audit/review, simplification/simplify")
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md](doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md)
-- **Plan:** [doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md](doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md)
-- **Design:** [doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md](doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md)
-- **Research:** [doc/01_research/local/llm_tooling_context_ponytail_mimic.md](doc/01_research/local/llm_tooling_context_ponytail_mimic.md)
+- **Requirements:** `doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md`
+- **Plan:** `doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md`
+- **Design:** `doc/05_design/app/tools/llm_tooling_context_ponytail_mimic.md`
+- **Research:** `doc/01_research/local/llm_tooling_context_ponytail_mimic.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-012`
+- `REQ-013`
+- `REQ-014`
+- `REQ-015`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6e0b214dd1947a6a3927c59f8bb1b0feb95206d766c5b5b8fb377f0e0325e5e7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6e0b214dd1947a6a3927c59f8bb1b0feb95206d766c5b5b8fb377f0e0325e5e7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6e0b214dd1947a6a3927c59f8bb1b0feb95206d766c5b5b8fb377f0e0325e5e7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl
+mirror: doc/06_spec/03_system/app/tooling/feature/context_ponytail_mimic_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/tooling/feature/context_ponytail_mimic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/tooling/feature/context_ponytail_mimic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-012 exposes source-less SQL context DB query through the CLI' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-012 and REQ-014 execute persisted source-less SQL CLI queries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/tooling/feature/context_ponytail_mimic_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-013 and REQ-015 expose SQL query and source filter through app MCP' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Mock Phase7 Specification
 
-> <details>
-
-<!-- sdn-diagram:id=mock_phase7_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mock_phase7_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mock_phase7_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mock_phase7_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Mock Library - Phase 7 (Advanced Scheduling).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +19,18 @@ mock_phase7_spec
 
 #### defines priority levels
 
+- defines priority levels
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("defines priority levels")
 val critical = TaskPriority.Critical
 val high = TaskPriority.High
 val normal = TaskPriority.Normal
@@ -63,25 +45,7 @@ expect true
 
 #### creates task scheduler
 
-1. expect scheduler get pending count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val scheduler = TaskScheduler.new()
-expect scheduler.get_pending_count() == 0
-```
-
-</details>
-
-#### schedules task with priority
-
-1. expect scheduler get pending count
+- creates task scheduler
 
 
 <details>
@@ -91,6 +55,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates task scheduler")
+val scheduler = TaskScheduler.new()
+expect scheduler.get_pending_count() == 0
+```
+
+</details>
+
+#### schedules task with priority
+
+- schedules task with priority
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("schedules task with priority")
 val scheduler = TaskScheduler.new()
 val id = scheduler.schedule("task1", TaskPriority.Normal, 100)
 expect id == 0
@@ -101,16 +87,18 @@ expect scheduler.get_pending_count() == 1
 
 #### schedules immediate task
 
-1. expect scheduler get pending count
+- schedules immediate task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("schedules immediate task")
 val scheduler = TaskScheduler.new()
 val id = scheduler.schedule_immediate("urgent")
 expect scheduler.get_pending_count() == 1
@@ -120,16 +108,18 @@ expect scheduler.get_pending_count() == 1
 
 #### schedules delayed task
 
-1. expect scheduler get pending count
+- schedules delayed task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("schedules delayed task")
 val scheduler = TaskScheduler.new()
 val id = scheduler.schedule_delayed("later", 500)
 expect scheduler.get_pending_count() == 1
@@ -139,16 +129,18 @@ expect scheduler.get_pending_count() == 1
 
 #### schedules background task
 
-1. expect scheduler get pending count
+- schedules background task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("schedules background task")
 val scheduler = TaskScheduler.new()
 val id = scheduler.schedule_background("bg_task", 1000)
 expect scheduler.get_pending_count() == 1
@@ -160,19 +152,18 @@ expect scheduler.get_pending_count() == 1
 
 #### executes next task by priority
 
-1. scheduler schedule
-2. scheduler schedule
-3. scheduler schedule
-4. Some
+- executes next task by priority
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("executes next task by priority")
 val scheduler = TaskScheduler.new()
 scheduler.schedule("low", TaskPriority.Low, 100)
 scheduler.schedule("high", TaskPriority.High, 100)
@@ -186,20 +177,18 @@ match scheduler.execute_next():
 
 #### executes all tasks
 
-1. scheduler schedule
-2. scheduler schedule
-3. scheduler schedule
-4. scheduler execute all
-5. expect scheduler get pending count
+- executes all tasks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("executes all tasks")
 val scheduler = TaskScheduler.new()
 scheduler.schedule("task1", TaskPriority.Normal, 50)
 scheduler.schedule("task2", TaskPriority.Normal, 50)
@@ -212,17 +201,18 @@ expect scheduler.get_pending_count() == 0
 
 #### tracks execution order
 
-1. scheduler execute all
-2. expect scheduler verify execution order
+- tracks execution order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tracks execution order")
 val scheduler = TaskScheduler.new()
 val id1 = scheduler.schedule("critical", TaskPriority.Critical, 10)
 val id2 = scheduler.schedule("normal", TaskPriority.Normal, 10)
@@ -235,16 +225,18 @@ expect scheduler.verify_execution_order([id1, id3, id2])
 
 #### gets task by id
 
-1. Some
+- gets task by id
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets task by id")
 val scheduler = TaskScheduler.new()
 val id = scheduler.schedule("findme", TaskPriority.Normal, 200)
 match scheduler.get_task(id):
@@ -256,18 +248,18 @@ match scheduler.get_task(id):
 
 #### resets scheduler
 
-1. scheduler schedule
-2. scheduler reset
-3. expect scheduler get pending count
+- resets scheduler
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets scheduler")
 val scheduler = TaskScheduler.new()
 scheduler.schedule("task", TaskPriority.Normal, 100)
 scheduler.reset()
@@ -280,13 +272,18 @@ expect scheduler.get_pending_count() == 0
 
 #### creates retry policy
 
+- creates retry policy
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates retry policy")
 val policy = RetryPolicy.new(3)
 expect policy.max_attempts == 3
 ```
@@ -295,13 +292,18 @@ expect policy.max_attempts == 3
 
 #### creates no-retry policy
 
+- creates no-retry policy
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates no-retry policy")
 val policy = RetryPolicy.no_retry()
 expect policy.max_attempts == 1
 ```
@@ -310,13 +312,18 @@ expect policy.max_attempts == 1
 
 #### creates linear backoff policy
 
+- creates linear backoff policy
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates linear backoff policy")
 val policy = RetryPolicy.with_linear_backoff(5, 100)
 expect policy.max_attempts == 5
 expect policy.base_delay_ms == 100
@@ -326,13 +333,18 @@ expect policy.base_delay_ms == 100
 
 #### creates exponential backoff policy
 
+- creates exponential backoff policy
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates exponential backoff policy")
 val policy = RetryPolicy.with_exponential_backoff(4, 50)
 expect policy.max_attempts == 4
 expect policy.base_delay_ms == 50
@@ -344,18 +356,18 @@ expect policy.base_delay_ms == 50
 
 #### calculates linear backoff
 
-1. expect policy calculate delay
-2. expect policy calculate delay
-3. expect policy calculate delay
+- calculates linear backoff
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates linear backoff")
 val policy = RetryPolicy.with_linear_backoff(5, 100)
 expect policy.calculate_delay(1) == 100
 expect policy.calculate_delay(2) == 200
@@ -366,18 +378,18 @@ expect policy.calculate_delay(3) == 300
 
 #### calculates exponential backoff
 
-1. expect policy calculate delay
-2. expect policy calculate delay
-3. expect policy calculate delay
+- calculates exponential backoff
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates exponential backoff")
 val policy = RetryPolicy.with_exponential_backoff(5, 100)
 expect policy.calculate_delay(1) == 100
 expect policy.calculate_delay(2) == 200
@@ -388,17 +400,18 @@ expect policy.calculate_delay(3) == 400
 
 #### respects max delay
 
-1. policy set max delay
-2. expect policy calculate delay
+- respects max delay
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("respects max delay")
 val policy = RetryPolicy.with_exponential_backoff(10, 100)
 policy.set_max_delay(500)
 expect policy.calculate_delay(5) <= 500
@@ -410,18 +423,18 @@ expect policy.calculate_delay(5) <= 500
 
 #### records successful attempt
 
-1. policy record attempt
-2. expect policy get attempt count
-3. expect policy was successful
+- records successful attempt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("records successful attempt")
 val policy = RetryPolicy.new(3)
 policy.record_attempt(true, nil)
 expect policy.get_attempt_count() == 1
@@ -432,18 +445,18 @@ expect policy.was_successful()
 
 #### records failed attempt
 
-1. policy record attempt
-2. expect policy get attempt count
-3. expect not policy was successful
+- records failed attempt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("records failed attempt")
 val policy = RetryPolicy.new(3)
 policy.record_attempt(false, Some("timeout"))
 expect policy.get_attempt_count() == 1
@@ -454,22 +467,18 @@ expect not policy.was_successful()
 
 #### determines should retry
 
-1. expect policy should retry
-2. policy record attempt
-3. expect policy should retry
-4. policy record attempt
-5. expect policy should retry
-6. policy record attempt
-7. expect not policy should retry
+- determines should retry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("determines should retry")
 val policy = RetryPolicy.new(3)
 expect policy.should_retry()
 policy.record_attempt(false, Some("error"))
@@ -484,19 +493,18 @@ expect not policy.should_retry()
 
 #### calculates total delay
 
-1. policy record attempt
-2. policy record attempt
-3. policy record attempt
-4. expect policy get total delay
+- calculates total delay
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates total delay")
 val policy = RetryPolicy.with_linear_backoff(3, 100)
 policy.record_attempt(false, nil)
 policy.record_attempt(false, nil)
@@ -508,18 +516,18 @@ expect policy.get_total_delay() == 600
 
 #### resets policy
 
-1. policy record attempt
-2. policy reset
-3. expect policy get attempt count
+- resets policy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets policy")
 val policy = RetryPolicy.new(3)
 policy.record_attempt(false, nil)
 policy.reset()
@@ -532,13 +540,18 @@ expect policy.get_attempt_count() == 0
 
 #### creates rate limiter
 
+- creates rate limiter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates rate limiter")
 val limiter = RateLimiter.new(10, 1000)
 expect limiter.max_requests == 10
 expect limiter.window_ms == 1000
@@ -548,13 +561,18 @@ expect limiter.window_ms == 1000
 
 #### creates per-second limiter
 
+- creates per-second limiter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates per-second limiter")
 val limiter = RateLimiter.per_second(5)
 expect limiter.max_requests == 5
 expect limiter.window_ms == 1000
@@ -564,13 +582,18 @@ expect limiter.window_ms == 1000
 
 #### creates per-minute limiter
 
+- creates per-minute limiter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates per-minute limiter")
 val limiter = RateLimiter.per_minute(100)
 expect limiter.max_requests == 100
 expect limiter.window_ms == 60000
@@ -582,19 +605,18 @@ expect limiter.window_ms == 60000
 
 #### allows requests within limit
 
-1. expect limiter try acquire
-2. expect limiter try acquire
-3. expect limiter try acquire
-4. expect not limiter try acquire
+- allows requests within limit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows requests within limit")
 val limiter = RateLimiter.new(3, 1000)
 expect limiter.try_acquire()
 expect limiter.try_acquire()
@@ -606,19 +628,18 @@ expect not limiter.try_acquire()
 
 #### checks can proceed
 
-1. expect limiter can proceed
-2. limiter try acquire
-3. limiter try acquire
-4. expect not limiter can proceed
+- checks can proceed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks can proceed")
 val limiter = RateLimiter.new(2, 1000)
 expect limiter.can_proceed()
 limiter.try_acquire()
@@ -630,19 +651,18 @@ expect not limiter.can_proceed()
 
 #### gets remaining requests
 
-1. expect limiter get remaining requests
-2. limiter try acquire
-3. limiter try acquire
-4. expect limiter get remaining requests
+- gets remaining requests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets remaining requests")
 val limiter = RateLimiter.new(5, 1000)
 expect limiter.get_remaining_requests() == 5
 limiter.try_acquire()
@@ -654,20 +674,18 @@ expect limiter.get_remaining_requests() == 3
 
 #### cleans up old requests after window
 
-1. limiter try acquire
-2. limiter try acquire
-3. expect not limiter can proceed
-4. limiter advance time
-5. expect limiter can proceed
+- cleans up old requests after window
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cleans up old requests after window")
 val limiter = RateLimiter.new(2, 100)
 limiter.try_acquire()
 limiter.try_acquire()
@@ -680,18 +698,18 @@ expect limiter.can_proceed()
 
 #### calculates wait time
 
-1. expect limiter get wait time
-2. limiter try acquire
-3. expect limiter get wait time
+- calculates wait time
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates wait time")
 val limiter = RateLimiter.new(1, 100)
 expect limiter.get_wait_time() == 0
 limiter.try_acquire()
@@ -702,19 +720,18 @@ expect limiter.get_wait_time() == 100
 
 #### resets limiter
 
-1. limiter try acquire
-2. limiter try acquire
-3. limiter reset
-4. expect limiter get remaining requests
+- resets limiter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets limiter")
 val limiter = RateLimiter.new(2, 1000)
 limiter.try_acquire()
 limiter.try_acquire()
@@ -728,24 +745,7 @@ expect limiter.get_remaining_requests() == 2
 
 #### creates timeout controller
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val timeout = TimeoutController.new(5000)
-expect timeout.timeout_ms == 5000
-```
-
-</details>
-
-#### starts and tracks elapsed time
-
-1. timeout start
-2. timeout advance
-3. expect timeout remaining time
+- creates timeout controller
 
 
 <details>
@@ -755,6 +755,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates timeout controller")
+val timeout = TimeoutController.new(5000)
+expect timeout.timeout_ms == 5000
+```
+
+</details>
+
+#### starts and tracks elapsed time
+
+- starts and tracks elapsed time
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("starts and tracks elapsed time")
 val timeout = TimeoutController.new(100)
 timeout.start()
 timeout.advance(50)
@@ -765,18 +787,18 @@ expect timeout.remaining_time() == 50
 
 #### detects timeout
 
-1. timeout start
-2. timeout advance
-3. expect timeout has timed out
+- detects timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects timeout")
 val timeout = TimeoutController.new(100)
 timeout.start()
 timeout.advance(150)
@@ -787,17 +809,18 @@ expect timeout.has_timed_out()
 
 #### completes without timeout
 
-1. timeout start
-2. timeout advance
+- completes without timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("completes without timeout")
 val timeout = TimeoutController.new(100)
 timeout.start()
 timeout.advance(50)
@@ -810,17 +833,18 @@ expect not result.timed_out
 
 #### completes with timeout
 
-1. timeout start
-2. timeout advance
+- completes with timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("completes with timeout")
 val timeout = TimeoutController.new(100)
 timeout.start()
 timeout.advance(150)
@@ -833,20 +857,18 @@ expect result.timed_out
 
 #### resets timeout
 
-1. timeout start
-2. timeout advance
-3. timeout reset
-4. expect not timeout has timed out
-5. expect timeout remaining time
+- resets timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets timeout")
 val timeout = TimeoutController.new(100)
 timeout.start()
 timeout.advance(150)
@@ -861,16 +883,18 @@ expect timeout.remaining_time() == 100
 
 #### creates execution order tracker
 
-1. expect tracker get start order
+- creates execution order tracker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates execution order tracker")
 val tracker = ExecutionOrderTracker.new()
 expect tracker.get_start_order().len() == 0
 ```
@@ -879,20 +903,18 @@ expect tracker.get_start_order().len() == 0
 
 #### records start and end events
 
-1. tracker record start
-2. tracker advance time
-3. tracker record end
-4. expect tracker get start order
-5. expect tracker get end order
+- records start and end events
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("records start and end events")
 val tracker = ExecutionOrderTracker.new()
 tracker.record_start("task1")
 tracker.advance_time(50)
@@ -907,20 +929,18 @@ expect tracker.get_end_order().len() == 1
 
 #### verifies started before
 
-1. tracker record start
-2. tracker advance time
-3. tracker record start
-4. expect tracker verify started before
-5. expect not tracker verify started before
+- verifies started before
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("verifies started before")
 val tracker = ExecutionOrderTracker.new()
 tracker.record_start("first")
 tracker.advance_time(10)
@@ -933,22 +953,18 @@ expect not tracker.verify_started_before("second", "first")
 
 #### verifies completed before
 
-1. tracker record start
-2. tracker record start
-3. tracker advance time
-4. tracker record end
-5. tracker advance time
-6. tracker record end
-7. expect tracker verify completed before
+- verifies completed before
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("verifies completed before")
 val tracker = ExecutionOrderTracker.new()
 tracker.record_start("fast")
 tracker.record_start("slow")
@@ -963,21 +979,18 @@ expect tracker.verify_completed_before("fast", "slow")
 
 #### gets concurrent tasks at time
 
-1. tracker record start
-2. tracker advance time
-3. tracker record start
-4. tracker advance time
-5. tracker record start
-6. expect concurrent len
+- gets concurrent tasks at time
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets concurrent tasks at time")
 val tracker = ExecutionOrderTracker.new()
 tracker.record_start("task1")
 tracker.advance_time(10)
@@ -992,19 +1005,18 @@ expect concurrent.len() == 2
 
 #### gets start and end order
 
-1. tracker record start
-2. tracker record start
-3. tracker record end
-4. tracker record end
+- gets start and end order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets start and end order")
 val tracker = ExecutionOrderTracker.new()
 tracker.record_start("a")
 tracker.record_start("b")
@@ -1019,18 +1031,18 @@ expect starts[1] == "b"
 
 #### resets tracker
 
-1. tracker record start
-2. tracker reset
-3. expect tracker get start order
+- resets tracker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets tracker")
 val tracker = ExecutionOrderTracker.new()
 tracker.record_start("task")
 tracker.reset()
@@ -1043,24 +1055,7 @@ expect tracker.get_start_order().len() == 0
 
 #### creates concurrency controller
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val controller = ConcurrencyController.new(3)
-expect controller.max_concurrent == 3
-```
-
-</details>
-
-#### allows starting within limit
-
-1. expect controller try start
-2. expect controller try start
-3. expect not controller try start
+- creates concurrency controller
 
 
 <details>
@@ -1070,6 +1065,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates concurrency controller")
+val controller = ConcurrencyController.new(3)
+expect controller.max_concurrent == 3
+```
+
+</details>
+
+#### allows starting within limit
+
+- allows starting within limit
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("allows starting within limit")
 val controller = ConcurrencyController.new(2)
 expect controller.try_start("task1")
 expect controller.try_start("task2")
@@ -1080,18 +1097,18 @@ expect not controller.try_start("task3")
 
 #### checks can start
 
-1. expect controller can start
-2. controller try start
-3. expect not controller can start
+- checks can start
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks can start")
 val controller = ConcurrencyController.new(1)
 expect controller.can_start()
 controller.try_start("task")
@@ -1104,18 +1121,18 @@ expect not controller.can_start()
 
 #### queues tasks when at limit
 
-1. controller try start
-2. controller try start
-3. expect controller get waiting count
+- queues tasks when at limit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("queues tasks when at limit")
 val controller = ConcurrencyController.new(1)
 controller.try_start("active")
 controller.try_start("waiting")
@@ -1127,19 +1144,18 @@ expect controller.get_waiting_count() == 1
 
 #### starts waiting task on completion
 
-1. controller try start
-2. controller try start
-3. controller complete
-4. expect controller get waiting count
+- starts waiting task on completion
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts waiting task on completion")
 val controller = ConcurrencyController.new(1)
 controller.try_start("first")
 controller.try_start("second")
@@ -1154,19 +1170,18 @@ expect active[0] == "second"
 
 #### tracks completed tasks
 
-1. controller try start
-2. controller try start
-3. controller complete
-4. expect controller get completed count
+- tracks completed tasks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tracks completed tasks")
 val controller = ConcurrencyController.new(2)
 controller.try_start("a")
 controller.try_start("b")
@@ -1178,17 +1193,18 @@ expect controller.get_completed_count() == 1
 
 #### resets controller
 
-1. controller try start
-2. controller reset
+- resets controller
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets controller")
 val controller = ConcurrencyController.new(2)
 controller.try_start("task")
 controller.reset()
@@ -1201,13 +1217,18 @@ expect controller.active_count == 0
 
 #### creates debouncer
 
+- creates debouncer
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates debouncer")
 val debouncer = Debouncer.new(100)
 expect debouncer.delay_ms == 100
 ```
@@ -1216,22 +1237,18 @@ expect debouncer.delay_ms == 100
 
 #### debounces rapid calls
 
-1. debouncer call
-2. debouncer advance time
-3. debouncer call
-4. debouncer advance time
-5. debouncer call
-6. debouncer advance time
-7. expect executed len
+- debounces rapid calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("debounces rapid calls")
 val debouncer = Debouncer.new(100)
 debouncer.call("first")
 debouncer.advance_time(50)
@@ -1248,20 +1265,18 @@ expect executed[0] == "third"
 
 #### executes after delay
 
-1. debouncer call
-2. expect debouncer has pending
-3. debouncer advance time
-4. expect not debouncer has pending
-5. expect debouncer get execution count
+- executes after delay
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("executes after delay")
 val debouncer = Debouncer.new(100)
 debouncer.call("value")
 expect debouncer.has_pending()
@@ -1274,20 +1289,18 @@ expect debouncer.get_execution_count() == 1
 
 #### tracks execution count
 
-1. debouncer call
-2. debouncer advance time
-3. debouncer call
-4. debouncer advance time
-5. expect debouncer get execution count
+- tracks execution count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tracks execution count")
 val debouncer = Debouncer.new(50)
 debouncer.call("a")
 debouncer.advance_time(100)
@@ -1300,19 +1313,18 @@ expect debouncer.get_execution_count() == 2
 
 #### resets debouncer
 
-1. debouncer call
-2. debouncer advance time
-3. debouncer reset
-4. expect debouncer get execution count
+- resets debouncer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets debouncer")
 val debouncer = Debouncer.new(100)
 debouncer.call("value")
 debouncer.advance_time(150)
@@ -1326,13 +1338,18 @@ expect debouncer.get_execution_count() == 0
 
 #### creates throttler
 
+- creates throttler
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates throttler")
 val throttler = Throttler.new(100)
 expect throttler.interval_ms == 100
 ```
@@ -1341,30 +1358,7 @@ expect throttler.interval_ms == 100
 
 #### allows first call
 
-1. expect throttler call
-2. expect throttler get execution count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val throttler = Throttler.new(100)
-expect throttler.call("first")
-expect throttler.get_execution_count() == 1
-```
-
-</details>
-
-#### throttles rapid calls
-
-1. expect throttler call
-2. expect not throttler call
-3. expect not throttler call
-4. expect throttler get execution count
+- allows first call
 
 
 <details>
@@ -1374,6 +1368,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows first call")
+val throttler = Throttler.new(100)
+expect throttler.call("first")
+expect throttler.get_execution_count() == 1
+```
+
+</details>
+
+#### throttles rapid calls
+
+- throttles rapid calls
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("throttles rapid calls")
 val throttler = Throttler.new(100)
 expect throttler.call("first")
 expect not throttler.call("second")
@@ -1385,19 +1402,18 @@ expect throttler.get_execution_count() == 1
 
 #### allows call after interval
 
-1. throttler call
-2. throttler advance time
-3. expect throttler call
-4. expect throttler get execution count
+- allows call after interval
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows call after interval")
 val throttler = Throttler.new(100)
 throttler.call("first")
 throttler.advance_time(150)
@@ -1409,18 +1425,18 @@ expect throttler.get_execution_count() == 2
 
 #### tracks dropped calls
 
-1. throttler call
-2. throttler call
-3. throttler call
+- tracks dropped calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tracks dropped calls")
 val throttler = Throttler.new(100)
 throttler.call("ok")
 throttler.call("dropped1")
@@ -1432,19 +1448,18 @@ expect throttler.dropped_count == 2
 
 #### resets throttler
 
-1. throttler call
-2. throttler call
-3. throttler reset
-4. expect throttler get execution count
+- resets throttler
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets throttler")
 val throttler = Throttler.new(100)
 throttler.call("value")
 throttler.call("dropped")
@@ -1459,17 +1474,18 @@ expect throttler.dropped_count == 0
 
 #### simulates API with rate limiting and retry
 
-1. retry record attempt
-2. retry record attempt
+- simulates API with rate limiting and retry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("simulates API with rate limiting and retry")
 val limiter = RateLimiter.new(2, 1000)
 val retry = RetryPolicy.with_exponential_backoff(3, 100)
 var success = false
@@ -1486,25 +1502,18 @@ expect success
 
 #### tracks concurrent async operations
 
-1. controller try start
-2. tracker record start
-3. controller try start
-4. tracker record start
-5. controller try start
-6. tracker advance time
-7. tracker record end
-8. controller complete
-9. tracker record start
-10. expect controller active tasks len
+- tracks concurrent async operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("tracks concurrent async operations")
 val controller = ConcurrencyController.new(2)
 val tracker = ExecutionOrderTracker.new()
 controller.try_start("op1")
@@ -1523,22 +1532,18 @@ expect controller.active_tasks.len() == 2
 
 #### handles timeout with retry
 
-1. timeout reset
-2. timeout start
-3. timeout advance
-4. retry record attempt
-5. retry record attempt
-6. expect retry get attempt count
-7. expect not retry was successful
+- handles timeout with retry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles timeout with retry")
 val timeout = TimeoutController.new(100)
 val retry = RetryPolicy.new(3)
 var completed = false
@@ -1559,22 +1564,18 @@ expect not retry.was_successful()
 
 #### priority scheduling with debounce
 
-1. debouncer call
-2. debouncer advance time
-3. debouncer call
-4. debouncer advance time
-5. scheduler schedule
-6. scheduler execute all
-7. expect scheduler get pending count
+- priority scheduling with debounce
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("priority scheduling with debounce")
 val scheduler = TaskScheduler.new()
 val debouncer = Debouncer.new(50)
 debouncer.call("input1")
@@ -1597,12 +1598,12 @@ expect scheduler.get_pending_count() == 0
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/mock_phase7_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Mock Library - Phase 7 (Advanced Scheduling).
 - Mock Library - Phase 7 (Advanced Scheduling)
 
 ## Scenario Summary
@@ -1617,3 +1618,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7aec909c9f13a8dd39eee9149a7fc472d567f44afa31884518672016a14db592`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7aec909c9f13a8dd39eee9149a7fc472d567f44afa31884518672016a14db592`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7aec909c9f13a8dd39eee9149a7fc472d567f44afa31884518672016a14db592`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/mock_phase7_spec.spl
+mirror: doc/06_spec/01_unit/std/mock_phase7_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/mock_phase7_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/mock_phase7_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/mock_phase7_spec.spl:666:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defines priority levels' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/mock_phase7_spec.spl:677:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates task scheduler' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/mock_phase7_spec.spl:683:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'schedules task with priority' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

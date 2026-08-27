@@ -1,29 +1,6 @@
-# query_upgrade_spec
+# Query Upgrade Specification
 
-> Tests for upgraded query.spl: Tier 2 engine delegation and Tier 4 improvements. Validates the transition from grep-based to outline-parser-based queries.
-
-<!-- sdn-diagram:id=query_upgrade_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=query_upgrade_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-query_upgrade_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=query_upgrade_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Tier 2 engine delegation, query input sanitization, rename upgrade with apply, semantic tokens upgrade, inlay hints outline-based, new subcommand dispatch, safe_process replaces query_shell.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,25 +9,7 @@ query_upgrade_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# query_upgrade_spec
-
-Tests for upgraded query.spl: Tier 2 engine delegation and Tier 4 improvements. Validates the transition from grep-based to outline-parser-based queries.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #QU-001 to #QU-010 |
-| Category | Tooling |
-| Difficulty | 3/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/cli/query_upgrade_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-Tests for upgraded query.spl: Tier 2 engine delegation and Tier 4 improvements.
-Validates the transition from grep-based to outline-parser-based queries.
+# Query Upgrade Specification
 
 ## Scenarios
 
@@ -58,13 +17,22 @@ Validates the transition from grep-based to outline-parser-based queries.
 
 #### definition delegates to engine_find_definition
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- definition delegates to engine_find_definition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("definition delegates to engine_find_definition")
 val subcmd = "definition"
 val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
 expect(valid).to_contain(subcmd)
@@ -74,13 +42,18 @@ expect(valid).to_contain(subcmd)
 
 #### references delegates to engine_find_references
 
+- references delegates to engine_find_references
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("references delegates to engine_find_references")
 val subcmd = "references"
 val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
 expect(valid).to_contain(subcmd)
@@ -90,13 +63,18 @@ expect(valid).to_contain(subcmd)
 
 #### hover delegates to engine_hover
 
+- hover delegates to engine_hover
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("hover delegates to engine_hover")
 val subcmd = "hover"
 val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
 expect(valid).to_contain(subcmd)
@@ -106,13 +84,18 @@ expect(valid).to_contain(subcmd)
 
 #### completions delegates to engine_completions
 
+- completions delegates to engine_completions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("completions delegates to engine_completions")
 val subcmd = "completions"
 val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
 expect(valid).to_contain(subcmd)
@@ -122,13 +105,18 @@ expect(valid).to_contain(subcmd)
 
 #### type-at delegates to engine_type_at
 
+- type-at delegates to engine_type_at
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("type-at delegates to engine_type_at")
 val subcmd = "type-at"
 val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
 expect(valid).to_contain(subcmd)
@@ -138,13 +126,18 @@ expect(valid).to_contain(subcmd)
 
 #### signature-help delegates to engine_signature_help
 
+- signature-help delegates to engine_signature_help
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("signature-help delegates to engine_signature_help")
 val subcmd = "signature-help"
 val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
 expect(valid).to_contain(subcmd)
@@ -156,13 +149,19 @@ expect(valid).to_contain(subcmd)
 
 #### sanitize_path called on file argument
 
+- sanitize_path called on file argument
+   - Expected: has_dangerous is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("sanitize_path called on file argument")
 val file = "src/app/cli/query.spl"
 # Safe path passes through
 val has_dangerous = (file.contains("$") or file.contains(";") or file.contains("|"))
@@ -173,13 +172,19 @@ expect(has_dangerous).to_equal(false)
 
 #### sanitize_symbol called on symbol argument
 
+- sanitize_symbol called on symbol argument
+   - Expected: is_safe is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("sanitize_symbol called on symbol argument")
 val symbol = "query_main"
 val is_safe = _is_valid_symbol(symbol)
 expect(is_safe).to_equal(true)
@@ -189,13 +194,19 @@ expect(is_safe).to_equal(true)
 
 #### rejects dangerous file path early
 
+- rejects dangerous file path early
+   - Expected: has_dangerous is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects dangerous file path early")
 val file = "src/test; cat /etc/passwd"
 val has_dangerous = file.contains(";")
 # sanitize_path returns "" -> query exits with error
@@ -206,13 +217,19 @@ expect(has_dangerous).to_equal(true)
 
 #### rejects dangerous symbol early
 
+- rejects dangerous symbol early
+   - Expected: is_safe is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects dangerous symbol early")
 val symbol = "foo;bar"
 val is_safe = _is_valid_symbol(symbol)
 expect(is_safe).to_equal(false)
@@ -224,13 +241,18 @@ expect(is_safe).to_equal(false)
 
 #### supports --apply flag
 
+- supports --apply flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("supports --apply flag")
 val flags = ["--apply", "--new-name"]
 expect(flags).to_contain("--apply")
 ```
@@ -239,13 +261,18 @@ expect(flags).to_contain("--apply")
 
 #### outputs structured format file:line: old -> new
 
+- outputs structured format file:line: old -> new
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("outputs structured format file:line: old -> new")
 val file = "src/test.spl"
 val line = 10
 val old_name = "foo"
@@ -259,13 +286,20 @@ expect(output).to_contain("foo -> bar")
 
 #### uses safe_grep for finding occurrences
 
+- uses safe_grep for finding occurrences
+   - Expected: args[0] equals `-rn`
+   - Expected: args.len() equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("uses safe_grep for finding occurrences")
 val args = ["-rn", "\\bfoo\\b", "src/", "--include=*.spl"]
 expect(args[0]).to_equal("-rn")
 expect(args.len()).to_equal(4)
@@ -275,13 +309,19 @@ expect(args.len()).to_equal(4)
 
 #### whole word replacement preserves boundaries
 
+- whole word replacement preserves boundaries
+   - Expected: has_foo is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("whole word replacement preserves boundaries")
 val line = "val foobar = foo(foo_arg)"
 # _replace_word("foo", "bar") should only replace standalone "foo"
 val has_foo = line.contains("foo")
@@ -294,20 +334,9 @@ expect(has_foo).to_equal(true)
 
 #### supports 12+ token types
 
-<details>
-<summary>Executable SSpec</summary>
+- supports 12+ token types
+   - Expected: types.len() equals `12`
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val types = ["keyword", "function", "type", "parameter", "property", "variable", "operator", "comment", "string", "number", "enumMember", "namespace"]
-expect(types.len()).to_equal(12)
-```
-
-</details>
-
-#### classifies fn/class/struct as keywords
 
 <details>
 <summary>Executable SSpec</summary>
@@ -316,6 +345,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("supports 12+ token types")
+val types = ["keyword", "function", "type", "parameter", "property", "variable", "operator", "comment", "string", "number", "enumMember", "namespace"]
+expect(types.len()).to_equal(12)
+```
+
+</details>
+
+#### classifies fn/class/struct as keywords
+
+- classifies fn/class/struct as keywords
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("classifies fn/class/struct as keywords")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "elif", "for", "while", "match", "case", "return", "use", "import", "trait", "impl", "static", "me", "self", "nil", "true", "false", "extern", "export", "type", "alias", "mixin", "ce", "bind", "receive", "after"]
 expect(keywords).to_contain("fn")
 expect(keywords).to_contain("class")
@@ -326,13 +377,18 @@ expect(keywords).to_contain("struct")
 
 #### classifies identifier by outline data
 
+- classifies identifier by outline data
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classifies identifier by outline data")
 # If identifier is in fn_names set -> "function"
 # If identifier is in type_names set -> "type"
 # If identifier is in param_names set -> "parameter"
@@ -348,13 +404,19 @@ expect(param_names).to_contain("file")
 
 #### classifies comment lines
 
+- classifies comment lines
+   - Expected: is_comment is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classifies comment lines")
 val line = "# this is a comment"
 val trimmed = line.trim()
 val is_comment = trimmed.starts_with("#")
@@ -365,13 +427,19 @@ expect(is_comment).to_equal(true)
 
 #### classifies string literals
 
+- classifies string literals
+   - Expected: is_string is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classifies string literals")
 val token = "\"hello world\""
 val is_string = token.starts_with("\"")
 expect(is_string).to_equal(true)
@@ -381,13 +449,19 @@ expect(is_string).to_equal(true)
 
 #### classifies numeric literals
 
+- classifies numeric literals
+   - Expected: token equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classifies numeric literals")
 val token = "42"
 val is_numeric = token >= "0" and token <= "99999"
 expect(token).to_equal("42")
@@ -399,13 +473,20 @@ expect(token).to_equal("42")
 
 #### infers type from string literal
 
+- infers type from string literal
+   - Expected: is_string is true
+   - Expected: inferred equals `text`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("infers type from string literal")
 val rhs = "\"hello\""
 val inferred = "text"
 val is_string = rhs.starts_with("\"")
@@ -417,13 +498,19 @@ expect(inferred).to_equal("text")
 
 #### infers type from integer literal
 
+- infers type from integer literal
+   - Expected: inferred equals `i64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("infers type from integer literal")
 val rhs = "42"
 val inferred = "i64"
 expect(inferred).to_equal("i64")
@@ -433,13 +520,19 @@ expect(inferred).to_equal("i64")
 
 #### infers type from boolean literal
 
+- infers type from boolean literal
+   - Expected: is_bool is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("infers type from boolean literal")
 val rhs = "true"
 val inferred = "bool"
 val is_bool = rhs == "true" or rhs == "false"
@@ -450,13 +543,19 @@ expect(is_bool).to_equal(true)
 
 #### infers type from function call via outline
 
+- infers type from function call via outline
+   - Expected: inferred equals `i64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("infers type from function call via outline")
 # engine provides fn return types
 val fn_names = ["get_count", "read_file"]
 val fn_returns = ["i64", "text"]
@@ -473,13 +572,19 @@ expect(inferred).to_equal("i64")
 
 #### skips already-typed bindings
 
+- skips already-typed bindings
+   - Expected: has_type_annotation is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("skips already-typed bindings")
 val line = "val count: i64 = 0"
 val has_type_annotation = line.contains(": i64")
 expect(has_type_annotation).to_equal(true)
@@ -491,13 +596,18 @@ expect(has_type_annotation).to_equal(true)
 
 #### recognizes document-highlight
 
+- recognizes document-highlight
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes document-highlight")
 val all_subcmds = ["definition", "references", "hover", "completions", "type-at", "signature-help", "rename", "code-actions", "workspace-symbols", "call-hierarchy", "type-hierarchy", "semantic-tokens", "inlay-hints", "selection-range", "document-formatting", "document-highlight", "type-definition", "implementation", "folding-range"]
 expect(all_subcmds).to_contain("document-highlight")
 ```
@@ -506,13 +616,18 @@ expect(all_subcmds).to_contain("document-highlight")
 
 #### recognizes type-definition
 
+- recognizes type-definition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes type-definition")
 val all_subcmds = ["document-highlight", "type-definition", "implementation", "folding-range"]
 expect(all_subcmds).to_contain("type-definition")
 ```
@@ -521,13 +636,18 @@ expect(all_subcmds).to_contain("type-definition")
 
 #### recognizes implementation
 
+- recognizes implementation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes implementation")
 val all_subcmds = ["document-highlight", "type-definition", "implementation", "folding-range"]
 expect(all_subcmds).to_contain("implementation")
 ```
@@ -536,13 +656,18 @@ expect(all_subcmds).to_contain("implementation")
 
 #### recognizes folding-range
 
+- recognizes folding-range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("recognizes folding-range")
 val all_subcmds = ["document-highlight", "type-definition", "implementation", "folding-range"]
 expect(all_subcmds).to_contain("folding-range")
 ```
@@ -551,13 +676,19 @@ expect(all_subcmds).to_contain("folding-range")
 
 #### total subcommands is now 19
 
+- total subcommands is now 19
+   - Expected: total equals `19`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("total subcommands is now 19")
 val original = 5
 val tier4 = 10
 val new_lsp = 4
@@ -571,13 +702,20 @@ expect(total).to_equal(19)
 
 #### code_actions uses safe_process
 
+- code_actions uses safe_process
+   - Expected: cmd equals `bin/simple`
+   - Expected: args.len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("code_actions uses safe_process")
 val cmd = "bin/simple"
 val args = ["check", "src/test.spl"]
 expect(cmd).to_equal("bin/simple")
@@ -588,13 +726,19 @@ expect(args.len()).to_equal(2)
 
 #### document_formatting uses safe_process
 
+- document_formatting uses safe_process
+   - Expected: cmd equals `bin/simple`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("document_formatting uses safe_process")
 val cmd = "bin/simple"
 val args = ["fmt", "--check", "src/test.spl"]
 expect(cmd).to_equal("bin/simple")
@@ -604,13 +748,19 @@ expect(cmd).to_equal("bin/simple")
 
 #### workspace_symbols uses safe_grep
 
+- workspace_symbols uses safe_grep
+   - Expected: cmd equals `grep`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("workspace_symbols uses safe_grep")
 val cmd = "grep"
 val args = ["-rn", "query_main", "src/", "--include=*.spl"]
 expect(cmd).to_equal("grep")
@@ -618,6 +768,27 @@ expect(args).to_contain("--include=*.spl")
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/cli/query_upgrade_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Tier 2 engine delegation, query input sanitization, rename upgrade with apply, semantic tokens upgrade, inlay hints outline-based, new subcommand dispatch, safe_process replaces query_shell.
+- Tier 2 engine delegation
+- query input sanitization
+- rename upgrade with apply
+- semantic tokens upgrade
+- inlay hints outline-based
+- new subcommand dispatch
+- safe_process replaces query_shell
 
 ## Scenario Summary
 
@@ -631,3 +802,54 @@ expect(args).to_contain("--include=*.spl")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d368c22c1180744524f0f47846e8648745b3e64e1c6bf1af6f8d14f5e7221355`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d368c22c1180744524f0f47846e8648745b3e64e1c6bf1af6f8d14f5e7221355`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d368c22c1180744524f0f47846e8648745b3e64e1c6bf1af6f8d14f5e7221355`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/cli/query_upgrade_spec.spl
+mirror: doc/06_spec/01_unit/app/cli/query_upgrade_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/cli/query_upgrade_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/cli/query_upgrade_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/cli/query_upgrade_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/cli/query_upgrade_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'definition delegates to engine_find_definition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli/query_upgrade_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'references delegates to engine_find_references' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli/query_upgrade_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hover delegates to engine_hover' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

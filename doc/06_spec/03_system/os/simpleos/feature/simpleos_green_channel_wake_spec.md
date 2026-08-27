@@ -2,30 +2,6 @@
 
 > This system spec connects the pure green-channel contract to the SimpleOS green-carrier scheduler bridge. A receive on an empty green channel parks a logical green task id. A later send reports the receiver to unpark, and the carrier bridge must convert that wake into a normal green enqueue, dispatch, and scheduler-owned execution-state update.
 
-<!-- sdn-diagram:id=simpleos_green_channel_wake_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_green_channel_wake_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_green_channel_wake_spec -> std
-simpleos_green_channel_wake_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_green_channel_wake_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -49,7 +25,7 @@ This system spec connects the pure green-channel contract to the SimpleOS green-
 | Design | doc/04_architecture/runtime/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -89,6 +65,8 @@ The bridge consumes `green_channel_send(...).receiver_task_id` and
 ## Examples
 
 ```simple
+use std.spec.step
+
 val parked_recv = green_channel_recv(channel, parked_task.task_id)
 val sent = green_channel_send(parked_recv.channel, 77)
 val decision = green_carrier_channel_wake_task(parked_task, sent.receiver_task_id, sent.unparked, 2, 2, 3, 1, 0)
@@ -163,12 +141,13 @@ queue mutation: none
 
 #### runs a channel wake through the scheduler-owned active pass
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- runs a channel wake through the scheduler-owned active pass
 - Initialize the hosted SimpleOS SMP model with CPU two online
-- smp init
-- smp bringup ap
 - Create a scheduler with one active green carrier
-- var scheduler = Scheduler new with cpu count
-- scheduler set green carrier parallelism
 - Create carrier queues and park a green receiver on channel receive
 - Send a value that wakes the parked receiver
 - Run the scheduler-owned channel wake active pass
@@ -188,10 +167,12 @@ queue mutation: none
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("runs a channel wake through the scheduler-owned active pass")
 step("Initialize the hosted SimpleOS SMP model with CPU two online")
 smp_init()
 smp_bringup_ap(2u32)
@@ -242,11 +223,9 @@ expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
 
 #### re-enqueues an unparked channel receiver through carrier dispatch
 
+- re-enqueues an unparked channel receiver through carrier dispatch
 - Initialize the hosted SimpleOS SMP model with CPU two online
-- smp init
-- smp bringup ap
 - Create scheduler state and carrier queues
-- var scheduler = Scheduler new with cpu count
 - Park a green task on channel receive
 - Send a value that wakes the same parked task
 - Create and apply the carrier wake decision
@@ -264,10 +243,12 @@ expect(green_carrier_queue_depth(wake.queues, 2)).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("re-enqueues an unparked channel receiver through carrier dispatch")
 step("Initialize the hosted SimpleOS SMP model with CPU two online")
 smp_init()
 smp_bringup_ap(2u32)
@@ -318,8 +299,8 @@ expect(scheduler.get_current_on_cpu(2u32).id).to_equal(0)
 
 #### does not enqueue when a send buffered without waking a receiver
 
+- does not enqueue when a send buffered without waking a receiver
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Create carrier queues and a parked task without a matching channel receiver
 - Send to a channel with no parked receiver
 - Build and apply the no-receiver wake decision
@@ -331,10 +312,12 @@ expect(scheduler.get_current_on_cpu(2u32).id).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("does not enqueue when a send buffered without waking a receiver")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Create carrier queues and a parked task without a matching channel receiver")
@@ -368,8 +351,8 @@ expect(applied.queues.queued_task_ids.len()).to_equal(0)
 
 #### rejects mismatched channel wake task ids
 
+- rejects mismatched channel wake task ids
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Create carrier queues and park task 503
 - Wake a different receiver task id
 - Build and apply the mismatched wake decision
@@ -381,10 +364,12 @@ expect(applied.queues.queued_task_ids.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects mismatched channel wake task ids")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Create carrier queues and park task 503")
@@ -431,10 +416,61 @@ expect(applied.enqueued).to_be(false)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
-- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
-- **Design:** [doc/04_architecture/runtime/multicore_green.md](doc/04_architecture/runtime/multicore_green.md)
-- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
+- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
+- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
+- **Design:** `doc/04_architecture/runtime/multicore_green.md`
+- **Research:** `doc/01_research/local/multicore_green.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9fb14c31d553956d08dd0fec94cff7b95ac772a897e02f36258449232ce57b83`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9fb14c31d553956d08dd0fec94cff7b95ac772a897e02f36258449232ce57b83`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9fb14c31d553956d08dd0fec94cff7b95ac772a897e02f36258449232ce57b83`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl
+mirror: doc/06_spec/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 15 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs a channel wake through the scheduler-owned active pass' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl:184:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 're-enqueues an unparked channel receiver through carrier dispatch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl:232:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not enqueue when a send buffered without waking a receiver' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # No Paren Specification
 
-> <details>
-
-<!-- sdn-diagram:id=no_paren_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=no_paren_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-no_paren_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=no_paren_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering No-paren method calls.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,16 +17,22 @@ no_paren_spec
 
 #### list.len works without parens
 
-- assert true
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- list.len works without parens
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("list.len works without parens")
 val list = [1, 2, 3]
 assert_true(list.len == 3)
 ```
@@ -58,16 +41,18 @@ assert_true(list.len == 3)
 
 #### string.len works without parens
 
-- assert true
+- string.len works without parens
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("string.len works without parens")
 val str = "hello"
 assert_true(str.len == 5)
 ```
@@ -76,17 +61,18 @@ assert_true(str.len == 5)
 
 #### comparison with no-paren method call
 
-- assert true
-- fail
+- comparison with no-paren method call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("comparison with no-paren method call")
 val items = [1, 2, 3, 4, 5]
 if items.len > 3:
     assert_true(true)
@@ -98,16 +84,18 @@ else:
 
 #### works in nested expressions
 
-- assert true
+- works in nested expressions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works in nested expressions")
 val data = [[1, 2], [3, 4, 5]]
 val total = data[0].len + data[1].len
 assert_true(total == 5)
@@ -122,12 +110,12 @@ assert_true(total == 5)
 | Category | Other |
 | Status | Active |
 | Source | `test/shared/control_flow/no_paren_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering No-paren method calls.
 - No-paren method calls
 
 ## Scenario Summary
@@ -142,3 +130,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SHARED`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6144294b025e981f42057bbc9314951c476654b8425399d51a7fd26ac543b7f7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6144294b025e981f42057bbc9314951c476654b8425399d51a7fd26ac543b7f7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6144294b025e981f42057bbc9314951c476654b8425399d51a7fd26ac543b7f7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/shared/control_flow/no_paren_spec.spl
+mirror: doc/06_spec/shared/control_flow/no_paren_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/shared/control_flow/no_paren_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/shared/control_flow/no_paren_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/shared/control_flow/no_paren_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'list.len works without parens' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/control_flow/no_paren_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'string.len works without parens' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/control_flow/no_paren_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'comparison with no-paren method call' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

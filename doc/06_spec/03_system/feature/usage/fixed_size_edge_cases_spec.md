@@ -2,29 +2,6 @@
 
 > This spec exercises the boundary conditions and edge cases of fixed-size arrays that go beyond typical usage. It tests zero-length arrays, single-element arrays, negative indexing on various sizes, and fixed-size arrays of non-numeric types (text, bool). It also verifies that functional operations like `map`, `filter`, and `reduce` behave correctly when applied to fixed-size arrays, including cases where `filter` produces a result smaller than the original size.
 
-<!-- sdn-diagram:id=fixed_size_edge_cases_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=fixed_size_edge_cases_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-fixed_size_edge_cases_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=fixed_size_edge_cases_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -44,7 +21,7 @@ This spec exercises the boundary conditions and edge cases of fixed-size arrays 
 | Category | Language |
 | Status | Active |
 | Source | `test/03_system/feature/usage/fixed_size_edge_cases_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -59,6 +36,8 @@ original size.
 ## Syntax
 
 ```simple
+use std.spec.step
+
 val empty: [i64; 0] = []
 val single: [i64; 1] = [42]
 val names: [text; 3] = ["alice", "bob", "charlie"]
@@ -83,16 +62,18 @@ val big = arr.filter(_1 > 3)
 
 #### allows size-zero arrays
 
-1. expect empty len
+- allows size-zero arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows size-zero arrays")
 val empty: [i64; 0] = []
 expect empty.len() == 0
 ```
@@ -101,13 +82,18 @@ expect empty.len() == 0
 
 #### iterates over size-zero arrays
 
+- iterates over size-zero arrays
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("iterates over size-zero arrays")
 val empty: [i64; 0] = []
 var count = 0
 for _ in empty:
@@ -121,13 +107,18 @@ expect count == 0
 
 #### supports negative indices
 
+- supports negative indices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports negative indices")
 val arr: [i64; 5] = [1, 2, 3, 4, 5]
 expect arr[-1] == 5
 expect arr[-2] == 4
@@ -140,16 +131,18 @@ expect arr[-3] == 3
 
 #### handles single element arrays
 
-1. expect single len
+- handles single element arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single element arrays")
 val single: [i64; 1] = [42]
 expect single[0] == 42
 expect single.len() == 1
@@ -159,16 +152,18 @@ expect single.len() == 1
 
 #### handles two element arrays
 
-1. expect pair len
+- handles two element arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles two element arrays")
 val pair: [i64; 2] = [10, 20]
 expect pair[0] == 10
 expect pair[1] == 20
@@ -181,16 +176,18 @@ expect pair.len() == 2
 
 #### works with string arrays
 
-1. expect names len
+- works with string arrays
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with string arrays")
 val names: [text; 3] = ["alice", "bob", "charlie"]
 expect names[0] == "alice"
 expect names.len() == 3
@@ -200,13 +197,18 @@ expect names.len() == 3
 
 #### works with boolean arrays
 
+- works with boolean arrays
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with boolean arrays")
 val flags: [bool; 2] = [true, false]
 expect flags[0] == true
 expect flags[1] == false
@@ -218,16 +220,18 @@ expect flags[1] == false
 
 #### map preserves values
 
-1. expect doubled len
+- map preserves values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("map preserves values")
 val arr: [i64; 4] = [1, 2, 3, 4]
 val doubled = arr.map(_1 * 2)
 expect doubled[0] == 2
@@ -239,16 +243,18 @@ expect doubled[3] == 8
 
 #### filter may reduce size
 
-1. expect big len
+- filter may reduce size
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("filter may reduce size")
 val arr: [i64; 5] = [1, 2, 3, 4, 5]
 val big = arr.filter(_1 > 3)
 expect big[0] == 4
@@ -260,13 +266,18 @@ expect big[1] == 5
 
 #### reduce works on fixed arrays
 
+- reduce works on fixed arrays
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reduce works on fixed arrays")
 val arr: [i64; 3] = [10, 20, 30]
 val total = arr.reduce(0, \acc, x: acc + x)
 expect total == 60
@@ -286,3 +297,51 @@ expect total == 60
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f22e984098eabd90d586623030d6bad314551e12297aa14de0c33e78fd0a39f9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f22e984098eabd90d586623030d6bad314551e12297aa14de0c33e78fd0a39f9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f22e984098eabd90d586623030d6bad314551e12297aa14de0c33e78fd0a39f9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/fixed_size_edge_cases_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/fixed_size_edge_cases_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/fixed_size_edge_cases_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/fixed_size_edge_cases_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/fixed_size_edge_cases_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows size-zero arrays' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/fixed_size_edge_cases_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'iterates over size-zero arrays' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/fixed_size_edge_cases_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports negative indices' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

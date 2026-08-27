@@ -1,29 +1,6 @@
 # Display Detect Specification
 
-> <details>
-
-<!-- sdn-diagram:id=display_detect_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=display_detect_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-display_detect_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=display_detect_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Display Detection, display_kind_name.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,30 +17,46 @@ display_detect_spec -> common
 
 #### returns a DisplayInfo struct
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- returns a DisplayInfo struct
+   - Expected: name == "" is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns a DisplayInfo struct")
 val info = detect_display()
 # Just verify it returns without crashing
 val name = display_kind_name(info.kind)
-expect(name).to_equal("").to_equal(false)
+expect(name == "").to_equal(false)
 ```
 
 </details>
 
 #### has_any_display returns a boolean
 
+- has_any_display returns a boolean
+   - Expected: result == true or result == false is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has_any_display returns a boolean")
 val result = has_any_display()
 # On any system this should return true or false
 expect(result == true or result == false).to_equal(true)
@@ -73,13 +66,19 @@ expect(result == true or result == false).to_equal(true)
 
 #### can_show_gui returns a boolean
 
+- can_show_gui returns a boolean
+   - Expected: result == true or result == false is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("can_show_gui returns a boolean")
 val result = can_show_gui()
 expect(result == true or result == false).to_equal(true)
 ```
@@ -90,13 +89,23 @@ expect(result == true or result == false).to_equal(true)
 
 #### names all display types
 
+- names all display types
+   - Expected: display_kind_name(DISPLAY_NONE) equals `none`
+   - Expected: display_kind_name(DISPLAY_X11) equals `X11`
+   - Expected: display_kind_name(DISPLAY_WAYLAND) equals `Wayland`
+   - Expected: display_kind_name(DISPLAY_MACOS) equals `macOS`
+   - Expected: display_kind_name(DISPLAY_XVFB) equals `Xvfb`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("names all display types")
 expect(display_kind_name(DISPLAY_NONE)).to_equal("none")
 expect(display_kind_name(DISPLAY_X11)).to_equal("X11")
 expect(display_kind_name(DISPLAY_WAYLAND)).to_equal("Wayland")
@@ -108,13 +117,19 @@ expect(display_kind_name(DISPLAY_XVFB)).to_equal("Xvfb")
 
 #### handles unknown values
 
+- handles unknown values
+   - Expected: display_kind_name(99) equals `unknown`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles unknown values")
 expect(display_kind_name(99)).to_equal("unknown")
 ```
 
@@ -127,12 +142,12 @@ expect(display_kind_name(99)).to_equal("unknown")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/display_detect_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Display Detection, display_kind_name.
 - Display Detection
 - display_kind_name
 
@@ -148,3 +163,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `5e1ffc8bb1f4536cdb4f18694f07374d34aebef42ecefbeb2fd9d0c5658775e9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `5e1ffc8bb1f4536cdb4f18694f07374d34aebef42ecefbeb2fd9d0c5658775e9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `5e1ffc8bb1f4536cdb4f18694f07374d34aebef42ecefbeb2fd9d0c5658775e9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/display_detect_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/display_detect_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/display_detect_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/display_detect_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/display_detect_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns a DisplayInfo struct' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/display_detect_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has_any_display returns a boolean' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/display_detect_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can_show_gui returns a boolean' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

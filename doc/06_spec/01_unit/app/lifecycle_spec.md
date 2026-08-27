@@ -1,30 +1,6 @@
 # Lifecycle Specification
 
-> <details>
-
-<!-- sdn-diagram:id=lifecycle_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lifecycle_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lifecycle_spec -> std
-lifecycle_spec -> nogc_sync_mut
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lifecycle_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering AppConfig, AppState, run_oneshot, run_simple.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,13 +19,20 @@ lifecycle_spec -> nogc_sync_mut
 
 #### creates config with detected platform
 
+- creates config with detected platform
+   - Expected: config.name equals `test-app`
+   - Expected: config.version equals `1.0.0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates config with detected platform")
 val config = AppConfig.from_env("test-app", "1.0.0")
 expect(config.name).to_equal("test-app")
 expect(config.version).to_equal("1.0.0")
@@ -63,13 +46,22 @@ expect(config.arch.len()).to_be_greater_than(0)
 
 #### creates config with explicit values
 
+- creates config with explicit values
+   - Expected: config.name equals `my-app`
+   - Expected: config.version equals `2.0.0`
+   - Expected: config.platform equals `linux`
+   - Expected: config.arch equals `x86_64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates config with explicit values")
 val config = AppConfig.create(
     name: "my-app",
     version: "2.0.0",
@@ -89,13 +81,20 @@ expect(config.arch).to_equal("x86_64")
 
 #### is_desktop returns true for linux
 
+- is_desktop returns true for linux
+   - Expected: config.is_desktop() is true
+   - Expected: config.is_mobile() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_desktop returns true for linux")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "linux", arch: "x86_64"
@@ -108,13 +107,20 @@ expect(config.is_mobile()).to_equal(false)
 
 #### is_mobile returns true for ios
 
+- is_mobile returns true for ios
+   - Expected: config.is_mobile() is true
+   - Expected: config.is_desktop() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_mobile returns true for ios")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "ios", arch: "aarch64"
@@ -127,13 +133,19 @@ expect(config.is_desktop()).to_equal(false)
 
 #### is_mobile returns true for android
 
+- is_mobile returns true for android
+   - Expected: config.is_mobile() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_mobile returns true for android")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "android", arch: "aarch64"
@@ -145,13 +157,19 @@ expect(config.is_mobile()).to_equal(true)
 
 #### is_wasm returns true for wasm32
 
+- is_wasm returns true for wasm32
+   - Expected: config.is_wasm() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_wasm returns true for wasm32")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "wasi", arch: "wasm32"
@@ -163,13 +181,19 @@ expect(config.is_wasm()).to_equal(true)
 
 #### is_baremetal returns true for none platform
 
+- is_baremetal returns true for none platform
+   - Expected: config.is_baremetal() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_baremetal returns true for none platform")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "none", arch: "riscv32"
@@ -181,13 +205,19 @@ expect(config.is_baremetal()).to_equal(true)
 
 #### is_64bit returns true for x86_64
 
+- is_64bit returns true for x86_64
+   - Expected: config.is_64bit() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_64bit returns true for x86_64")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "linux", arch: "x86_64"
@@ -199,13 +229,19 @@ expect(config.is_64bit()).to_equal(true)
 
 #### is_64bit returns false for wasm32
 
+- is_64bit returns false for wasm32
+   - Expected: config.is_64bit() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("is_64bit returns false for wasm32")
 val config = AppConfig.create(
     name: "t", version: "0", args: [],
     platform: "wasi", arch: "wasm32"
@@ -219,13 +255,20 @@ expect(config.is_64bit()).to_equal(false)
 
 #### Created is not running
 
+- Created is not running
+   - Expected: state.is_running() is false
+   - Expected: state.is_stopped() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("Created is not running")
 val state = AppState.Created
 expect(state.is_running()).to_equal(false)
 expect(state.is_stopped()).to_equal(false)
@@ -235,13 +278,20 @@ expect(state.is_stopped()).to_equal(false)
 
 #### Running is running
 
+- Running is running
+   - Expected: state.is_running() is true
+   - Expected: state.is_stopped() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("Running is running")
 val state = AppState.Running
 expect(state.is_running()).to_equal(true)
 expect(state.is_stopped()).to_equal(false)
@@ -251,13 +301,20 @@ expect(state.is_stopped()).to_equal(false)
 
 #### Stopped is stopped
 
+- Stopped is stopped
+   - Expected: state.is_running() is false
+   - Expected: state.is_stopped() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("Stopped is stopped")
 val state = AppState.Stopped
 expect(state.is_running()).to_equal(false)
 expect(state.is_stopped()).to_equal(true)
@@ -269,22 +326,19 @@ expect(state.is_stopped()).to_equal(true)
 
 #### runs init, run, shutdown in order
 
-1. fn test init
-2. log push
-3. fn test run
-4. log push
-5. fn test shutdown
-6. log push
+- runs init, run, shutdown in order
    - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("runs init, run, shutdown in order")
 var log = []
 
 fn test_init(config: AppConfig):
@@ -307,17 +361,19 @@ expect(code).to_equal(0)
 
 #### passes args to main function
 
-1. fn test main
+- passes args to main function
    - Expected: code equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("passes args to main function")
 fn test_main(args: [text]) -> i32:
     42
 
@@ -334,12 +390,12 @@ expect(code).to_equal(42)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lifecycle_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering AppConfig, AppState, run_oneshot, run_simple.
 - AppConfig
 - AppState
 - run_oneshot
@@ -357,3 +413,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `24f24bc4cdb1107663ec4fe8148c7363e903069855035ab6893aa89f9d6f3262`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `24f24bc4cdb1107663ec4fe8148c7363e903069855035ab6893aa89f9d6f3262`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `24f24bc4cdb1107663ec4fe8148c7363e903069855035ab6893aa89f9d6f3262`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/lifecycle_spec.spl
+mirror: doc/06_spec/01_unit/app/lifecycle_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/lifecycle_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/lifecycle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/lifecycle_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/lifecycle_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates config with detected platform' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lifecycle_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates config with explicit values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lifecycle_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is_desktop returns true for linux' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

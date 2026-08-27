@@ -1,29 +1,6 @@
 # Mcp T32 Json Specification
 
-> <details>
-
-<!-- sdn-diagram:id=mcp_t32_json_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mcp_t32_json_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mcp_t32_json_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mcp_t32_json_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32 MCP JSON Helpers.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,23 @@ mcp_t32_json_spec
 
 #### wraps string in quotes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- wraps string in quotes
+   - Expected: result equals `"hello"`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wraps string in quotes")
 val result = tjs("hello")
 expect(result).to_equal("\"hello\"")
 ```
@@ -55,13 +42,18 @@ expect(result).to_equal("\"hello\"")
 
 #### escapes quotes in string
 
+- escapes quotes in string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escapes quotes in string")
 val result = tjs("say \"hi\"")
 expect(result).to_contain("\\\"")
 ```
@@ -70,13 +62,18 @@ expect(result).to_contain("\\\"")
 
 #### escapes newlines
 
+- escapes newlines
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escapes newlines")
 val result = tjs("line1\nline2")
 expect(result).to_contain("\\n")
 ```
@@ -85,13 +82,18 @@ expect(result).to_contain("\\n")
 
 #### creates key-value pair
 
+- creates key-value pair
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates key-value pair")
 val result = tjp("name", tjs("test"))
 expect(result).to_start_with("\"name\"")
 expect(result).to_contain("\"test\"")
@@ -101,13 +103,18 @@ expect(result).to_contain("\"test\"")
 
 #### creates JSON object
 
+- creates JSON object
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates JSON object")
 val result = tjo1(tjp("key", tjs("val")))
 expect(result).to_start_with("{")
 expect(result).to_end_with("}")
@@ -117,13 +124,19 @@ expect(result).to_end_with("}")
 
 #### parses initialize method with shared extractor behavior
 
+- parses initialize method with shared extractor behavior
+   - Expected: lsp_extract_field(json, "method") equals `initialize`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses initialize method with shared extractor behavior")
 val json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"1.0\"}}}"
 expect(lsp_extract_field(json, "method")).to_equal("initialize")
 ```
@@ -132,13 +145,19 @@ expect(lsp_extract_field(json, "method")).to_equal("initialize")
 
 #### parses numeric id with shared extractor behavior
 
+- parses numeric id with shared extractor behavior
+   - Expected: lsp_extract_id(json) equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses numeric id with shared extractor behavior")
 val json = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"initialize\"}"
 expect(lsp_extract_id(json)).to_equal("42")
 ```
@@ -147,13 +166,19 @@ expect(lsp_extract_id(json)).to_equal("42")
 
 #### parses nested params fields with shared extractor behavior
 
+- parses nested params fields with shared extractor behavior
+   - Expected: lsp_extract_nested(json, "name") equals `cmm_parse`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses nested params fields with shared extractor behavior")
 val json = "{\"method\":\"tools/call\",\"params\":{\"name\":\"cmm_parse\",\"arguments\":{\"source\":\"do main\"}}}"
 expect(lsp_extract_nested(json, "name")).to_equal("cmm_parse")
 ```
@@ -167,12 +192,12 @@ expect(lsp_extract_nested(json, "name")).to_equal("cmm_parse")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/mcp_t32/mcp_t32_json_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering T32 MCP JSON Helpers.
 - T32 MCP JSON Helpers
 
 ## Scenario Summary
@@ -187,3 +212,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `850699bcdde5d2b61dd13ded9007fe0efbe3248e76e2dadc2f42f72189bbee9c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `850699bcdde5d2b61dd13ded9007fe0efbe3248e76e2dadc2f42f72189bbee9c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `850699bcdde5d2b61dd13ded9007fe0efbe3248e76e2dadc2f42f72189bbee9c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/mcp_t32/mcp_t32_json_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_t32/mcp_t32_json_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_t32/mcp_t32_json_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_t32/mcp_t32_json_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_t32/mcp_t32_json_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'wraps string in quotes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_t32/mcp_t32_json_spec.spl:122:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'escapes quotes in string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_t32/mcp_t32_json_spec.spl:128:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'escapes newlines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

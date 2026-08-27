@@ -2,29 +2,6 @@
 
 > Validates the interpreter-visible f32 SIMD facade used by the science backend
 
-<!-- sdn-diagram:id=simd_f32_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simd_f32_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simd_f32_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simd_f32_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -44,7 +21,7 @@ Validates the interpreter-visible f32 SIMD facade used by the science backend
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/scilib/simd_f32_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates the interpreter-visible f32 SIMD facade used by the science backend
@@ -57,13 +34,28 @@ dispatch.
 
 #### computes lane-wise add/sub/mul/div
 
-<details>
-<summary>Executable SPipe</summary>
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-Runnable source: 12 lines folded for reproduction.
+
+- computes lane-wise add/sub/mul/div
+   - Expected: added.x equals `10.0`
+   - Expected: added.w equals `18.0`
+   - Expected: subbed.y equals `6.0`
+   - Expected: multiplied.z equals `50.0`
+   - Expected: divided.x equals `4.0`
+   - Expected: divided.w equals `2.0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes lane-wise add/sub/mul/div")
 val a = Vec4f(x: 8.0, y: 9.0, z: 10.0, w: 12.0)
 val b = Vec4f(x: 2.0, y: 3.0, z: 5.0, w: 6.0)
 val added = simd_add_f32x4(a, b)
@@ -82,13 +74,22 @@ expect(divided.w).to_equal(2.0)
 
 #### computes lane-wise fma
 
-<details>
-<summary>Executable SPipe</summary>
+- computes lane-wise fma
+   - Expected: result.x equals `11.0`
+   - Expected: result.y equals `20.0`
+   - Expected: result.z equals `29.0`
+   - Expected: result.w equals `42.0`
 
-Runnable source: 8 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes lane-wise fma")
 val a = Vec4f(x: 1.0, y: 2.0, z: 3.0, w: 4.0)
 val b = Vec4f(x: 10.0, y: 10.0, z: 10.0, w: 10.0)
 val c = Vec4f(x: 1.0, y: 0.0, z: -1.0, w: 2.0)
@@ -105,13 +106,24 @@ expect(result.w).to_equal(42.0)
 
 #### computes lane-wise add/sub/mul/div across eight lanes
 
-<details>
-<summary>Executable SPipe</summary>
+- computes lane-wise add/sub/mul/div across eight lanes
+   - Expected: added.e0 equals `10.0`
+   - Expected: added.e7 equals `21.0`
+   - Expected: subbed.e1 equals `6.0`
+   - Expected: multiplied.e2 equals `50.0`
+   - Expected: divided.e0 equals `4.0`
+   - Expected: divided.e7 equals `6.0`
 
-Runnable source: 12 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes lane-wise add/sub/mul/div across eight lanes")
 val a = Vec8f(e0: 8.0, e1: 9.0, e2: 10.0, e3: 12.0, e4: 14.0, e5: 15.0, e6: 16.0, e7: 18.0)
 val b = Vec8f(e0: 2.0, e1: 3.0, e2: 5.0, e3: 6.0, e4: 7.0, e5: 5.0, e6: 4.0, e7: 3.0)
 val added = simd_add_f32x8(a, b)
@@ -130,13 +142,21 @@ expect(divided.e7).to_equal(6.0)
 
 #### computes lane-wise fma across eight lanes
 
-<details>
-<summary>Executable SPipe</summary>
+- computes lane-wise fma across eight lanes
+   - Expected: fused.e0 equals `9.0`
+   - Expected: fused.e3 equals `21.0`
+   - Expected: fused.e7 equals `9.0`
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes lane-wise fma across eight lanes")
 val a = Vec8f(e0: 1.0, e1: 2.0, e2: 3.0, e3: 4.0, e4: 5.0, e5: 6.0, e6: 7.0, e7: 8.0)
 val b = Vec8f(e0: 8.0, e1: 7.0, e2: 6.0, e3: 5.0, e4: 4.0, e5: 3.0, e6: 2.0, e7: 1.0)
 val c = Vec8f.splat(1.0)
@@ -160,3 +180,56 @@ expect(fused.e7).to_equal(9.0)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-SCILIB-C-001`
+- `REQ-SCILIB-C-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `fa86c071f02e4c0881fab31592093e0d0200cb8702ce20b4f3c6b105b1513a87`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `fa86c071f02e4c0881fab31592093e0d0200cb8702ce20b4f3c6b105b1513a87`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `fa86c071f02e4c0881fab31592093e0d0200cb8702ce20b4f3c6b105b1513a87`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/scilib/simd_f32_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/simd_f32_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/simd_f32_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/simd_f32_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/simd_f32_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 19 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/scilib/simd_f32_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'computes lane-wise add/sub/mul/div' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/simd_f32_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'computes lane-wise fma' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/simd_f32_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'computes lane-wise add/sub/mul/div across eight lanes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

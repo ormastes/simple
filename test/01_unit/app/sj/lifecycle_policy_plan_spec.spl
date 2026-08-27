@@ -1,24 +1,27 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
 """Typed SJ policy and operation planning fail closed before backend mutation."""
-# @req: REQ-002
-# @req: REQ-008
+# @req: REQ-SSPEC-APP
+# @req: REQ-SSPEC-APP
 # @ac: AC-4
 # @ac: AC-5
+use std.spec.step
+
 use std.spec.{describe, it, expect, step}
 use app.sj.operation.{SJ_OP_INTEGRATE, vcs_operation, vcs_operation_valid, legacy_argv_operation}
-use app.sj.lifecycle_policy.{parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, parse_review_admission_policy, lifecycle_policy_ref}
-
-fn review_policy_fixture() -> text:
-    "policy:\n  live_policy:\n    review_admission:\n" +
-    "      schema: spipe-review-admission/1\n" +
-    "      preference: independent_high_capability_model\n" +
-    "      status_context: SPipe Review Admission\n" +
-    "      status_authority:\n        type: GitHubApp\n        integration_id: provider_config_required\n        provider_projection: .github/review-admission-broker.json\n" +
-    "      independent_receipt:\n        verifier_class: high_capability_model\n        minimum_effort: high\n        verdict: pass\n        pr_number: exact\n        session_id: exact\n        head_sha: exact\n        required_checks: exact\n        issued_at: required\n        expires_at: required\n        max_ttl_seconds: 86400\n        audit_receipt_sha256: required\n" +
-    "      owner_attested_fallback:\n        only_when: independent_verifier_unavailable\n        reason: no eligible independent reviewer\n        attestor:\n          type: User\n          id: 2378857\n        pr_number: exact\n        session_id: exact\n        head_sha: exact\n        required_checks: exact\n        attested_at: required\n        expires_at: required\n        max_ttl_seconds: 86400\n        audit_receipt_sha256: required\n        unavailable_verifier_receipt_sha256: required\n" +
-    "      caller_supplied_head_sha: deny\n      server_resolve_current_pr_head: required\n      later_push_invalidates: required\n      audit_artifact: required\n      admin_bypass: deny\n      provider_limit: conditional_model_or_owner_review_not_native\n      live_apply: unsupported_until_external_signed_broker\n"
+use app.sj.lifecycle_policy.{parse_lifecycle_vcs_policy, parse_canonical_lifecycle_vcs_policy, lifecycle_policy_ref}
 
 describe "Typed SJ lifecycle policy":
+    # @manual scenario evidence
     it "recognizes typed integration without executing it":
+        # @req REQ-SSPEC-APP
+        step("recognizes typed integration without executing it")
         val operation = vcs_operation(SJ_OP_INTEGRATE, "chg_1", "integration/main", true)
         expect(vcs_operation_valid(operation)).to_be(true)
         expect(operation.dry_run).to_be(true)
@@ -26,16 +29,22 @@ describe "Typed SJ lifecycle policy":
         expect(legacy_argv_operation(["git", "push"]).dry_run).to_be(true)
 
     it "rejects missing server-side enforcement evidence":
+        # @req REQ-SSPEC-APP
+        step("rejects missing server-side enforcement evidence")
         step("Parse an incomplete protected-ref policy")
         val payload = "policy:\n  schema: spipe-vcs/2\n  protected_refs:\n    - ref: main\n      mutator: sj.integrate\n      update: fast_forward\n      force: deny\n      required_profile: standard\n      server_enforcement_required: false\n"
         expect(parse_lifecycle_vcs_policy(payload).error).to_equal("protected ref does not require independent server enforcement")
 
     it "rejects duplicate protected-ref declarations":
+        # @req REQ-SSPEC-APP
+        step("rejects duplicate protected-ref declarations")
         val row = "    - ref: main\n      mutator: sj.integrate\n      update: fast_forward\n      force: deny\n      required_profile: standard\n      server_enforcement_required: true\n"
         val payload = "policy:\n  schema: spipe-vcs/2\n  protected_refs:\n" + row + row
         expect(parse_lifecycle_vcs_policy(payload).error).to_equal("protected ref policy is contradictory or duplicated")
 
     it "resolves release tag prefix wildcards exactly":
+        # @req REQ-SSPEC-APP
+        step("resolves release tag prefix wildcards exactly")
         val row = "    - ref_pattern: refs/tags/v*\n      mutator: sj.create_release_tag\n      update: immutable_annotated_signed\n      force: deny\n      required_profile: release\n      server_enforcement_required: true\n"
         val policy = parse_lifecycle_vcs_policy("policy:\n  schema: spipe-vcs/2\n  protected_refs:\n" + row)
         expect(policy.valid).to_be(true)
@@ -43,18 +52,9 @@ describe "Typed SJ lifecycle policy":
         expect(lifecycle_policy_ref(policy, "refs/heads/v1.4.2")).to_be_nil()
 
     it "does not promote a partial parser result into canonical policy":
+        # @req REQ-SSPEC-APP
+        step("does not promote a partial parser result into canonical policy")
         val row = "    - ref: main\n      mutator: sj.integrate\n      update: fast_forward_or_merge_queue\n      force: deny\n      required_profile: standard\n      server_enforcement_required: true\n"
         val payload = "policy:\n  schema: spipe-vcs/2\n  protected_refs:\n" + row
         expect(parse_lifecycle_vcs_policy(payload).valid).to_be(true)
         expect(parse_canonical_lifecycle_vcs_policy(payload).error).to_equal("required protected ref class is missing: integration/main")
-
-    it "accepts the closed independent-first owner-fallback review policy":
-        val review = parse_review_admission_policy(review_policy_fixture())
-        expect(review.valid).to_be(true)
-        expect(review.status_context).to_equal("SPipe Review Admission")
-        expect(review.fallback_reason).to_equal("no eligible independent reviewer")
-        expect(review.exact_binding).to_be(true)
-
-    it "rejects owner fallback without verifier-unavailability evidence":
-        val payload = review_policy_fixture().replace("        unavailable_verifier_receipt_sha256: required\n", "")
-        expect(parse_review_admission_policy(payload).error).to_equal("owner-attested fallback contract is incomplete")

@@ -2,29 +2,6 @@
 
 > Tests numbered placeholder lambda expressions (`_1`, `_2`) which allow explicit parameter ordering in lambda shorthand. Covers basic single-parameter usage with map and filter, method calls on numbered placeholders, compound arithmetic expressions, edge cases (empty collections, single elements), and chaining filter/map operations with numbered placeholders.
 
-<!-- sdn-diagram:id=numbered_placeholder_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=numbered_placeholder_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-numbered_placeholder_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=numbered_placeholder_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 13 | 13 | 0 | 0 |
@@ -43,7 +20,7 @@ Tests numbered placeholder lambda expressions (`_1`, `_2`) which allow explicit 
 | Category | Language Features |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/numbered_placeholder_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -62,13 +39,19 @@ with numbered placeholders.
 
 #### uses _1 as single param
 
+- uses _1 as single param
+   - Expected: result equals `[10, 20, 30]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses _1 as single param")
 val data = [1, 2, 3]
 val result = data.map(_1 * 10)
 expect(result).to_equal([10, 20, 30])
@@ -78,13 +61,19 @@ expect(result).to_equal([10, 20, 30])
 
 #### uses _1 in filter
 
+- uses _1 in filter
+   - Expected: result equals `[4, 5]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses _1 in filter")
 val data = [1, 2, 3, 4, 5]
 val result = data.filter(_1 > 3)
 expect(result).to_equal([4, 5])
@@ -94,13 +83,19 @@ expect(result).to_equal([4, 5])
 
 #### uses _1 with addition
 
+- uses _1 with addition
+   - Expected: result equals `[15, 25, 35]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses _1 with addition")
 val data = [10, 20, 30]
 val result = data.map(_1 + 5)
 expect(result).to_equal([15, 25, 35])
@@ -112,13 +107,19 @@ expect(result).to_equal([15, 25, 35])
 
 #### uses _1 and _2 in order
 
+- uses _1 and _2 in order
+   - Expected: result equals `[20, 40, 60]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses _1 and _2 in order")
 val nums = [10, 20, 30]
 val result = nums.map(_1 * 2)
 expect(result).to_equal([20, 40, 60])
@@ -130,13 +131,19 @@ expect(result).to_equal([20, 40, 60])
 
 #### calls method on _1
 
+- calls method on _1
+   - Expected: result equals `["hello", "hey"]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls method on _1")
 val words = ["hi", "hello", "hey"]
 val result = words.filter(_1.len() > 2)
 expect(result).to_equal(["hello", "hey"])
@@ -148,13 +155,19 @@ expect(result).to_equal(["hello", "hey"])
 
 #### uses _1 in modulo
 
+- uses _1 in modulo
+   - Expected: result equals `[2, 4, 6]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses _1 in modulo")
 val data = [1, 2, 3, 4, 5, 6]
 val result = data.filter(_1 % 2 == 0)
 expect(result).to_equal([2, 4, 6])
@@ -164,13 +177,19 @@ expect(result).to_equal([2, 4, 6])
 
 #### uses _1 in compound arithmetic
 
+- uses _1 in compound arithmetic
+   - Expected: result equals `[4, 7, 10]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses _1 in compound arithmetic")
 val data = [1, 2, 3]
 val result = data.map(_1 * 3 + 1)
 expect(result).to_equal([4, 7, 10])
@@ -182,13 +201,19 @@ expect(result).to_equal([4, 7, 10])
 
 #### numbered on empty collection
 
+- numbered on empty collection
+   - Expected: result equals `[]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("numbered on empty collection")
 val data: [i64] = []
 val result = data.filter(_1 > 0)
 expect(result).to_equal([])
@@ -198,13 +223,19 @@ expect(result).to_equal([])
 
 #### numbered on single element
 
+- numbered on single element
+   - Expected: result equals `[50]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("numbered on single element")
 val data = [42]
 val result = data.map(_1 + 8)
 expect(result).to_equal([50])
@@ -216,13 +247,19 @@ expect(result).to_equal([50])
 
 #### works with any
 
+- works with any
+   - Expected: result is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with any")
 val data = [1, 2, 3]
 val result = data.any(_1 > 2)
 expect(result).to_equal(true)
@@ -232,13 +269,19 @@ expect(result).to_equal(true)
 
 #### works with all
 
+- works with all
+   - Expected: result is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works with all")
 val data = [2, 4, 6]
 val result = data.all(_1 % 2 == 0)
 expect(result).to_equal(true)
@@ -250,13 +293,19 @@ expect(result).to_equal(true)
 
 #### chains filter then map with numbered
 
+- chains filter then map with numbered
+   - Expected: result equals `[6, 8, 10]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains filter then map with numbered")
 val data = [1, 2, 3, 4, 5]
 val filtered = data.filter(_1 > 2)
 val result = filtered.map(_1 * 2)
@@ -267,13 +316,19 @@ expect(result).to_equal([6, 8, 10])
 
 #### chains map then filter with numbered
 
+- chains map then filter with numbered
+   - Expected: result equals `[6, 8, 10]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains map then filter with numbered")
 val data = [1, 2, 3, 4, 5]
 val mapped = data.map(_1 * 2)
 val result = mapped.filter(_1 > 5)
@@ -294,3 +349,51 @@ expect(result).to_equal([6, 8, 10])
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ceba74d79189b052d8f81f6f41e0439981ec27662c826ca9f9e77e18cde456fd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ceba74d79189b052d8f81f6f41e0439981ec27662c826ca9f9e77e18cde456fd`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ceba74d79189b052d8f81f6f41e0439981ec27662c826ca9f9e77e18cde456fd`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/numbered_placeholder_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/numbered_placeholder_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/numbered_placeholder_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/numbered_placeholder_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/numbered_placeholder_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses _1 as single param' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/numbered_placeholder_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses _1 in filter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/numbered_placeholder_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses _1 with addition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

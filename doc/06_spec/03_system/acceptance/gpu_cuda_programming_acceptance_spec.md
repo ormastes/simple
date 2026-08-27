@@ -20,7 +20,7 @@ These are the things someone writing GPU code in Simple must be able to do, stat
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 These are the things someone writing GPU code in Simple must be able to do, stated
@@ -34,6 +34,7 @@ These are the things someone writing GPU code in Simple must be able to do, stat
 
 #### discovers the machine's GPUs and what they are, with no CUDA toolkit installed
 
+- discovers the machine's GPUs and what they are, with no CUDA toolkit installed
 - Ask whether a CUDA driver is present at all -- this must answer on any host
 - No CUDA driver on this host: report the absence rather than inventing devices
 - Initialise the driver and count the devices
@@ -45,10 +46,12 @@ These are the things someone writing GPU code in Simple must be able to do, stat
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("discovers the machine's GPUs and what they are, with no CUDA toolkit installed")
 step("Ask whether a CUDA driver is present at all -- this must answer on any host")
 val available = cuda_available()
 if not available:
@@ -72,6 +75,7 @@ else:
 
 #### round-trips a realistically sized typed buffer through device memory without corruption
 
+- round-trips a realistically sized typed buffer through device memory without corruption
 - SKIP: no device requested/available (set SIMPLE_CUDA_TEST=1 on a CUDA host)
 - Select device 0 and allocate room for 2048 f32 -- the size that used to SEGV
 - Upload a pattern that includes negative values, then read it back
@@ -81,10 +85,12 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("round-trips a realistically sized typed buffer through device memory without corruption")
 if not device_present():
     step("SKIP: no device requested/available (set SIMPLE_CUDA_TEST=1 on a CUDA host)")
     assert_true(true)
@@ -119,6 +125,7 @@ if device_present():
 
 #### develops and verifies 2-D kernel index arithmetic with no GPU present
 
+- develops and verifies 2-D kernel index arithmetic with no GPU present
 - Run the real kernel body over a 2x2 grid of 3x2 blocks -- a 6x4 matrix
 - Every work-item ran: 4 blocks x 6 threads
 - The flat indices cover 0..23 exactly once -- the kernel's addressing is correct
@@ -129,10 +136,12 @@ if device_present():
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("develops and verifies 2-D kernel index arithmetic with no GPU present")
 step("Run the real kernel body over a 2x2 grid of 3x2 blocks -- a 6x4 matrix")
 _flat = []
 _cols = 6
@@ -160,6 +169,7 @@ assert_equal(gpu_block_dim_z(), 1)
 
 #### guards the tail of a 1-D range so a kernel never runs past its data
 
+- guards the tail of a 1-D range so a kernel never runs past its data
 - 10 elements at block size 4 dispatch 3 blocks, but only 10 work-items run
 - An empty or malformed range executes nothing rather than guessing
 
@@ -167,10 +177,12 @@ assert_equal(gpu_block_dim_z(), 1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("guards the tail of a 1-D range so a kernel never runs past its data")
 step("10 elements at block size 4 dispatch 3 blocks, but only 10 work-items run")
 _ticks = 0
 assert_equal(cpu_kernel_run_1d(10, 4, tick), 10)
@@ -184,6 +196,7 @@ assert_equal(gpu_launch_emulated((1, 1, 1), (0, 1, 1), tick), 0)
 
 #### tells the truth when a backend is unavailable instead of faking a pass
 
+- tells the truth when a backend is unavailable instead of faking a pass
 - Probe the Metal lane; on a non-macOS host this must be a machine-readable skip
 - Reported unavailable with a reason: {verdict}
 - Metal is genuinely available here, so the probe must not claim otherwise
@@ -192,10 +205,12 @@ assert_equal(gpu_launch_emulated((1, 1, 1), (0, 1, 1), tick), 0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tells the truth when a backend is unavailable instead of faking a pass")
 step("Probe the Metal lane; on a non-macOS host this must be a machine-readable skip")
 val verdict = MetalLaneSession.create().probe()
 if verdict.starts_with("skip:"):
@@ -220,3 +235,51 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `209d06e4a2d4271b660962288d41b4cebf330739a1b55c8e9b099f49464386d1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `209d06e4a2d4271b660962288d41b4cebf330739a1b55c8e9b099f49464386d1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `209d06e4a2d4271b660962288d41b4cebf330739a1b55c8e9b099f49464386d1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl
+mirror: doc/06_spec/03_system/acceptance/gpu_cuda_programming_acceptance_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/acceptance/gpu_cuda_programming_acceptance_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/acceptance/gpu_cuda_programming_acceptance_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'discovers the machine's GPUs and what they are, with no CUDA toolkit installed' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips a realistically sized typed buffer through device memory without corruption' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'develops and verifies 2-D kernel index arithmetic with no GPU present' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

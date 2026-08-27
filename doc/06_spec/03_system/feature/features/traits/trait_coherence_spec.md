@@ -2,29 +2,6 @@
 
 > 1. **Orphan Rule**: Either trait OR type must be local
 
-<!-- sdn-diagram:id=trait_coherence_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=trait_coherence_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-trait_coherence_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=trait_coherence_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -44,7 +21,7 @@ trait_coherence_spec -> std
 | Category | Type System \| Traits |
 | Status | Implemented |
 | Source | `test/03_system/feature/features/traits/trait_coherence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Coherence Rules
@@ -60,18 +37,18 @@ trait_coherence_spec -> std
 
 #### allows local trait on foreign type
 
-1. fn process
-2. fn process
-3. expect "test" process
+- allows local trait on foreign type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows local trait on foreign type")
 trait MyTrait:
     fn process() -> i64
 
@@ -86,17 +63,18 @@ expect "test".process() == 42
 
 #### allows foreign trait on local type
 
-1. fn to string
-2. expect t to string
+- allows foreign trait on local type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows foreign trait on local type")
 struct MyType:
     value: i64
 
@@ -112,18 +90,18 @@ expect t.to_string() == "MyType"
 
 #### allows local trait on local type
 
-1. fn get
-2. fn get
-3. expect t get
+- allows local trait on local type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows local trait on local type")
 trait LocalTrait:
     fn get() -> i64
 
@@ -144,13 +122,18 @@ expect t.get() == 42
 
 #### foreign trait on foreign type is rejected at compile time
 
+- foreign trait on foreign type is rejected at compile time
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("foreign trait on foreign type is rejected at compile time")
 # This would be a compile error:
 # impl Display for String:
 #     fn to_string() -> str:
@@ -164,18 +147,18 @@ expect true  # Placeholder - compile-time check
 
 #### single impl is allowed
 
-1. fn run
-2. fn run
-3. expect x run
+- single impl is allowed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("single impl is allowed")
 trait Process:
     fn run() -> i64
 
@@ -191,13 +174,18 @@ expect x.run() == 42
 
 #### duplicate impl is rejected at compile time
 
+- duplicate impl is rejected at compile time
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("duplicate impl is rejected at compile time")
 # This would be a compile error (second impl):
 # impl Process for i32:
 #     fn run() -> i64:
@@ -211,18 +199,18 @@ expect true
 
 #### specific impl is allowed alone
 
-1. fn handle
-2. fn handle
-3. expect x handle
+- specific impl is allowed alone
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("specific impl is allowed alone")
 trait Handler:
     fn handle() -> i64
 
@@ -238,13 +226,18 @@ expect x.handle() == 1
 
 #### generic impl conflicts with specific
 
+- generic impl conflicts with specific
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generic impl conflicts with specific")
 # This would be a compile error (blanket conflicts):
 # impl<T> Handler for T:
 #     fn handle() -> i64:
@@ -258,20 +251,18 @@ expect true
 
 #### different types can have same trait
 
-1. fn convert
-2. fn convert
-3. fn convert
-4. expect x convert
-5. expect s convert
+- different types can have same trait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("different types can have same trait")
 trait Convert:
     fn convert() -> str
 
@@ -295,18 +286,18 @@ expect s.convert() == "str"
 
 #### associated type in impl is valid
 
-1. fn get
-2. fn get
-3. expect list get
+- associated type in impl is valid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("associated type in impl is valid")
 trait Container:
     type Item
 
@@ -332,13 +323,18 @@ expect list.get() == 42
 
 #### conflicting associated type is rejected
 
+- conflicting associated type is rejected
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("conflicting associated type is rejected")
 # This would be a compile error (conflicting Item type):
 # impl Container for IntList:
 #     type Item = str  # Conflicts with i64
@@ -351,18 +347,18 @@ expect true
 
 #### specific impl alone works
 
-1. fn serialize
-2. fn serialize
-3. expect x serialize
+- specific impl alone works
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("specific impl alone works")
 trait Serialize:
     fn serialize() -> str
 
@@ -380,18 +376,18 @@ expect x.serialize() == "i64"
 
 #### module with trait, struct, and impl passes
 
-1. fn print value
-2. fn print value
-3. expect p print value
+- module with trait, struct, and impl passes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("module with trait, struct, and impl passes")
 trait Printable:
     fn print_value() -> str
 
@@ -412,17 +408,18 @@ expect p.print_value() == "Alice"
 
 #### inherent impl on local type is allowed
 
-1. fn magnitude squared
-2. expect p magnitude squared
+- inherent impl on local type is allowed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inherent impl on local type is allowed")
 struct Point:
     x: i64
     y: i64
@@ -441,21 +438,18 @@ expect p.magnitude_squared() == 25
 
 #### multiple traits on same type
 
-1. fn to str
-2. fn compare
-3. fn to str
-4. fn compare
-5. expect v1 to str
-6. expect v1 compare
+- multiple traits on same type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiple traits on same type")
 trait Printable:
     fn to_str() -> str
 
@@ -485,19 +479,18 @@ expect v1.compare(v2) == 5
 
 #### impl on generic type
 
-1. fn size
-2. fn size
-3. self len
-4. expect arr size
+- impl on generic type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("impl on generic type")
 trait Container:
     fn size() -> i64
 
@@ -515,19 +508,18 @@ expect arr.size() == 5
 
 #### default impl can be specialized
 
-1. fn process
-2. fn process
-3. fn process
-4. expect x process
+- default impl can be specialized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("default impl can be specialized")
 trait Process:
     fn process() -> str
 
@@ -550,19 +542,18 @@ expect x.process() == "specialized for i64"
 
 #### extension trait on foreign type
 
-1. fn shout
-2. fn shout
-3. self upper
-4. expect "hello" shout
+- extension trait on foreign type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("extension trait on foreign type")
 trait StringExt:
     fn shout() -> str
 
@@ -577,19 +568,18 @@ expect "hello".shout() == "HELLO!"
 
 #### generic extension trait
 
-1. fn first or default
-2. fn first or default
-3. expect arr first or default
-4. expect empty first or default
+- generic extension trait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generic extension trait")
 trait SliceExt<T>:
     fn first_or_default(default: T) -> T
 
@@ -613,18 +603,18 @@ expect empty.first_or_default(42) == 42
 
 #### impl with where clause
 
-1. fn clone
-2. fn run
-3. fn run
+- impl with where clause
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("impl with where clause")
 trait Clone:
     fn clone() -> Self
 
@@ -653,3 +643,51 @@ expect true
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `873c3ffdfc1419c6d546f02418830db553ed243a1df0669f8d1b2735518a59da`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `873c3ffdfc1419c6d546f02418830db553ed243a1df0669f8d1b2735518a59da`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `873c3ffdfc1419c6d546f02418830db553ed243a1df0669f8d1b2735518a59da`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/features/traits/trait_coherence_spec.spl
+mirror: doc/06_spec/03_system/feature/features/traits/trait_coherence_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/features/traits/trait_coherence_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/features/traits/trait_coherence_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/features/traits/trait_coherence_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows local trait on foreign type' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/traits/trait_coherence_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows foreign trait on local type' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/traits/trait_coherence_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows local trait on local type' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

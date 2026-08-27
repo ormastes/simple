@@ -1,40 +1,17 @@
 # Simple launcher dispatch regression spec
 
-> Verifies `bin/simple` keeps the shell-wrapper routing for launcher-only
-
-<!-- sdn-diagram:id=simple_launcher_dispatch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simple_launcher_dispatch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simple_launcher_dispatch_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simple_launcher_dispatch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Verifies the compiled `bin/simple` dispatches recognized subcommands in-process to
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Simple launcher dispatch regression spec
 
-Verifies `bin/simple` keeps the shell-wrapper routing for launcher-only
+Verifies the compiled `bin/simple` dispatches recognized subcommands in-process to
 
 ## At a Glance
 
@@ -43,246 +20,113 @@ Verifies `bin/simple` keeps the shell-wrapper routing for launcher-only
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/simple_launcher_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Verifies `bin/simple` keeps the shell-wrapper routing for launcher-only
-entrypoints and honors explicit runtime selection for test-path execution.
+Verifies the compiled `bin/simple` dispatches recognized subcommands in-process to
+their handlers, and treats an unrecognized first argument as a file path to run.
+
+Post-self-hosting `bin/simple` is a compiled binary with an in-process CommandEntry
+dispatch table (`src/app/cli/dispatch/table.spl`) — NOT the old shell wrapper that
+copied itself and re-exec'd a runtime with `run <entrypoint.spl>`. This spec was
+rewritten (#38) to test the current in-process routing instead of the removed
+shell-wrapper mechanism (the old copy-text + fake-runtime + re-exec approach cannot
+work against a compiled binary).
 
 ## Scenarios
 
-### simple launcher dispatch
+### simple launcher dispatch (in-process)
 
-#### routes duplicate-check through the release runtime entrypoint
+#### dispatches the lint subcommand to its handler
 
-1. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-2. expect arg
-3. expect arg
-4. expect arg
-5. expect arg
-6. expect arg
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- dispatches the lint subcommand to its handler
+   - Expected: out contains `Usage: simple lint`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val root = setup_repo_root("release_duplicate_check")
-make_fake_runtime(root + "/bin/release/linux-x86_64/simple")
-
-val (stdout, stderr, code) = run_wrapper(root, ["duplicate-check", "src/app", "--cosine"])
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect_arg(stdout, 1, "run")
-expect_arg(stdout, 2, root + "/src/compiler/90.tools/duplicate_check/main.spl")
-expect_arg(stdout, 3, "duplicate-check")
-expect_arg(stdout, 4, "src/app")
-expect_arg(stdout, 5, "--cosine")
+# @req REQ-SSPEC-INTEGRATION
+step("dispatches the lint subcommand to its handler")
+val (out, _err, _code) = run_simple(["lint"])
+expect(out.contains("Usage: simple lint")).to_equal(true)
 ```
 
 </details>
 
-#### routes stats through the release runtime entrypoint
+#### dispatches the fmt subcommand to its handler
 
-1. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-2. expect arg
-3. expect arg
-4. expect arg
-5. expect arg
-6. expect arg
+- dispatches the fmt subcommand to its handler
+   - Expected: out contains `Usage: simple fmt`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val root = setup_repo_root("release_stats")
-make_fake_runtime(root + "/bin/release/linux-x86_64/simple")
-
-val (stdout, stderr, code) = run_wrapper(root, ["stats", "--brief", "--json"])
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect_arg(stdout, 1, "run")
-expect_arg(stdout, 2, root + "/src/app/cli/stats_entry.spl")
-expect_arg(stdout, 3, "stats")
-expect_arg(stdout, 4, "--brief")
-expect_arg(stdout, 5, "--json")
+# @req REQ-SSPEC-INTEGRATION
+step("dispatches the fmt subcommand to its handler")
+val (out, _err, _code) = run_simple(["fmt"])
+expect(out.contains("Usage: simple fmt")).to_equal(true)
 ```
 
 </details>
 
-#### routes duplicate-check through the bootstrap runtime when release is absent
+#### treats an unrecognized first argument as a file path to run
 
-1. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-2. expect arg
-3. expect arg
-4. expect arg
-5. expect arg
+- treats an unrecognized first argument as a file path to run
+   - Expected: (out + err) contains `file not found`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val root = setup_repo_root("bootstrap_duplicate_check")
-make_fake_runtime(root + "/src/compiler_rust/target/bootstrap/simple")
-
-val (stdout, stderr, code) = run_wrapper(root, ["duplicate-check", "src/compiler"])
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect_arg(stdout, 1, "run")
-expect_arg(stdout, 2, root + "/src/compiler/90.tools/duplicate_check/main.spl")
-expect_arg(stdout, 3, "duplicate-check")
-expect_arg(stdout, 4, "src/compiler")
+# @req REQ-SSPEC-INTEGRATION
+step("treats an unrecognized first argument as a file path to run")
+val (out, err, _code) = run_simple(["zz_not_a_command_launcher_spec.spl"])
+expect((out + err).contains("file not found")).to_equal(true)
 ```
 
 </details>
 
-#### routes stats through the bootstrap runtime when release is absent
+#### registers subcommands in the in-process dispatch table (no shell re-exec)
 
-1. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-2. expect arg
-3. expect arg
-4. expect arg
-5. expect arg
+- registers subcommands in the in-process dispatch table (no shell re-exec)
+   - Expected: table contains `get_command_table`
+   - Expected: table contains `CommandEntry`
+   - Expected: table contains `"lint"`
+   - Expected: table contains `"fmt"`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val root = setup_repo_root("bootstrap_stats")
-make_fake_runtime(root + "/src/compiler_rust/target/bootstrap/simple")
-
-val (stdout, stderr, code) = run_wrapper(root, ["stats", "--quick"])
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect_arg(stdout, 1, "run")
-expect_arg(stdout, 2, root + "/src/app/cli/stats_entry.spl")
-expect_arg(stdout, 3, "stats")
-expect_arg(stdout, 4, "--quick")
-```
-
-</details>
-
-#### passes normal commands straight through to the selected runtime
-
-1. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-   - Expected: stdout does not contain `arg1=run\n`
-2. expect arg
-3. expect arg
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = setup_repo_root("release_passthrough")
-make_fake_runtime(root + "/bin/release/linux-x86_64/simple")
-
-val (stdout, stderr, code) = run_wrapper(root, ["check", "src/app/cli/main.spl"])
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect(stdout.contains("arg1=run\n")).to_equal(false)
-expect_arg(stdout, 1, "check")
-expect_arg(stdout, 2, "src/app/cli/main.spl")
-```
-
-</details>
-
-#### honors SIMPLE_BINARY for the test path
-
-1. make fake runtime
-2. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-3. expect arg
-4. expect arg
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = setup_repo_root("test_path_simple_binary")
-make_fake_runtime(root + "/src/compiler_rust/target/debug/simple")
-make_fake_runtime(root + "/src/compiler_rust/target/release/simple")
-
-val (stdout, stderr, code) = run_wrapper_with_simple_binary(
-    root,
-    root + "/src/compiler_rust/target/debug/simple",
-    ["test", "test/unit/lib/common/simd_dispatch_facade_spec.spl"]
-)
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect_arg(stdout, 1, "test")
-expect_arg(stdout, 2, "test/unit/lib/common/simd_dispatch_facade_spec.spl")
-```
-
-</details>
-
-#### prefers the release runtime for the test path when SIMPLE_BINARY is unset
-
-1. make fake runtime
-2. make fake runtime
-   - Expected: code equals `0`
-   - Expected: stderr equals ``
-3. expect arg
-4. expect arg
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = setup_repo_root("test_path_release_default")
-make_fake_runtime(root + "/src/compiler_rust/target/debug/simple")
-make_fake_runtime(root + "/src/compiler_rust/target/release/simple")
-
-val (stdout, stderr, code) = run_wrapper(root, ["test", "test/system/variant_api_parity_spec.spl"])
-
-expect(code).to_equal(0)
-expect(stderr).to_equal("")
-expect(stdout).to_contain("argv0=" + root + "/src/compiler_rust/target/release/simple\n")
-expect_arg(stdout, 1, "test")
-expect_arg(stdout, 2, "test/system/variant_api_parity_spec.spl")
+# @req REQ-SSPEC-INTEGRATION
+step("registers subcommands in the in-process dispatch table (no shell re-exec)")
+val table = rt_file_read_text("src/app/cli/dispatch/table.spl") ?? ""
+expect(table.contains("get_command_table")).to_equal(true)
+expect(table.contains("CommandEntry")).to_equal(true)
+expect(table.contains("\"lint\"")).to_equal(true)
+expect(table.contains("\"fmt\"")).to_equal(true)
 ```
 
 </details>
@@ -291,11 +135,59 @@ expect_arg(stdout, 2, "test/system/variant_api_parity_spec.spl")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a481d3246bfbe72db39b3e7f664cb0d257d3e92df63d5178d0f1fb61c4a1bcb3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a481d3246bfbe72db39b3e7f664cb0d257d3e92df63d5178d0f1fb61c4a1bcb3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a481d3246bfbe72db39b3e7f664cb0d257d3e92df63d5178d0f1fb61c4a1bcb3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/simple_launcher_dispatch_spec.spl
+mirror: doc/06_spec/02_integration/simple_launcher_dispatch_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/simple_launcher_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/simple_launcher_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/simple_launcher_dispatch_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches the lint subcommand to its handler' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/simple_launcher_dispatch_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches the fmt subcommand to its handler' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/simple_launcher_dispatch_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'treats an unrecognized first argument as a file path to run' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

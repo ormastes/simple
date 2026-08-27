@@ -1,29 +1,6 @@
 # Widgets Specification
 
-> 1. expect true  # Menu new
-
-<!-- sdn-diagram:id=widgets_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=widgets_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-widgets_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=widgets_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Menu, Dialog, ProgressBar, TextInput, ScrollList.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,16 +17,22 @@ widgets_spec
 
 #### creates empty menu
 
-1. expect true  # Menu new
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates empty menu
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates empty menu")
 expect true  # Menu.new(id); selected_index() == 0
 ```
 
@@ -57,16 +40,18 @@ expect true  # Menu.new(id); selected_index() == 0
 
 #### adds items
 
-1. expect true  #  add item
+- adds items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds items")
 expect true  # .add_item("Option 1").add_item("Option 2")
 ```
 
@@ -74,16 +59,18 @@ expect true  # .add_item("Option 1").add_item("Option 2")
 
 #### adds items with keys
 
-1. expect true  #  add item with key
+- adds items with keys
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds items with keys")
 expect true  # .add_item_with_key("New", 'n')
 ```
 
@@ -91,16 +78,18 @@ expect true  # .add_item_with_key("New", 'n')
 
 #### navigates selection
 
-1. expect true  # select next
+- navigates selection
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("navigates selection")
 expect true  # select_next(), select_prev()
 ```
 
@@ -108,16 +97,18 @@ expect true  # select_next(), select_prev()
 
 #### gets selected item
 
-1. expect true  # selected item
+- gets selected item
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets selected item")
 expect true  # selected_item().label == "First"
 ```
 
@@ -125,16 +116,18 @@ expect true  # selected_item().label == "First"
 
 #### supports title
 
-1. expect true  #  with title
+- supports title
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("supports title")
 expect true  # .with_title("Main Menu")
 ```
 
@@ -144,16 +137,18 @@ expect true  # .with_title("Main Menu")
 
 #### creates dialog with message
 
-1. expect true  # Dialog new
+- creates dialog with message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates dialog with message")
 expect true  # Dialog.new(id, "Alert").with_message("msg")
 ```
 
@@ -161,16 +156,18 @@ expect true  # Dialog.new(id, "Alert").with_message("msg")
 
 #### creates OK/Cancel dialog
 
-1. expect true  # Dialog ok cancel
+- creates OK/Cancel dialog
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates OK/Cancel dialog")
 expect true  # Dialog.ok_cancel(id, title, msg)
 ```
 
@@ -178,16 +175,18 @@ expect true  # Dialog.ok_cancel(id, title, msg)
 
 #### creates Yes/No dialog
 
-1. expect true  # Dialog yes no
+- creates Yes/No dialog
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates Yes/No dialog")
 expect true  # Dialog.yes_no(id, title, msg)
 ```
 
@@ -195,16 +194,18 @@ expect true  # Dialog.yes_no(id, title, msg)
 
 #### navigates buttons
 
-1. expect true  # select next button
+- navigates buttons
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("navigates buttons")
 expect true  # select_next_button(), select_prev_button()
 ```
 
@@ -214,16 +215,18 @@ expect true  # select_next_button(), select_prev_button()
 
 #### creates progress bar with defaults
 
-1. expect true  # ProgressBar new
+- creates progress bar with defaults
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates progress bar with defaults")
 expect true  # ProgressBar.new(id); width == 40
 ```
 
@@ -231,16 +234,18 @@ expect true  # ProgressBar.new(id); width == 40
 
 #### sets progress
 
-1. expect true  # set progress
+- sets progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets progress")
 expect true  # set_progress(0.5)
 ```
 
@@ -248,16 +253,18 @@ expect true  # set_progress(0.5)
 
 #### clamps progress to valid range
 
-1. expect true  # set progress
+- clamps progress to valid range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("clamps progress to valid range")
 expect true  # set_progress(1.5) -> 1.0
 ```
 
@@ -265,16 +272,18 @@ expect true  # set_progress(1.5) -> 1.0
 
 #### increments progress
 
-1. expect true  # increment
+- increments progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("increments progress")
 expect true  # increment(0.3)
 ```
 
@@ -282,16 +291,18 @@ expect true  # increment(0.3)
 
 #### supports custom width and label
 
-1. expect true  #  with width
+- supports custom width and label
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("supports custom width and label")
 expect true  # .with_width(20).with_label("Loading")
 ```
 
@@ -301,16 +312,18 @@ expect true  # .with_width(20).with_label("Loading")
 
 #### creates empty input
 
-1. expect true  # TextInput new
+- creates empty input
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates empty input")
 expect true  # TextInput.new(id); value() == ""
 ```
 
@@ -318,16 +331,18 @@ expect true  # TextInput.new(id); value() == ""
 
 #### inserts characters
 
-1. expect true  # insert char
+- inserts characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("inserts characters")
 expect true  # insert_char('H'); insert_char('i')
 ```
 
@@ -335,16 +350,18 @@ expect true  # insert_char('H'); insert_char('i')
 
 #### handles backspace
 
-1. expect true  # backspace
+- handles backspace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles backspace")
 expect true  # backspace() removes char before cursor
 ```
 
@@ -352,16 +369,18 @@ expect true  # backspace() removes char before cursor
 
 #### handles delete
 
-1. expect true  # delete
+- handles delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles delete")
 expect true  # delete() removes char at cursor
 ```
 
@@ -369,16 +388,18 @@ expect true  # delete() removes char at cursor
 
 #### moves cursor
 
-1. expect true  # move left
+- moves cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("moves cursor")
 expect true  # move_left(), move_right(), move_home(), move_end()
 ```
 
@@ -386,16 +407,18 @@ expect true  # move_left(), move_right(), move_home(), move_end()
 
 #### respects max length
 
-1. expect true  #  with max length
+- respects max length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("respects max length")
 expect true  # .with_max_length(3); can't exceed
 ```
 
@@ -403,16 +426,18 @@ expect true  # .with_max_length(3); can't exceed
 
 #### supports placeholder
 
-1. expect true  #  with placeholder
+- supports placeholder
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("supports placeholder")
 expect true  # .with_placeholder("Enter name...")
 ```
 
@@ -422,16 +447,18 @@ expect true  # .with_placeholder("Enter name...")
 
 #### creates scrollable list
 
-1. expect true  # ScrollList new
+- creates scrollable list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates scrollable list")
 expect true  # ScrollList.new(id, 5)
 ```
 
@@ -439,16 +466,18 @@ expect true  # ScrollList.new(id, 5)
 
 #### adds and clears items
 
-1. expect true  # add item
+- adds and clears items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds and clears items")
 expect true  # add_item("Item"); clear()
 ```
 
@@ -456,16 +485,18 @@ expect true  # add_item("Item"); clear()
 
 #### navigates selection
 
-1. expect true  # select next
+- navigates selection
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("navigates selection")
 expect true  # select_next(), select_prev()
 ```
 
@@ -473,13 +504,18 @@ expect true  # select_next(), select_prev()
 
 #### scrolls to keep selection visible
 
+- scrolls to keep selection visible
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("scrolls to keep selection visible")
 expect true  # scroll_offset adjusts automatically
 ```
 
@@ -492,12 +528,12 @@ expect true  # scroll_offset adjusts automatically
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/widgets_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Menu, Dialog, ProgressBar, TextInput, ScrollList.
 - Menu
 - Dialog
 - ProgressBar
@@ -516,3 +552,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f560b3969bfeb9b0b34d37c65a6ab8f0d13821f0805054418c886704d867bc14`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f560b3969bfeb9b0b34d37c65a6ab8f0d13821f0805054418c886704d867bc14`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f560b3969bfeb9b0b34d37c65a6ab8f0d13821f0805054418c886704d867bc14`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/widgets_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/widgets_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/widgets_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/widgets_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/widgets_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty menu' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/widgets_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds items' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/widgets_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds items with keys' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

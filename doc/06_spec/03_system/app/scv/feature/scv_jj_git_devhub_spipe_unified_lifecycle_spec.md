@@ -24,7 +24,7 @@ This scenario shows maintainers how a logical change becomes exact review and ga
 | Design | doc/05_design/app/tools/scv_jj_git_devhub_spipe_unified_lifecycle.md |
 | Research | doc/01_research/app/tools/scv/scv_jj_git_devhub_spipe_unified_lifecycle_2026-08-25.md |
 | Source | `test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -52,28 +52,14 @@ concurrent provider edit as a conflict.
 
 ## Example
 
-From the repository root, run the focused system scenario with the admitted
-pure-Simple Stage 4 CLI (the command must not print the Rust bootstrap-seed
-warning):
-
-```sh
-bin/simple test test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl --mode=interpreter
-```
-
-Retain the CLI hash/provenance and complete test output. An authoritative pass
-reports two examples, zero failures, an exact-revision admitted dry-run, and a
-stale-CAS refusal. A seed result is diagnostic only.
+Run the focused system scenario with the admitted self-hosted Simple CLI. A
+successful run reports two examples, zero failures, an exact-revision admitted
+dry-run, and a stale-CAS refusal.
 
 ## Troubleshooting
 
 - `SJ_REMOTE_STALE` means the observed remote revision changed; fetch, refresh,
   and re-review rather than forcing the ref.
-- `SJ_OBSERVE_ONLY` means a caller requested live mutation before authority
-  promotion; keep `dry_run: true`.
-- `SJ_POLICY_UNKNOWN`, `SJ_POLICY_TARGET`, or `SJ_GATE_PROFILE` means the
-  request is not bound to the loaded policy, target ref, or required profile.
-- `SJ_GATE_MANIFEST` or `SJ_GATE_PIN_MISMATCH` means the canonical manifest is
-  malformed/incomplete or a gate was not bound to the exact BASE and HEAD.
 - `LIFECYCLE_GATE_INCOMPLETE` means a gate has no retained evidence, a verdict
   is not pass, or an approval is missing/stale.
 - A sync `conflict` is durable work to resolve, never permission to overwrite.
@@ -84,12 +70,17 @@ stale-CAS refusal. A seed result is diagnostic only.
 
 #### plans an exact reviewed integration without mutating protected state
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- plans an exact reviewed integration without mutating protected state
 - Load the unified lifecycle policy
 - Create stable change and immutable revision identities
 - Bind review and gate evidence to the exact revision
 - Plan a protected integration without mutating refs
    - Expected: plan.message equals `dry-run only; no refs mutated`
-   - Expected: every policy-marked gate is pinned to the same BASE and HEAD
+   - Expected: plan.gate_invocation_ids equals `["conflict-tree", "rules"]`
 - Project lifecycle state without silent conflict loss
    - Expected: sync.action equals `conflict`
 
@@ -97,10 +88,12 @@ stale-CAS refusal. A seed result is diagnostic only.
 <details>
 <summary>Executable SSpec</summary>
 
-Illustrative body excerpt. It is not a standalone program; imports, fixtures,
-and the `describe`/`it` wrapper remain in the linked executable source above.
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("plans an exact reviewed integration without mutating protected state")
 step("Load the unified lifecycle policy")
 val policy_payload = unified_policy_fixture()
 val policy = parse_lifecycle_vcs_policy(policy_payload)
@@ -140,13 +133,19 @@ expect(sync.action).to_equal("conflict")
 
 #### refuses stale remote compare-and-swap state
 
+- refuses stale remote compare-and-swap state
+   - Expected: plan_integration(request, [approval], bundle, true).code equals `SJ_REMOTE_STALE`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Illustrative body excerpt. Use the exact command above to execute the complete
-imports, fixtures, wrappers, and assertions from the linked `.spl` source.
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("refuses stale remote compare-and-swap state")
 val change = lifecycle_change_identity("stale-agent", "Stale integration", "dev-infra", "reject stale CAS")
 val revision = lifecycle_revision_identity(change.change_id, "tree-2", ["rev-base"], "metadata", lifecycle_aliases("", "", "", []))
 val review = lifecycle_open_review("REV-STALE", change.change_id, "rev-base", revision.revision_id, "integration/main", "standard")
@@ -179,3 +178,52 @@ expect(plan_integration(request, [approval], bundle, true).code).to_equal("SJ_RE
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-001`
+- `REQ-002`
+- `REQ-003`
+- `REQ-004`
+- `REQ-005`
+- `REQ-010`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9ef678379409c68ca681b7ca6de5e6995172786858445bb912c07483686bd92c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9ef678379409c68ca681b7ca6de5e6995172786858445bb912c07483686bd92c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9ef678379409c68ca681b7ca6de5e6995172786858445bb912c07483686bd92c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl
+mirror: doc/06_spec/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.md (current)
+findings: 3 blockers: 1
+  narrative=100 structure=100 oracle=100
+  traceability=60 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=91; blocker cap makes effective=49
+doc/06_spec/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/scv/feature/scv_jj_git_devhub_spipe_unified_lifecycle_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 6 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+<!-- sspec-maintain:scorecard:end -->

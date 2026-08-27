@@ -2,29 +2,6 @@
 
 > Tests for the `cli` keyword basic functionality: bool flags, string options, int options, and default values. The `cli` keyword provides declarative command-line argument parsing integrated into the language.
 
-<!-- sdn-diagram:id=cli_args_basic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cli_args_basic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cli_args_basic_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cli_args_basic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -44,7 +21,7 @@ Tests for the `cli` keyword basic functionality: bool flags, string options, int
 | Category | Language \| CLI |
 | Status | Draft |
 | Source | `test/03_system/feature/usage/cli_args_basic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -70,13 +47,19 @@ cli:
 
 #### parses bool flag default
 
+- parses bool flag default
+   - Expected: expected is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses bool flag default")
 # cli:
 #     verbose: false
 # val args = cli.parse([])
@@ -89,13 +72,19 @@ expect(expected).to_equal(false)
 
 #### parses bool flag when set
 
+- parses bool flag when set
+   - Expected: expected is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses bool flag when set")
 # cli:
 #     verbose: false
 # val args = cli.parse(["--verbose"])
@@ -110,13 +99,19 @@ expect(expected).to_equal(true)
 
 #### parses string option default
 
+- parses string option default
+   - Expected: expected equals `result.txt`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses string option default")
 # cli:
 #     output: "result.txt"
 # val args = cli.parse([])
@@ -129,13 +124,19 @@ expect(expected).to_equal("result.txt")
 
 #### parses string option with value
 
+- parses string option with value
+   - Expected: expected equals `custom.txt`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses string option with value")
 # cli:
 #     output: "result.txt"
 # val args = cli.parse(["--output", "custom.txt"])
@@ -148,13 +149,19 @@ expect(expected).to_equal("custom.txt")
 
 #### parses string option with equals syntax
 
+- parses string option with equals syntax
+   - Expected: expected equals `custom.txt`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses string option with equals syntax")
 # cli:
 #     output: "result.txt"
 # val args = cli.parse(["--output=custom.txt"])
@@ -169,13 +176,19 @@ expect(expected).to_equal("custom.txt")
 
 #### parses int option default
 
+- parses int option default
+   - Expected: expected equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses int option default")
 # cli:
 #     count: 1
 # val args = cli.parse([])
@@ -188,13 +201,19 @@ expect(expected).to_equal(1)
 
 #### parses int option with value
 
+- parses int option with value
+   - Expected: expected equals `5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses int option with value")
 # cli:
 #     count: 1
 # val args = cli.parse(["--count", "5"])
@@ -209,13 +228,21 @@ expect(expected).to_equal(5)
 
 #### handles multiple options together
 
+- handles multiple options together
+   - Expected: verbose is true
+   - Expected: output equals `result.txt`
+   - Expected: count equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles multiple options together")
 # cli:
 #     verbose: false
 #     output: "out.txt"
@@ -246,3 +273,58 @@ expect(count).to_equal(3)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6e572baaaf4ae399f4a837f71cb0d051eb857649ad8ad27f1eceaea437782459`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6e572baaaf4ae399f4a837f71cb0d051eb857649ad8ad27f1eceaea437782459`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6e572baaaf4ae399f4a837f71cb0d051eb857649ad8ad27f1eceaea437782459`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/usage/cli_args_basic_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/cli_args_basic_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=20
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=76; blocker cap makes effective=49
+doc/06_spec/03_system/feature/usage/cli_args_basic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/cli_args_basic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/cli_args_basic_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario compares only locally constructed arithmetic or literals
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/03_system/feature/usage/cli_args_basic_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/usage/cli_args_basic_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses bool flag default' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/cli_args_basic_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses bool flag when set' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/cli_args_basic_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses string option default' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

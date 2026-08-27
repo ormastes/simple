@@ -1,29 +1,6 @@
 # Protocol Types Specification
 
-> <details>
-
-<!-- sdn-diagram:id=protocol_types_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=protocol_types_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-protocol_types_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=protocol_types_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Position Type, Range Type, DiagnosticSeverity Enum, Diagnostic Type, Protocol Type Integration.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,22 @@ protocol_types_spec
 
 #### creates position with line and character
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates position with line and character
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates position with line and character")
 val pos = Position { line: 10, character: 5 }
 expect pos.line == 10
 expect pos.character == 5
@@ -56,13 +42,18 @@ expect pos.character == 5
 
 #### handles zero-based positions
 
+- handles zero-based positions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles zero-based positions")
 val origin = Position { line: 0, character: 0 }
 expect origin.line == 0
 expect origin.character == 0
@@ -72,13 +63,18 @@ expect origin.character == 0
 
 #### handles large line numbers
 
+- handles large line numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles large line numbers")
 val large_pos = Position { line: 10000, character: 100 }
 expect large_pos.line == 10000
 expect large_pos.character == 100
@@ -88,13 +84,18 @@ expect large_pos.character == 100
 
 #### compares positions
 
+- compares positions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compares positions")
 val pos1 = Position { line: 5, character: 10 }
 val pos2 = Position { line: 5, character: 10 }
 val pos3 = Position { line: 5, character: 15 }
@@ -110,13 +111,18 @@ expect pos3.character != pos1.character
 
 #### creates range from two positions
 
+- creates range from two positions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates range from two positions")
 val start = Position { line: 0, character: 0 }
 val end = Position { line: 0, character: 10 }
 val range = Range { start: start, end: end }
@@ -129,13 +135,18 @@ expect range.end.character == 10
 
 #### handles single-line ranges
 
+- handles single-line ranges
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles single-line ranges")
 val start = Position { line: 5, character: 0 }
 val end = Position { line: 5, character: 20 }
 val range = Range { start: start, end: end }
@@ -147,13 +158,18 @@ expect range.start.line == range.end.line
 
 #### handles multi-line ranges
 
+- handles multi-line ranges
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles multi-line ranges")
 val start = Position { line: 5, character: 0 }
 val end = Position { line: 10, character: 20 }
 val range = Range { start: start, end: end }
@@ -165,13 +181,18 @@ expect range.start.line < range.end.line
 
 #### calculates range length for single line
 
+- calculates range length for single line
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("calculates range length for single line")
 val start = Position { line: 0, character: 5 }
 val end = Position { line: 0, character: 15 }
 val range = Range { start: start, end: end }
@@ -186,13 +207,18 @@ expect length == 10
 
 #### has Error severity
 
+- has Error severity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has Error severity")
 val severity = DiagnosticSeverity.Error
 match severity:
     case DiagnosticSeverity.Error:
@@ -205,13 +231,18 @@ match severity:
 
 #### has Warning severity
 
+- has Warning severity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has Warning severity")
 val severity = DiagnosticSeverity.Warning
 match severity:
     case DiagnosticSeverity.Warning:
@@ -224,13 +255,18 @@ match severity:
 
 #### has Information severity
 
+- has Information severity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has Information severity")
 val severity = DiagnosticSeverity.Information
 match severity:
     case DiagnosticSeverity.Information:
@@ -243,13 +279,18 @@ match severity:
 
 #### has Hint severity
 
+- has Hint severity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has Hint severity")
 val severity = DiagnosticSeverity.Hint
 match severity:
     case DiagnosticSeverity.Hint:
@@ -262,13 +303,18 @@ match severity:
 
 #### distinguishes between severities
 
+- distinguishes between severities
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("distinguishes between severities")
 val error = DiagnosticSeverity.Error
 val warning = DiagnosticSeverity.Warning
 
@@ -287,13 +333,18 @@ match error:
 
 #### creates diagnostic with all fields
 
+- creates diagnostic with all fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates diagnostic with all fields")
 val range = Range {
     start: Position { line: 0, character: 0 },
     end: Position { line: 0, character: 5 }
@@ -313,13 +364,18 @@ expect diag.source == "simple-compiler"
 
 #### creates error diagnostic
 
+- creates error diagnostic
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates error diagnostic")
 val range = Range {
     start: Position { line: 5, character: 10 },
     end: Position { line: 5, character: 15 }
@@ -342,13 +398,18 @@ match error.severity:
 
 #### creates warning diagnostic
 
+- creates warning diagnostic
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates warning diagnostic")
 val range = Range {
     start: Position { line: 10, character: 0 },
     end: Position { line: 10, character: 20 }
@@ -371,17 +432,18 @@ match warning.severity:
 
 #### stores diagnostic message
 
-1. expect diag message len
-2. expect diag message contains
+- stores diagnostic message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("stores diagnostic message")
 val range = Range {
     start: Position { line: 0, character: 0 },
     end: Position { line: 0, character: 1 }
@@ -403,13 +465,18 @@ expect diag.message.contains("const")
 
 #### builds diagnostic with position and range
 
+- builds diagnostic with position and range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds diagnostic with position and range")
 val pos_start = Position { line: 5, character: 0 }
 val pos_end = Position { line: 5, character: 10 }
 val range = Range { start: pos_start, end: pos_end }
@@ -429,13 +496,18 @@ expect diagnostic.message == "Type mismatch"
 
 #### creates multiple diagnostics for same range
 
+- creates multiple diagnostics for same range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates multiple diagnostics for same range")
 val range = Range {
     start: Position { line: 10, character: 5 },
     end: Position { line: 10, character: 15 }
@@ -468,12 +540,12 @@ expect error.severity != warning.severity
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/protocol_types_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Position Type, Range Type, DiagnosticSeverity Enum, Diagnostic Type, Protocol Type Integration.
 - Position Type
 - Range Type
 - DiagnosticSeverity Enum
@@ -492,3 +564,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `dd1dc211357bc41964965298ccd717091a4c167ff1055cac365f1d339e859027`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `dd1dc211357bc41964965298ccd717091a4c167ff1055cac365f1d339e859027`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `dd1dc211357bc41964965298ccd717091a4c167ff1055cac365f1d339e859027`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/lsp/protocol_types_spec.spl
+mirror: doc/06_spec/01_unit/app/lsp/protocol_types_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/lsp/protocol_types_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/lsp/protocol_types_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/lsp/protocol_types_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates position with line and character' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lsp/protocol_types_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles zero-based positions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lsp/protocol_types_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles large line numbers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

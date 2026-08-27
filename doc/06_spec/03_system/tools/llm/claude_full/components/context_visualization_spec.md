@@ -2,30 +2,6 @@
 
 > Checks context usage buckets, labels, collapse status, and source grouping.
 
-<!-- sdn-diagram:id=context_visualization_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=context_visualization_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-context_visualization_spec -> std
-context_visualization_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=context_visualization_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
@@ -44,7 +20,7 @@ Checks context usage buckets, labels, collapse status, and source grouping.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/context_visualization_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks context usage buckets, labels, collapse status, and source grouping.
@@ -55,18 +31,18 @@ Checks context usage buckets, labels, collapse status, and source grouping.
 
 #### models token buckets, percentages, warning thresholds, and labels
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- models token buckets, percentages, warning thresholds, and labels
 - Compute bucket percentage and warning status from max tokens
-- ContextCategory new
-- ContextCategory new
-- ContextCategory new
-- ContextCategory new
-- ContextCategory new
    - Expected: contextTokenPercentTenths(12500, 100000) equals `125`
    - Expected: contextTokenPercentText(12500, 100000) equals `12.5%`
    - Expected: contextUsageStatus(59) equals `ok`
    - Expected: contextUsageStatus(contextWarningPercent()) equals `warning`
    - Expected: contextUsageStatus(contextCriticalPercent()) equals `critical`
-   - Expected: contextStatusLine("claude-sonnet", 40000, 100000, 40) equals `"claude-sonnet · 40.0k/100.0k tokens (40%)")`
+   - Expected: contextStatusLine("claude-sonnet", 40000, 100000, 40) equals `claude-sonnet · 40.0k/100.0k tokens (40%)`
    - Expected: visibleContextCategories(categories).len() equals `1`
    - Expected: hasDeferredMcpTools(categories) is true
    - Expected: contextCategoryLabel(categories[0], 100000) equals `filled Messages: 40.0k tokens (40.0%)`
@@ -85,10 +61,12 @@ Checks context usage buckets, labels, collapse status, and source grouping.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("models token buckets, percentages, warning thresholds, and labels")
 step("Compute bucket percentage and warning status from max tokens")
 val categories = [
     ContextCategory.new("Messages", 40000, "primary", false),
@@ -125,12 +103,8 @@ expect(contextGridSymbol(ContextGridSquare.new(reservedCategoryName(), "warning"
 
 #### groups source-backed items in Claude display order with token sorting
 
+- groups source-backed items in Claude display order with token sorting
 - Project, User, Managed, Plugin, Built-in order wins over input order
-- SourceItem new
-- SourceItem new
-- SourceItem new
-- SourceItem new
-- SourceItem new
    - Expected: groups.len() equals `4`
    - Expected: groups[0].sourceDisplay equals `Project`
    - Expected: groups[1].sourceDisplay equals `User`
@@ -138,17 +112,19 @@ expect(contextGridSymbol(ContextGridSquare.new(reservedCategoryName(), "warning"
    - Expected: groups[1].items[1].name equals `user-small`
    - Expected: groups[2].sourceDisplay equals `Plugin`
    - Expected: groups[3].sourceDisplay equals `Built-in`
-   - Expected: sourceSummaryLine("Memory files", "/memory", items) equals `"Memory files · /memory · 5 sources")`
-   - Expected: renderSourceGroups(items) equals `["Project", "└ project: 20 tokens", "User", "└ user-big: 30 tokens", "└ user-... (full value in folded executable source)`
+   - Expected: sourceSummaryLine("Memory files", "/memory", items) equals `Memory files · /memory · 5 sources`
+   - Expected: renderSourceGroups(items) equals `["Project", "└ project: 20 tokens", "User", "└ user-big: 30 tokens", "└... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("groups source-backed items in Claude display order with token sorting")
 step("Project, User, Managed, Plugin, Built-in order wins over input order")
 val items = [
     SourceItem.new("z-plugin", "plugin", 10),
@@ -174,6 +150,7 @@ expect(renderSourceGroups(items)).to_equal(["Project", "└ project: 20 tokens",
 
 #### renders collapse summary, warnings, and context visualization lines
 
+- renders collapse summary, warnings, and context visualization lines
 - Collapse helper mirrors summarized, staged, error, idle, and disabled states
    - Expected: collapseStatusLine(disabled) equals ``
    - Expected: collapseStatusSummary(waiting) equals `waiting for first trigger`
@@ -181,20 +158,20 @@ expect(renderSourceGroups(items)).to_equal(["Project", "└ project: 20 tokens",
    - Expected: collapseStatusSummary(active) equals `2 spans summarized (7 msgs), 1 staged`
    - Expected: collapseStatusSummary(idle) equals `3 spawns, nothing staged yet`
    - Expected: collapseStatusWarning(idle) equals `Collapse idle: 3 consecutive empty runs`
-- ContextCategory new
-- ContextCategory new
    - Expected: rendered[0] equals `Context Usage`
-   - Expected: rendered[1] equals `"opus · 60.0k/100.0k tokens (60%)")`
+   - Expected: rendered[1] equals `opus · 60.0k/100.0k tokens (60%)`
    - Expected: contextVisualizationSourceLinesModeled() equals `488`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders collapse summary, warnings, and context visualization lines")
 step("Collapse helper mirrors summarized, staged, error, idle, and disabled states")
 val disabled = CollapseStatusInput.disabled()
 expect(collapseStatusLine(disabled)).to_equal("")
@@ -239,3 +216,54 @@ expect(contextVisualizationSourceLinesModeled()).to_equal(488)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `48852714d96cc4e92f3298a08c744b22a08eb63223602d3eb6827ea461fd473f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `48852714d96cc4e92f3298a08c744b22a08eb63223602d3eb6827ea461fd473f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `48852714d96cc4e92f3298a08c744b22a08eb63223602d3eb6827ea461fd473f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/tools/llm/claude_full/components/context_visualization_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/claude_full/components/context_visualization_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/claude_full/components/context_visualization_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/claude_full/components/context_visualization_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/claude_full/components/context_visualization_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/claude_full/components/context_visualization_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'models token buckets, percentages, warning thresholds, and labels' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/context_visualization_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'groups source-backed items in Claude display order with token sorting' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/context_visualization_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders collapse summary, warnings, and context visualization lines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,142 +1,311 @@
-# Direct CUDA ProcessingIR Fill Contract
+# Processing Cuda Fill Native Contract Specification
 
-## Purpose
+> Tests covering direct CUDA ProcessingIR native evidence contract.
 
-Prove that `processing_ir_execute_cuda` executes the shared
-`FillU32(0x01020304)` fixture on a CUDA device without CPU fallback. The
-default parity mode uses 64 elements; large mode uses the calibrated
-1,048,576-element policy threshold. Warm mode executes that threshold twice
-through one retained `CudaSession`.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
 
-## Run
+<details>
+<summary>Full Scenario Manual</summary>
 
-Build `src/app/test/processing_cuda_fill_probe.spl` incrementally against the
-CUDA-enabled runtime. Keep all three source roots: omitting `src/compiler`
-widens resolution to `src` and can load duplicate `std.*` aliases.
+# Processing Cuda Fill Native Contract Specification
 
-```sh
-bin/simple native-build \
-  --source src/compiler --source src/app --source src/lib \
-  --entry-closure --entry src/app/test/processing_cuda_fill_probe.spl \
-  --strip \
-  --output build/simpleos_gpu_host/cuda_fill_native/processing_cuda_fill_probe
+## Scenarios
+
+### direct CUDA ProcessingIR native evidence contract
+
+#### requires the exact shared 64-element fill fixture
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- requires the exact shared 64-element fill fixture
+   - Expected: file_exists(PROBE) is true
+   - Expected: indexed_access_present is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires the exact shared 64-element fill fixture")
+val source = file_read(PROBE)
+expect(file_exists(PROBE)).to_equal(true)
+expect(source).to_contain("processing_ir_execute_cuda_with_executor(")
+expect(source).to_contain("val count: i64 = if large or warm: 1048576 else: 64")
+expect(source).to_contain("expected_checksum: u64 = if large or warm: 17730434498560 else: 1082179840")
+expect(source).to_contain("checksum == expected_checksum and mismatches == 0")
+expect(source).to_contain("for actual in result.values:")
+expect(source).to_contain("checksum = checksum + actual.to_u64()")
+# indexed element access is forbidden: the checksum must fold the whole result
+val indexed_access_present = source.contains("result.values[index]")
+expect(indexed_access_present).to_equal(false)
 ```
 
-Then run:
+</details>
 
-```sh
-sh scripts/check/check-processing-cuda-fill-native.shs
+#### keeps the policy-threshold workload on the same direct executor
+
+- keeps the policy-threshold workload on the same direct executor
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the policy-threshold workload on the same direct executor")
+val source = file_read(PROBE)
+val wrapper = file_read(WRAPPER)
+expect(source).to_contain("((large or warm or recover) and args.len() != 2)")
+expect(source).to_contain("if started_nanos <= 0: return 0")
+expect(source).to_contain("val elapsed_us = _elapsed_us(started)")
+expect(source).to_contain("elapsed_us > 0")
+expect(wrapper).to_contain("large) PROBE_ARG=--large; COUNT=1048576; CHECKSUM=17730434498560")
+expect(wrapper).to_contain("warm) PROBE_ARG=--warm; COUNT=1048576; CHECKSUM=17730434498560")
+expect(wrapper).to_contain("mode=$MODE completed=true count=$COUNT")
+expect(wrapper).to_contain("elapsed_us=[1-9][0-9]*")
+expect(wrapper).to_contain("warm_improved=true")
 ```
 
-Run the threshold workload against the same candidate:
+</details>
 
-```sh
-PROCESSING_CUDA_FILL_MODE=large \
-  sh scripts/check/check-processing-cuda-fill-native.shs
+#### requires same-session recovery after deterministic CUDA failures
+
+- requires same-session recovery after deterministic CUDA failures
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires same-session recovery after deterministic CUDA failures")
+val source = file_read(PROBE)
+val wrapper = file_read(WRAPPER)
+expect(source).to_contain("val recover_readback = args.contains(\"--recover=readback\")")
+expect(source).to_contain("val recover_submit = args.contains(\"--recover=submit\")")
+expect(source).to_contain("val recover_mismatch = args.contains(\"--recover=mismatch\")")
+expect(source).to_contain("\"submit\", \"cuda:submit\", \"cuda-submit-failed\"")
+expect(source).to_contain("\"mismatch\", \"cuda:mismatch\", \"checksum-mismatch\"")
+expect(source).to_contain("\"readback\", \"cuda:readback\", \"cuda-readback-failed\"")
+expect(source).to_contain("failed.reason == expected_reason and failed.values.len() == 0")
+expect(source).to_contain("recovered.device_identity == before.device_identity")
+expect(source).to_contain("recovered.backend_handle == before.backend_handle")
+expect(source).to_contain("executor.shutdown()")
+expect(wrapper).to_contain("recovery) RECOVERY_PHASE=readback; RECOVERY_REASON=cuda-readback-failed")
+expect(wrapper).to_contain("RECOVERY_PHASE=\nRECOVERY_REASON=")
+expect(wrapper).to_contain("recovery-submit) RECOVERY_PHASE=submit; RECOVERY_REASON=cuda-submit-failed")
+expect(wrapper).to_contain("recovery-mismatch) RECOVERY_PHASE=mismatch; RECOVERY_REASON=checksum-mismatch")
+expect(wrapper).to_contain("PROCESSING_CUDA_RECOVERY status=pass phase=$RECOVERY_PHASE")
+expect(wrapper).to_contain(
+    "receipt_count=$(printf '%s\\n' \"$output\" | grep -Ec '^PROCESSING_CUDA_RECOVERY ' || true)")
+expect(wrapper).to_contain(
+    "if [ \"$receipt_count\" -ne 1 ] || [ \"$valid\" -ne 1 ]; then")
+expect(wrapper).to_contain("failed_reason=$RECOVERY_REASON failed_count=0 failed_handle=0 failed_identity=0")
+expect(wrapper).to_contain("recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
+expect(wrapper).to_contain("identity_stable=true cpu_fallback=false")
 ```
 
-Run the retained-session timing check:
+</details>
 
-```sh
-PROCESSING_CUDA_FILL_MODE=warm \
-  sh scripts/check/check-processing-cuda-fill-native.shs
+#### reuses one CUDA session for the measured warm request
+
+- reuses one CUDA session for the measured warm request
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("reuses one CUDA session for the measured warm request")
+val source = file_read(PROBE)
+val executor = file_read(EXECUTOR)
+val platform = file_read(PLATFORM)
+val platform_contract = file_read(PLATFORM_CONTRACT)
+val daemon = file_read(DAEMON)
+val entry = file_read(ENTRY)
+expect(source).to_contain("var executor = ProcessingCudaExecutor.create()")
+expect(source).to_contain("val cold = processing_ir_execute_cuda_with_executor(")
+expect(source).to_contain(
+    "cold_reason=" + "{" + "cold.reason} cold_count=" + "{" + "cold.values.len()}")
+expect(source).to_contain("val result = processing_ir_execute_cuda_with_executor(")
+expect(source).to_contain("executor.shutdown()")
+expect(executor).to_contain("if self.session.module_cache > 0:")
+expect(executor).to_contain("self.buffer_capacity >= byte_count")
+expect(executor).to_contain("self.device_buffer = replacement_device")
+expect(executor).to_contain("self.host_buffer = replacement_host")
+expect(executor).to_contain("executor.session.launch_kernel_args(")
+expect(executor).to_contain("self.session.shutdown()")
+expect(executor).to_contain("reason: \"cuda-readback-size-mismatch\"")
+expect(executor).to_contain("return \"cuda-executor-closed\"")
+expect(executor).to_contain("self.session.activate()")
+expect(executor).to_contain("if not dispatch_ok:\n        executor._release_buffers()\n        executor.session.shutdown()")
+expect(executor).to_contain("if not copied:\n        executor._release_buffers()\n        executor.session.shutdown()")
+expect(source).to_contain("val warm_improved = not warm or elapsed_us < cold_us")
+expect(source).to_contain("cold_checksum == expected_checksum and cold_mismatches == 0")
+expect(source).to_contain("result.device_identity == cold_identity")
+expect(platform).to_contain("cuda_executor: ProcessingCudaExecutor")
+expect(platform).to_contain("_execute_processing(self.cuda_executor, ir, backend)")
+expect(platform_contract).to_contain("fn shutdown()")
+expect(daemon).to_contain("platform.shutdown()")
+expect(entry).to_contain("SimpleOsGpuHostAllPlatform.create()")
 ```
 
-Run same-process readback-failure recovery:
+</details>
 
-```sh
-PROCESSING_CUDA_FILL_MODE=recovery \
-  sh scripts/check/check-processing-cuda-fill-native.shs
+#### requires device provenance and rejects fallback
+
+- requires device provenance and rejects fallback
+   - Expected: executor does not contain `values.push(raw_read_i32`
+   - Expected: executor does not contain `processing_ir_execute_cpu`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires device provenance and rejects fallback")
+val source = file_read(PROBE)
+val wrapper = file_read(WRAPPER)
+val executor = file_read(EXECUTOR)
+expect(source).to_contain("result.backend_handle > 0 and result.device_identity > 0")
+expect(executor).to_contain("cuda_memcpy_dtoh(")
+expect(executor).to_contain("raw_read_u32s(host_ptr, ir.element_count)")
+expect(executor.contains("values.push(raw_read_i32")).to_equal(false)
+expect(executor.contains("processing_ir_execute_cpu")).to_equal(false)
+expect(wrapper).to_contain("backend=cuda readback_source=device_readback")
+expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
+expect(wrapper).to_contain(
+    "before_count=64 before_checksum=1082179840 before_exact=true")
+expect(wrapper).to_contain(
+    "recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
+expect(wrapper).to_contain("cpu_fallback=false")
+expect(wrapper).to_contain("timeout -k 5 \"$TIMEOUT_SECONDS\"")
+expect(wrapper).to_contain("probe_rc=$?")
+expect(wrapper).to_contain("exit \"$probe_rc\"")
+expect(wrapper).to_contain("processing_cuda_fill_native_reason=probe-failed")
+expect(wrapper).to_contain("processing_cuda_fill_native_reason=invalid-receipt")
 ```
 
-Run same-process submit-failure recovery:
+</details>
 
-```sh
-PROCESSING_CUDA_FILL_MODE=recovery-submit \
-  sh scripts/check/check-processing-cuda-fill-native.shs
+#### uses length-tracked native PTX and kernel-name ABIs
+
+- uses length-tracked native PTX and kernel-name ABIs
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses length-tracked native PTX and kernel-name ABIs")
+val source = file_read(CUDA)
+expect(source).to_contain("if rt_is_interpreter_runtime()")
+expect(source).to_contain("fn cuda_ctx_set_current(ctx: i64) -> i64:")
+expect(source).to_contain("rt_cuda_module_load_data_array(bytes)")
+expect(source).to_contain("rt_cuda_launch_kernel_name_array(")
+expect(source).to_contain("module, name_bytes,")
 ```
 
-Run same-process checksum-mismatch recovery:
+</details>
 
-```sh
-PROCESSING_CUDA_FILL_MODE=recovery-mismatch \
-  sh scripts/check/check-processing-cuda-fill-native.shs
-```
+## At a Glance
 
-The recovery mode names and typed failure reasons are:
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-| Mode | Injected phase | Required failure reason |
-| --- | --- | --- |
-| `recovery` | `readback` | `cuda-readback-failed` |
-| `recovery-submit` | `submit` | `cuda-submit-failed` |
-| `recovery-mismatch` | `mismatch` | `checksum-mismatch` |
+## Overview
 
-Each mode is a single-process sequence: an exact baseline call, one injected
-failure with empty output and zero provenance, then an exact recovery call on
-the same executor. The recovery call must preserve the positive backend handle
-and device identity from the baseline.
+Tests covering direct CUDA ProcessingIR native evidence contract.
+- direct CUDA ProcessingIR native evidence contract
 
-## Checks
+## Scenario Summary
 
-1. Every returned value exactly matches `0x01020304`.
-2. Expected and actual checksums equal `1082179840` in parity mode or
-   `17730434498560` in large mode.
-3. Mismatch count is zero.
-4. Device handle and identity are positive.
-5. End-to-end executor time is positive.
-6. The receipt names CUDA device readback and rejects CPU fallback.
-7. Readback materialization uses the runtime-owned bulk
-   `rt_u32s_from_raw` conversion, not a per-element `push` loop.
-8. Warm mode requires the second exact device request to complete faster than
-   the cold request through the same executor.
-9. `recovery` requires exact baseline output, a post-sync `cuda-readback-failed`
-   result with empty output and zero provenance, then exact output with the
-   same positive handle and device identity.
-10. `recovery-submit` requires the typed `cuda-submit-failed` result with empty
-    output and zero provenance, then exact output with the same positive handle
-    and device identity.
-11. `recovery-mismatch` requires the typed `checksum-mismatch` result with
-    empty output and zero provenance, then exact output with the same positive
-    handle and device identity.
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Current Evidence
 
-The retained native candidate passes both modes with exact checksums, zero
-mismatches, positive handle/identity, device readback, and no CPU fallback.
-The 1,048,576-element run improved from `1044501 us` with per-element
-materialization to `593323 us` with the canonical bulk converter. The retained
-session run completed cold in `861499 us` and warm in `69331 us`, a 12.4x
-improvement, with exact values and unchanged device provenance. Those timings
-precede the subsequent retained-context activation repair; its two-context
-runtime test passes, but the capped Simple probe was not rebuilt a fourth time.
-Correlated daemon-wire and multi-sample evidence remain open.
+</details>
 
-The 2026-07-28 recovery candidate
-`10323c8438ed987a2610793aa6af680933ae20e933ce0f3c11fcdbc281259519`
-passes baseline/failure/recovery in one process. Baseline and recovery each
-return 64 exact values with checksum `1082179840`, handle `1`, and device
-identity `1002905313239842438`; the injected synchronized readback failure
-returns `cuda-readback-failed`, zero values, zero handle, and zero identity.
-The same candidate also passes ordinary parity mode.
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-The `recovery-submit` and `recovery-mismatch` modes are documented contract
-coverage for the corresponding typed fault paths. No execution evidence for
-those modes is recorded in this manual yet; they have not been run for this
-spec update.
+Requirements covered by the scenarios in this manual:
 
-The 2026-07-31 source-matched rebuild did not replace the candidate. It reached
-whole-closure MIR validation, then failed first on unresolved `Infer` type
-transport and accumulated unrelated session/dynamic-loader diagnostics. The
-focused `cuda_fill_u32.spl` source check passes, so TODO 651 owns explicit-entry
-closure isolation before another build. Its CLI transport/driver-seed fix and
-focused contracts are complete, but a source-matched candidate has not been rebuilt.
-The executable at the documented path remains the July 28 hash above and is
-not admissible for submit/mismatch proof.
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
 
-The first 2026-07-31 bootstrap-source attempt exited before probe compilation
-with unsupported `rt_native_build` and a seed-interpreter `env_get` name
-collision during restoration. Explicit nil guards removed the restoration
-error: the 36-second rerun ends only at the unsupported interpreter intrinsic.
-Neither run is CUDA execution evidence, and neither replaced the candidate.
-Logs are retained as `build/simpleos_gpu_host/cuda_fill_native/`
-`build-after-entry-closure-{fix,env-guard}.log`.
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7c031de3e55518780b2f4d61a2bc251e5ae932eec196658aa74a0d26414ef419`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7c031de3e55518780b2f4d61a2bc251e5ae932eec196658aa74a0d26414ef419`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7c031de3e55518780b2f4d61a2bc251e5ae932eec196658aa74a0d26414ef419`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.spl
+mirror: doc/06_spec/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires the exact shared 64-element fill fixture' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the policy-threshold workload on the same direct executor' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires same-session recovery after deterministic CUDA failures' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

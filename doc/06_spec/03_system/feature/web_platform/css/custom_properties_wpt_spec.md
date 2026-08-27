@@ -20,7 +20,7 @@ Exercises missing, cyclic, malformed, deep, and shared `var()` graphs through
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Exercises missing, cyclic, malformed, deep, and shared `var()` graphs through
@@ -33,35 +33,21 @@ Resolution depth is capped at 32 and use-site fallbacks remain authoritative.
 
 #### should type every direct store failure and enforce 1024 substitutions
 
-- store set property
-- store set property
-- store set property
-- store set property
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- v: "var
-- fail
+- should type every direct store failure and enforce 1024 substitutions
 - Use consumer fallbacks without caching failed graph tails
 - Keep former sentinel spellings as ordinary author text
 - Admit substitution 1024 and invalidate substitution 1025
-- v: "var
-- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 132 lines folded for reproduction.
+Runnable source: 134 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should type every direct store failure and enforce 1024 substitutions")
 val logger = Logger.new(
     "custom-property-cycle2", BrowserLogLevel.Error
 )
@@ -200,29 +186,7 @@ expect(_custom_property_value_text(
 
 #### should use use-site fallbacks for missing cyclic and malformed graphs
 
-- "--brand:var
-   - Artifact capture: after_step
-- "--self:var
-   - Artifact capture: after_step
-- "--left:var
-   - Artifact capture: after_step
-- "--invalid:var
-   - Artifact capture: after_step
-- "#brand{background:var
-   - Artifact capture: after_step
-- "#self{background:var
-   - Artifact capture: after_step
-- "#mutual{background:var
-   - Artifact capture: after_step
-- "#invalid{background:var
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes by len
-   - Artifact capture: after_step
-- fail
+- should use use-site fallbacks for missing cyclic and malformed graphs
    - Artifact capture: after_step
 - Collect standalone root after preamble and reject suffix root
    - Artifact capture: after_step
@@ -230,13 +194,7 @@ expect(_custom_property_value_text(
    - Expected: inspected.hit_index.boxes.by[invalid_node] equals `24`
 - Lower graph winners through canonical Draw IR
    - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read identical exact pixels through both production paths
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -247,10 +205,12 @@ expect(_custom_property_value_text(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 129 lines folded for reproduction.
+Runnable source: 131 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should use use-site fallbacks for missing cyclic and malformed graphs")
 var html = (
     "<style>html,body{margin:0;background:#fff}" +
     "/* standalone root preamble */\n@layer theme;\n" +
@@ -259,7 +219,7 @@ var html = (
     "--self:var(--self);" +
     "--left:var(--right);--right:var(--left);" +
     "--invalid:var(color)}" +
-    ".not-root:root{--brand:#9333ea}" +
+    ".not-root:root{{--brand:#9333ea}}" +
     "div{width:12px;height:8px}" +
     "#brand{background:var(--brand)}" +
     "#self{background:var(--self,#9333ea)}" +
@@ -386,21 +346,7 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 #### should bound deep graphs and memoize repeated shared branches
 
-- "#limit{background:var
-   - Artifact capture: after_step
-- "#over{background:var
-   - Artifact capture: after_step
-- "#branch{background:var
-   - Artifact capture: after_step
-- branch index to text
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- node index >= inspected hit index styles len
-   - Artifact capture: after_step
-- node index >= inspected hit index boxes by len
-   - Artifact capture: after_step
-- fail
+- should bound deep graphs and memoize repeated shared branches
    - Artifact capture: after_step
 - Resolve the exact depth boundary and shared branch graph
    - Artifact capture: after_step
@@ -408,13 +354,7 @@ expect(compatibility_pixels).to_equal(engine_pixels)
    - Expected: inspected.hit_index.boxes.by[branch_node] equals `16`
 - Preserve bounded winners in canonical Draw IR
    - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
-- fail
-   - Artifact capture: after_step
 - Read exact bounded pixels through both renderers
-   - Artifact capture: after_step
-- raster shutdown
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: rendered.skipped_command_count equals `0`
@@ -425,10 +365,12 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 111 lines folded for reproduction.
+Runnable source: 113 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should bound deep graphs and memoize repeated shared branches")
 val pass_chain = _custom_property_chain("p", 32, "#16a34a")
 val fail_chain = _custom_property_chain("q", 33, "#dc2626")
 val shared_chain = _custom_property_chain(
@@ -556,3 +498,70 @@ expect(compatibility_pixels).to_equal(engine_pixels)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c7d0d4a17bca5bdffc60a061f0d33463713fce9cd41c8b91480af028440c8848`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c7d0d4a17bca5bdffc60a061f0d33463713fce9cd41c8b91480af028440c8848`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c7d0d4a17bca5bdffc60a061f0d33463713fce9cd41c8b91480af028440c8848`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/custom_properties_wpt_spec.md (current)
+findings: 10 blockers: 1
+  narrative=100 structure=85 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=78; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/custom_properties_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/custom_properties_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:116:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should type every direct store failure and enforce 1024 substitutions' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should type every direct store failure and enforce 1024 substitutions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:255:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should use use-site fallbacks for missing cyclic and malformed graphs' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:255:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should use use-site fallbacks for missing cyclic and malformed graphs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:391:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should bound deep graphs and memoize repeated shared branches' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/custom_properties_wpt_spec.spl:391:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should bound deep graphs and memoize repeated shared branches' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

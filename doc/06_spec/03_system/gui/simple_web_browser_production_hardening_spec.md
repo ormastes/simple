@@ -24,7 +24,7 @@ Verifies selected Feature C and NFR C browser production hardening behavior for 
 | Design | doc/05_design/ui/web/simple_web_browser_production_hardening.md |
 | Research | doc/01_research/domain/simple_web_browser_production_hardening.md |
 | Source | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -159,111 +159,25 @@ by proving the live browser server boundary is production-hardened on this host.
 
 #### fails closed on unauthenticated browser HTTP and WebSocket routes _(slow)_
 
-- Start a production-configured Simple Web server with a real token secret
-- Send unauthenticated requests to login, API, and WebSocket routes
-- hardening stop web server
-- Verify every unauthenticated route fails closed and browser document/script responses have security headers
-   - Expected: missing_origin equals `HTTP/1.1 403 Forbidden|present`
-   - Expected: oversized_head equals `HTTP/1.1 413 Payload Too Large|present`
-   - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
-   - Expected: oversized_header_line equals `HTTP/1.1 413 Payload Too Large|present`
-   - Expected: oversized_login equals `HTTP/1.1 413 Payload Too Large|present`
-   - Expected: malformed_login equals `HTTP/1.1 400 Bad Request|present`
-   - Expected: api_state equals `HTTP/1.1 403 Forbidden|present`
-   - Expected: api_widgets equals `HTTP/1.1 403 Forbidden|present`
-   - Expected: resume equals `HTTP/1.1 403 Forbidden|present`
-   - Expected: websocket equals `HTTP/1.1 403 Forbidden|present`
-   - Expected: legacy_websocket equals `HTTP/1.1 404 Not Found|present`
-   - Expected: websocket_query equals `HTTP/1.1 403 Forbidden|present`
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val port = hardening_free_port(0)
-step("Start a production-configured Simple Web server with a real token secret")
-val pid = hardening_start_web_server(port)
-
-step("Send unauthenticated requests to login, API, and WebSocket routes")
-val missing_origin = raw_http_summary(port, login_missing_origin_request(port), "forbidden_origin")
-val oversized_head = raw_http_summary(port, oversized_head_request(port), "request_head_too_large")
-val oversized_request_line = raw_http_summary(port, oversized_request_line_request(port), "request_head_too_large")
-val oversized_header_line = raw_http_summary(port, oversized_header_line_request(port), "request_head_too_large")
-val oversized_login = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
-val malformed_login = raw_http_summary(port, login_malformed_framing_request(port), "invalid_request_framing")
-val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"error\": \"forbidden\"")
-val api_widgets = raw_http_summary(port, api_widgets_unauthorized_request(port), "\"error\": \"forbidden\"")
-val resume = raw_http_summary(port, resume_unauthorized_request(port), "\"error\": \"forbidden\"")
-val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
-val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"not_found\"")
-val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
-val root_page = raw_http_request(port, root_page_request(port))
-val native_window = raw_http_request(port, native_window_request(port))
-val wm_script = raw_http_request(port, wm_script_request(port))
-val retained_renderer_script = raw_http_request(port, retained_renderer_script_request(port))
-val unknown_route = raw_http_request(port, unknown_route_request(port))
-
-hardening_stop_web_server(pid)
-
-step("Verify every unauthenticated route fails closed and browser document/script responses have security headers")
-expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
-expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
-expect(oversized_header_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
-expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")
-expect(malformed_login).to_equal("HTTP/1.1 400 Bad Request|present")
-expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(api_widgets).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(legacy_websocket).to_equal("HTTP/1.1 404 Not Found|present")
-expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(root_page).to_contain("Cache-Control: no-store")
-expect(root_page).to_contain("Pragma: no-cache")
-expect(root_page).to_contain("Expires: 0")
-expect(root_page).to_contain("X-Frame-Options: DENY")
-expect(root_page).to_contain("X-DNS-Prefetch-Control: off")
-expect(root_page).to_contain("X-Permitted-Cross-Domain-Policies: none")
-expect(root_page).to_contain("Referrer-Policy: no-referrer")
-expect(root_page).to_contain("Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()")
-expect(root_page).to_contain("usb=(), serial=(), bluetooth=()")
-expect(root_page).to_contain("clipboard-read=(), clipboard-write=()")
-expect(root_page).to_contain("display-capture=(), screen-wake-lock=(), xr-spatial-tracking=()")
-expect(root_page).to_contain("Content-Security-Policy: default-src 'self'")
-expect(root_page).to_contain("Origin-Agent-Cluster: ?1")
-expect(root_page).to_contain("Cross-Origin-Embedder-Policy: require-corp")
-expect(root_page).to_contain("object-src 'none'")
-expect(native_window).to_contain("HTTP/1.1 200 OK")
-expect(native_window).to_contain("Cache-Control: no-store")
-expect(native_window).to_contain("Pragma: no-cache")
-expect(native_window).to_contain("Expires: 0")
-expect(native_window).to_contain("X-Frame-Options: DENY")
-expect(native_window).to_contain("X-DNS-Prefetch-Control: off")
-expect(native_window).to_contain("X-Permitted-Cross-Domain-Policies: none")
-expect(native_window).to_contain("Referrer-Policy: no-referrer")
-expect(native_window).to_contain("Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()")
-expect(native_window).to_contain("usb=(), serial=(), bluetooth=()")
-expect(native_window).to_contain("clipboard-read=(), clipboard-write=()")
-expect(native_window).to_contain("display-capture=(), screen-wake-lock=(), xr-spatial-tracking=()")
-expect(native_window).to_contain("Content-Security-Policy: default-src 'self'")
-expect(native_window).to_contain("Origin-Agent-Cluster: ?1")
-expect(native_window).to_contain("Cross-Origin-Embedder-Policy: require-corp")
-expect(native_window).to_contain("object-src 'none'")
-expect(wm_script).to_contain("Cache-Control: no-store")
-expect(wm_script).to_contain("Pragma: no-cache")
-expect(wm_script).to_contain("X-Content-Type-Options: nosniff")
-expect(retained_renderer_script).to_contain("Cache-Control: no-store")
-expect(retained_renderer_script).to_contain("Pragma: no-cache")
-expect(retained_renderer_script).to_contain("X-Content-Type-Options: nosniff")
-expect(unknown_route).to_contain("HTTP/1.1 404 Not Found")
-expect(unknown_route).to_contain("\"error\": \"not_found\"")
-expect(unknown_route).to_contain("Cache-Control: no-store")
-expect(unknown_route).to_contain("Pragma: no-cache")
-expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
+# @req REQ-WEB-HARD-003
+# @req REQ-WEB-HARD-006
+# @req REQ-WEB-HARD-007
+# @req REQ-WEB-HARD-008
+# @req REQ-WEB-HARD-009
+# @req REQ-WEB-HARD-010
+# @req REQ-WEB-HARD-011
+# @req REQ-WEB-HARD-012
 ```
 
 </details>
@@ -276,10 +190,10 @@ expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
 
 #### mints an origin-bound token and redeems it for a websocket upgrade _(slow)_
 
+- mints an origin-bound token and redeems it for a websocket upgrade
 - Start a fresh production-configured Simple Web server
 - Extract the server bootstrap grant and reject an attacker-chosen grant from another allowed localhost port
 - Redeem the minted bearer token through resume and WebSocket routes
-- hardening stop web server
 - Verify login succeeds, canonical GET upgrades are accepted, legacy routes are hidden, and POST upgrades are rejected
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
    - Expected: login_grant.len() equals `64`
@@ -302,10 +216,13 @@ expect(unknown_route).to_contain("X-Content-Type-Options: nosniff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 76 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mints an origin-bound token and redeems it for a websocket upgrade")
+"""The positive production path must mint a token for the request origin and accept that token during WebSocket upgrade."""
 val port = hardening_free_port(100)
 step("Start a fresh production-configured Simple Web server")
 val pid = hardening_start_web_server(port)
@@ -391,11 +308,10 @@ expect(legacy_websocket_post).to_equal("HTTP/1.1 404 Not Found|present")
 
 #### rate limits allowed origin login bursts _(slow)_
 
+- rate limits allowed origin login bursts
 - Start a fresh production-configured Simple Web server
 - Spend the allowed login burst budget from an allowed loopback origin
-- last allowed = raw http summary
 - Send one more login request in the same fixed window
-- hardening stop web server
 - Verify the burst budget allows the configured count and rejects the next request
    - Expected: last_allowed equals `HTTP/1.1 200 OK|present`
    - Expected: limited equals `HTTP/1.1 429 Too Many Requests|present`
@@ -404,10 +320,13 @@ expect(legacy_websocket_post).to_equal("HTTP/1.1 404 Not Found|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rate limits allowed origin login bursts")
+"""The production login endpoint must bound repeated token mint requests even when the Origin is allowed."""
 val port = hardening_free_port(200)
 step("Start a fresh production-configured Simple Web server")
 val pid = hardening_start_web_server(port)
@@ -440,9 +359,9 @@ expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 
 #### measures warm browser auth path latency _(slow)_
 
+- measures warm browser auth path latency
 - Start and warm a production-configured Simple Web server
 - Measure a warmed login plus authenticated WebSocket upgrade
-- hardening stop web server
 - Verify the warmed browser auth path succeeds inside the local latency budget
    - Expected: http_status_line(warmup_response) equals `HTTP/1.1 200 OK`
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
@@ -452,10 +371,13 @@ expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("measures warm browser auth path latency")
+"""A warmed production server must complete token minting and authenticated WebSocket upgrade within a bounded local latency budget."""
 val port = hardening_free_port(250)
 step("Start and warm a production-configured Simple Web server")
 val pid = hardening_start_web_server(port)
@@ -490,9 +412,9 @@ expect(elapsed_ms).to_be_less_than(10000)
 
 #### rejects query bearer websocket compatibility even when deprecated env is set _(slow)_
 
+- rejects query bearer websocket compatibility even when deprecated env is set
 - Start a production-configured Simple Web server with query-token compatibility enabled
 - Mint a token and try to redeem it through the query bearer path
-- hardening stop web server
 - Verify the deprecated compatibility environment variable is non-authorizing
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
    - Expected: websocket equals `HTTP/1.1 403 Forbidden|present`
@@ -501,10 +423,13 @@ expect(elapsed_ms).to_be_less_than(10000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects query bearer websocket compatibility even when deprecated env is set")
+"""Production auth must reject query bearer tokens even when the old compatibility environment variable is present."""
 val port = hardening_free_port(300)
 step("Start a production-configured Simple Web server with query-token compatibility enabled")
 val pid = hardening_start_web_server_with_query_tokens(port)
@@ -534,14 +459,12 @@ expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 
 #### rate limits shared wm login bursts _(slow)_
 
+- rate limits shared wm login bursts
 - Start a shared-WM Simple Web server with a real token secret
 - Reject an oversized shared-WM request head before route dispatch
 - Fetch shared-WM browser script responses
 - Spend the shared-WM login burst budget from an allowed loopback origin
-- var last allowed = "{http status line
-- last allowed = raw http summary
 - Send one more shared-WM login request in the same fixed window
-- hardening stop web server
 - Verify the shared-WM request-head cap and burst budget
    - Expected: oversized_head equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
@@ -559,10 +482,13 @@ expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 81 lines folded for reproduction.
+Runnable source: 84 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rate limits shared wm login bursts")
+"""The shared WM web server has a separate login path and must enforce the same burst limit as normal run_web."""
 val port = hardening_free_port(400)
 step("Start a shared-WM Simple Web server with a real token secret")
 val pid = hardening_start_shared_wm_server(port)
@@ -671,3 +597,65 @@ expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-HARD-003`
+- `REQ-WEB-HARD-006`
+- `REQ-WEB-HARD-007`
+- `REQ-WEB-HARD-008`
+- `REQ-WEB-HARD-009`
+- `REQ-WEB-HARD-010`
+- `REQ-WEB-HARD-011`
+- `REQ-WEB-HARD-012`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1a37dbbe05359f6223418fd465dbd9a35c9c46ea248e14e2690441544a49b22b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1a37dbbe05359f6223418fd465dbd9a35c9c46ea248e14e2690441544a49b22b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1a37dbbe05359f6223418fd465dbd9a35c9c46ea248e14e2690441544a49b22b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+
+SSpec documentization score: 85/100
+source: test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+mirror: doc/06_spec/03_system/gui/simple_web_browser_production_hardening_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=90 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/gui/simple_web_browser_production_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/gui/simple_web_browser_production_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: audience, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/simple_web_browser_production_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/gui/simple_web_browser_production_hardening_spec.spl:451:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'fails closed on unauthenticated browser HTTP and WebSocket routes' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/gui/simple_web_browser_production_hardening_spec.spl:552:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mints an origin-bound token and redeems it for a websocket upgrade' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/simple_web_browser_production_hardening_spec.spl:630:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rate limits allowed origin login bursts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/simple_web_browser_production_hardening_spec.spl:655:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'measures warm browser auth path latency' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

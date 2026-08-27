@@ -20,7 +20,7 @@ Proves that admitted comparison-page CSS crosses the existing web
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves that admitted comparison-page CSS crosses the existing web
@@ -34,74 +34,28 @@ rows; this specification does not claim full CSS effects or transforms.
 
 #### should lower generated pseudo content through web layout and Draw IR
 
-- Resolve generated content in canonical web semantic and layout state
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
-- identify missing features
-   - Artifact capture: after_step
-- "pseudo-elements
-   - Artifact capture: after_step
-- Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: _draw_ir_style_value(card, "display") equals `block`
-- Read exact generated-content pixels through Engine2D
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: _pixel_count(pixels, 0xFF2563EBu32) equals `64`
+**Scenario capture:** artifact after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = (
-    "<style>html,body{margin:0}.card{width:16px;height:8px;" +
-    "font-size:8px;color:#2563eb}.card::before{content:'A'}" +
-    ".card::after{content:'B'}</style><div id='card' " +
-    "class='card'></div>"
-)
-
-step("Resolve generated content in canonical web semantic and layout state")
-_expect_web_layout(html, "card", 0, 0, 16, 8)
-expect(_contains(
-    identify_missing_features(html),
-    "pseudo-elements (::before/::after)"
-)).to_be(false)
-
-step("Render HTML and CSS through canonical Draw IR")
-val composition = _glass_composition(html)
-val card = _expect_draw_ir_rect(
-    composition, "card", 0, 0, 16, 8
-)
-expect(_draw_ir_style_value(card, "display")).to_equal("block")
-
-step("Read exact generated-content pixels through Engine2D")
-val pixels = _glass_pixels(html, composition)
-expect(_pixel_count(pixels, 0xFF2563EBu32)).to_equal(64)
+# @req REQ-WEB-BROWSER-003/004
 ```
 
 </details>
 
 #### should preserve the explicit backdrop sampling fallback
 
-- "background:rgba
-   - Artifact capture: after_step
-- "blur
+- should preserve the explicit backdrop sampling fallback
    - Artifact capture: after_step
 - Resolve the solid fallback in canonical web semantic and layout state
    - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
-- "blur
-   - Artifact capture: after_step
-- identify missing features
    - Artifact capture: after_step
 - Read the exact solid fallback pixel through Engine2D
    - Artifact capture: after_step
@@ -112,12 +66,14 @@ expect(_pixel_count(pixels, 0xFF2563EBu32)).to_equal(64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve the explicit backdrop sampling fallback")
 val html = (
-    "<style>html,body{margin:0}:root{--glass-blur:12px;" +
+    "<style>html,body{{margin:0}}:root{--glass-blur:12px;" +
     "--glass-saturation:145%}#panel{width:16px;height:8px;" +
     "background:rgba(31,31,33,0.80);backdrop-filter:" +
     "blur(var(--glass-blur)) saturate(var(--glass-saturation));" +
@@ -182,11 +138,9 @@ expect(pixels[2 + 2 * WIDTH]).to_equal(0xFF1F1F21u32)
 
 #### should lower admitted multi-layer shadows through canonical owners
 
+- should lower admitted multi-layer shadows through canonical owners
+   - Artifact capture: after_step
 - Resolve the shadow box in canonical web semantic and layout state
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
-- identify missing features
    - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
    - Artifact capture: after_step
@@ -201,12 +155,14 @@ expect(pixels[2 + 2 * WIDTH]).to_equal(0xFF1F1F21u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should lower admitted multi-layer shadows through canonical owners")
 val html = (
-    "<style>html,body{margin:0}#panel{width:8px;height:6px;" +
+    "<style>html,body{{margin:0}}#panel{width:8px;height:6px;" +
     "background:#fff;box-shadow:4px 0 0 #dc2626," +
     "0 4px 0 #2563eb}</style><div id='panel'></div>"
 )
@@ -240,13 +196,9 @@ expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
 
 #### should lower an admitted linear gradient through canonical owners
 
-- "background:linear-gradient
+- should lower an admitted linear gradient through canonical owners
    - Artifact capture: after_step
 - Resolve gradient stops in canonical web semantic and layout state
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
-- identify missing features
    - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
    - Artifact capture: after_step
@@ -260,12 +212,14 @@ expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should lower an admitted linear gradient through canonical owners")
 val html = (
-    "<style>html,body{margin:0}#panel{width:8px;height:6px;" +
+    "<style>html,body{{margin:0}}#panel{width:8px;height:6px;" +
     "background:linear-gradient(180deg,#dc2626,#2563eb)}" +
     "</style><div id='panel'></div>"
 )
@@ -295,19 +249,9 @@ expect(pixels[1 + 5 * WIDTH]).to_equal(0xFF2563EBu32)
 
 #### should lower admitted pixel and percentage translations
 
-- "background:#16a34a;transform:translate
-   - Artifact capture: after_step
-- "background:#2563eb;transform:translate
+- should lower admitted pixel and percentage translations
    - Artifact capture: after_step
 - Resolve translated boxes in canonical web semantic and layout state
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
-- identify missing features
-   - Artifact capture: after_step
-- identify missing features
    - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
    - Artifact capture: after_step
@@ -323,17 +267,19 @@ expect(pixels[1 + 5 * WIDTH]).to_equal(0xFF2563EBu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should lower admitted pixel and percentage translations")
 val pixel_html = (
-    "<style>html,body{margin:0}#panel{width:4px;height:4px;" +
+    "<style>html,body{{margin:0}}#panel{width:4px;height:4px;" +
     "background:#16a34a;transform:translate(4px,4px)}" +
     "</style><div id='panel'></div>"
 )
 val percent_html = (
-    "<style>html,body{margin:0}#panel{width:10px;height:8px;" +
+    "<style>html,body{{margin:0}}#panel{width:10px;height:8px;" +
     "background:#2563eb;transform:translate(50%,0)}" +
     "</style><div id='panel'></div>"
 )
@@ -373,29 +319,13 @@ expect(percent_pixels[5]).to_equal(0xFF2563EBu32)
 
 #### should keep unsupported transform forms explicit and fail closed
 
-- "background:#0f766e;transform:rotate
-   - Artifact capture: after_step
-- "<style>#panel{transform:translate
-   - Artifact capture: after_step
-- "translateX
-   - Artifact capture: after_step
-- "<style>#panel{transform:translate
+- should keep unsupported transform forms explicit and fail closed
    - Artifact capture: after_step
 - Retain unsupported transform rows in the feature ledger
    - Artifact capture: after_step
-- identify missing features
-   - Artifact capture: after_step
-- identify missing features
-   - Artifact capture: after_step
-- identify missing features
-   - Artifact capture: after_step
 - Resolve the fallback box in canonical web semantic and layout state
    - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
--  expect draw ir rect
    - Artifact capture: after_step
 - Read an exact fail-closed fallback pixel through Engine2D
    - Artifact capture: after_step
@@ -406,12 +336,14 @@ expect(percent_pixels[5]).to_equal(0xFF2563EBu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep unsupported transform forms explicit and fail closed")
 val rotate_html = (
-    "<style>html,body{margin:0}#panel{width:8px;height:8px;" +
+    "<style>html,body{{margin:0}}#panel{width:8px;height:8px;" +
     "background:#0f766e;transform:rotate(5deg)}" +
     "</style><div id='panel'></div>"
 )
@@ -461,3 +393,73 @@ expect(pixels[3 + 3 * WIDTH]).to_equal(0xFF0F766Eu32)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b79a92c5b2a302d62bd0f0341a9b99d5a93ac46c39c87c5c9e16a6828af274f1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b79a92c5b2a302d62bd0f0341a9b99d5a93ac46c39c87c5c9e16a6828af274f1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b79a92c5b2a302d62bd0f0341a9b99d5a93ac46c39c87c5c9e16a6828af274f1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/glass_feature_gap_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=60 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/css/glass_feature_gap_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/glass_feature_gap_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:135:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should lower generated pseudo content through web layout and Draw IR' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:135:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should lower generated pseudo content through web layout and Draw IR' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:168:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve the explicit backdrop sampling fallback' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:168:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve the explicit backdrop sampling fallback' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:235:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should lower admitted multi-layer shadows through canonical owners' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:235:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should lower admitted multi-layer shadows through canonical owners' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:271:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should lower an admitted linear gradient through canonical owners' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:271:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should lower an admitted linear gradient through canonical owners' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:303:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should lower admitted pixel and percentage translations' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/glass_feature_gap_spec.spl:350:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep unsupported transform forms explicit and fail closed' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

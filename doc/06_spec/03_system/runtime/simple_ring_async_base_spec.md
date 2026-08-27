@@ -1,16 +1,10 @@
 # simple_ring_async_base_spec
 
-> **Phase 3 regeneration required:** the executable source now contains two
-> additional NFR mechanism scenarios (seven total). This file remains the last
-> generated five-scenario snapshot and must not be treated as current docgen
-> evidence. Regenerate only with the admitted pure-Simple command in
-> `.spipe/simple-ring-async-base/todo.sdn` row `SRA-P3-005`.
-
 > Operator scenarios for the SimpleRing V1 async foundation.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -54,10 +48,11 @@ native OS provider, compiler-generated async lowering, or a migrated executor.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-SRA-010, REQ-SRA-012, REQ-SRA-015, REQ-SSPEC-SYSTEM
 step("Configure the async execution profile")
 val fixture = setup_simple_ring_profile_fixture(async_profile_server_v1())
 val provider = fixture.provider
@@ -95,10 +90,11 @@ check_simple_ring_invariants(fixture)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-SRA-001, REQ-SRA-002, REQ-SRA-003, REQ-SRA-004
 val fixture = setup_simple_ring_profile_fixture(async_profile_common_v1())
 val work_ring = fixture.ring
 val provider = fixture.provider
@@ -151,10 +147,11 @@ check_simple_ring_invariants(fixture)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-SRA-006, REQ-SRA-007, REQ-SRA-010, REQ-SRA-011
 val fixture = setup_simple_ring_profile_fixture(async_profile_common_v1())
 val work_ring = fixture.ring
 val provider = fixture.provider
@@ -223,10 +220,11 @@ check_simple_ring_invariants(fixture)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-SRA-002, REQ-SRA-004, REQ-SRA-005
 val fixture = setup_simple_ring_profile_fixture(async_profile_common_v1())
 val work_ring = fixture.ring
 val provider = fixture.provider
@@ -296,10 +294,11 @@ check_simple_ring_invariants(fixture)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 76 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req: REQ-SRA-012, REQ-SRA-013, REQ-SRA-014, REQ-SRA-015
 step("Configure the async execution profile")
 val mission_alloc = async_profile_mission_alloc_v1()
 val mission_pool = async_profile_mission_pool_v1()
@@ -379,12 +378,112 @@ check_simple_ring_invariants(fixture)
 
 </details>
 
+#### keeps wake selection bounded, nonblocking, deterministic, and generation safe
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Nonfunctional acceptance mechanisms (expected show, folded, detail, or skip)
+
+
+- Verify bounded nonfunctional ring behavior
+   - Expected: token.ring_id equals `reservation.token.ring_id`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: NFR-SRA-001, NFR-SRA-002, NFR-SRA-003, NFR-SRA-004, NFR-SRA-005
+step("Verify bounded nonfunctional ring behavior")
+var ready_set = match MissionReadySet64.create(93u64, 8u64):
+    case Ok(value): value
+    case Err(_): fail("mission ready set construction failed")
+match ready_set.seal(93u64):
+    case Ok(receipt): expect(receipt.capacity).to_equal(8u64)
+    case Err(_): fail("mission ready set seal failed")
+val ready_token = match ready_set.admit(93u64, 5u64):
+    case Ok(value): value
+    case Err(_): fail("bounded task slot admission failed")
+match ready_set.post_ready(93u64, ready_token):
+    case Ok(_): ()
+    case Err(_): fail("exact task wake post failed")
+expect(ready_set.is_ready(5u64)).to_be(true)
+match ready_set.claim_ready(93u64, ready_token):
+    case Ok(_): ()
+    case Err(_): fail("exact task wake claim failed")
+expect(ready_set.is_ready(5u64)).to_be(false)
+
+val fixture = setup_simple_ring_profile_fixture(async_profile_common_v1())
+val reservation = match fixture.ring.reserve(fixture.owner_id, 9301u64):
+    case Ok(value): value
+    case Err(_): fail("compatibility wait reservation failed")
+val compat = match poll_future_compat(Future<i64>.pending(), reservation.token):
+    case Ok(value): value
+    case Err(_): fail("nonblocking compatibility poll failed")
+match compat.poll_result:
+    case TaskPollResult.Pending(token):
+        expect(token.ring_id).to_equal(reservation.token.ring_id)
+        expect(token.generation.value).to_equal(
+            reservation.token.generation.value)
+    case TaskPollResult.Ready(_): fail("pending compatibility future became ready")
+expect(compat.blocking_used).to_be(false)
+expect(compat.scheduler_created).to_be(false)
+```
+
+</details>
+
+#### reports portable mapping, compatibility, and telemetry facts explicitly
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual_section: Portable profile and compatibility policy (expected show, folded, detail, or skip)
+
+
+- Verify portable provider and compatibility facts
+   - Expected: admission.mapping equals `RingMappingGrade.Software`
+   - Expected: admission.fallback_fact equals `software-grade-selected`
+   - Expected: telemetry.high_water equals `0u64`
+   - Expected: telemetry.full_events equals `0u64`
+   - Expected: telemetry.batches equals `0u64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: NFR-SRA-010, NFR-SRA-011, REQ-SRA-016, REQ-SRA-017
+step("Verify portable provider and compatibility facts")
+val fixture = setup_simple_ring_profile_fixture(async_profile_server_v1())
+val admission = fixture.provider.admit_for_depth(fixture.profile, 4)
+match admission.status:
+    case SoftwareProviderAdmissionStatus.Admitted:
+        expect(admission.mapping).to_equal(RingMappingGrade.Software)
+        expect(admission.bounded).to_be(true)
+        expect(admission.fallback_fact).to_equal("software-grade-selected")
+        expect(admission.fallback_reason).to_equal(
+            "software ring provider selected")
+    case SoftwareProviderAdmissionStatus.Rejected:
+        fail("bounded server provider was rejected")
+val telemetry = fixture.ring.telemetry()
+expect(telemetry.high_water).to_equal(0u64)
+expect(telemetry.full_events).to_equal(0u64)
+expect(telemetry.batches).to_equal(0u64)
+expect(fixture.profile.blocking_allowed).to_be(false)
+expect(fixture.profile.single_owner_mutable_queues_required).to_be(false)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -397,6 +496,7 @@ check_simple_ring_invariants(fixture)
 
 Requirements covered by the scenarios in this manual:
 
+- `REQ-SSPEC-SYSTEM`
 - `REQ-SRA-010`
 - `REQ-SRA-012`
 - `REQ-SRA-015`
@@ -410,54 +510,46 @@ Requirements covered by the scenarios in this manual:
 - `REQ-SRA-005`
 - `REQ-SRA-013`
 - `REQ-SRA-014`
+- `REQ-SRA-016`
+- `REQ-SRA-017`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `259a997a9dec6d327776bb1ef9f6ace4b1e357663b7f45d6ace9609ddda0b51a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `7d305fc9657e99816d8434feda976a651c98db9f1047a2406e9b77b50469dfa5`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `259a997a9dec6d327776bb1ef9f6ace4b1e357663b7f45d6ace9609ddda0b51a`.
+Source SHA-256: `7d305fc9657e99816d8434feda976a651c98db9f1047a2406e9b77b50469dfa5`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `259a997a9dec6d327776bb1ef9f6ace4b1e357663b7f45d6ace9609ddda0b51a`  
+Source SHA-256: `7d305fc9657e99816d8434feda976a651c98db9f1047a2406e9b77b50469dfa5`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/03_system/runtime/simple_ring_async_base_spec.spl
 mirror: doc/06_spec/03_system/runtime/simple_ring_async_base_spec.md (current)
-findings: 8 blockers: 1
-  narrative=80 structure=100 oracle=100
-  traceability=60 evidence=70 coverage=100 maintainability=60
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/03_system/runtime/simple_ring_async_base_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/runtime/simple_ring_async_base_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/runtime/simple_ring_async_base_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
-  why: Reviewers need selected lifecycle evidence, not inferred project state.
-  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
-test/03_system/runtime/simple_ring_async_base_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
-  why: Readers need scope, audience, and intent before executable detail.
-  improve: Add authored purpose, scope, and audience facts.
-test/03_system/runtime/simple_ring_async_base_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 13 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/runtime/simple_ring_async_base_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits a compatible profile with a stable provider fingerprint' has no retained capture or evidence
+test/03_system/runtime/simple_ring_async_base_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits a compatible profile with a stable provider fingerprint' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/runtime/simple_ring_async_base_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reserves and commits a bounded all-or-nothing batch' has no retained capture or evidence
+test/03_system/runtime/simple_ring_async_base_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reserves and commits a bounded all-or-nothing batch' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/runtime/simple_ring_async_base_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'publishes one completion and wakes only its task key' has no retained capture or evidence
+test/03_system/runtime/simple_ring_async_base_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'publishes one completion and wakes only its task key' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

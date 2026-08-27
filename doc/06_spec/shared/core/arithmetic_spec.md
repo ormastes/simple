@@ -1,29 +1,6 @@
 # Arithmetic Specification
 
-> <details>
-
-<!-- sdn-diagram:id=arithmetic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=arithmetic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-arithmetic_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=arithmetic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Arithmetic, addition, subtraction, multiplication, division, precedence.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +19,18 @@ arithmetic_spec
 
 #### adds two numbers
 
+- adds two numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("adds two numbers")
 expect 1 + 1 == 2
 ```
 
@@ -56,13 +38,18 @@ expect 1 + 1 == 2
 
 #### adds multiple numbers
 
+- adds multiple numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("adds multiple numbers")
 expect 1 + 2 + 3 == 6
 ```
 
@@ -72,13 +59,18 @@ expect 1 + 2 + 3 == 6
 
 #### subtracts two numbers
 
+- subtracts two numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("subtracts two numbers")
 expect 5 - 3 == 2
 ```
 
@@ -86,13 +78,18 @@ expect 5 - 3 == 2
 
 #### subtracts to zero
 
+- subtracts to zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("subtracts to zero")
 expect 5 - 5 == 0
 ```
 
@@ -102,13 +99,18 @@ expect 5 - 5 == 0
 
 #### multiplies two numbers
 
+- multiplies two numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("multiplies two numbers")
 expect 3 * 4 == 12
 ```
 
@@ -116,13 +118,18 @@ expect 3 * 4 == 12
 
 #### multiplies by zero
 
+- multiplies by zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("multiplies by zero")
 expect 5 * 0 == 0
 ```
 
@@ -132,13 +139,18 @@ expect 5 * 0 == 0
 
 #### divides evenly
 
+- divides evenly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("divides evenly")
 expect 10 / 2 == 5
 ```
 
@@ -146,13 +158,18 @@ expect 10 / 2 == 5
 
 #### integer division
 
+- integer division
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("integer division")
 expect 7 / 2 == 3
 ```
 
@@ -162,13 +179,18 @@ expect 7 / 2 == 3
 
 #### multiplication before addition
 
+- multiplication before addition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("multiplication before addition")
 expect 2 + 3 * 4 == 14
 ```
 
@@ -176,16 +198,18 @@ expect 2 + 3 * 4 == 14
 
 #### parentheses override precedence
 
-1. expect
+- parentheses override precedence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("parentheses override precedence")
 expect (2 + 3) * 4 == 20
 ```
 
@@ -198,12 +222,12 @@ expect (2 + 3) * 4 == 20
 | Category | Other |
 | Status | Active |
 | Source | `test/shared/core/arithmetic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Arithmetic, addition, subtraction, multiplication, division, precedence.
 - Arithmetic
 - addition
 - subtraction
@@ -223,3 +247,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SHARED`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e2cef2be1764ad6dde11df1b5fa92abdd86a13016d1ed2100cbab29e0b5be05b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e2cef2be1764ad6dde11df1b5fa92abdd86a13016d1ed2100cbab29e0b5be05b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e2cef2be1764ad6dde11df1b5fa92abdd86a13016d1ed2100cbab29e0b5be05b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/shared/core/arithmetic_spec.spl
+mirror: doc/06_spec/shared/core/arithmetic_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/shared/core/arithmetic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/shared/core/arithmetic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/shared/core/arithmetic_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds two numbers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/core/arithmetic_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds multiple numbers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/core/arithmetic_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'subtracts two numbers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

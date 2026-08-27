@@ -1,30 +1,6 @@
 # Process Isolation As Specification
 
-> 1. expect as phys root
-
-<!-- sdn-diagram:id=process_isolation_as_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=process_isolation_as_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-process_isolation_as_spec -> std
-process_isolation_as_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=process_isolation_as_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering AddressSpace handle accessors, as_switch_to deduplication, as_create / as_destroy lifecycle, Process Table Extended — alloc and register, Process Table Extended — count and list, Convenience helpers.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,16 +17,22 @@ process_isolation_as_spec -> os
 
 #### as_phys_root returns the physical root
 
-1. expect as phys root
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- as_phys_root returns the physical root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_phys_root returns the physical root")
 val space = AddressSpace(phys_root: 0x1000, id: 7)
 expect as_phys_root(space) == 0x1000
 ```
@@ -59,16 +41,18 @@ expect as_phys_root(space) == 0x1000
 
 #### as_id returns the monotonic id
 
-1. expect as id
+- as_id returns the monotonic id
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_id returns the monotonic id")
 val space = AddressSpace(phys_root: 0x2000, id: 42)
 expect as_id(space) == 42
 ```
@@ -77,16 +61,18 @@ expect as_id(space) == 42
 
 #### as_is_kernel true for zero root
 
-1. expect as is kernel
+- as_is_kernel true for zero root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_is_kernel true for zero root")
 val space = AddressSpace(phys_root: 0, id: 0)
 expect as_is_kernel(space) == true
 ```
@@ -95,16 +81,18 @@ expect as_is_kernel(space) == true
 
 #### as_is_kernel false for nonzero root
 
-1. expect as is kernel
+- as_is_kernel false for nonzero root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_is_kernel false for nonzero root")
 val space = AddressSpace(phys_root: 0x3000, id: 1)
 expect as_is_kernel(space) == false
 ```
@@ -113,13 +101,18 @@ expect as_is_kernel(space) == false
 
 #### as_kernel_sentinel returns zero root
 
+- as_kernel_sentinel returns zero root
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_kernel_sentinel returns zero root")
 val sentinel = as_kernel_sentinel()
 expect sentinel.phys_root == 0
 expect sentinel.id == 0
@@ -131,49 +124,7 @@ expect sentinel.id == 0
 
 #### as_switch_to updates current root
 
-1. as switch to
-2. expect as current phys root
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-as_switch_to(0x4000)
-expect as_current_phys_root() == 0x4000
-```
-
-</details>
-
-#### as_switch_to is idempotent (same root twice)
-
-1. as switch to
-2. as switch to
-3. expect as current phys root
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-as_switch_to(0x5000)
-as_switch_to(0x5000)
-expect as_current_phys_root() == 0x5000
-```
-
-</details>
-
-#### as_switch_to zero root is a no-op after the root is set
-
-1. as switch to
-2. as switch to
-3. expect as current phys root
+- as_switch_to updates current root
 
 
 <details>
@@ -183,6 +134,49 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_switch_to updates current root")
+as_switch_to(0x4000)
+expect as_current_phys_root() == 0x4000
+```
+
+</details>
+
+#### as_switch_to is idempotent (same root twice)
+
+- as_switch_to is idempotent (same root twice)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("as_switch_to is idempotent (same root twice)")
+as_switch_to(0x5000)
+as_switch_to(0x5000)
+expect as_current_phys_root() == 0x5000
+```
+
+</details>
+
+#### as_switch_to zero root is a no-op after the root is set
+
+- as_switch_to zero root is a no-op after the root is set
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("as_switch_to zero root is a no-op after the root is set")
 as_switch_to(0x6000)
 as_switch_to(0)
 # zero means no-op; current root stays from previous call
@@ -195,16 +189,18 @@ expect as_current_phys_root() == 0x6000
 
 #### as_create returns an AddressSpace (phys_root may be 1 if VMM not init)
 
-1. expect
+- as_create returns an AddressSpace (phys_root may be 1 if VMM not init)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_create returns an AddressSpace (phys_root may be 1 if VMM not init)")
 val space = as_create()
 val root = as_phys_root(space)
 expect (root == 0 or root == 1 or root > 4096) == true
@@ -214,17 +210,18 @@ expect (root == 0 or root == 1 or root > 4096) == true
 
 #### as_destroy on kernel sentinel is a no-op
 
-1. as destroy
-2. expect as phys root
+- as_destroy on kernel sentinel is a no-op
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_destroy on kernel sentinel is a no-op")
 val sentinel = as_kernel_sentinel()
 as_destroy(sentinel)
 expect as_phys_root(sentinel) == 0
@@ -234,17 +231,18 @@ expect as_phys_root(sentinel) == 0
 
 #### as_destroy on sentinel root=1 is a no-op
 
-1. as destroy
-2. expect as phys root
+- as_destroy on sentinel root=1 is a no-op
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("as_destroy on sentinel root=1 is a no-op")
 val legacy = AddressSpace(phys_root: 1, id: 0)
 as_destroy(legacy)
 expect as_phys_root(legacy) == 1
@@ -256,13 +254,18 @@ expect as_phys_root(legacy) == 1
 
 #### pt_ext_alloc_pid is monotonically increasing
 
+- pt_ext_alloc_pid is monotonically increasing
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_alloc_pid is monotonically increasing")
 val p1 = pt_ext_alloc_pid()
 val p2 = pt_ext_alloc_pid()
 expect p2 > p1
@@ -272,13 +275,18 @@ expect p2 > p1
 
 #### pt_ext_alloc_pid always > 0
 
+- pt_ext_alloc_pid always > 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_alloc_pid always > 0")
 val pid = pt_ext_alloc_pid()
 expect pid > 0
 ```
@@ -287,16 +295,18 @@ expect pid > 0
 
 #### pt_ext_register + pt_ext_lookup round-trip
 
-1. pt ext register
+- pt_ext_register + pt_ext_lookup round-trip
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_register + pt_ext_lookup round-trip")
 val pid = pt_ext_alloc_pid()
 val space = AddressSpace(phys_root: 0x9000, id: 99)
 pt_ext_register(pid, space)
@@ -310,13 +320,18 @@ expect opt.entry.space.phys_root == 0x9000
 
 #### pt_ext_lookup absent PID returns is_some = false
 
+- pt_ext_lookup absent PID returns is_some = false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_lookup absent PID returns is_some = false")
 val opt = pt_ext_lookup(-999)
 expect opt.is_some == false
 ```
@@ -325,17 +340,18 @@ expect opt.is_some == false
 
 #### pt_ext_set_state updates state field
 
-1. pt ext register
-2. pt ext set state
+- pt_ext_set_state updates state field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_set_state updates state field")
 val pid = pt_ext_alloc_pid()
 val space = AddressSpace(phys_root: 0xA000, id: 3)
 pt_ext_register(pid, space)
@@ -349,17 +365,18 @@ expect opt.entry.state == "blocked"
 
 #### pt_ext_reap tombstones the entry
 
-1. pt ext register
-2. pt ext reap
+- pt_ext_reap tombstones the entry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_reap tombstones the entry")
 val pid = pt_ext_alloc_pid()
 val space = AddressSpace(phys_root: 1, id: 0)
 pt_ext_register(pid, space)
@@ -374,16 +391,18 @@ expect opt.is_some == false
 
 #### pt_ext_count increases after register
 
-1. pt ext register
+- pt_ext_count increases after register
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_count increases after register")
 val before = pt_ext_count()
 val pid = pt_ext_alloc_pid()
 pt_ext_register(pid, AddressSpace(phys_root: 1, id: 0))
@@ -395,16 +414,18 @@ expect after == before + 1
 
 #### pt_ext_list_pids contains newly registered pid
 
-1. pt ext register
+- pt_ext_list_pids contains newly registered pid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_list_pids contains newly registered pid")
 val pid = pt_ext_alloc_pid()
 pt_ext_register(pid, AddressSpace(phys_root: 1, id: 0))
 val pids = pt_ext_list_pids()
@@ -423,13 +444,18 @@ expect found == true
 
 #### pt_ext_spawn returns a positive pid
 
+- pt_ext_spawn returns a positive pid
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_spawn returns a positive pid")
 val pid = pt_ext_spawn()
 expect pid > 0
 ```
@@ -438,13 +464,18 @@ expect pid > 0
 
 #### pt_ext_spawn registers a live entry
 
+- pt_ext_spawn registers a live entry
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_spawn registers a live entry")
 val pid = pt_ext_spawn()
 val opt = pt_ext_lookup(pid)
 expect opt.is_some == true
@@ -454,13 +485,18 @@ expect opt.is_some == true
 
 #### pt_ext_spawn_with_kernel_as registers with phys_root 0
 
+- pt_ext_spawn_with_kernel_as registers with phys_root 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_spawn_with_kernel_as registers with phys_root 0")
 val pid = pt_ext_spawn_with_kernel_as()
 val opt = pt_ext_lookup(pid)
 expect opt.is_some == true
@@ -471,13 +507,18 @@ expect opt.entry.space.phys_root == 0
 
 #### pt_ext_address_space_for returns sentinel for unknown pid
 
+- pt_ext_address_space_for returns sentinel for unknown pid
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pt_ext_address_space_for returns sentinel for unknown pid")
 val space = pt_ext_address_space_for(-777)
 expect space.phys_root == 0
 ```
@@ -491,12 +532,12 @@ expect space.phys_root == 0
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/process_isolation_as_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering AddressSpace handle accessors, as_switch_to deduplication, as_create / as_destroy lifecycle, Process Table Extended — alloc and register, Process Table Extended — count and list, Convenience helpers.
 - AddressSpace handle accessors
 - as_switch_to deduplication
 - as_create / as_destroy lifecycle
@@ -516,3 +557,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d1119e00c23fd8a51aed9882ff8ec12e9eec7fba5e23aee52d34d9da998aa791`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d1119e00c23fd8a51aed9882ff8ec12e9eec7fba5e23aee52d34d9da998aa791`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d1119e00c23fd8a51aed9882ff8ec12e9eec7fba5e23aee52d34d9da998aa791`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/process_isolation_as_spec.spl
+mirror: doc/06_spec/01_unit/os/process_isolation_as_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/process_isolation_as_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/process_isolation_as_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/process_isolation_as_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'as_phys_root returns the physical root' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/process_isolation_as_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'as_id returns the monotonic id' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/process_isolation_as_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'as_is_kernel true for zero root' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

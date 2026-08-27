@@ -1,30 +1,6 @@
 # Fileio Main Specification
 
-> <details>
-
-<!-- sdn-diagram:id=fileio_main_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=fileio_main_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-fileio_main_spec -> std
-fileio_main_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=fileio_main_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering FileIO Main - Parsing Helpers, FileIO Main - Safe Read, FileIO Main - Safe Write/Delete/Append, FileIO Main - Copy and Move, FileIO Main - Other Tools.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,27 @@ fileio_main_spec -> app
 
 #### parses method and params
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- parses method and params
+   - Expected: parse_method("{\"method\":\"ping\"}") equals `ping`
+   - Expected: parse_method("{\"method\":123}") equals ``
+   - Expected: parse_method("{}" ) equals ``
+   - Expected: params contains `"name"`
+   - Expected: parse_params("{\"id\":1}") equals `{}`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parses method and params")
 expect(parse_method("{\"method\":\"ping\"}")).to_equal("ping")
 expect(parse_method("{\"method\":123}")).to_equal("")
 expect(parse_method("{}" )).to_equal("")
@@ -61,13 +51,23 @@ expect(parse_params("{\"id\":1}")).to_equal("{}")
 
 #### parses arguments and handles missing values
 
+- parses arguments and handles missing values
+   - Expected: server.parse_arg("{\"path\":\"/tmp/x\"}", "path") equals `/tmp/x`
+   - Expected: server.parse_arg("{\"path\":123}", "path") equals ``
+   - Expected: server.parse_arg("{\"other\":\"x\"}", "path") equals ``
+   - Expected: server.parse_path_arg("{\"path\":\"/tmp/y\"}") equals `/tmp/y`
+   - Expected: server.parse_content_arg("{\"content\":\"hi\"}") equals `hi`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parses arguments and handles missing values")
 val server = setup_server()
 expect(server.parse_arg("{\"path\":\"/tmp/x\"}", "path")).to_equal("/tmp/x")
 expect(server.parse_arg("{\"path\":123}", "path")).to_equal("")
@@ -80,13 +80,21 @@ expect(server.parse_content_arg("{\"content\":\"hi\"}")).to_equal("hi")
 
 #### formats file lists
 
+- formats file lists
+   - Expected: server.files_to_json([]) equals `[]`
+   - Expected: json contains `"a"`
+   - Expected: json contains `"b"`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats file lists")
 val server = setup_server()
 expect(server.files_to_json([])).to_equal("[]")
 val json = server.files_to_json(["a", "b"])
@@ -98,13 +106,20 @@ expect(json.contains("\"b\"")).to_equal(true)
 
 #### lists tools
 
+- lists tools
+   - Expected: resp contains `safe_read`
+   - Expected: resp contains `safe_write`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("lists tools")
 val resp = handle_tools_list("1")
 expect(resp.contains("safe_read")).to_equal(true)
 expect(resp.contains("safe_write")).to_equal(true)
@@ -116,7 +131,7 @@ expect(resp.contains("safe_write")).to_equal(true)
 
 #### reads allowed files
 
-1. write text
+- reads allowed files
    - Expected: resp contains `success`
    - Expected: resp contains `hello`
 
@@ -124,10 +139,12 @@ expect(resp.contains("safe_write")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("reads allowed files")
 val server = setup_server()
 val path = "/tmp/mcp_allow_read.txt"
 write_text(path, "hello")
@@ -140,13 +157,19 @@ expect(resp.contains("hello")).to_equal(true)
 
 #### denies protected reads
 
+- denies protected reads
+   - Expected: resp contains `Read denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("denies protected reads")
 val server = setup_server()
 val resp = server.tool_safe_read("{\"path\":\"/tmp/mcp_deny.txt\"}")
 expect(resp.contains("Read denied")).to_equal(true)
@@ -156,40 +179,52 @@ expect(resp.contains("Read denied")).to_equal(true)
 
 #### reads redirected files
 
-1. shell
-2. write text
+- reads redirected files
    - Expected: resp contains `temp-data`
+   - Expected: comparison.status equals `EvidenceStatus.passed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("reads redirected files")
 val server = setup_server()
 shell("mkdir -p tmp/fileio_temp")
 write_text("tmp/fileio_temp/mcp_redirect.txt", "temp-data")
 val resp = server.tool_safe_read("{\"path\":\"/tmp/mcp_redirect.txt\"}")
 expect(resp.contains("temp-data")).to_equal(true)
+
+val redirect_readback = read_text("tmp/fileio_temp/mcp_redirect.txt")
+val capture = UntypedCapture(label: "fileio-main-redirect-readback", raw_value: redirect_readback, source_kind: "log_line")
+val evidence = untyped_capture_to_canonical(capture, "fileio_main_spec/redirect-readback")
+val comparison = compare_evidence(evidence, oracle_spec("fileio_main_spec/redirect-readback", [
+    check_exact("value", "temp-data")
+]))
+expect(comparison.status).to_equal(EvidenceStatus.passed)
 ```
 
 </details>
 
 #### reads atomic-protected files
 
-1. write text
+- reads atomic-protected files
    - Expected: resp contains `atomic`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("reads atomic-protected files")
 val server = setup_server()
 val path = "/tmp/mcp_atomic.sdn"
 write_text(path, "atomic")
@@ -201,13 +236,19 @@ expect(resp.contains("atomic")).to_equal(true)
 
 #### handles missing path
 
+- handles missing path
+   - Expected: resp contains `Missing 'path'`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles missing path")
 val server = setup_server()
 val resp = server.tool_safe_read("{\"content\":\"x\"}")
 expect(resp.contains("Missing 'path'")).to_equal(true)
@@ -219,13 +260,20 @@ expect(resp.contains("Missing 'path'")).to_equal(true)
 
 #### writes allowed files
 
+- writes allowed files
+   - Expected: resp contains `success`
+   - Expected: read_text(path) contains `hi`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("writes allowed files")
 val server = setup_server()
 val path = "/tmp/mcp_allow_write.txt"
 val resp = server.tool_safe_write("{\"path\":\"{path}\",\"content\":\"hi\"}")
@@ -237,13 +285,20 @@ expect(read_text(path).contains("hi")).to_equal(true)
 
 #### writes redirected files to temp
 
+- writes redirected files to temp
+   - Expected: resp contains `temp`
+   - Expected: read_text(temp_path) contains `temp`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("writes redirected files to temp")
 val server = setup_server()
 val path = "/tmp/mcp_redirect.txt"
 val temp_path = server.temp_manager.get_temp_path(path)
@@ -256,13 +311,19 @@ expect(read_text(temp_path).contains("temp")).to_equal(true)
 
 #### rejects atomic writes when required
 
+- rejects atomic writes when required
+   - Expected: resp contains `Atomic write required`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects atomic writes when required")
 val server = setup_server()
 val resp = server.tool_safe_write("{\"path\":\"/tmp/mcp_atomic.sdn\",\"content\":\"x\"}")
 expect(resp.contains("Atomic write required")).to_equal(true)
@@ -272,13 +333,19 @@ expect(resp.contains("Atomic write required")).to_equal(true)
 
 #### rejects denied writes
 
+- rejects denied writes
+   - Expected: resp contains `Write denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects denied writes")
 val server = setup_server()
 val resp = server.tool_safe_write("{\"path\":\"/tmp/mcp_deny.txt\",\"content\":\"x\"}")
 expect(resp.contains("Write denied")).to_equal(true)
@@ -288,7 +355,7 @@ expect(resp.contains("Write denied")).to_equal(true)
 
 #### deletes allowed files
 
-1. write text
+- deletes allowed files
    - Expected: resp contains `success`
    - Expected: file_exists(path) is false
 
@@ -296,10 +363,12 @@ expect(resp.contains("Write denied")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("deletes allowed files")
 val server = setup_server()
 val path = "/tmp/mcp_allow_delete.txt"
 write_text(path, "bye")
@@ -312,7 +381,7 @@ expect(file_exists(path)).to_equal(false)
 
 #### deletes redirected temp files
 
-1. write text
+- deletes redirected temp files
    - Expected: resp contains `success`
    - Expected: file_exists(temp_path) is false
 
@@ -320,10 +389,12 @@ expect(file_exists(path)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("deletes redirected temp files")
 val server = setup_server()
 val path = "/tmp/mcp_redirect.txt"
 val temp_path = server.temp_manager.get_temp_path(path)
@@ -337,13 +408,19 @@ expect(file_exists(temp_path)).to_equal(false)
 
 #### rejects denied delete
 
+- rejects denied delete
+   - Expected: resp contains `Delete denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects denied delete")
 val server = setup_server()
 val resp = server.tool_safe_delete("{\"path\":\"/tmp/mcp_deny.txt\"}")
 expect(resp.contains("Delete denied")).to_equal(true)
@@ -353,13 +430,19 @@ expect(resp.contains("Delete denied")).to_equal(true)
 
 #### rejects atomic delete
 
+- rejects atomic delete
+   - Expected: resp contains `Cannot delete atomic`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects atomic delete")
 val server = setup_server()
 val resp = server.tool_safe_delete("{\"path\":\"/tmp/mcp_atomic.sdn\"}")
 expect(resp.contains("Cannot delete atomic")).to_equal(true)
@@ -369,7 +452,7 @@ expect(resp.contains("Cannot delete atomic")).to_equal(true)
 
 #### appends to allowed files
 
-1. write text
+- appends to allowed files
    - Expected: resp contains `success`
    - Expected: read_text(path) contains `ab`
 
@@ -377,10 +460,12 @@ expect(resp.contains("Cannot delete atomic")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("appends to allowed files")
 val server = setup_server()
 val path = "/tmp/mcp_allow_append.txt"
 write_text(path, "a")
@@ -393,7 +478,7 @@ expect(read_text(path).contains("ab")).to_equal(true)
 
 #### appends to redirected files
 
-1. write text
+- appends to redirected files
    - Expected: resp contains `temp`
    - Expected: read_text(temp_path) contains `ab`
 
@@ -401,10 +486,12 @@ expect(read_text(path).contains("ab")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("appends to redirected files")
 val server = setup_server()
 val path = "/tmp/mcp_redirect.txt"
 val temp_path = server.temp_manager.get_temp_path(path)
@@ -418,13 +505,19 @@ expect(read_text(temp_path).contains("ab")).to_equal(true)
 
 #### rejects append on atomic
 
+- rejects append on atomic
+   - Expected: resp contains `Atomic write required`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects append on atomic")
 val server = setup_server()
 val resp = server.tool_safe_append("{\"path\":\"/tmp/mcp_atomic.sdn\",\"content\":\"x\"}")
 expect(resp.contains("Atomic write required")).to_equal(true)
@@ -434,13 +527,19 @@ expect(resp.contains("Atomic write required")).to_equal(true)
 
 #### rejects append on denied
 
+- rejects append on denied
+   - Expected: resp contains `Append denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects append on denied")
 val server = setup_server()
 val resp = server.tool_safe_append("{\"path\":\"/tmp/mcp_deny.txt\",\"content\":\"x\"}")
 expect(resp.contains("Append denied")).to_equal(true)
@@ -452,13 +551,19 @@ expect(resp.contains("Append denied")).to_equal(true)
 
 #### rejects copy when source denied
 
+- rejects copy when source denied
+   - Expected: resp contains `Source read denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects copy when source denied")
 val server = setup_server()
 val resp = server.tool_safe_copy("{\"src\":\"/tmp/mcp_deny.txt\",\"dest\":\"/tmp/mcp_allow_copy.txt\"}")
 expect(resp.contains("Source read denied")).to_equal(true)
@@ -468,7 +573,7 @@ expect(resp.contains("Source read denied")).to_equal(true)
 
 #### copies to allowed destination
 
-1. write text
+- copies to allowed destination
    - Expected: resp contains `success`
    - Expected: read_text(dest) contains `copy`
 
@@ -476,10 +581,12 @@ expect(resp.contains("Source read denied")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("copies to allowed destination")
 val server = setup_server()
 val src = "/tmp/mcp_src_copy.txt"
 val dest = "/tmp/mcp_allow_copy.txt"
@@ -493,7 +600,7 @@ expect(read_text(dest).contains("copy")).to_equal(true)
 
 #### copies to redirected destination
 
-1. write text
+- copies to redirected destination
    - Expected: resp contains `temp`
    - Expected: read_text(temp_dest) contains `copy2`
 
@@ -501,10 +608,12 @@ expect(read_text(dest).contains("copy")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("copies to redirected destination")
 val server = setup_server()
 val src = "/tmp/mcp_src_copy2.txt"
 val dest = "/tmp/mcp_redirect_dest.txt"
@@ -519,13 +628,19 @@ expect(read_text(temp_dest).contains("copy2")).to_equal(true)
 
 #### rejects copy when dest denied
 
+- rejects copy when dest denied
+   - Expected: resp contains `Destination write denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects copy when dest denied")
 val server = setup_server()
 val resp = server.tool_safe_copy("{\"src\":\"/tmp/mcp_src_copy.txt\",\"dest\":\"/tmp/mcp_deny_dest.txt\"}")
 expect(resp.contains("Destination write denied")).to_equal(true)
@@ -535,13 +650,19 @@ expect(resp.contains("Destination write denied")).to_equal(true)
 
 #### rejects copy when dest atomic
 
+- rejects copy when dest atomic
+   - Expected: resp contains `Atomic write required`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects copy when dest atomic")
 val server = setup_server()
 val resp = server.tool_safe_copy("{\"src\":\"/tmp/mcp_src_copy.txt\",\"dest\":\"/tmp/mcp_atomic.sdn\"}")
 expect(resp.contains("Atomic write required")).to_equal(true)
@@ -551,13 +672,19 @@ expect(resp.contains("Atomic write required")).to_equal(true)
 
 #### rejects move when source denied
 
+- rejects move when source denied
+   - Expected: resp contains `Source delete denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects move when source denied")
 val server = setup_server()
 val resp = server.tool_safe_move("{\"src\":\"/tmp/mcp_deny.txt\",\"dest\":\"/tmp/mcp_allow_move.txt\"}")
 expect(resp.contains("Source delete denied")).to_equal(true)
@@ -567,7 +694,7 @@ expect(resp.contains("Source delete denied")).to_equal(true)
 
 #### moves to allowed destination
 
-1. write text
+- moves to allowed destination
    - Expected: resp contains `success`
    - Expected: file_exists(src) is false
    - Expected: read_text(dest) contains `move`
@@ -576,10 +703,12 @@ expect(resp.contains("Source delete denied")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("moves to allowed destination")
 val server = setup_server()
 val src = "/tmp/mcp_src_move.txt"
 val dest = "/tmp/mcp_allow_move.txt"
@@ -594,7 +723,7 @@ expect(read_text(dest).contains("move")).to_equal(true)
 
 #### moves to redirected destination
 
-1. write text
+- moves to redirected destination
    - Expected: resp contains `temp`
    - Expected: read_text(temp_dest) contains `move2`
 
@@ -602,10 +731,12 @@ expect(read_text(dest).contains("move")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("moves to redirected destination")
 val server = setup_server()
 val src = "/tmp/mcp_src_move2.txt"
 val dest = "/tmp/mcp_redirect_dest.txt"
@@ -620,13 +751,19 @@ expect(read_text(temp_dest).contains("move2")).to_equal(true)
 
 #### rejects move when dest denied
 
+- rejects move when dest denied
+   - Expected: resp contains `Destination write denied`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects move when dest denied")
 val server = setup_server()
 val resp = server.tool_safe_move("{\"src\":\"/tmp/mcp_src_move.txt\",\"dest\":\"/tmp/mcp_deny_dest.txt\"}")
 expect(resp.contains("Destination write denied")).to_equal(true)
@@ -636,13 +773,19 @@ expect(resp.contains("Destination write denied")).to_equal(true)
 
 #### rejects move when dest atomic
 
+- rejects move when dest atomic
+   - Expected: resp contains `Atomic write required`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects move when dest atomic")
 val server = setup_server()
 val resp = server.tool_safe_move("{\"src\":\"/tmp/mcp_src_move.txt\",\"dest\":\"/tmp/mcp_atomic.sdn\"}")
 expect(resp.contains("Atomic write required")).to_equal(true)
@@ -654,13 +797,20 @@ expect(resp.contains("Atomic write required")).to_equal(true)
 
 #### lists protected files and checks protection
 
+- lists protected files and checks protection
+   - Expected: list_resp contains `success`
+   - Expected: info_resp contains `Deny`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("lists protected files and checks protection")
 val server = setup_server()
 val list_resp = server.tool_list_protected_files("{}")
 expect(list_resp.contains("success")).to_equal(true)
@@ -672,13 +822,20 @@ expect(info_resp.contains("Deny")).to_equal(true)
 
 #### adds protection rules and handles missing pattern
 
+- adds protection rules and handles missing pattern
+   - Expected: missing contains `Missing 'pattern'`
+   - Expected: resp contains `success`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("adds protection rules and handles missing pattern")
 val server = setup_server()
 val missing = server.tool_add_protection_rule("{}")
 expect(missing.contains("Missing 'pattern'")).to_equal(true)
@@ -699,7 +856,7 @@ for r in rules:
 
 #### manages temp files
 
-1. write text
+- manages temp files
    - Expected: list_resp contains `success`
    - Expected: dir_resp contains `tmp/fileio_temp`
    - Expected: clean_resp contains `success`
@@ -708,10 +865,12 @@ for r in rules:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("manages temp files")
 val server = setup_server()
 val temp_path = server.temp_manager.get_temp_path("/tmp/mcp_temp.txt")
 write_text(temp_path, "temp")
@@ -732,12 +891,12 @@ expect(clean_resp.contains("success")).to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/mcp/fileio_main_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering FileIO Main - Parsing Helpers, FileIO Main - Safe Read, FileIO Main - Safe Write/Delete/Append, FileIO Main - Copy and Move, FileIO Main - Other Tools.
 - FileIO Main - Parsing Helpers
 - FileIO Main - Safe Read
 - FileIO Main - Safe Write/Delete/Append
@@ -756,3 +915,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `be36b2327fe12f3ff108fb038a8e1e4c89c2cb8a1ac7f6dcce861d5dec2eb0bf`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `be36b2327fe12f3ff108fb038a8e1e4c89c2cb8a1ac7f6dcce861d5dec2eb0bf`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `be36b2327fe12f3ff108fb038a8e1e4c89c2cb8a1ac7f6dcce861d5dec2eb0bf`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/mcp/fileio_main_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp/fileio_main_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp/fileio_main_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp/fileio_main_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp/fileio_main_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses method and params' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp/fileio_main_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses arguments and handles missing values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp/fileio_main_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats file lists' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

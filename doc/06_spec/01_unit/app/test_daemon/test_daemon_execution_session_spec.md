@@ -1,30 +1,6 @@
 # test_daemon_execution_session_spec
 
-> Test Daemon Execution Session Specification
-
-<!-- sdn-diagram:id=test_daemon_execution_session_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_daemon_execution_session_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_daemon_execution_session_spec -> std
-test_daemon_execution_session_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_daemon_execution_session_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Prove that Execution Sessions.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -35,24 +11,21 @@ test_daemon_execution_session_spec -> app
 
 # test_daemon_execution_session_spec
 
-Test Daemon Execution Session Specification
+Purpose: Prove that Execution Sessions.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #TDMN-071 to #TDMN-090 |
-| Category | Infrastructure |
+| Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/test_daemon/test_daemon_execution_session_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Test Daemon Execution Session Specification
-
-Tests execution session management using the actual session_types and
-session_broker implementations: TestSessionMeta, SessionKey, SessionDescriptor
-construction from metadata, name converters, and categorization helpers.
+## Purpose and audience
+Purpose: Prove that Execution Sessions.
+Audience: compiler and tooling engineers who maintain this spec.
 
 ## Scenarios
 
@@ -62,13 +35,27 @@ construction from metadata, name converters, and categorization helpers.
 
 #### creates default meta with LOCAL kind
 
+- creates default meta with LOCAL kind
+- Verify: creates default meta with LOCAL kind
+   - Expected: meta.file_path equals `test/unit/parser_spec.spl`
+   - Expected: meta.session_kind equals `SESSION_KIND_LOCAL`
+   - Expected: meta.reuse_mode equals `REUSE_FRESH_PER_TEST`
+   - Expected: meta.reset_policy equals `RESET_NONE`
+   - Expected: meta.target equals ``
+   - Expected: meta.artifact equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates default meta with LOCAL kind")
+step("Verify: creates default meta with LOCAL kind")
+# @req: REQ-APP-TEST-DAEMON-001
 val meta = test_session_meta_default("test/unit/parser_spec.spl")
 expect(meta.file_path).to_equal("test/unit/parser_spec.spl")
 expect(meta.session_kind).to_equal(SESSION_KIND_LOCAL)
@@ -82,13 +69,21 @@ expect(meta.artifact).to_equal("")
 
 #### default meta does not need a session
 
+- default meta does not need a session
+- Verify: default meta does not need a session
+   - Expected: meta_needs_session(meta) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("default meta does not need a session")
+step("Verify: default meta does not need a session")
 val meta = test_session_meta_default("test/unit/foo_spec.spl")
 expect(meta_needs_session(meta)).to_equal(false)
 ```
@@ -97,13 +92,21 @@ expect(meta_needs_session(meta)).to_equal(false)
 
 #### QEMU meta needs a session
 
+- QEMU meta needs a session
+- Verify: QEMU meta needs a session
+   - Expected: meta_needs_session(meta) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("QEMU meta needs a session")
+step("Verify: QEMU meta needs a session")
 val meta = TestSessionMeta(
     file_path: "test/baremetal/boot_spec.spl",
     session_kind: SESSION_KIND_QEMU_VM,
@@ -123,13 +126,25 @@ expect(meta_needs_session(meta)).to_equal(true)
 
 #### builds key from QEMU meta
 
+- builds key from QEMU meta
+- Verify: builds key from QEMU meta
+   - Expected: key.kind equals `SESSION_KIND_QEMU_VM`
+   - Expected: key.target equals `arm64`
+   - Expected: key.reuse_mode equals `REUSE_SHARED_WITH_RESET`
+   - Expected: key.reset_policy equals `RESET_RELOAD_BINARY`
+   - Expected: key.artifact_hash != "" is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("builds key from QEMU meta")
+step("Verify: builds key from QEMU meta")
 val meta = TestSessionMeta(
     file_path: "test/baremetal/arm64_boot_spec.spl",
     session_kind: SESSION_KIND_QEMU_VM,
@@ -153,13 +168,22 @@ expect(key.artifact_hash != "").to_equal(true)
 
 #### builds key with empty artifact hash for local
 
+- builds key with empty artifact hash for local
+- Verify: builds key with empty artifact hash for local
+   - Expected: key.kind equals `SESSION_KIND_LOCAL`
+   - Expected: key.artifact_hash equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("builds key with empty artifact hash for local")
+step("Verify: builds key with empty artifact hash for local")
 val meta = test_session_meta_default("test/unit/foo_spec.spl")
 val key = meta_to_session_key(meta)
 expect(key.kind).to_equal(SESSION_KIND_LOCAL)
@@ -170,13 +194,21 @@ expect(key.artifact_hash).to_equal("")
 
 #### session_key_matches compares correctly
 
+- session_key_matches compares correctly
+- Verify: session_key_matches compares correctly
+   - Expected: session_key_matches(key_a, key_b) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("session_key_matches compares correctly")
+step("Verify: session_key_matches compares correctly")
 val key_a = SessionKey(
     kind: SESSION_KIND_QEMU_VM,
     target: "riscv64",
@@ -201,13 +233,21 @@ expect(session_key_matches(key_a, key_b)).to_equal(true)
 
 #### session_key_matches rejects different targets
 
+- session_key_matches rejects different targets
+- Verify: session_key_matches rejects different targets
+   - Expected: session_key_matches(key_a, key_b) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("session_key_matches rejects different targets")
+step("Verify: session_key_matches rejects different targets")
 val key_a = SessionKey(
     kind: SESSION_KIND_QEMU_VM,
     target: "riscv64",
@@ -233,13 +273,23 @@ expect(session_key_matches(key_a, key_b)).to_equal(false)
 
 #### creates descriptor with default timeout
 
+- creates descriptor with default timeout
+- Verify: creates descriptor with default timeout
+   - Expected: desc.timeout_ms equals `60000`
+   - Expected: desc.max_concurrent equals `1`
+   - Expected: desc.key.kind equals `SESSION_KIND_CONTAINER`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates descriptor with default timeout")
+step("Verify: creates descriptor with default timeout")
 val key = SessionKey(
     kind: SESSION_KIND_CONTAINER,
     target: "docker",
@@ -249,8 +299,8 @@ val key = SessionKey(
     reset_policy: RESET_SOFT
 )
 val desc = session_descriptor_new(key)
-expect(desc.timeout_ms).to_equal(60000)
-expect(desc.max_concurrent).to_equal(1)
+expect(desc.timeout_ms).to_equal(60000)  # oracle: 60000 — named expected value from the requirement
+expect(desc.max_concurrent).to_equal(1)  # oracle: 1 — named expected value from the requirement
 expect(desc.key.kind).to_equal(SESSION_KIND_CONTAINER)
 ```
 
@@ -260,13 +310,24 @@ expect(desc.key.kind).to_equal(SESSION_KIND_CONTAINER)
 
 #### creates lease in IDLE state
 
+- creates lease in IDLE state
+- Verify: creates lease in IDLE state
+   - Expected: lease.status equals `LEASE_IDLE`
+   - Expected: lease.pid equals `0`
+   - Expected: lease.test_count equals `0`
+   - Expected: lease.key.kind equals `SESSION_KIND_SERVICE`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates lease in IDLE state")
+step("Verify: creates lease in IDLE state")
 val key = SessionKey(
     kind: SESSION_KIND_SERVICE,
     target: "http_server",
@@ -277,8 +338,8 @@ val key = SessionKey(
 )
 val lease = session_lease_new(key)
 expect(lease.status).to_equal(LEASE_IDLE)
-expect(lease.pid).to_equal(0)
-expect(lease.test_count).to_equal(0)
+expect(lease.pid).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(lease.test_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
 expect(lease.key.kind).to_equal(SESSION_KIND_SERVICE)
 ```
 
@@ -286,13 +347,21 @@ expect(lease.key.kind).to_equal(SESSION_KIND_SERVICE)
 
 #### lease session_id matches key_to_id
 
+- lease session_id matches key_to_id
+- Verify: lease session_id matches key_to_id
+   - Expected: lease.session_id equals `expected_id`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("lease session_id matches key_to_id")
+step("Verify: lease session_id matches key_to_id")
 val key = SessionKey(
     kind: SESSION_KIND_QEMU_VM,
     target: "riscv64",
@@ -312,13 +381,20 @@ expect(lease.session_id).to_equal(expected_id)
 
 #### generates readable ID from key
 
+- generates readable ID from key
+- Verify: generates readable ID from key
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("generates readable ID from key")
+step("Verify: generates readable ID from key")
 val key = SessionKey(
     kind: SESSION_KIND_QEMU_VM,
     target: "arm64",
@@ -339,13 +415,22 @@ expect(id).to_contain("deadbeef")
 
 #### parses session-kind marker
 
+- parses session-kind marker
+- Verify: parses session-kind marker
+   - Expected: meta.session_kind equals `SESSION_KIND_QEMU_VM`
+   - Expected: meta.target equals `riscv64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parses session-kind marker")
+step("Verify: parses session-kind marker")
 val lines = [
     "# @session-kind: qemu_vm",
     "# @target: riscv64"
@@ -359,13 +444,23 @@ expect(meta.target).to_equal("riscv64")
 
 #### parses reuse and reset markers
 
+- parses reuse and reset markers
+- Verify: parses reuse and reset markers
+   - Expected: meta.session_kind equals `SESSION_KIND_CONTAINER`
+   - Expected: meta.reuse_mode equals `REUSE_SHARED_WITH_RESET`
+   - Expected: meta.reset_policy equals `RESET_SOFT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parses reuse and reset markers")
+step("Verify: parses reuse and reset markers")
 val lines = [
     "# @session-kind: container_instance",
     "# @reuse: shared_with_reset",
@@ -381,13 +476,22 @@ expect(meta.reset_policy).to_equal(RESET_SOFT)
 
 #### parses artifact and startup markers
 
+- parses artifact and startup markers
+- Verify: parses artifact and startup markers
+   - Expected: meta.artifact equals `/tmp/test.elf`
+   - Expected: meta.startup_cmd equals `qemu-system-riscv64 -kernel /tmp/test.elf`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parses artifact and startup markers")
+step("Verify: parses artifact and startup markers")
 val lines = [
     "# @session-kind: qemu_vm",
     "# @artifact: /tmp/test.elf",
@@ -402,13 +506,22 @@ expect(meta.startup_cmd).to_equal("qemu-system-riscv64 -kernel /tmp/test.elf")
 
 #### returns defaults for empty header
 
+- returns defaults for empty header
+- Verify: returns defaults for empty header
+   - Expected: meta.session_kind equals `SESSION_KIND_LOCAL`
+   - Expected: meta.reuse_mode equals `REUSE_FRESH_PER_TEST`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns defaults for empty header")
+step("Verify: returns defaults for empty header")
 val meta = parse_session_meta("test/unit/foo_spec.spl", [])
 expect(meta.session_kind).to_equal(SESSION_KIND_LOCAL)
 expect(meta.reuse_mode).to_equal(REUSE_FRESH_PER_TEST)
@@ -420,13 +533,27 @@ expect(meta.reuse_mode).to_equal(REUSE_FRESH_PER_TEST)
 
 #### converts session kind to name and back
 
+- converts session kind to name and back
+- Verify: converts session kind to name and back
+   - Expected: session_kind_name(SESSION_KIND_QEMU_VM) equals `qemu_vm`
+   - Expected: session_kind_name(SESSION_KIND_CONTAINER) equals `container_instance`
+   - Expected: session_kind_name(SESSION_KIND_GUI) equals `gui_session`
+   - Expected: session_kind_name(SESSION_KIND_LOCAL) equals `local`
+   - Expected: session_kind_from_name("qemu_vm") equals `SESSION_KIND_QEMU_VM`
+   - Expected: session_kind_from_name("local") equals `SESSION_KIND_LOCAL`
+   - Expected: session_kind_from_name("unknown_thing") equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts session kind to name and back")
+step("Verify: converts session kind to name and back")
 expect(session_kind_name(SESSION_KIND_QEMU_VM)).to_equal("qemu_vm")
 expect(session_kind_name(SESSION_KIND_CONTAINER)).to_equal("container_instance")
 expect(session_kind_name(SESSION_KIND_GUI)).to_equal("gui_session")
@@ -440,13 +567,24 @@ expect(session_kind_from_name("unknown_thing")).to_equal(-1)
 
 #### converts reuse mode to name and back
 
+- converts reuse mode to name and back
+- Verify: converts reuse mode to name and back
+   - Expected: reuse_mode_name(REUSE_SHARED_READ_ONLY) equals `shared_read_only`
+   - Expected: reuse_mode_name(REUSE_FRESH_PER_TEST) equals `fresh_per_test`
+   - Expected: reuse_mode_from_name("shared_with_reset") equals `REUSE_SHARED_WITH_RESET`
+   - Expected: reuse_mode_from_name("bogus") equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts reuse mode to name and back")
+step("Verify: converts reuse mode to name and back")
 expect(reuse_mode_name(REUSE_SHARED_READ_ONLY)).to_equal("shared_read_only")
 expect(reuse_mode_name(REUSE_FRESH_PER_TEST)).to_equal("fresh_per_test")
 expect(reuse_mode_from_name("shared_with_reset")).to_equal(REUSE_SHARED_WITH_RESET)
@@ -457,13 +595,25 @@ expect(reuse_mode_from_name("bogus")).to_equal(-1)
 
 #### converts reset policy to name and back
 
+- converts reset policy to name and back
+- Verify: converts reset policy to name and back
+   - Expected: reset_policy_name(RESET_NONE) equals `none`
+   - Expected: reset_policy_name(RESET_RECREATE) equals `recreate`
+   - Expected: reset_policy_from_name("hard_reset") equals `RESET_HARD`
+   - Expected: reset_policy_from_name("reload_binary") equals `RESET_RELOAD_BINARY`
+   - Expected: reset_policy_from_name("nope") equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("converts reset policy to name and back")
+step("Verify: converts reset policy to name and back")
 expect(reset_policy_name(RESET_NONE)).to_equal("none")
 expect(reset_policy_name(RESET_RECREATE)).to_equal("recreate")
 expect(reset_policy_from_name("hard_reset")).to_equal(RESET_HARD)
@@ -477,13 +627,22 @@ expect(reset_policy_from_name("nope")).to_equal(-1)
 
 #### categorizes QEMU test files
 
+- categorizes QEMU test files
+- Verify: categorizes QEMU test files
+   - Expected: categorize_test_file("test/unit/lib/qemu/boot_spec.spl") equals `qemu`
+   - Expected: categorize_test_file("test/emulator/arm64_spec.spl") equals `qemu`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("categorizes QEMU test files")
+step("Verify: categorizes QEMU test files")
 expect(categorize_test_file("test/unit/lib/qemu/boot_spec.spl")).to_equal("qemu")
 expect(categorize_test_file("test/emulator/arm64_spec.spl")).to_equal("qemu")
 ```
@@ -492,13 +651,22 @@ expect(categorize_test_file("test/emulator/arm64_spec.spl")).to_equal("qemu")
 
 #### categorizes baremetal test files
 
+- categorizes baremetal test files
+- Verify: categorizes baremetal test files
+   - Expected: categorize_test_file("test/baremetal/kernel_init_spec.spl") equals `baremetal`
+   - Expected: categorize_test_file("test/kernel/boot_spec.spl") equals `baremetal`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("categorizes baremetal test files")
+step("Verify: categorizes baremetal test files")
 expect(categorize_test_file("test/baremetal/kernel_init_spec.spl")).to_equal("baremetal")
 expect(categorize_test_file("test/kernel/boot_spec.spl")).to_equal("baremetal")
 ```
@@ -507,13 +675,23 @@ expect(categorize_test_file("test/kernel/boot_spec.spl")).to_equal("baremetal")
 
 #### categorizes standard test files
 
+- categorizes standard test files
+- Verify: categorizes standard test files
+   - Expected: categorize_test_file("test/unit/parser/lexer_spec.spl") equals `unit`
+   - Expected: categorize_test_file("test/integration/api_spec.spl") equals `integration`
+   - Expected: categorize_test_file("test/system/daemon_spec.spl") equals `system`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("categorizes standard test files")
+step("Verify: categorizes standard test files")
 expect(categorize_test_file("test/unit/parser/lexer_spec.spl")).to_equal("unit")
 expect(categorize_test_file("test/integration/api_spec.spl")).to_equal("integration")
 expect(categorize_test_file("test/system/daemon_spec.spl")).to_equal("system")
@@ -523,13 +701,24 @@ expect(categorize_test_file("test/system/daemon_spec.spl")).to_equal("system")
 
 #### assigns correct timeouts per category
 
+- assigns correct timeouts per category
+- Verify: assigns correct timeouts per category
+   - Expected: strategy_timeout_for_category("qemu") equals `1800`
+   - Expected: strategy_timeout_for_category("baremetal") equals `1800`
+   - Expected: strategy_timeout_for_category("unit") equals `60`
+   - Expected: strategy_timeout_for_category("system") equals `600`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("assigns correct timeouts per category")
+step("Verify: assigns correct timeouts per category")
 expect(strategy_timeout_for_category("qemu")).to_equal(1800)
 expect(strategy_timeout_for_category("baremetal")).to_equal(1800)
 expect(strategy_timeout_for_category("unit")).to_equal(60)
@@ -540,13 +729,23 @@ expect(strategy_timeout_for_category("system")).to_equal(600)
 
 #### assigns correct memory per category
 
+- assigns correct memory per category
+- Verify: assigns correct memory per category
+   - Expected: strategy_memory_mb_for_category("qemu") equals `2048`
+   - Expected: strategy_memory_mb_for_category("unit") equals `256`
+   - Expected: strategy_memory_mb_for_category("system") equals `1024`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("assigns correct memory per category")
+step("Verify: assigns correct memory per category")
 expect(strategy_memory_mb_for_category("qemu")).to_equal(2048)
 expect(strategy_memory_mb_for_category("unit")).to_equal(256)
 expect(strategy_memory_mb_for_category("system")).to_equal(1024)
@@ -566,3 +765,55 @@ expect(strategy_memory_mb_for_category("system")).to_equal(1024)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-APP-TEST-DAEMON-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4395f192cb6d978709eeca692075fdebea81598d8a4d6eee6e1d99be3513bf95`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4395f192cb6d978709eeca692075fdebea81598d8a4d6eee6e1d99be3513bf95`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4395f192cb6d978709eeca692075fdebea81598d8a4d6eee6e1d99be3513bf95`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/test_daemon/test_daemon_execution_session_spec.spl
+mirror: doc/06_spec/01_unit/app/test_daemon/test_daemon_execution_session_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/test_daemon/test_daemon_execution_session_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/test_daemon/test_daemon_execution_session_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/test_daemon/test_daemon_execution_session_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/test_daemon/test_daemon_execution_session_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates default meta with LOCAL kind' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_daemon/test_daemon_execution_session_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'default meta does not need a session' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_daemon/test_daemon_execution_session_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'QEMU meta needs a session' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

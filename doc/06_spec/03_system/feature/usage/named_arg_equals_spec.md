@@ -2,29 +2,6 @@
 
 > connect(host: "localhost", port: 8080)
 
-<!-- sdn-diagram:id=named_arg_equals_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=named_arg_equals_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-named_arg_equals_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=named_arg_equals_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -44,7 +21,7 @@ connect(host: "localhost", port: 8080)
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/named_arg_equals_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -75,17 +52,18 @@ greet("Hello", name="World")
 
 #### passes single named argument
 
-1. fn greet
-2. expect greet
+- passes single named argument
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes single named argument")
 fn greet(name: text) -> text:
     "Hello, {name}!"
 expect greet(name="World") == "Hello, World!"
@@ -95,18 +73,18 @@ expect greet(name="World") == "Hello, World!"
 
 #### passes multiple named arguments
 
-1. fn format point
-2. "
-3. expect format point
+- passes multiple named arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes multiple named arguments")
 fn format_point(x: i64, y: i64) -> text:
     "({x}, {y})"
 expect format_point(x=3, y=4) == "(3, 4)"
@@ -116,18 +94,18 @@ expect format_point(x=3, y=4) == "(3, 4)"
 
 #### allows reordered named arguments
 
-1. fn format point
-2. "
-3. expect format point
+- allows reordered named arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows reordered named arguments")
 fn format_point(x: i64, y: i64) -> text:
     "({x}, {y})"
 expect format_point(y=4, x=3) == "(3, 4)"
@@ -139,17 +117,18 @@ expect format_point(y=4, x=3) == "(3, 4)"
 
 #### passes single named argument with colon
 
-1. fn greet
-2. expect greet
+- passes single named argument with colon
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes single named argument with colon")
 fn greet(name: text) -> text:
     "Hello, {name}!"
 expect greet(name: "World") == "Hello, World!"
@@ -159,18 +138,18 @@ expect greet(name: "World") == "Hello, World!"
 
 #### passes multiple named arguments with colon
 
-1. fn format point
-2. "
-3. expect format point
+- passes multiple named arguments with colon
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes multiple named arguments with colon")
 fn format_point(x: i64, y: i64) -> text:
     "({x}, {y})"
 expect format_point(x: 3, y: 4) == "(3, 4)"
@@ -180,18 +159,18 @@ expect format_point(x: 3, y: 4) == "(3, 4)"
 
 #### allows reordered named arguments with colon
 
-1. fn format point
-2. "
-3. expect format point
+- allows reordered named arguments with colon
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows reordered named arguments with colon")
 fn format_point(x: i64, y: i64) -> text:
     "({x}, {y})"
 expect format_point(y: 4, x: 3) == "(3, 4)"
@@ -203,17 +182,18 @@ expect format_point(y: 4, x: 3) == "(3, 4)"
 
 #### combines positional with named equals
 
-1. fn connect
-2. expect connect
+- combines positional with named equals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines positional with named equals")
 fn connect(host: text, port: i64) -> text:
     "{host}:{port}"
 expect connect("localhost", port=8080) == "localhost:8080"
@@ -223,17 +203,18 @@ expect connect("localhost", port=8080) == "localhost:8080"
 
 #### combines positional with named colon
 
-1. fn connect
-2. expect connect
+- combines positional with named colon
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines positional with named colon")
 fn connect(host: text, port: i64) -> text:
     "{host}:{port}"
 expect connect("localhost", port: 8080) == "localhost:8080"
@@ -243,18 +224,18 @@ expect connect("localhost", port: 8080) == "localhost:8080"
 
 #### uses multiple positional then named
 
-1. fn format record
-2. "{id}: {name}
-3. expect format record
+- uses multiple positional then named
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses multiple positional then named")
 fn format_record(id: i64, name: text, active: bool) -> text:
     "{id}: {name} (active={active})"
 expect format_record(1, "Alice", active=true) == "1: Alice (active=true)"
@@ -266,18 +247,18 @@ expect format_record(1, "Alice", active=true) == "1: Alice (active=true)"
 
 #### uses default when named arg omitted
 
-1. fn create config
-2. "{host}:{port}
-3. expect create config
+- uses default when named arg omitted
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses default when named arg omitted")
 fn create_config(host: text, port: i64 = 80, timeout: i64 = 30) -> text:
     "{host}:{port} (timeout={timeout})"
 expect create_config(host="example.com") == "example.com:80 (timeout=30)"
@@ -287,18 +268,18 @@ expect create_config(host="example.com") == "example.com:80 (timeout=30)"
 
 #### overrides default with named arg
 
-1. fn create config
-2. "{host}:{port}
-3. expect create config
+- overrides default with named arg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("overrides default with named arg")
 fn create_config(host: text, port: i64 = 80, timeout: i64 = 30) -> text:
     "{host}:{port} (timeout={timeout})"
 expect create_config(host="example.com", port=443) == "example.com:443 (timeout=30)"
@@ -308,18 +289,18 @@ expect create_config(host="example.com", port=443) == "example.com:443 (timeout=
 
 #### overrides multiple defaults
 
-1. fn create config
-2. "{host}:{port}
-3. expect create config
+- overrides multiple defaults
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("overrides multiple defaults")
 fn create_config(host: text, port: i64 = 80, timeout: i64 = 30) -> text:
     "{host}:{port} (timeout={timeout})"
 expect create_config(host="example.com", port=443, timeout=60) == "example.com:443 (timeout=60)"
@@ -329,18 +310,18 @@ expect create_config(host="example.com", port=443, timeout=60) == "example.com:4
 
 #### overrides defaults in any order
 
-1. fn create config
-2. "{host}:{port}
-3. expect create config
+- overrides defaults in any order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("overrides defaults in any order")
 fn create_config(host: text, port: i64 = 80, timeout: i64 = 30) -> text:
     "{host}:{port} (timeout={timeout})"
 expect create_config(host="example.com", timeout=120, port=8080) == "example.com:8080 (timeout=120)"
@@ -352,13 +333,18 @@ expect create_config(host="example.com", timeout=120, port=8080) == "example.com
 
 #### constructs struct with equals syntax
 
+- constructs struct with equals syntax
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("constructs struct with equals syntax")
 struct Point:
     x: i64
     y: i64
@@ -371,13 +357,18 @@ expect p.y == 20
 
 #### constructs struct with colon syntax
 
+- constructs struct with colon syntax
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("constructs struct with colon syntax")
 struct Point:
     x: i64
     y: i64
@@ -390,13 +381,18 @@ expect p.y == 20
 
 #### allows reordered struct fields
 
+- allows reordered struct fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows reordered struct fields")
 struct Point:
     x: i64
     y: i64
@@ -409,13 +405,18 @@ expect p.y == 20
 
 #### constructs complex struct
 
+- constructs complex struct
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("constructs complex struct")
 struct Person:
     name: text
     age: i64
@@ -432,17 +433,18 @@ expect person.active == true
 
 #### handles single character parameter names
 
-1. fn f
-2. expect f
+- handles single character parameter names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single character parameter names")
 fn f(a: i64, b: i64) -> i64:
     a + b
 expect f(a=1, b=2) == 3
@@ -452,17 +454,18 @@ expect f(a=1, b=2) == 3
 
 #### handles longer parameter names
 
-1. fn calculate
-2. expect calculate
+- handles longer parameter names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles longer parameter names")
 fn calculate(first_operand: i64, second_operand: i64) -> i64:
     first_operand * second_operand
 expect calculate(first_operand=5, second_operand=6) == 30
@@ -472,17 +475,18 @@ expect calculate(first_operand=5, second_operand=6) == 30
 
 #### handles underscored parameter names
 
-1. fn process
-2. expect process
+- handles underscored parameter names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles underscored parameter names")
 fn process(input_value: i64, max_retries: i64) -> i64:
     input_value * max_retries
 expect process(input_value=10, max_retries=3) == 30
@@ -502,3 +506,51 @@ expect process(input_value=10, max_retries=3) == 30
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `db6e8472a0436b34a5d4d63567d167ca1fa47aebae8eec9f4fdb01f11aff35c2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `db6e8472a0436b34a5d4d63567d167ca1fa47aebae8eec9f4fdb01f11aff35c2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `db6e8472a0436b34a5d4d63567d167ca1fa47aebae8eec9f4fdb01f11aff35c2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/named_arg_equals_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/named_arg_equals_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/named_arg_equals_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/named_arg_equals_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/named_arg_equals_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes single named argument' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/named_arg_equals_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes multiple named arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/named_arg_equals_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows reordered named arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

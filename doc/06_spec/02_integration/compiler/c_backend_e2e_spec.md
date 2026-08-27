@@ -1,29 +1,6 @@
 # C Backend E2e Specification
 
-> <details>
-
-<!-- sdn-diagram:id=c_backend_e2e_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=c_backend_e2e_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-c_backend_e2e_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=c_backend_e2e_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering C Backend - Type Mapper, C Backend - IR Builder, C Backend - Registration.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -45,13 +22,19 @@ c_backend_e2e_spec
 
 #### maps i64 _(slow)_
 
+- maps i64
+   - Expected: result equals `int64_t`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("maps i64")
 if _can_run:
     val mapper = CTypeMapper.create()
     val result = mapper.map_primitive(PrimitiveType.I64)
@@ -70,13 +53,19 @@ else:
 
 #### maps f64 _(slow)_
 
+- maps f64
+   - Expected: result equals `double`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("maps f64")
 if _can_run:
     val mapper = CTypeMapper.create()
     val result = mapper.map_primitive(PrimitiveType.F64)
@@ -95,13 +84,19 @@ else:
 
 #### maps bool as int64_t _(slow)_
 
+- maps bool as int64_t
+   - Expected: result equals `int64_t`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("maps bool as int64_t")
 if _can_run:
     val mapper = CTypeMapper.create()
     val result = mapper.map_primitive(PrimitiveType.Bool)
@@ -120,13 +115,19 @@ else:
 
 #### maps unit as void _(slow)_
 
+- maps unit as void
+   - Expected: result equals `void`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("maps unit as void")
 if _can_run:
     val mapper = CTypeMapper.create()
     val result = mapper.map_primitive(PrimitiveType.Unit)
@@ -147,13 +148,19 @@ else:
 
 #### maps pointers to void* _(slow)_
 
+- maps pointers to void*
+   - Expected: result equals `void*`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("maps pointers to void*")
 if _can_run:
     val mapper = CTypeMapper.create()
     val result = mapper.map_pointer("int64_t", Mutability.Mutable)
@@ -174,13 +181,19 @@ else:
 
 #### returns C _(slow)_
 
+- returns C
+   - Expected: mapper.backend_name() equals `C`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns C")
 if _can_run:
     val mapper = CTypeMapper.create()
     expect(mapper.backend_name()).to_equal("C")
@@ -202,17 +215,18 @@ else:
 
 #### emits includes and runtime header _(slow)_
 
-1. var builder = CIRBuilder create
-2. builder emit file header
+- emits includes and runtime header
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("emits includes and runtime header")
 if _can_run:
     var builder = CIRBuilder.create("test_module")
     builder.emit_file_header()
@@ -236,20 +250,18 @@ else:
 
 #### emits function definition _(slow)_
 
-1. var builder = CIRBuilder create
-2. builder start function
-3. builder emit assign
-4. builder emit return
-5. builder end function
+- emits function definition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("emits function definition")
 if _can_run:
     var builder = CIRBuilder.create("test")
     builder.start_function("int64_t", "my_func", "int64_t _l0")
@@ -276,22 +288,18 @@ else:
 
 #### emits labels and gotos _(slow)_
 
-1. var builder = CIRBuilder create
-2. builder start function
-3. builder emit label
-4. builder emit goto
-5. builder emit label
-6. builder emit return
-7. builder end function
+- emits labels and gotos
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("emits labels and gotos")
 if _can_run:
     var builder = CIRBuilder.create("test")
     builder.start_function("void", "test_fn", "void")
@@ -320,17 +328,19 @@ else:
 
 #### adds string constants _(slow)_
 
-1. var builder = CIRBuilder create
+- adds string constants
    - Expected: name equals `_str_0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("adds string constants")
 if _can_run:
     var builder = CIRBuilder.create("test")
     val name = builder.add_string_literal("hello")
@@ -355,16 +365,22 @@ else:
 
 #### finds C backend by name 'c' _(slow)_
 
+- finds C backend by name 'c'
+   - Expected: kind == nil is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("finds C backend by name 'c'")
 if _can_run:
     val kind = backend_for_name("c")
-    expect(kind.?).to_equal(true)
+    expect(kind == nil).to_equal(false)
 else:
     print "SKIP: requires compiled mode"
 ```
@@ -379,16 +395,22 @@ else:
 
 #### finds C backend by name 'cpp' _(slow)_
 
+- finds C backend by name 'cpp'
+   - Expected: kind == nil is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("finds C backend by name 'cpp'")
 if _can_run:
     val kind = backend_for_name("cpp")
-    expect(kind.?).to_equal(true)
+    expect(kind == nil).to_equal(false)
 else:
     print "SKIP: requires compiled mode"
 ```
@@ -403,16 +425,22 @@ else:
 
 #### finds C backend by name 'ccodegen' _(slow)_
 
+- finds C backend by name 'ccodegen'
+   - Expected: kind == nil is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("finds C backend by name 'ccodegen'")
 if _can_run:
     val kind = backend_for_name("ccodegen")
-    expect(kind.?).to_equal(true)
+    expect(kind == nil).to_equal(false)
 else:
     print "SKIP: requires compiled mode"
 ```
@@ -429,13 +457,19 @@ else:
 
 #### includes CCodegen in available backends _(slow)_
 
+- includes CCodegen in available backends
+   - Expected: found is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("includes CCodegen in available backends")
 if _can_run:
     val backends = available_backends()
     var found = false
@@ -459,13 +493,19 @@ else:
 
 #### has correct integer tag _(slow)_
 
+- has correct integer tag
+   - Expected: BACKEND_CCODEGEN equals `9`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("has correct integer tag")
 if _can_run:
     expect(BACKEND_CCODEGEN).to_equal(9)
 else:
@@ -484,12 +524,12 @@ else:
 | Category | Compiler |
 | Status | Active |
 | Source | `test/02_integration/compiler/c_backend_e2e_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering C Backend - Type Mapper, C Backend - IR Builder, C Backend - Registration.
 - C Backend - Type Mapper
 - C Backend - IR Builder
 - C Backend - Registration
@@ -506,3 +546,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8c4405181a7707764e06d8d94308cc86a112b1442ffa346c88c4ebfe8fb7ef84`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8c4405181a7707764e06d8d94308cc86a112b1442ffa346c88c4ebfe8fb7ef84`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8c4405181a7707764e06d8d94308cc86a112b1442ffa346c88c4ebfe8fb7ef84`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/02_integration/compiler/c_backend_e2e_spec.spl
+mirror: doc/06_spec/02_integration/compiler/c_backend_e2e_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/compiler/c_backend_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/compiler/c_backend_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/compiler/c_backend_e2e_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/compiler/c_backend_e2e_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps i64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/c_backend_e2e_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps f64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/c_backend_e2e_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps bool as int64_t' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,30 +2,6 @@
 
 > Tests for FileManager: construction, sorting, navigation, and
 
-<!-- sdn-diagram:id=file_manager_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=file_manager_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-file_manager_spec -> std
-file_manager_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=file_manager_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 49 | 49 | 0 | 0 |
@@ -44,7 +20,7 @@ Tests for FileManager: construction, sorting, navigation, and
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/apps/file_manager/file_manager_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests for FileManager: construction, sorting, navigation, and
@@ -59,13 +35,20 @@ Tests for FileManager: construction, sorting, navigation, and
 
 #### has Name variant
 
+- has Name variant
+   - Expected: field equals `SortField.Name`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("has Name variant")
+"""SortField.Name variant exists and equals itself."""
 val field = SortField.Name
 expect(field).to_equal(SortField.Name)
 ```
@@ -74,13 +57,19 @@ expect(field).to_equal(SortField.Name)
 
 #### has Size variant
 
+- has Size variant
+   - Expected: field equals `SortField.Size`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("has Size variant")
 val field = SortField.Size
 expect(field).to_equal(SortField.Size)
 ```
@@ -89,13 +78,19 @@ expect(field).to_equal(SortField.Size)
 
 #### has Date variant
 
+- has Date variant
+   - Expected: field equals `SortField.Date`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("has Date variant")
 val field = SortField.Date
 expect(field).to_equal(SortField.Date)
 ```
@@ -106,13 +101,19 @@ expect(field).to_equal(SortField.Date)
 
 #### has Ascending variant
 
+- has Ascending variant
+   - Expected: dir equals `SortDirection.Ascending`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("has Ascending variant")
 val dir = SortDirection.Ascending
 expect(dir).to_equal(SortDirection.Ascending)
 ```
@@ -121,13 +122,19 @@ expect(dir).to_equal(SortDirection.Ascending)
 
 #### has Descending variant
 
+- has Descending variant
+   - Expected: dir equals `SortDirection.Descending`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("has Descending variant")
 val dir = SortDirection.Descending
 expect(dir).to_equal(SortDirection.Descending)
 ```
@@ -138,13 +145,20 @@ expect(dir).to_equal(SortDirection.Descending)
 
 #### constructs with name and size
 
+- constructs with name and size
+   - Expected: entry.name equals `readme.txt`
+   - Expected: entry.size equals `1024`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("constructs with name and size")
 val entry = FileEntry(
     name: "readme.txt",
     kind: FsNodeKind.File,
@@ -160,13 +174,20 @@ expect(entry.size).to_equal(1024)
 
 #### constructs directory entry
 
+- constructs directory entry
+   - Expected: entry.name equals `src`
+   - Expected: entry.kind equals `FsNodeKind.Directory`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("constructs directory entry")
 val entry = FileEntry(
     name: "src",
     kind: FsNodeKind.Directory,
@@ -186,13 +207,19 @@ expect(entry.kind).to_equal(FsNodeKind.Directory)
 
 #### starts at given path
 
+- starts at given path
+   - Expected: fm.current_path equals `/home`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts at given path")
 val fm = FileManager.new("/home")
 expect(fm.current_path).to_equal("/home")
 ```
@@ -201,13 +228,19 @@ expect(fm.current_path).to_equal("/home")
 
 #### starts with empty entries
 
+- starts with empty entries
+   - Expected: fm.entries.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with empty entries")
 val fm = FileManager.new("/")
 expect(fm.entries.len()).to_equal(0)
 ```
@@ -216,13 +249,19 @@ expect(fm.entries.len()).to_equal(0)
 
 #### starts with selected_index at 0
 
+- starts with selected_index at 0
+   - Expected: fm.selected_index equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with selected_index at 0")
 val fm = FileManager.new("/")
 expect(fm.selected_index).to_equal(0)
 ```
@@ -231,13 +270,19 @@ expect(fm.selected_index).to_equal(0)
 
 #### starts with show_hidden false
 
+- starts with show_hidden false
+   - Expected: fm.show_hidden is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with show_hidden false")
 val fm = FileManager.new("/")
 expect(fm.show_hidden).to_equal(false)
 ```
@@ -246,13 +291,19 @@ expect(fm.show_hidden).to_equal(false)
 
 #### starts with sort_by Name
 
+- starts with sort_by Name
+   - Expected: fm.sort_by equals `SortField.Name`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with sort_by Name")
 val fm = FileManager.new("/")
 expect(fm.sort_by).to_equal(SortField.Name)
 ```
@@ -261,13 +312,19 @@ expect(fm.sort_by).to_equal(SortField.Name)
 
 #### starts with sort_dir Ascending
 
+- starts with sort_dir Ascending
+   - Expected: fm.sort_dir equals `SortDirection.Ascending`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with sort_dir Ascending")
 val fm = FileManager.new("/")
 expect(fm.sort_dir).to_equal(SortDirection.Ascending)
 ```
@@ -276,13 +333,20 @@ expect(fm.sort_dir).to_equal(SortDirection.Ascending)
 
 #### starts with dir_tree_paths containing root
 
+- starts with dir_tree_paths containing root
+   - Expected: fm.dir_tree_paths.len() equals `1`
+   - Expected: fm.dir_tree_paths[0] equals `/`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with dir_tree_paths containing root")
 val fm = FileManager.new("/")
 expect(fm.dir_tree_paths.len()).to_equal(1)
 expect(fm.dir_tree_paths[0]).to_equal("/")
@@ -292,13 +356,19 @@ expect(fm.dir_tree_paths[0]).to_equal("/")
 
 #### starts with empty clipboard_path
 
+- starts with empty clipboard_path
+   - Expected: fm.clipboard_path equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with empty clipboard_path")
 val fm = FileManager.new("/")
 expect(fm.clipboard_path).to_equal("")
 ```
@@ -307,13 +377,19 @@ expect(fm.clipboard_path).to_equal("")
 
 #### starts with empty clipboard_op
 
+- starts with empty clipboard_op
+   - Expected: fm.clipboard_op equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with empty clipboard_op")
 val fm = FileManager.new("/")
 expect(fm.clipboard_op).to_equal("")
 ```
@@ -322,13 +398,18 @@ expect(fm.clipboard_op).to_equal("")
 
 #### starts with nil vfs
 
+- starts with nil vfs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("starts with nil vfs")
 val fm = FileManager.new("/")
 expect(fm.vfs).to_be_nil
 ```
@@ -339,13 +420,19 @@ expect(fm.vfs).to_be_nil
 
 #### respects /home/user path
 
+- respects /home/user path
+   - Expected: fm.current_path equals `/home/user`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("respects /home/user path")
 val fm = FileManager.new("/home/user")
 expect(fm.current_path).to_equal("/home/user")
 ```
@@ -354,13 +441,19 @@ expect(fm.current_path).to_equal("/home/user")
 
 #### respects root path
 
+- respects root path
+   - Expected: fm.current_path equals `/`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("respects root path")
 val fm = FileManager.new("/")
 expect(fm.current_path).to_equal("/")
 ```
@@ -371,13 +464,18 @@ expect(fm.current_path).to_equal("/")
 
 #### _compare_entries sorts by name ascending
 
+- _compare_entries sorts by name ascending
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_compare_entries sorts by name ascending")
 val a = FileEntry(name: "alpha", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
 val b = FileEntry(name: "beta", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
 val result = _compare_entries(a, b, SortField.Name, SortDirection.Ascending)
@@ -388,13 +486,18 @@ expect(result).to_be_less_than(0)
 
 #### _compare_entries sorts by name descending
 
+- _compare_entries sorts by name descending
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_compare_entries sorts by name descending")
 val a = FileEntry(name: "alpha", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
 val b = FileEntry(name: "beta", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
 val result = _compare_entries(a, b, SortField.Name, SortDirection.Descending)
@@ -405,13 +508,18 @@ expect(result).to_be_greater_than(0)
 
 #### _compare_entries sorts by size
 
+- _compare_entries sorts by size
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_compare_entries sorts by size")
 val a = FileEntry(name: "small", kind: FsNodeKind.File, size: 100, modified_ns: 0, permissions: 0)
 val b = FileEntry(name: "big", kind: FsNodeKind.File, size: 9999, modified_ns: 0, permissions: 0)
 val result = _compare_entries(a, b, SortField.Size, SortDirection.Ascending)
@@ -422,13 +530,18 @@ expect(result).to_be_less_than(0)
 
 #### _compare_entries sorts by date
 
+- _compare_entries sorts by date
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_compare_entries sorts by date")
 val a = FileEntry(name: "old", kind: FsNodeKind.File, size: 0, modified_ns: 100, permissions: 0)
 val b = FileEntry(name: "new", kind: FsNodeKind.File, size: 0, modified_ns: 9999, permissions: 0)
 val result = _compare_entries(a, b, SortField.Date, SortDirection.Ascending)
@@ -439,9 +552,7 @@ expect(result).to_be_less_than(0)
 
 #### _sort_file_entries sorts list by name
 
-1. FileEntry
-2. FileEntry
-3. FileEntry
+- _sort_file_entries sorts list by name
    - Expected: sorted[0].name equals `a.txt`
    - Expected: sorted[1].name equals `b.txt`
    - Expected: sorted[2].name equals `c.txt`
@@ -450,10 +561,12 @@ expect(result).to_be_less_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_sort_file_entries sorts list by name")
 val entries = [
     FileEntry(name: "c.txt", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
     FileEntry(name: "a.txt", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
@@ -469,13 +582,19 @@ expect(sorted[2].name).to_equal("c.txt")
 
 #### _compare_entries returns 0 for equal names
 
+- _compare_entries returns 0 for equal names
+   - Expected: result equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_compare_entries returns 0 for equal names")
 val a = FileEntry(name: "same", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
 val b = FileEntry(name: "same", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
 val result = _compare_entries(a, b, SortField.Name, SortDirection.Ascending)
@@ -488,18 +607,19 @@ expect(result).to_equal(0)
 
 #### navigate_to changes current_path
 
-1. var fm = FileManager new
-2. fm navigate to
+- navigate_to changes current_path
    - Expected: fm.current_path equals `/home`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("navigate_to changes current_path")
 var fm = FileManager.new("/")
 fm.navigate_to("/home")
 expect(fm.current_path).to_equal("/home")
@@ -509,18 +629,19 @@ expect(fm.current_path).to_equal("/home")
 
 #### navigate_to resets selected_index
 
-1. var fm = FileManager new
-2. fm navigate to
+- navigate_to resets selected_index
    - Expected: fm.selected_index equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("navigate_to resets selected_index")
 var fm = FileManager.new("/")
 fm.selected_index = 5
 fm.navigate_to("/home")
@@ -531,18 +652,19 @@ expect(fm.selected_index).to_equal(0)
 
 #### navigate_up goes to parent directory
 
-1. var fm = FileManager new
-2. fm navigate up
+- navigate_up goes to parent directory
    - Expected: fm.current_path equals `/home`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("navigate_up goes to parent directory")
 var fm = FileManager.new("/home/user")
 fm.navigate_up()
 expect(fm.current_path).to_equal("/home")
@@ -552,18 +674,19 @@ expect(fm.current_path).to_equal("/home")
 
 #### navigate_up from root stays at root
 
-1. var fm = FileManager new
-2. fm navigate up
+- navigate_up from root stays at root
    - Expected: fm.current_path equals `/`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("navigate_up from root stays at root")
 var fm = FileManager.new("/")
 fm.navigate_up()
 expect(fm.current_path).to_equal("/")
@@ -573,19 +696,19 @@ expect(fm.current_path).to_equal("/")
 
 #### open_selected resolves parent entries in-place
 
-1. var fm = FileManager new
-2. FileEntry
-3. fm open selected
+- open_selected resolves parent entries in-place
    - Expected: fm.current_path equals `/home`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("open_selected resolves parent entries in-place")
 var fm = FileManager.new("/home/user")
 fm.entries = [
     FileEntry(name: "..", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
@@ -598,11 +721,8 @@ expect(fm.current_path).to_equal("/home")
 
 #### open_selected navigates when stat resolves a non-directory entry to a directory
 
-1. var vfs = VfsManager new
+- open_selected navigates when stat resolves a non-directory entry to a directory
    - Expected: mounted.is_ok() is true
-2. var fm = FileManager with vfs
-3. FileEntry
-4. fm open selected
    - Expected: fm.current_path equals `/home/docs`
    - Expected: fs.last_stat_path equals `/home/docs`
 
@@ -610,10 +730,12 @@ expect(fm.current_path).to_equal("/home")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("open_selected navigates when stat resolves a non-directory entry to a directory")
 var vfs = VfsManager.new()
 val fs = FileManagerOpenStatFs.new(FsNodeKind.Directory)
 val mounted = vfs.mount(path: "/", fs_type: "mock", device: "", read_only: false, fs: fs)
@@ -633,20 +755,19 @@ expect(fs.last_stat_path).to_equal("/home/docs")
 
 #### select_next increments selected_index
 
-1. var fm = FileManager new
-2. FileEntry
-3. FileEntry
-4. fm select next
+- select_next increments selected_index
    - Expected: fm.selected_index equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("select_next increments selected_index")
 var fm = FileManager.new("/")
 fm.entries = [
     FileEntry(name: "a", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
@@ -660,19 +781,19 @@ expect(fm.selected_index).to_equal(1)
 
 #### select_next does not exceed entries length
 
-1. var fm = FileManager new
-2. FileEntry
-3. fm select next
+- select_next does not exceed entries length
    - Expected: fm.selected_index equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("select_next does not exceed entries length")
 var fm = FileManager.new("/")
 fm.entries = [
     FileEntry(name: "a", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0)
@@ -686,20 +807,19 @@ expect(fm.selected_index).to_equal(0)
 
 #### select_prev decrements selected_index
 
-1. var fm = FileManager new
-2. FileEntry
-3. FileEntry
-4. fm select prev
+- select_prev decrements selected_index
    - Expected: fm.selected_index equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("select_prev decrements selected_index")
 var fm = FileManager.new("/")
 fm.entries = [
     FileEntry(name: "a", kind: FsNodeKind.File, size: 0, modified_ns: 0, permissions: 0),
@@ -714,18 +834,19 @@ expect(fm.selected_index).to_equal(0)
 
 #### select_prev does not go below 0
 
-1. var fm = FileManager new
-2. fm select prev
+- select_prev does not go below 0
    - Expected: fm.selected_index equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("select_prev does not go below 0")
 var fm = FileManager.new("/")
 fm.selected_index = 0
 fm.select_prev()
@@ -738,18 +859,19 @@ expect(fm.selected_index).to_equal(0)
 
 #### toggle_hidden flips from false to true
 
-1. var fm = FileManager new
-2. fm toggle hidden
+- toggle_hidden flips from false to true
    - Expected: fm.show_hidden is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("toggle_hidden flips from false to true")
 var fm = FileManager.new("/")
 fm.toggle_hidden()
 expect(fm.show_hidden).to_equal(true)
@@ -759,18 +881,19 @@ expect(fm.show_hidden).to_equal(true)
 
 #### toggle_hidden flips from true to false
 
-1. var fm = FileManager new
-2. fm toggle hidden
+- toggle_hidden flips from true to false
    - Expected: fm.show_hidden is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("toggle_hidden flips from true to false")
 var fm = FileManager.new("/")
 fm.show_hidden = true
 fm.toggle_hidden()
@@ -783,18 +906,19 @@ expect(fm.show_hidden).to_equal(false)
 
 #### changes sort field to Size
 
-1. var fm = FileManager new
-2. fm set sort
+- changes sort field to Size
    - Expected: fm.sort_by equals `SortField.Size`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("changes sort field to Size")
 var fm = FileManager.new("/")
 fm.set_sort(SortField.Size)
 expect(fm.sort_by).to_equal(SortField.Size)
@@ -804,18 +928,19 @@ expect(fm.sort_by).to_equal(SortField.Size)
 
 #### changes sort field to Date
 
-1. var fm = FileManager new
-2. fm set sort
+- changes sort field to Date
    - Expected: fm.sort_by equals `SortField.Date`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("changes sort field to Date")
 var fm = FileManager.new("/")
 fm.set_sort(SortField.Date)
 expect(fm.sort_by).to_equal(SortField.Date)
@@ -827,13 +952,18 @@ expect(fm.sort_by).to_equal(SortField.Date)
 
 #### format_size returns bytes for small sizes
 
+- format_size returns bytes for small sizes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("format_size returns bytes for small sizes")
 val result = format_size(512)
 expect(result).to_contain("B")
 ```
@@ -842,13 +972,18 @@ expect(result).to_contain("B")
 
 #### format_size returns KB for kilobyte sizes
 
+- format_size returns KB for kilobyte sizes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("format_size returns KB for kilobyte sizes")
 val result = format_size(2048)
 expect(result).to_contain("KB")
 ```
@@ -857,13 +992,18 @@ expect(result).to_contain("KB")
 
 #### format_size returns MB for megabyte sizes
 
+- format_size returns MB for megabyte sizes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("format_size returns MB for megabyte sizes")
 val result = format_size(2097152)
 expect(result).to_contain("MB")
 ```
@@ -872,13 +1012,19 @@ expect(result).to_contain("MB")
 
 #### format_kind returns File for file
 
+- format_kind returns File for file
+   - Expected: result equals `File`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("format_kind returns File for file")
 val result = format_kind(FsNodeKind.File)
 expect(result).to_equal("File")
 ```
@@ -887,13 +1033,19 @@ expect(result).to_equal("File")
 
 #### format_kind returns Dir for directory
 
+- format_kind returns Dir for directory
+   - Expected: result equals `Dir`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("format_kind returns Dir for directory")
 val result = format_kind(FsNodeKind.Directory)
 expect(result).to_equal("Dir")
 ```
@@ -902,13 +1054,19 @@ expect(result).to_equal("Dir")
 
 #### kind_icon returns folder for directory
 
+- kind_icon returns folder for directory
+   - Expected: result equals `folder`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("kind_icon returns folder for directory")
 val result = kind_icon(FsNodeKind.Directory)
 expect(result).to_equal("folder")
 ```
@@ -919,13 +1077,19 @@ expect(result).to_equal("folder")
 
 #### _resolve_open_path keeps current directory for dot entries
 
+- _resolve_open_path keeps current directory for dot entries
+   - Expected: _resolve_open_path("/home/user", ".") equals `/home/user`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_resolve_open_path keeps current directory for dot entries")
 expect(_resolve_open_path("/home/user", ".")).to_equal("/home/user")
 ```
 
@@ -933,13 +1097,19 @@ expect(_resolve_open_path("/home/user", ".")).to_equal("/home/user")
 
 #### _resolve_open_path resolves parent for dot-dot entries
 
+- _resolve_open_path resolves parent for dot-dot entries
+   - Expected: _resolve_open_path("/home/user", "..") equals `/home`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_resolve_open_path resolves parent for dot-dot entries")
 expect(_resolve_open_path("/home/user", "..")).to_equal("/home")
 ```
 
@@ -947,7 +1117,7 @@ expect(_resolve_open_path("/home/user", "..")).to_equal("/home")
 
 #### _should_navigate_in_place prefers stat-resolved directories
 
-1. var vfs = VfsManager new
+- _should_navigate_in_place prefers stat-resolved directories
    - Expected: mounted.is_ok() is true
    - Expected: _should_navigate_in_place("docs", FsNodeKind.Symlink, "/home/docs", vfs) is true
 
@@ -955,10 +1125,12 @@ expect(_resolve_open_path("/home/user", "..")).to_equal("/home")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_should_navigate_in_place prefers stat-resolved directories")
 var vfs = VfsManager.new()
 val fs = FileManagerOpenStatFs.new(FsNodeKind.Directory)
 val mounted = vfs.mount(path: "/", fs_type: "mock", device: "", read_only: false, fs: fs)
@@ -970,13 +1142,19 @@ expect(_should_navigate_in_place("docs", FsNodeKind.Symlink, "/home/docs", vfs))
 
 #### _should_navigate_in_place leaves regular files to the launcher
 
+- _should_navigate_in_place leaves regular files to the launcher
+   - Expected: _should_navigate_in_place("notes.txt", FsNodeKind.File, "/home/notes.txt", nil) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("_should_navigate_in_place leaves regular files to the launcher")
 expect(_should_navigate_in_place("notes.txt", FsNodeKind.File, "/home/notes.txt", nil)).to_equal(false)
 ```
 
@@ -994,3 +1172,54 @@ expect(_should_navigate_in_place("notes.txt", FsNodeKind.File, "/home/notes.txt"
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `73b19626284d1e656816cde05fc8d8dadb9804fadd2ac4b799bd72558a41c935`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `73b19626284d1e656816cde05fc8d8dadb9804fadd2ac4b799bd72558a41c935`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `73b19626284d1e656816cde05fc8d8dadb9804fadd2ac4b799bd72558a41c935`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/os/apps/file_manager/file_manager_spec.spl
+mirror: doc/06_spec/01_unit/os/apps/file_manager/file_manager_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/apps/file_manager/file_manager_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/apps/file_manager/file_manager_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/apps/file_manager/file_manager_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/apps/file_manager/file_manager_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Name variant' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/apps/file_manager/file_manager_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Size variant' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/apps/file_manager/file_manager_spec.spl:114:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Date variant' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->
