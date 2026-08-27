@@ -258,6 +258,44 @@ fn test_unwrap_or_self_only_unwraps_canonical_option() {
 }
 
 #[test]
+fn test_unwrap_or_value_checks_enum_identity_and_typed_controls() {
+    let payload = RuntimeValue::from_int(42);
+    let default = RuntimeValue::from_int(-1);
+    let ok_disc = super::hash_variant_discriminant("Ok");
+    let err_disc = super::hash_variant_discriminant("Err");
+    let some_disc = super::hash_variant_discriminant("Some");
+    let none_disc = super::hash_variant_discriminant("None");
+
+    // Variant names are not identities: user Ok/Err values remain opaque.
+    let user_ok = rt_enum_new(77, ok_disc, payload);
+    let user_err = rt_enum_new(77, err_disc, payload);
+    assert_eq!(super::rt_unwrap_or_value(user_ok, default), user_ok);
+    assert_eq!(super::rt_unwrap_or_value(user_err, default), user_err);
+
+    let result_ok = rt_enum_new(super::RESULT_ENUM_ID, ok_disc, payload);
+    let result_err = rt_enum_new(super::RESULT_ENUM_ID, err_disc, payload);
+    assert_eq!(super::rt_unwrap_or_value(result_ok, default), payload);
+    assert_eq!(super::rt_unwrap_or_value(result_err, default), default);
+
+    // Both Option encodings are live: compiler constructors use hashed names,
+    // while core collection providers still emit ordinal Some=0/None=1.
+    for (some, none) in [
+        (
+            rt_enum_new(super::OPTION_ENUM_ID, some_disc, payload),
+            rt_enum_new(super::OPTION_ENUM_ID, none_disc, RuntimeValue::NIL),
+        ),
+        (
+            rt_enum_new(super::OPTION_ENUM_ID, 0, payload),
+            rt_enum_new(super::OPTION_ENUM_ID, 1, RuntimeValue::NIL),
+        ),
+    ] {
+        assert_eq!(super::rt_unwrap_or_value(some, default), payload);
+        assert_eq!(super::rt_unwrap_or_value(none, default), default);
+        assert!(super::rt_is_none(none));
+    }
+}
+
+#[test]
 fn test_option_probes_reject_forged_heap_handles_without_dereference() {
     // Flat optional payloads are not necessarily tagged RuntimeValues. Values
     // congruent to one modulo eight therefore look heap-shaped even though

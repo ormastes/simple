@@ -587,11 +587,49 @@ impl<'a> Parser<'a> {
                     // Supports multi-line: expr ??\n    default
                     self.advance();
                     self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
-                    let default = self.parse_pipe()?;
-                    expr = Expr::Coalesce {
-                        expr: Box::new(expr),
-                        default: Box::new(default),
-                    };
+                    // The fallback may be a DIVERGING `return` rather than a
+                    // value: `val p = g(x) ??\n    return Err("missing")`.
+                    // `return` is usable as a plain identifier in primary
+                    // position, so `parse_pipe` read it as a NAME and its
+                    // operand as a no-paren call argument; on the multi-line
+                    // form that scan then ran past the statement's Newline and
+                    // died with "expected expression, found Dedent". A BARE
+                    // `return` parsed fine, which is what hid this.
+                    // Item 25 of doc/08_tracking/bug/
+                    // unit_sweep_language_and_interpreter_gaps_2026-08-26.md.
+                    // NOTE: `break`/`continue` fallbacks are deliberately NOT
+                    // handled here — there is no loop-control counterpart to
+                    // `UnwrapOrReturn`, and they parsed only as identifiers
+                    // before this change too, so there is no working behaviour
+                    // to preserve. Recorded as a sub-item of 25.
+                    if self.check(&TokenKind::Return) {
+                        self.advance();
+                        // `expr ?? return X` IS `expr unwrap or_return: X`, and
+                        // that node already has diverging semantics wired
+                        // through the interpreter and every backend. Building a
+                        // DoBlock instead was tried and evaluates to a thunk
+                        // ("cannot convert function to int"), because a Coalesce
+                        // default is a lazily-evaluated value.
+                        let default = if self.check(&TokenKind::Newline)
+                            || self.check(&TokenKind::Dedent)
+                            || self.check(&TokenKind::Eof)
+                        {
+                            // bare `return` — unit
+                            Expr::Tuple(vec![])
+                        } else {
+                            self.parse_pipe()?
+                        };
+                        expr = Expr::UnwrapOrReturn {
+                            expr: Box::new(expr),
+                            default: Box::new(default),
+                        };
+                    } else {
+                        let default = self.parse_pipe()?;
+                        expr = Expr::Coalesce {
+                            expr: Box::new(expr),
+                            default: Box::new(default),
+                        };
+                    }
                 }
                 TokenKind::QuestionDot => {
                     // Optional chaining: expr?.field or expr?.method(args)

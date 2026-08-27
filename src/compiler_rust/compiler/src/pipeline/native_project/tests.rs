@@ -4488,6 +4488,39 @@ fn test_entry_closure_and_use_map_follow_nested_function_local_use() {
 }
 
 #[test]
+fn test_entry_closure_follows_use_inside_unwrap_or_return_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let main_path = src_root.join("app/main.spl");
+    let worker_path = src_root.join("app/worker.spl");
+    let fallback_path = src_root.join("lib/fallback_value.spl");
+    std::fs::create_dir_all(main_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(fallback_path.parent().unwrap()).unwrap();
+    std::fs::write(&main_path, "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n").unwrap();
+    std::fs::write(
+        &worker_path,
+        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: do:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
+    )
+    .unwrap();
+    std::fs::write(&fallback_path, "fn load_fallback() -> i64:\n    return 7\n").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), temp.path().join("out"))
+        .source_dir(src_root.clone())
+        .entry_file(main_path.clone());
+    let file_sources = builder.discover_reachable_files_with_sources(&main_path).unwrap();
+    let actual: std::collections::BTreeSet<_> = file_sources
+        .iter()
+        .map(|(path, _)| path.strip_prefix(&src_root).unwrap().to_path_buf())
+        .collect();
+    let expected: std::collections::BTreeSet<_> = ["app/main.spl", "app/worker.spl", "lib/fallback_value.spl"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn test_build_use_map_resolves_data_from_dotted_module_with_name_collision() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");
