@@ -43,7 +43,7 @@ crash and carries no instruction.
   `stdlib import … resolves from the project stdlib roots only` but still returns a value; the
   same probe inside the project is silent. Neither produces this hard error.
 
-## MECHANISM (2026-08-27): co-compiled duplicate definitions, and the directory-only entry point
+## WORKING HYPOTHESIS (2026-08-27): co-compiled duplicates on the directory-only path
 
 The same run that aborts emits **11** duplicate-definition warnings, including:
 
@@ -57,13 +57,17 @@ warning: class `Trace32Adapter` has 2 co-compiled definitions across 2 modules; 
 ```
 
 `discover_test_files` is **the directory-expansion function** — a directory target calls it, a file
-target does not. That lines the mechanism up exactly with the discriminator above: the failing path
-is the one that goes through a symbol which exists twice, with *different signatures*, in
-co-compiled modules. `mcdc_condition_key` being doubled the same way puts the MC/DC machinery in
-the same blast radius as the symbol named in the abort.
+target does not. That makes its two differing co-compiled signatures a plausible explanation for
+the discriminator above, but it does **not** establish causation. `mcdc_condition_key` being
+doubled the same way puts the MC/DC machinery in the same blast radius as the symbol named in the
+abort; it remains correlation until a controlled change removes or selects the duplicate and the
+two-file directory repro stops aborting.
 
 The interpreter resolving members **by name across modules** is a known defect class in this repo,
-and these warnings are it firing in the test runner's own dependency graph.
+and the warnings prove that class is present in the test runner's dependency graph. Evidence still
+needed for this specific abort: remove the duplicate `discover_test_files` definition or force the
+intended owner, then show the directory repro passes while an equivalent sabotage restores the
+failure. Until that experiment exists, the root cause remains **OPEN**.
 
 Likely source of the duplication: facade modules that re-export a sibling family wholesale, e.g.
 `src/lib/nogc_async_mut/test_runner/test_runner_types.spl:1` is

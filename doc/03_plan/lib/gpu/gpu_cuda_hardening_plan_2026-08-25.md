@@ -118,9 +118,3 @@ under `src/runtime/` defines `rt_cuda_stream_*`, `rt_cuda_event_*`, `rt_cuda_mem
 `rt_cuda_launch_kernel_ex`, so the E2 surface is unavailable to any lane linking the C runtime
 rather than the Rust one. That is worth closing on its own merits, and is tracked separately — not
 as an E2 exit-criterion failure, because E2's criteria are met.
-me gap is nonetheless real, just unrelated to this spec.** Verified by grep: no file
-under `src/runtime/` defines `rt_cuda_stream_*`, `rt_cuda_event_*`, `rt_cuda_memcpy_*_async` or
-`rt_cuda_launch_kernel_ex`, so the E2 surface is unavailable to any lane linking the C runtime
-rather than the Rust one. That is worth closing on its own merits, and is tracked separately — not
-as an E2 exit-criterion failure, because E2's criteria are met.
-
