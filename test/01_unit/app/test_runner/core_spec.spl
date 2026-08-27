@@ -21,7 +21,9 @@
 
 use std.spec.step
 
-fn main():
+use spec.{describe, context, it, expect}
+
+fn run_suite() -> i64:
     # Test Status Constants
     val TEST_STATUS_PENDING: i32 = 0
     val TEST_STATUS_RUNNING: i32 = 1
@@ -132,7 +134,7 @@ fn main():
     # Test 9: Protocol message encoding (test_pass)
     total = total + 1
     val msg = ProtocolMessage_test_pass(42, 100, PROTO_MAGIC, PROTO_VERSION, MSG_TEST_PASS)
-    val encoded = msg.encode(PROTO_MAGIC, PROTO_VERSION)
+    val encoded = protocol_message_encode(msg, PROTO_MAGIC, PROTO_VERSION)
     if encoded[0] == PROTO_MAGIC and encoded[1] == PROTO_VERSION and encoded[2] == MSG_TEST_PASS:
         print "[PASS] ProtocolMessage test_pass encoding"
         passed = passed + 1
@@ -144,7 +146,7 @@ fn main():
     total = total + 1
     var parser = ProtocolParser_create()
     val test_msg = ProtocolMessage_test_pass(1, 50, PROTO_MAGIC, PROTO_VERSION, MSG_TEST_PASS)
-    val test_bytes = test_msg.encode(PROTO_MAGIC, PROTO_VERSION)
+    val test_bytes = protocol_message_encode(msg, PROTO_MAGIC, PROTO_VERSION)
     parser.feed(test_bytes, PROTO_MAGIC, PROTO_VERSION)
     if parser.has_messages():
         val parsed = parser.pop_message()
@@ -162,7 +164,7 @@ fn main():
     total = total + 1
     var parser2 = ProtocolParser_create()
     val msg2 = ProtocolMessage_test_pass(123, 456, PROTO_MAGIC, PROTO_VERSION, MSG_TEST_PASS)
-    parser2.feed(msg2.encode(PROTO_MAGIC, PROTO_VERSION), PROTO_MAGIC, PROTO_VERSION)
+    parser2.feed(protocol_message_encode(msg2, PROTO_MAGIC, PROTO_VERSION), PROTO_MAGIC, PROTO_VERSION)
     if parser2.has_messages():
         val parsed2 = parser2.pop_message()
         var payload = TestPassPayload_decode(parsed2.payload)
@@ -266,7 +268,7 @@ fn main():
     total = total + 1
     val complete_msg = ProtocolMessage_complete(10, 8, 2, 0, MSG_COMPLETE)
     var parser3 = ProtocolParser_create()
-    parser3.feed(complete_msg.encode(PROTO_MAGIC, PROTO_VERSION), PROTO_MAGIC, PROTO_VERSION)
+    parser3.feed(complete_protocol_message_encode(msg, PROTO_MAGIC, PROTO_VERSION), PROTO_MAGIC, PROTO_VERSION)
     if parser3.has_messages():
         val parsed3 = parser3.pop_message()
         if parsed3.msg_type == MSG_COMPLETE:
@@ -294,9 +296,19 @@ fn main():
         print "SOME TESTS FAILED"
     else:
         print "ALL TESTS PASSED"
+    failed
 
-# =========================================================================
-# Type Implementations
+describe "Test Runner Core Module":
+    """
+    Test runner core module types, wire protocol encoding/decoding,
+    result accounting, and status/duration formatting, verified by
+    executing the module suite and asserting zero failures.
+    """
+    it "executes the full core module suite with zero failures":
+        # @req REQ-SSPEC-UNIT
+        step("run the test runner core module suite")
+        val failures = run_suite()
+        expect(failures).to_equal(0)
 # =========================================================================
 
 class TestCase:
@@ -427,20 +439,21 @@ fn ProtocolMessage_complete(total: i32, passed: i32, failed: i32, skipped: i32, 
         payload.push(b)
     ProtocolMessage(msg_type: msg_type, payload: payload)
 
-impl ProtocolMessage:
-    fn payload_len() -> i32:
-        self.payload.len() as i32
-
-    fn encode(magic: i32, version: i32) -> [i32]:
-        var bytes: [i32] = []
-        bytes.push(magic)
-        bytes.push(version)
-        bytes.push(self.msg_type)
-        for b in encode_u16(self.payload_len()):
-            bytes.push(b)
-        for b in self.payload:
-            bytes.push(b)
-        bytes
+# NOTE: encode is a free function because method dispatch on non-`me` impl
+# methods of ProtocolMessage fails under the spec-test loader ("method `encode`
+# not found on type `ProtocolMessage`", 2026-08-27) although the same call runs
+# under `bin/simple run`. Semantics are identical; see
+# doc/08_tracking/bug/spec_test_loader_impl_method_dispatch_2026-08-27.md
+fn protocol_message_encode(msg: ProtocolMessage, magic: i32, version: i32) -> [i32]:
+    var bytes: [i32] = []
+    bytes.push(magic)
+    bytes.push(version)
+    bytes.push(msg.msg_type)
+    for b in encode_u16(msg.payload.len() as i32):
+        bytes.push(b)
+    for b in msg.payload:
+        bytes.push(b)
+    bytes
 
 class ParsedMessage:
     msg_type: i32
