@@ -17,7 +17,7 @@ use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_authenticated_wi
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_AUTH_MEDIA_HELLO, SPAWN_RECIPE_AUTH_MEDIA_SERVER}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.types.capability_types.{CapabilitySet}
-use os.kernel.loader.boot_authenticated_launch_lease_v1.{BootAuthenticatedLaunchCoordinatesV1, boot_authenticated_launch_lease_issue_current_v1, boot_authenticated_launch_lease_consume_once_v1}
+use os.kernel.loader.boot_authenticated_launch_lease_v1.{boot_authenticated_launch_coordinates_new_v1, boot_authenticated_launch_lease_issue_current_v1, boot_authenticated_launch_lease_consume_once_v1}
 use os.kernel.loader.x86_64_authenticated_media_policy.{x86_64_authenticated_media_root_matches_pin_v1}
 use x86_64_auth_trust_config.{x86_64_authenticated_pinned_key_id_v1, x86_64_authenticated_pinned_public_key_hex_v1, x86_64_authenticated_pinned_public_key_hash_v1}
 
@@ -132,12 +132,19 @@ fn _x86_64_authenticated_media_execute_path_v1(
     var launch_caller = caller
     var launch_caps = caller_caps
     if not launch_caps.?:
-        val coordinates = BootAuthenticatedLaunchCoordinatesV1(canonical_path: executable_path, image_hash: image_hash.unwrap(), manifest_hash: manifest_hash.unwrap(), kernel_hash: kernel_hash.unwrap(), trust_root_hash: trust_hash.unwrap(), mount_id: mount_id.unwrap(), mount_generation: mount_generation.unwrap(), file_id: file_id.unwrap(), file_generation: file_generation.unwrap(), recipe: recipe)
-        val lease = boot_authenticated_launch_lease_issue_current_v1(scheduler, coordinates)
+        val coordinates = boot_authenticated_launch_coordinates_new_v1(
+            executable_path, image_hash.unwrap(), manifest_hash.unwrap(),
+            kernel_hash.unwrap(), trust_hash.unwrap(), mount_id.unwrap(),
+            mount_generation.unwrap(), file_id.unwrap(), file_generation.unwrap(), recipe)
+        if not coordinates.?:
+            _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
+            return -13
+        val signed_coordinates = coordinates.unwrap()
+        val lease = boot_authenticated_launch_lease_issue_current_v1(scheduler, signed_coordinates)
         if not lease.?:
             _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
             return -13
-        val grant = boot_authenticated_launch_lease_consume_once_v1(lease.unwrap(), coordinates)
+        val grant = boot_authenticated_launch_lease_consume_once_v1(lease.unwrap(), signed_coordinates)
         if not grant.?:
             _ = executable_loader_revoke(owner, authorities.unwrap(), admitted.unwrap().authority_token)
             return -13
