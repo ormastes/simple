@@ -449,11 +449,11 @@ passing placeholder.
     reads and two scope calls require lexical unsafe scopes. Do not introduce
     numeric substitutes, helper dispatch, allocation, copying, lookup, locks,
     retries, or extra calls. This is source containment, not provider admission.
-83. Keep the WM lane-boundary gate's raw file read explicitly unsafe until an
-    error-preserving safe facade exists. Do not replace its failure state with
-    an empty text fallback: that would make an unreadable baseline/path look
-    like valid empty input. Its two direct reads remain lexical with no added
-    allocation, copying, lookup, locks, retries, or additional I/O.
+83. Keep the WM lane-boundary gate on `read_file_text_result`, not a local raw
+    non-optional file-text declaration or an empty-text fallback. An unreadable
+    baseline/path must return gate `ERROR`; normal operation retains one read
+    per path with no retry, extra I/O, lookup, lock, or copy. The canonical
+    facade's raw provider remains separately unsafe pending admission.
 84. Keep bootstrap CLI argument acquisition and seed native-build dispatch as
     two explicit raw FFI boundaries. Do not add a broader import/facade to the
     bootstrap closure, allocate/copy arguments, add lookup/locking/retries, or

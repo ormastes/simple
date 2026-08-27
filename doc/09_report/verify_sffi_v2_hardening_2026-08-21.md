@@ -549,17 +549,16 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): these providers have no artifact-bound ABI/ownership
   verification receipt or trusted signature, so the boundary remains unsafe.
 
-## Follow-up: WM lane-boundary file-read containment (2026-08-27)
+## Follow-up: WM lane-boundary file-read migration (2026-08-27)
 
-- PASS (static/source): the ratchet gate's one raw file-read declaration and
-  two existing direct reads are explicitly lexical FFI boundaries.
-- PASS (semantics/performance shape): the existing direct I/O call count is
-  retained. No fabricated-empty fallback, helper dispatch, allocation, copy,
-  lookup, lock, retry, or additional I/O was introduced. No runtime benchmark
-  was run.
-- FAIL (global admission): the non-optional raw text return has no
-  artifact-bound null/error/ownership verification or trusted signature. The
-  gate remains explicitly unsafe until an error-preserving facade is available.
+- PASS (static/source): the gate no longer declares or calls raw
+  `rt_file_read_text`; both reads use the canonical `read_file_text_result`
+  lift and turn post-existence I/O failure into a gate `ERROR`.
+- PASS (semantics/performance shape): normal operation retains one read per
+  path and has no fallback-to-empty, retry, extra I/O, lookup, lock, or copy.
+  No runtime benchmark was run.
+- FAIL (global admission): the canonical facade's raw provider remains outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.
 
 ## Follow-up: bootstrap CLI containment (2026-08-27)
 
