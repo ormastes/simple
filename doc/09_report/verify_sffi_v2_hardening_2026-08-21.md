@@ -401,3 +401,13 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): static/source checks do not establish exact runtime
   artifact identity, trusted signature, ABI admission, or semantic provider
   verification. The provider remains unsigned and unverified globally.
+
+## Follow-up: bootstrap raw time facade classification (2026-08-27)
+
+- PASS (static/source): all four `sys.sffi.time` declarations now explicitly
+  carry `unsafe(ffi)`. The legacy millisecond-clock and sleep symbols are
+  documented as unbacked in the owned runtime rather than being implied safe.
+- PASS (performance shape): declaration-only classification adds no call-path
+  allocation, copy, lookup, lock, retry, or clock read.
+- FAIL (provider): no artifact-bound provider, ABI contract, signature, or
+  verification receipt is present; the entire facade remains unsafe-only.

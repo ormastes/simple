@@ -391,3 +391,8 @@ passing placeholder.
     `Value::Float` only for the f64 symbol. Keep both direct, inline calls;
     do not add conversion allocations, lookup, locking, retries, or extra
     clock reads. This resolves a representation defect, not provider signing.
+71. Keep bootstrap `sys.sffi.time` as a raw unsafe-only declaration facade.
+    Its legacy millisecond and sleep symbols have no owned runtime backing in
+    this tree, so they may not be promoted to safe wrappers or be called
+    verified. The supported integer seconds and nanosecond declarations also
+    remain unsafe pending artifact-bound provider admission.
