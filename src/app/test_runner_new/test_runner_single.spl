@@ -143,6 +143,56 @@ fn _single_option_takes_value(arg: text) -> bool:
         arg == "--seed" or arg == "--profile" or arg == "--qemu-socket"
     )
 
+fn _single_option_is_integer(arg: text) -> bool:
+    (
+        arg == "--max-mem" or arg == "--resource-limit" or
+        arg == "--max-workers" or arg == "--parallel-timeout" or
+        arg == "--fuzz-time" or arg == "--chaos-trials" or
+        arg == "--chaos-fault-rate" or arg == "--batch-size" or
+        arg == "--max-sessions" or arg == "--timeout" or arg == "--seed"
+    )
+
+fn _single_option_is_decimal(arg: text) -> bool:
+    arg == "--cpu-threshold" or arg == "--mem-threshold"
+
+fn _single_numeric_value_valid(value: text, decimal: bool) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    if value.starts_with("-"):
+        i = 1
+    if i >= value.len():
+        return false
+    var digits = 0
+    var dots = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code >= 48 and code <= 57:
+            digits = digits + 1
+        elif decimal and code == 46 and dots == 0:
+            dots = dots + 1
+        else:
+            return false
+        i = i + 1
+    digits > 0
+
+fn _single_option_value_error(arg: text, value: text) -> text:
+    if value == "":
+        return "missing value for " + arg
+    # A following option is never the value of this option. In particular,
+    # `--format --list` must not swallow `--list` and continue with a false
+    # interpretation of the remaining positionals. Signed numeric values are
+    # checked by their full domain below.
+    if value.starts_with("-") and not _single_option_is_integer(arg) and not _single_option_is_decimal(arg):
+        return "missing value for " + arg
+    if arg == "--format" and value != "text" and value != "json" and value != "doc":
+        return "invalid value for --format: " + value
+    if _single_option_is_integer(arg) and not _single_numeric_value_valid(value, false):
+        return "invalid value for " + arg + ": " + value
+    if _single_option_is_decimal(arg) and not _single_numeric_value_valid(value, true):
+        return "invalid value for " + arg + ": " + value
+    ""
+
 fn clean_args() -> [text]:
     val raw = cli_get_args()
     var args: [text] = []
@@ -170,14 +220,26 @@ fn parse_child_run(args: [text]) -> ChildRun:
         if _single_option_takes_value(arg):
             if i + 1 >= args.len():
                 return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing value for " + arg)
+            val value = args[i + 1]
+            val value_error = _single_option_value_error(arg, value)
+            if value_error != "":
+                return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: value_error)
             if arg == "--timeout":
-                timeout_secs = args[i + 1].to_i64() ?? 0
+                timeout_secs = value.to_i64() ?? 0
             i = i + 2
             continue
-        if arg.starts_with("--timeout="):
-            timeout_secs = arg[10:].to_i64() ?? 0
-            i = i + 1
-            continue
+        val equals_at = arg.index_of("=")
+        if equals_at > 0:
+            val option_name = arg[0:equals_at]
+            if _single_option_takes_value(option_name):
+                val value = arg[equals_at + 1:]
+                val value_error = _single_option_value_error(option_name, value)
+                if value_error != "":
+                    return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: value_error)
+                if option_name == "--timeout":
+                    timeout_secs = value.to_i64() ?? 0
+                i = i + 1
+                continue
         if arg == "--list":
             list_only = true
             i = i + 1

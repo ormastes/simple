@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -32,9 +32,10 @@ Why this spec exists (GENERALIZATION). The defect closed on 2026-08-27 was one
 instance of a class: a positional argument that the parser neither consumes nor
 rejects, so the run proceeds as if it had never been asked for. This spec walks
 the argv shapes adjacent to the reported one — extra paths interleaved between
-flags, three paths, extra paths combined with `--timeout`, and the several
-already-fail-closed classes (missing path, non-`.spl`, nonexistent file) — and
-asserts each is CLASSIFIED. Every shape here must land on a definite verdict:
+flags, three paths, extra paths combined with `--timeout`, malformed option
+values that could otherwise hide a path, and the several already-fail-closed
+classes (missing path, non-`.spl`, nonexistent file) — and asserts each is
+CLASSIFIED. Every shape here must land on a definite verdict:
 either `valid: true` with the right path, or `valid: false` with a non-empty
 error. Silence is the bug.
 
@@ -279,12 +280,125 @@ assert_contains(run.error, "missing value for --format")
 
 </details>
 
+### malformed option values cannot hide another path
+
+#### rejects a spec path used as an invalid --format value
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--format", SPEC_B])
+assert_false(run.valid)
+assert_contains(run.error, "invalid value for --format")
+```
+
+</details>
+
+#### does not swallow --list as the value of --format
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--format", "--list", SPEC_B])
+assert_false(run.valid)
+assert_contains(run.error, "missing value for --format")
+```
+
+</details>
+
+#### rejects empty equals syntax before a second path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--format=", SPEC_B])
+assert_false(run.valid)
+assert_contains(run.error, "missing value for --format")
+```
+
+</details>
+
+#### rejects an invalid equals value before a second path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--format=yaml", SPEC_B])
+assert_false(run.valid)
+assert_contains(run.error, "invalid value for --format")
+```
+
+</details>
+
+#### rejects a nonnumeric timeout before a second path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--timeout", SPEC_B])
+assert_false(run.valid)
+assert_contains(run.error, "invalid value for --timeout")
+```
+
+</details>
+
+#### does not swallow --list as a QEMU socket value
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--qemu-socket", "--list", SPEC_B])
+assert_false(run.valid)
+assert_contains(run.error, "missing value for --qemu-socket")
+```
+
+</details>
+
+#### accepts a signed decimal threshold value
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val run = parse_child_run([SPEC_A, "--cpu-threshold", "-0.5"])
+assert_true(run.valid)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

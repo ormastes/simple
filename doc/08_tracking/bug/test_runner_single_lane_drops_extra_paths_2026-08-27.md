@@ -113,7 +113,11 @@ The parser also uses an explicit one-value option table before classifying
 positionals. This preserves forwarded pairs such as `--format json` and
 adapter-owned `--qemu-socket <socket>` without weakening the multiple-path
 guard: boolean flags consume no following token, so a real second path still
-fails closed. A known value-taking option with no value is invalid.
+fails closed. Consumption is conditional on validation: empty values and a
+following option token are missing values, `--format` accepts only
+`text|json|doc`, and numeric options require a numeric value. Both separated
+and `--option=value` forms use the same validation, so malformed option syntax
+cannot disguise a second path.
 
 ## Specs
 
@@ -128,7 +132,9 @@ fails closed. A known value-taking option with no value is invalid.
   already-fail-closed classes (no path, non-`.spl`, nonexistent `.spl`) and the
   single-path/`--list` contracts. It also covers separated `--format` values
   before and after the path, an adapter-forwarded QEMU socket, a real second
-  path after a format pair, and a missing option value. `15 total, 15 passed`.
+  path after a format pair, missing option values, malformed separated and
+  equals-form format values before a second path, numeric-domain rejection,
+  option-token rejection, and a valid signed decimal. `22 total, 22 passed`.
 
 ## Guard
 
@@ -140,9 +146,9 @@ into "reject everything", and a successful single path with `--format json`.
 
 Verified as a real ratchet, not a tautology:
 
-- with the fix reverted: `FAIL — 3 invocation(s) executed, false green(s):
+- with the fix reverted: `FAIL — 4 invocation(s) executed, false green(s):
   --no-session-daemon(2 paths, rc=0) --no-session-daemon --timeout(2 paths, rc=0)` (exit 1)
-- with the fix applied: `PASS — 3 invocation(s) executed, 0 false green(s)` (exit 0)
+- with the fix applied: `PASS — 4 invocation(s) executed, 0 false green(s)` (exit 0)
 
 ## Pre-existing unrelated red
 
