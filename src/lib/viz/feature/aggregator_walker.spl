@@ -2,29 +2,15 @@
 
 use std.viz.entity.compositor_frame.{CompositorFrame, FrameMetadata}
 use std.viz.entity.render_pass.{RenderPass}
-use std.viz.entity.draw_quad.{DrawQuad, DrawQuadKind, SharedQuadState}
+use std.viz.entity.draw_quad.{DrawQuad, DrawQuadKind}
 use std.viz.entity.surface_id.{SurfaceId, FrameSinkId, LocalSurfaceId}
 use std.skia.entity.geometry.{SkRect}
-use std.skia.entity.matrix.{Matrix3x3}
-use std.skia.entity.color.{SkColor4f}
-use std.viz.entity.aggregator_entry.{AggregatorEntry}
+use std.viz.feature.aggregator.{AggregatorEntry}
 
 enum SurfaceResolution:
     Present
     Missing
     Deferred
-
-# Aggregate-owned resource limits.  These cap recursive import depth and the
-# retained pass-DAG payload before any untrusted frame graph reaches rendering.
-const AGGREGATE_MAX_SURFACE_DEPTH: i32 = 32
-const AGGREGATE_MAX_UNIQUE_SURFACES: i32 = 128
-const AGGREGATE_MAX_OUTPUT_PASSES: i32 = 256
-const AGGREGATE_MAX_OUTPUT_QUADS: i32 = 4096
-const AGGREGATE_MAX_OUTPUT_SQS: i32 = 4096
-const AGGREGATE_MAX_INPUT_REFERENCED_SURFACES: i32 = 4096
-const AGGREGATE_MAX_INPUT_PAYLOAD_BYTES: i64 = 1048576i64
-const AGGREGATE_MAX_OUTPUT_PAYLOAD_BYTES: i64 = 1048576i64
-const AGGREGATE_MAX_DEBUG_WIDTH: i32 = 64
 
 class WalkerContext:
     known_frames: [AggregatorEntry]
@@ -111,7 +97,6 @@ fn _remap_quad_sqs(q: DrawQuad, offset: i32) -> DrawQuad:
         uv_top_left: q.uv_top_left,
         uv_bottom_right: q.uv_bottom_right,
         render_pass_id: q.render_pass_id,
-        surface_id: q.surface_id,
         mask_resource_id: q.mask_resource_id,
         mask_uv_rect: q.mask_uv_rect,
         filters_scale: q.filters_scale,
@@ -186,375 +171,46 @@ fn placeholder_deferred_surface(render_pass: RenderPass, surface_id: SurfaceId) 
     val _ = surface_id
     render_pass
 
-# A composed frame is a pass DAG, not a flattened primitive list.  The parent
-# Surface quad is rewritten to a RenderPass quad with its original SQS/rect;
-# therefore parent transforms, clips, opacity and blend boundaries remain
-# authoritative.  Imported child passes retain their own SQS and dependencies.
-class AggregateImportContext:
-    known_frames: [AggregatorEntry]
-    active_surfaces: [SurfaceId]
-    output_passes: [RenderPass]
-    imported_surfaces: [SurfaceId]
-    imported_root_ids: [i32]
-    output_quad_count: i32
-    output_sqs_count: i32
-    output_payload_bytes: i64
-    next_pass_id: i32
-    failed: bool
-
-    static fn new(known_frames: [AggregatorEntry]) -> AggregateImportContext:
-        AggregateImportContext(
-            known_frames: known_frames, active_surfaces: [], output_passes: [],
-            imported_surfaces: [], imported_root_ids: [], output_quad_count: 0,
-            output_sqs_count: 0, output_payload_bytes: 0i64,
-            next_pass_id: 1, failed: false
-        )
-
-fn _active_surface(context: AggregateImportContext, surface: SurfaceId) -> bool:
+fn _rewrite_pass(render_pass: RenderPass, context: WalkerContext) -> RenderPass:
+    var current = render_pass
     var i = 0
-    while i < context.active_surfaces.len().to_i32():
-        if context.active_surfaces[i.to_i64()].equals(surface):
-            return true
+    while i < render_pass.quads.len().to_i32():
+        val q = render_pass.quads[i.to_i64()]
+        match q.kind:
+            DrawQuadKind.RenderPass:
+                if q.render_pass_id < 0:
+                    val client_id = (0 - q.render_pass_id)
+                    val probe_sid = SurfaceId(
+                        frame_sink_id: FrameSinkId(client_id: client_id, sink_id: 0),
+                        local_surface_id: LocalSurfaceId(parent_sequence_number: 0, child_sequence_number: 0)
+                    )
+                    val resolution = context.resolve(probe_sid)
+                    match resolution:
+                        SurfaceResolution.Present:
+                            val maybe_frame = find_frame_for(context, probe_sid)
+                            if val Some(child_frame) = maybe_frame:
+                                current = inline_render_pass(current, child_frame)
+                        SurfaceResolution.Missing:
+                            current = drop_missing_surface(current, q.render_pass_id.to_text())
+                        SurfaceResolution.Deferred:
+                            current = placeholder_deferred_surface(current, probe_sid)
+            _:
+                pass_do_nothing
         i = i + 1
-    false
-
-fn _completed_surface_root(context: AggregateImportContext, surface: SurfaceId) -> Option<i32>:
-    var i = 0
-    while i < context.imported_surfaces.len().to_i32():
-        if context.imported_surfaces[i.to_i64()].equals(surface):
-            return Some(context.imported_root_ids[i.to_i64()])
-        i = i + 1
-    None
-
-fn _frame_quad_count(frame: CompositorFrame) -> i32:
-    var total = 0
-    var i = 0
-    while i < frame.render_pass_list.len().to_i32():
-        total = total + frame.render_pass_list[i.to_i64()].quads.len().to_i32()
-        i = i + 1
-    total
-
-fn _frame_sqs_count(frame: CompositorFrame) -> i32:
-    var total = 0
-    var i = 0
-    while i < frame.render_pass_list.len().to_i32():
-        total = total + frame.render_pass_list[i.to_i64()].shared_quad_states.len().to_i32()
-        i = i + 1
-    total
-
-fn _frame_payload_bytes(frame: CompositorFrame) -> i64:
-    var total = 0i64
-    var pass_index = 0
-    while pass_index < frame.render_pass_list.len().to_i32():
-        val render_pass = frame.render_pass_list[pass_index.to_i64()]
-        var quad_index = 0
-        while quad_index < render_pass.quads.len().to_i32():
-            total = total + render_pass.quads[quad_index.to_i64()].texture_mailbox.bytes.len()
-            quad_index = quad_index + 1
-        pass_index = pass_index + 1
-    total
-
-fn _can_admit_frame(frame: CompositorFrame, context: AggregateImportContext) -> bool:
-    val pass_count = frame.render_pass_list.len().to_i32()
-    val quad_count = _frame_quad_count(frame)
-    val sqs_count = _frame_sqs_count(frame)
-    val payload_bytes = _frame_payload_bytes(frame)
-    if pass_count < 0 or quad_count < 0 or sqs_count < 0:
-        return false
-    if context.next_pass_id - 1 > AGGREGATE_MAX_OUTPUT_PASSES - pass_count:
-        return false
-    if context.output_quad_count > AGGREGATE_MAX_OUTPUT_QUADS - quad_count:
-        return false
-    if context.output_sqs_count > AGGREGATE_MAX_OUTPUT_SQS - sqs_count:
-        return false
-    if payload_bytes > AGGREGATE_MAX_OUTPUT_PAYLOAD_BYTES - context.output_payload_bytes:
-        return false
-    true
-
-# Bound direct entity-frame work before graph/numeric validation walks every
-# pass. This is shared by registry admission and recursive composition.
-fn source_frame_is_within_input_budget(frame: CompositorFrame) -> bool:
-    if frame.render_pass_list.len() > AGGREGATE_MAX_OUTPUT_PASSES.to_i64() or
-        frame.referenced_surfaces.len() > AGGREGATE_MAX_INPUT_REFERENCED_SURFACES.to_i64():
-        return false
-    var quad_count = 0
-    var sqs_count = 0
-    var payload_bytes = 0i64
-    var pass_index = 0
-    while pass_index < frame.render_pass_list.len().to_i32():
-        val render_pass = frame.render_pass_list[pass_index.to_i64()]
-        val pass_quad_count = render_pass.quads.len().to_i32()
-        val pass_sqs_count = render_pass.shared_quad_states.len().to_i32()
-        if pass_quad_count < 0 or pass_sqs_count < 0 or
-            pass_quad_count > AGGREGATE_MAX_OUTPUT_QUADS - quad_count or
-            pass_sqs_count > AGGREGATE_MAX_OUTPUT_SQS - sqs_count:
-            return false
-        quad_count = quad_count + pass_quad_count
-        sqs_count = sqs_count + pass_sqs_count
-        var quad_index = 0
-        while quad_index < render_pass.quads.len().to_i32():
-            val mailbox_bytes = render_pass.quads[quad_index.to_i64()].texture_mailbox.bytes.len()
-            if mailbox_bytes > AGGREGATE_MAX_INPUT_PAYLOAD_BYTES - payload_bytes:
-                return false
-            payload_bytes = payload_bytes + mailbox_bytes
-            quad_index = quad_index + 1
-        pass_index = pass_index + 1
-    true
-
-fn _allocate_pass_id(context: AggregateImportContext) -> Option<i32>:
-    if context.next_pass_id <= 0 or context.next_pass_id == 2147483647:
-        return None
-    val result = context.next_pass_id
-    context.next_pass_id = context.next_pass_id + 1
-    Some(result)
-
-fn _mapped_pass_id(source_ids: [i32], output_ids: [i32], source_id: i32) -> Option<i32>:
-    var i = 0
-    while i < source_ids.len().to_i32():
-        if source_ids[i.to_i64()] == source_id:
-            return Some(output_ids[i.to_i64()])
-        i = i + 1
-    None
-
-fn _surface_as_render_pass(q: DrawQuad, child_root_id: i32) -> DrawQuad:
-    val result = DrawQuad.render_pass(q.shared_quad_state_index, q.rect, child_root_id)
-    result.visible_rect = q.visible_rect
-    result.needs_blending = q.needs_blending
-    result
-
-fn _copy_quad_with_pass_map(q: DrawQuad, source_ids: [i32], output_ids: [i32]) -> Option<DrawQuad>:
-    match q.kind:
-        DrawQuadKind.RenderPass:
-            val mapped = _mapped_pass_id(source_ids, output_ids, q.render_pass_id)
-            if val Some(mapped_id) = mapped:
-                val copied = _remap_quad_sqs(q, 0)
-                copied.render_pass_id = mapped_id
-                Some(copied)
-            else:
-                None
-        _:
-            Some(_remap_quad_sqs(q, 0))
-
-fn _source_pass_seen_before(frame: CompositorFrame, pass_limit: i32, pass_id: i32) -> bool:
-    var i = 0
-    while i < pass_limit:
-        if frame.render_pass_list[i.to_i64()].id == pass_id:
-            return true
-        i = i + 1
-    false
-
-# Direct entity-frame callers bypass the builder's finite/range validation.
-# Prove numeric rendering state before any pass graph is copied or submitted.
-fn _finite_coordinate(value: f64) -> bool:
-    # Keep this self-hosted-safe policy aligned with the canonical frame
-    # builder: NaN fails equality and the envelope rejects infinities.
-    value == value and value >= -1.0e308 and value <= 1.0e308
-
-fn _finite_rect(rect: SkRect) -> bool:
-    _finite_coordinate(rect.left) and _finite_coordinate(rect.top) and
-        _finite_coordinate(rect.right) and _finite_coordinate(rect.bottom)
-
-fn _valid_geometry_rect(rect: SkRect) -> bool:
-    _finite_rect(rect) and not rect.is_empty()
-
-fn _finite_matrix(matrix: Matrix3x3) -> bool:
-    _finite_coordinate(matrix.m00) and _finite_coordinate(matrix.m01) and _finite_coordinate(matrix.m02) and
-        _finite_coordinate(matrix.m10) and _finite_coordinate(matrix.m11) and _finite_coordinate(matrix.m12) and
-        _finite_coordinate(matrix.m20) and _finite_coordinate(matrix.m21) and _finite_coordinate(matrix.m22)
-
-fn _valid_color(color: SkColor4f) -> bool:
-    _finite_coordinate(color.r) and _finite_coordinate(color.g) and
-        _finite_coordinate(color.b) and _finite_coordinate(color.a) and
-        color.r >= 0.0 and color.r <= 1.0 and
-        color.g >= 0.0 and color.g <= 1.0 and
-        color.b >= 0.0 and color.b <= 1.0 and
-        color.a >= 0.0 and color.a <= 1.0
-
-fn _valid_shared_quad_state(sqs: SharedQuadState) -> bool:
-    _finite_matrix(sqs.quad_to_target_transform) and
-        _finite_rect(sqs.visible_layer_rect) and _finite_rect(sqs.clip_rect) and
-        _finite_coordinate(sqs.opacity) and sqs.opacity >= 0.0 and sqs.opacity <= 1.0
-
-fn _valid_quad_numeric_state(quad: DrawQuad) -> bool:
-    _valid_geometry_rect(quad.rect) and _finite_rect(quad.visible_rect) and
-        _finite_rect(quad.uv_top_left) and _finite_rect(quad.uv_bottom_right) and
-        _finite_rect(quad.mask_uv_rect) and _valid_color(quad.solid_color) and
-        _finite_coordinate(quad.filters_scale) and quad.filters_scale >= 0.0
-
-# Direct entity frames bypass the builder's resource constructors. Admit only
-# resource forms whose identity contract is represented in the canonical quad.
-# Tile and Video need their own typed resource contracts and fail closed here.
-fn _valid_quad_resource_state(quad: DrawQuad) -> bool:
-    match quad.kind:
-        DrawQuadKind.Texture:
-            quad.texture_mailbox.bytes.len() > 0
-        DrawQuadKind.Tile: false
-        DrawQuadKind.Video: false
-        DrawQuadKind.Debug:
-            quad.debug_width > 0 and quad.debug_width <= AGGREGATE_MAX_DEBUG_WIDTH
-        _: true
-
-# Reject malformed direct frames before allocating output state.  A surface
-# dependency has exactly one typed quad in declaration order, and local pass
-# references must form an acyclic dependency-first order.
-fn _valid_source_frame(frame: CompositorFrame) -> bool:
-    if (not _finite_coordinate(frame.metadata.device_scale_factor) or
-        frame.metadata.device_scale_factor <= 0.0 or
-        not _finite_coordinate(frame.metadata.root_scroll_offset_x) or
-        not _finite_coordinate(frame.metadata.root_scroll_offset_y) or
-        not _finite_rect(frame.device_viewport_rect)):
-        return false
-    var reference_index = 0
-    var pass_index = 0
-    while pass_index < frame.render_pass_list.len().to_i32():
-        val render_pass = frame.render_pass_list[pass_index.to_i64()]
-        if _source_pass_seen_before(frame, pass_index, render_pass.id):
-            return false
-        if (not _valid_geometry_rect(render_pass.output_rect) or
-            not _finite_rect(render_pass.damage_rect) or
-            not _finite_matrix(render_pass.transform_to_root_target)):
-            return false
-        if val Some(backdrop_bounds) = render_pass.backdrop_filter_bounds:
-            if not _finite_rect(backdrop_bounds): return false
-        var sqs_index = 0
-        while sqs_index < render_pass.shared_quad_states.len().to_i32():
-            if not _valid_shared_quad_state(render_pass.shared_quad_states[sqs_index.to_i64()]):
-                return false
-            sqs_index = sqs_index + 1
-        var quad_index = 0
-        while quad_index < render_pass.quads.len().to_i32():
-            val quad = render_pass.quads[quad_index.to_i64()]
-            # Entity frames can bypass the builder, so the composition owner
-            # must prove every quad selects an SQS owned by this render pass.
-            # Never pass a negative/out-of-range index to a renderer.
-            if (quad.shared_quad_state_index < 0 or
-                quad.shared_quad_state_index >= render_pass.shared_quad_states.len().to_i32()):
-                return false
-            if not _valid_quad_numeric_state(quad) or
-                not _valid_quad_resource_state(quad):
-                return false
-            match quad.kind:
-                DrawQuadKind.RenderPass:
-                    if not _source_pass_seen_before(frame, pass_index, quad.render_pass_id):
-                        return false
-                DrawQuadKind.Surface:
-                    if reference_index >= frame.referenced_surfaces.len().to_i32() or
-                        not frame.referenced_surfaces[reference_index.to_i64()].equals(quad.surface_id):
-                        return false
-                    reference_index = reference_index + 1
-                _:
-                    pass_do_nothing
-            quad_index = quad_index + 1
-        pass_index = pass_index + 1
-    reference_index == frame.referenced_surfaces.len().to_i32()
-
-# Registry admission uses this same structural/numeric proof before retaining
-# a direct entity frame. Keep the detailed validator private so composition
-# and storage cannot drift into separate frame contracts.
-fn source_frame_is_admissible_for_composition(frame: CompositorFrame) -> bool:
-    source_frame_is_within_input_budget(frame) and _valid_source_frame(frame)
-
-fn _import_surface_frame(surface: SurfaceId, frame: CompositorFrame, context: AggregateImportContext) -> Option<i32>:
-    if _active_surface(context, surface):
-        context.failed = true
-        return None
-    val completed_root = _completed_surface_root(context, surface)
-    if completed_root.is_some():
-        return completed_root
-    if context.active_surfaces.len().to_i32() >= AGGREGATE_MAX_SURFACE_DEPTH or
-        context.imported_surfaces.len().to_i32() >= AGGREGATE_MAX_UNIQUE_SURFACES:
-        context.failed = true
-        return None
-    if frame.render_pass_list.len() == 0:
-        context.failed = true
-        return None
-    if not source_frame_is_within_input_budget(frame) or not _valid_source_frame(frame):
-        context.failed = true
-        return None
-    if not _can_admit_frame(frame, context):
-        context.failed = true
-        return None
-    # Reserve the full source-frame payload before recursively importing its
-    # children.  A rejected aggregate is discarded wholesale, so reservations
-    # never become observable partial output.
-    context.output_quad_count = context.output_quad_count + _frame_quad_count(frame)
-    context.output_sqs_count = context.output_sqs_count + _frame_sqs_count(frame)
-    context.output_payload_bytes = context.output_payload_bytes + _frame_payload_bytes(frame)
-    context.active_surfaces.push(surface)
-    var source_ids: [i32] = []
-    var output_ids: [i32] = []
-    var i = 0
-    while i < frame.render_pass_list.len().to_i32():
-        val allocated = _allocate_pass_id(context)
-        if val Some(pass_id) = allocated:
-            source_ids.push(frame.render_pass_list[i.to_i64()].id)
-            output_ids.push(pass_id)
-        else:
-            context.failed = true
-            context.active_surfaces.pop()
-            return None
-        i = i + 1
-    var pass_index = 0
-    while pass_index < frame.render_pass_list.len().to_i32():
-        val source_pass = frame.render_pass_list[pass_index.to_i64()]
-        var rewritten_quads: [DrawQuad] = []
-        var q_index = 0
-        while q_index < source_pass.quads.len().to_i32():
-            val q = source_pass.quads[q_index.to_i64()]
-            match q.kind:
-                DrawQuadKind.Surface:
-                    val child = find_frame_for(WalkerContext.new(context.known_frames), q.surface_id)
-                    if val Some(child_frame) = child:
-                        val child_root = _import_surface_frame(q.surface_id, child_frame, context)
-                        if val Some(child_root_id) = child_root:
-                            rewritten_quads.push(_surface_as_render_pass(q, child_root_id))
-                        else:
-                            context.active_surfaces.pop()
-                            return None
-                    else:
-                        context.failed = true
-                        context.active_surfaces.pop()
-                        return None
-                _:
-                    val copied = _copy_quad_with_pass_map(q, source_ids, output_ids)
-                    if val Some(copied_quad) = copied:
-                        rewritten_quads.push(copied_quad)
-                    else:
-                        context.failed = true
-                        context.active_surfaces.pop()
-                        return None
-            q_index = q_index + 1
-        context.output_passes.push(RenderPass(
-            id: output_ids[pass_index.to_i64()], output_rect: source_pass.output_rect,
-            damage_rect: source_pass.damage_rect,
-            transform_to_root_target: source_pass.transform_to_root_target,
-            filters_disabled: source_pass.filters_disabled,
-            quads: rewritten_quads, shared_quad_states: source_pass.shared_quad_states,
-            backdrop_filter_bounds: source_pass.backdrop_filter_bounds
-        ))
-        pass_index = pass_index + 1
-    val root_id = output_ids[output_ids.len() - 1]
-    context.active_surfaces.pop()
-    context.imported_surfaces.push(surface)
-    context.imported_root_ids.push(root_id)
-    Some(root_id)
-
-fn walk_and_compose(root_frame: CompositorFrame, root_surface: SurfaceId, context: WalkerContext) -> CompositorFrame:
-    var imports = AggregateImportContext.new(context.known_frames)
-    val root_id = _import_surface_frame(root_surface, root_frame, imports)
-    if root_id.is_none() or imports.failed:
-        return CompositorFrame.empty()
-    CompositorFrame(
-        metadata: root_frame.metadata,
-        render_pass_list: imports.output_passes,
-        referenced_surfaces: [],
-        device_viewport_rect: root_frame.device_viewport_rect
-    )
+    current
 
 fn walk_and_inline(root_frame: CompositorFrame, context: WalkerContext) -> CompositorFrame:
-    # The legacy entrypoint has no root SurfaceId and cannot safely compose.
-    # Reject unresolved surface dependencies rather than return stale output.
-    if root_frame.referenced_surfaces.len() > 0:
-        CompositorFrame.empty()
-    else:
-        root_frame
+    # TODO(viz-aggregator): coord-space composition lives in 6b aggregator_compose.spl (next wave)
+    var new_passes: [RenderPass] = []
+    var i = 0
+    while i < root_frame.render_pass_list.len().to_i32():
+        val render_pass = root_frame.render_pass_list[i.to_i64()]
+        val rewritten = _rewrite_pass(render_pass, context)
+        new_passes.push(rewritten)
+        i = i + 1
+    CompositorFrame(
+        metadata: root_frame.metadata,
+        render_pass_list: new_passes,
+        referenced_surfaces: root_frame.referenced_surfaces,
+        device_viewport_rect: root_frame.device_viewport_rect
+    )

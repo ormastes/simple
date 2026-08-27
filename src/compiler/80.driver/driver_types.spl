@@ -9,15 +9,16 @@ export use compiler.common.driver_core_types.*
 use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.frontend.core.lexer.*
-use compiler.frontend.parser_types.{Module}
+use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.treesitter.*
 use compiler.common.config.*
 use compiler.backend.backend_port.{BackendPort}
-use compiler.backend.backend_types.{BackendResult, BackendError}
+use lazy compiler.backend.backend_types.{BackendResult, BackendError, CompiledUnit, BackendSdnValue}
 use compiler.backend.codegen.{CodegenMode}
 use compiler.backend.backend.compiler.{CompilerBackendImpl}
-use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 use compiler.backend.backend.sdn.{SdnBackendImpl}
+use compiler.common.attributes.{VhdlHardwareMetadataFlatRow}
 use compiler.common.di.{DiContainer}
 use compiler.tools.aop.{AopWeaver, LogAspect}
 use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
@@ -33,7 +34,7 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 # 20.hir/hir_lowering/_Items/module_import_registration.spl. There is no cycle
 # to avoid here -- cache/compile_options_hash.spl imports only std -- so the
 # import belongs at module scope.
-use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute_with_mcdc}
+use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
 use compiler.common.assurance.policy.{policy_from_env_value}
 use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
@@ -44,48 +45,11 @@ use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
 }
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
-
-fn mcdc_wire_put_u32_v1(output: [u8], offset: i64, value: i64):
-    var byte_index = 0
-    while byte_index < 4:
-        output[offset + byte_index] = ((value >> (byte_index * 8)) & 255).to_u8()
-        byte_index = byte_index + 1
-
-fn mcdc_wire_put_u64_v1(output: [u8], offset: i64, value: i64):
-    var byte_index = 0
-    while byte_index < 8:
-        output[offset + byte_index] = ((value >> (byte_index * 8)) & 255).to_u8()
-        byte_index = byte_index + 1
-
-fn mcdc_wire_put_bytes_v1(output: [u8], offset: i64, bytes: [u8]):
-    var byte_index = 0
-    while byte_index < bytes.len():
-        output[offset + byte_index] = bytes[byte_index]
-        byte_index = byte_index + 1
-
-fn mcdc_radix_order_pass_v1(order: [i64], keys: [i64], byte_index: i64) -> [i64]:
-    var counts: [i64] = [0; 256]
-    val shift = byte_index * 8
-    for row in order:
-        val bucket = (keys[row] >> shift) & 255
-        counts[bucket] = counts[bucket] + 1
-    var total = 0
-    var bucket = 0
-    while bucket < 256:
-        val count = counts[bucket]
-        counts[bucket] = total
-        total = total + count
-        bucket = bucket + 1
-    var result: [i64] = [0; order.len()]
-    for row in order:
-        val row_bucket = (keys[row] >> shift) & 255
-        result[counts[row_bucket]] = row
-        counts[row_bucket] = counts[row_bucket] + 1
-    result
 
 class FrozenStorageModuleSnapshotV1:
     ok: bool
@@ -129,7 +93,6 @@ class FrozenNativeModuleCapsuleBatchV1:
     ok: bool
     registry_identity: text
     capsules: [FrozenNativeModuleCapsuleV1]
-    capsule_index: Dict<text, i64>
     reason: text
 
     fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
@@ -146,23 +109,15 @@ class FrozenNativeModuleCapsuleBatchV1:
             backend_name: "", target: "", target_cpu: "", opt_level: 0,
             is_release: false,
             reason: "capsule-not-found")
-        if not self.capsule_index.has(module_name):
+        var count = 0
+        for capsule in self.capsules:
+            if capsule.module_name == module_name:
+                found = capsule
+                count = count + 1
+        if count != 1:
             found.ok = false
-            found.reason = "capsule-not-found"
+            found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
             return found
-        val index = self.capsule_index[module_name]
-        if index < 0:
-            found.ok = false
-            found.reason = "duplicate-capsule"
-            return found
-        if index >= self.capsules.len():
-            found.ok = false
-            found.reason = "capsule-index-invalid"
-            return found
-        found = self.capsules[index]
-        if found.module_name != module_name:
-            found.ok = false
-            found.reason = "capsule-index-invalid"
         found
 
 # Keep capsule lookup available as a uniquely named free function.  Bootstrap
@@ -201,38 +156,16 @@ fn storage_identity_text_v1(value: text) -> text:
 
 fn native_capsule_sorted_symbol_ids_v1(keys: [SymbolId]) -> [SymbolId]:
     var result = keys
-    val key_count = result.len()
-    var width = 1
-    while width < key_count:
-        var merged: [SymbolId] = []
-        var left = 0
-        while left < key_count:
-            val middle = if left + width < key_count:
-                left + width
-            else:
-                key_count
-            val right = if middle + width < key_count:
-                middle + width
-            else:
-                key_count
-            var lhs = left
-            var rhs = middle
-            while lhs < middle and rhs < right:
-                if result[lhs].id <= result[rhs].id:
-                    merged.push(result[lhs])
-                    lhs = lhs + 1
-                else:
-                    merged.push(result[rhs])
-                    rhs = rhs + 1
-            while lhs < middle:
-                merged.push(result[lhs])
-                lhs = lhs + 1
-            while rhs < right:
-                merged.push(result[rhs])
-                rhs = rhs + 1
-            left = right
-        result = merged
-        width = width * 2
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].id < result[i].id:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
     result
 
 fn native_capsule_type_def_identity_v1(type_def: MirTypeDef) -> text:
@@ -536,6 +469,17 @@ class CompileContext:
     aop: AopWeaver
     logger: BootLogger
     sources: [SourceFile]
+    # Scalar owner projection of sources. Native value-record lowering can
+    # invalidate SourceFile field handles across transient parser scopes; these
+    # arrays are created with independent text storage during phase 1.
+    source_paths_owner: [text]
+    source_authored_paths_owner: [text]
+    source_contents_owner: [text]
+    # Immutable whole-source receipt hashes captured before low-memory source
+    # eviction. Zero is reserved for unavailable/missing, so a real zero hash
+    # is remapped to one by the producer and validator.
+    source_content_hashes_owner: [i64]
+    source_module_names_owner: [text]
     native_sources_fingerprint: text
     modules: Dict<text, ParserModule>
     module_surfaces: ModuleSurfacesByName?
@@ -584,26 +528,36 @@ class CompileContext:
     frozen_storage_sites: [MirStorageViewSiteBindingV1]
     frozen_storage_evidence: [MirTypedStorageViewEvidenceV1]
     frozen_storage_known_module_names: [text]
-    # Canonical masking analyzer manifest. Rows are frozen in
-    # (source_digest, decision_id) order after MIR lowering. Token offsets
-    # address the aligned postfix opcode/condition arrays.
-    mcdc_manifest_semantic_ids: [text]
-    mcdc_manifest_decision_ids: [i64]
-    mcdc_manifest_source_digests: [i64]
-    mcdc_manifest_condition_counts: [i64]
-    mcdc_manifest_token_offsets: [i64]
-    mcdc_manifest_token_counts: [i64]
-    mcdc_manifest_token_opcodes: [i64]
-    mcdc_manifest_token_conditions: [i64]
-    mcdc_manifest_frozen: bool
-    mcdc_manifest_frozen_identity: text
 
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
         var config: Dict<text, text> = {}
-        val compiler_config = CompilerConfig.from_env()
-        if compiler_config.coverage_enabled:
+        var compiler_config = CompilerConfig.from_env()
+        # CompileOptions is the real CLI-to-driver boundary. Apply its values
+        # after environment loading so command-line authority wins without a
+        # process-global env write that could leak into concurrent compiles.
+        if options.mcdc_mode_text != "":
+            if val cli_mcdc_mode = mcdc_mode_from_text(options.mcdc_mode_text):
+                compiler_config.mcdc_mode = cli_mcdc_mode
+            else:
+                config["mcdc_config_error"] = "MCDC-E-MODE: unknown MC/DC mode '{options.mcdc_mode_text}'"
+        if options.mcdc_owner_bytes > 0:
+            compiler_config.mcdc_owner_bytes = options.mcdc_owner_bytes
+        if options.mcdc_global_bytes > 0:
+            if options.mcdc_global_bytes >= compiler_config.mcdc_owner_bytes:
+                compiler_config.mcdc_global_bytes = options.mcdc_global_bytes
+            else:
+                config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget"
+        if compiler_config.mcdc_global_bytes < compiler_config.mcdc_owner_bytes:
+            config["mcdc_config_error"] = "MC/DC global byte budget must be at least the owner byte budget"
+        if compiler_config.coverage_enabled or options.coverage_enabled:
             config["coverage"] = "1"
+        config["mcdc_mode"] = mcdc_mode_name(compiler_config.mcdc_mode)
+        config["mcdc_owner_bytes"] = compiler_config.mcdc_owner_bytes.to_text()
+        config["mcdc_global_bytes"] = compiler_config.mcdc_global_bytes.to_text()
+        config["mcdc_include"] = compiler_config.mcdc_include
+        config["mcdc_exclude"] = compiler_config.mcdc_exclude
+        config["rt_hal_plan"] = compiler_config.get("rt-hal-plan") ?? ""
 
         # Standalone native CLI transports its requested mode through the
         # stable text field because the enum field can be corrupted by the
@@ -664,21 +618,15 @@ class CompileContext:
         else:
             BootLogger.from_env()
 
-        val assurance_profile = rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
-        val assurance_policy = policy_from_env_value(assurance_profile)
-        val assurance_policy_v2 = policy_from_env_value_v2(assurance_profile)
-
-        # Setup AOP. Verified closure admits only the canonical static weave;
-        # runtime advice registration would be a post-VIR transformation.
+        # Setup AOP
         val aop_config = WeavingConfig(enabled: false, before_advices: [], after_success_advices: [], after_error_advices: [], around_advices: [])
-        val runtime_enabled = not options.release and
-            assurance_policy_v2.strictness != AssuranceStrictnessV2.Verified
+        val runtime_enabled = not options.release  # Runtime advice disabled in release builds
         var aop = AopWeaver(advices: [], config: aop_config, logger: logger, runtime_enabled: runtime_enabled, runtime_allowlist: [])
         if options.verbose:
             aop.add_log_aspect(LogAspect(level: 6), Pointcut(kind: PointcutKind.All, pattern: "*"))
 
         CompileContext(
-            options: resolved_options,
+            options: options,
             assurance_policy: policy_from_env_value(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""),
             config: config,
             backend: backend,
@@ -686,8 +634,14 @@ class CompileContext:
             aop: aop,
             logger: logger,
             sources: [],
+            source_paths_owner: [],
+            source_authored_paths_owner: [],
+            source_contents_owner: [],
+            source_content_hashes_owner: [],
+            source_module_names_owner: [],
             native_sources_fingerprint: "",
             modules: {},
+            module_surfaces: nil,
             hir_modules: {},
             hir_module_count_value: 0,
             bootstrap_entry_hir: nil,
@@ -710,229 +664,8 @@ class CompileContext:
             frozen_storage_module_names: [],
             frozen_storage_sites: [],
             frozen_storage_evidence: []
-            , frozen_storage_known_module_names: [],
-            mcdc_manifest_semantic_ids: [],
-            mcdc_manifest_decision_ids: [],
-            mcdc_manifest_source_digests: [],
-            mcdc_manifest_condition_counts: [],
-            mcdc_manifest_token_offsets: [],
-            mcdc_manifest_token_counts: [],
-            mcdc_manifest_token_opcodes: [],
-            mcdc_manifest_token_conditions: [],
-            mcdc_manifest_frozen: false,
-            mcdc_manifest_frozen_identity: ""
+            , frozen_storage_known_module_names: []
         )
-
-    fn mcdc_manifest_rows_well_formed() -> bool:
-        val rows = self.mcdc_manifest_decision_ids.len()
-        (not self.mcdc_manifest_frozen
-            and rows == self.mcdc_manifest_semantic_ids.len()
-            and rows == self.mcdc_manifest_source_digests.len()
-            and rows == self.mcdc_manifest_condition_counts.len()
-            and rows == self.mcdc_manifest_token_offsets.len()
-            and rows == self.mcdc_manifest_token_counts.len()
-            and self.mcdc_manifest_token_opcodes.len()
-                == self.mcdc_manifest_token_conditions.len())
-
-    me freeze_mcdc_manifest_v1() -> text:
-        if self.mcdc_manifest_frozen:
-            return self.mcdc_manifest_frozen_identity
-        if not self.mcdc_manifest_rows_well_formed():
-            return ""
-        val row_count = self.mcdc_manifest_decision_ids.len()
-        var order: [i64] = []
-        var index = 0
-        while index < row_count:
-            order.push(index)
-            index = index + 1
-        # Stable LSD radix ordering is O(D) with a fixed 16 passes. Sort the
-        # secondary decision key first, then the primary u64 source digest.
-        # This avoids an O(D^2) compile-time cliff for large applications.
-        var radix_byte = 0
-        while radix_byte < 8:
-            order = mcdc_radix_order_pass_v1(
-                order, self.mcdc_manifest_decision_ids, radix_byte)
-            radix_byte = radix_byte + 1
-        radix_byte = 0
-        while radix_byte < 8:
-            order = mcdc_radix_order_pass_v1(
-                order, self.mcdc_manifest_source_digests, radix_byte)
-            radix_byte = radix_byte + 1
-
-        var semantic_ids: [text] = []
-        var decision_ids: [i64] = []
-        var source_digests: [i64] = []
-        var condition_counts: [i64] = []
-        var token_offsets: [i64] = []
-        var token_counts: [i64] = []
-        var token_opcodes: [i64] = []
-        var token_conditions: [i64] = []
-        var out_index = 0
-        while out_index < order.len():
-            val row = order[out_index]
-            val source_digest = self.mcdc_manifest_source_digests[row]
-            val decision_id = self.mcdc_manifest_decision_ids[row]
-            val condition_count = self.mcdc_manifest_condition_counts[row]
-            val old_offset = self.mcdc_manifest_token_offsets[row]
-            val count = self.mcdc_manifest_token_counts[row]
-            if source_digest == 0 or decision_id <= 0 or condition_count <= 0
-                or condition_count > 62 or count <= 0 or count > 256
-                or self.mcdc_manifest_semantic_ids[row] == ""
-                or self.mcdc_manifest_semantic_ids[row].len() > 4096
-                or old_offset < 0
-                or old_offset + count > self.mcdc_manifest_token_opcodes.len():
-                return ""
-            if out_index > 0 and source_digest == source_digests[out_index - 1]
-                and decision_id == decision_ids[out_index - 1]:
-                return ""
-            semantic_ids.push(self.mcdc_manifest_semantic_ids[row])
-            decision_ids.push(decision_id)
-            source_digests.push(source_digest)
-            condition_counts.push(condition_count)
-            token_offsets.push(token_opcodes.len())
-            token_counts.push(count)
-            val semantic_id = self.mcdc_manifest_semantic_ids[row]
-            var stack_depth = 0
-            var referenced_mask = 0
-            var token_index = 0
-            while token_index < count:
-                val opcode = self.mcdc_manifest_token_opcodes[old_offset + token_index]
-                val condition = self.mcdc_manifest_token_conditions[old_offset + token_index]
-                if opcode == 1:
-                    if condition < 0 or condition >= condition_count:
-                        return ""
-                    val condition_bit = 1 << condition
-                    if (referenced_mask & condition_bit) != 0:
-                        return ""
-                    referenced_mask = referenced_mask | condition_bit
-                    stack_depth = stack_depth + 1
-                elif opcode == 2:
-                    if condition != 0 or stack_depth < 1:
-                        return ""
-                elif opcode == 3 or opcode == 4:
-                    if condition != 0 or stack_depth < 2:
-                        return ""
-                    stack_depth = stack_depth - 1
-                else:
-                    return ""
-                token_opcodes.push(opcode)
-                token_conditions.push(condition)
-                token_index = token_index + 1
-            if stack_depth != 1 or referenced_mask != (1 << condition_count) - 1:
-                return ""
-            out_index = out_index + 1
-        self.mcdc_manifest_semantic_ids = semantic_ids
-        self.mcdc_manifest_decision_ids = decision_ids
-        self.mcdc_manifest_source_digests = source_digests
-        self.mcdc_manifest_condition_counts = condition_counts
-        self.mcdc_manifest_token_offsets = token_offsets
-        self.mcdc_manifest_token_counts = token_counts
-        self.mcdc_manifest_token_opcodes = token_opcodes
-        self.mcdc_manifest_token_conditions = token_conditions
-        self.mcdc_manifest_frozen = true
-        # Canonical MCDP V1 identity is SHA-256 over the exact little-endian
-        # 24-byte header followed by every byte after the 64-byte identity
-        # field. This binds counts, rows, tokens, and semantic IDs without a
-        # text/number formatting contract at the runtime boundary.
-        val identity_input = self.mcdc_manifest_identity_input_v1()
-        if identity_input.len() == 0:
-            self.mcdc_manifest_frozen = false
-            return ""
-        self.mcdc_manifest_frozen_identity = sha256_u8_hex(identity_input)
-        if self.mcdc_manifest_frozen_identity.len() != 64:
-            self.mcdc_manifest_frozen = false
-            return ""
-        self.mcdc_manifest_frozen_identity
-
-    fn mcdc_manifest_identity_input_v1() -> [u8]:
-        if not self.mcdc_manifest_frozen: return []
-        val row_count = self.mcdc_manifest_decision_ids.len()
-        val token_count = self.mcdc_manifest_token_opcodes.len()
-        var semantic_bytes = 0
-        for semantic_id in self.mcdc_manifest_semantic_ids:
-            semantic_bytes = semantic_bytes + 4 + semantic_id.bytes().len()
-        val total_bytes = 32 + row_count * 32 + token_count * 8 + semantic_bytes
-        if total_bytes < 32 or total_bytes > 67108800: return []
-        var out: [u8] = [0u8; total_bytes]
-        mcdc_wire_put_u32_v1(out, 0, 0x5044434d)
-        mcdc_wire_put_u32_v1(out, 4, 1)
-        mcdc_wire_put_u64_v1(out, 8, row_count)
-        mcdc_wire_put_u64_v1(out, 16, token_count)
-        var cursor = 24
-        var row = 0
-        while row < row_count:
-            mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_decision_ids[row])
-            mcdc_wire_put_u64_v1(out, cursor + 8, self.mcdc_manifest_source_digests[row])
-            mcdc_wire_put_u32_v1(out, cursor + 16, self.mcdc_manifest_condition_counts[row])
-            mcdc_wire_put_u32_v1(out, cursor + 20, self.mcdc_manifest_token_counts[row])
-            mcdc_wire_put_u64_v1(out, cursor + 24, self.mcdc_manifest_token_offsets[row])
-            cursor = cursor + 32
-            row = row + 1
-        var token = 0
-        while token < token_count:
-            out[cursor] = self.mcdc_manifest_token_opcodes[token].to_u8()
-            mcdc_wire_put_u32_v1(out, cursor + 4, self.mcdc_manifest_token_conditions[token])
-            cursor = cursor + 8
-            token = token + 1
-        mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_semantic_ids.len())
-        cursor = cursor + 8
-        for semantic_id in self.mcdc_manifest_semantic_ids:
-            val bytes = semantic_id.bytes()
-            mcdc_wire_put_u32_v1(out, cursor, bytes.len())
-            cursor = cursor + 4
-            mcdc_wire_put_bytes_v1(out, cursor, bytes)
-            cursor = cursor + bytes.len()
-        out
-
-    fn mcdc_manifest_wire_v1() -> [u8]:
-        # MCDP V1 is directly consumable as runtime_mcdc_v1.h arrays:
-        # 24-byte header, 64-byte lowercase SHA-256 identity, then aligned
-        # 32-byte SimpleMcdcDecisionExprV1 rows, 8-byte token rows, and a
-        # length-prefixed semantic-ID table for report correlation.
-        if not self.mcdc_manifest_frozen or self.mcdc_manifest_frozen_identity.len() != 64:
-            return []
-        val row_count = self.mcdc_manifest_decision_ids.len()
-        val token_count = self.mcdc_manifest_token_opcodes.len()
-        if row_count > 1048576 or token_count > 8388608: return []
-        var semantic_bytes = 0
-        for semantic_id in self.mcdc_manifest_semantic_ids:
-            if semantic_id.len() > 4096: return []
-            semantic_bytes = semantic_bytes + 4 + semantic_id.bytes().len()
-        val total_bytes = 96 + row_count * 32 + token_count * 8 + semantic_bytes
-        # Artifact-local cap prevents pathological compiler allocation and
-        # keeps the section well below the signed SMF offset boundary.
-        if total_bytes < 96 or total_bytes > 67108864: return []
-        var out: [u8] = [0u8; total_bytes]
-        mcdc_wire_put_u32_v1(out, 0, 0x5044434d)
-        mcdc_wire_put_u32_v1(out, 4, 1)
-        mcdc_wire_put_u64_v1(out, 8, row_count)
-        mcdc_wire_put_u64_v1(out, 16, token_count)
-        mcdc_wire_put_bytes_v1(out, 24, self.mcdc_manifest_frozen_identity.bytes())
-        var cursor = 88
-        var row = 0
-        while row < row_count:
-            mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_decision_ids[row])
-            mcdc_wire_put_u64_v1(out, cursor + 8, self.mcdc_manifest_source_digests[row])
-            mcdc_wire_put_u32_v1(out, cursor + 16, self.mcdc_manifest_condition_counts[row])
-            mcdc_wire_put_u32_v1(out, cursor + 20, self.mcdc_manifest_token_counts[row])
-            mcdc_wire_put_u64_v1(out, cursor + 24, self.mcdc_manifest_token_offsets[row])
-            cursor = cursor + 32
-            row = row + 1
-        var token = 0
-        while token < token_count:
-            out[cursor] = self.mcdc_manifest_token_opcodes[token].to_u8()
-            mcdc_wire_put_u32_v1(out, cursor + 4, self.mcdc_manifest_token_conditions[token])
-            cursor = cursor + 8
-            token = token + 1
-        mcdc_wire_put_u64_v1(out, cursor, self.mcdc_manifest_semantic_ids.len())
-        cursor = cursor + 8
-        for semantic_id in self.mcdc_manifest_semantic_ids:
-            val bytes = semantic_id.bytes()
-            mcdc_wire_put_u32_v1(out, cursor, bytes.len())
-            cursor = cursor + 4
-            mcdc_wire_put_bytes_v1(out, cursor, bytes)
-            cursor = cursor + bytes.len()
-        out
 
     fn storage_binding_rows_well_formed() -> bool:
         self.storage_binding_module_names.len() == self.storage_view_site_bindings.len()
@@ -1246,25 +979,27 @@ class CompileContext:
         if not self.storage_registry_frozen
             or not self.frozen_storage_registry_well_formed():
             return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
+                registry_identity: self.storage_binding_identity(), capsules: [],
                 reason: "storage-registry-not-frozen")
         var capsules: [FrozenNativeModuleCapsuleV1] = []
-        var capsule_index: Dict<text, i64> = {}
         var index = 0
         while index < module_names.len():
             val module_name = module_names[index]
             if module_name == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
+                    registry_identity: self.storage_binding_identity(), capsules: [],
                     reason: "invalid-capsule-module-name")
-            if capsule_index.has(module_name):
-                return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
-                    reason: "duplicate-capsule-module")
+            var prior = 0
+            while prior < index:
+                if module_names[prior] == module_name:
+                    return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                        registry_identity: self.storage_binding_identity(), capsules: [],
+                        reason: "duplicate-capsule-module")
+                prior = prior + 1
             val snapshot = self.frozen_storage_module_snapshot(module_name)
             if not snapshot.ok:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
+                    registry_identity: self.storage_binding_identity(), capsules: [],
                     reason: snapshot.reason)
             var module_found = false
             var module = MirModule(name: "", functions: {}, statics: {},
@@ -1278,11 +1013,11 @@ class CompileContext:
                 module_found = true
             if not module_found:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
+                    registry_identity: self.storage_binding_identity(), capsules: [],
                     reason: "capsule-mir-module-missing")
             if module.name != "" and module.name != module_name:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                    registry_identity: self.storage_binding_identity(), capsules: [], capsule_index: {},
+                    registry_identity: self.storage_binding_identity(), capsules: [],
                     reason: "capsule-mir-module-name-mismatch")
             val cache_source = self.frozen_native_cache_source_v1(module_name)
             val object_path = "{object_base}.{module_name}.o"
@@ -1296,11 +1031,10 @@ class CompileContext:
                 is_release: is_release, reason: "ok")
             capsule.capsule_identity = capsule.expected_identity()
             capsules.push(capsule)
-            capsule_index[module_name] = index
             index = index + 1
         FrozenNativeModuleCapsuleBatchV1(ok: true,
             registry_identity: self.storage_binding_identity(),
-            capsules: capsules, capsule_index: capsule_index, reason: "ok")
+            capsules: capsules, reason: "ok")
 
     me add_error(message: text):
         self.errors.push(message)
@@ -1383,25 +1117,32 @@ class CompileContext:
     # ------------------------------------------------------------------
     # Memory eviction (--low-memory mode)
     # ------------------------------------------------------------------
+    # `rt_string_free` is registry-checked: aliases may carry the same copied
+    # RuntimeValue, and a second call safely returns 0 without dereferencing an
+    # unregistered pointer. Never inspect content after the first call because
+    # a logical alias may already name freed storage. Paths are not ownership.
+    me reclaim_source_contents() -> i64:
+        var reclaimed: i64 = 0
+        for source in self.sources:
+            val freed = rt_string_free(source.content)
+            if freed == 1:
+                reclaimed = reclaimed + 1
+        reclaimed
+
+    me source_contents_reclaimable() -> bool:
+        self.options.low_memory and self.options.backend != "vhdl"
+
     # After parsing, raw source text is no longer needed.
     me evict_sources():
         var metadata: [SourceFile] = []
         for source in self.sources:
             metadata = metadata.push(SourceFile(
                 path: source.path,
-                physical_path: source.physical_path,
                 authored_path: source.authored_path,
                 content: "",
                 module_name: source.module_name
             ))
         self.sources = metadata
-        # `source_contents_owner` holds independent array slots, but physical
-        # aliases intentionally share the same owned text allocation.  Once
-        # reclaim_source_contents() releases that allocation through
-        # `sources`, retaining these slots would leave dangling text handles
-        # available to a reused driver and invite a second free.  Receipts and
-        # path/module metadata have separate scalar owners and remain valid.
-        self.source_contents_owner = []
 
     # The three evictions below drop references only. With no GC and no
     # refcounting that reclaims NOTHING -- measured at 0 of 2001 allocations by
@@ -1488,11 +1229,7 @@ class CompileContext:
 
 fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
     val opt_level = compileoptions_effective_mir_opt_level(opts)
-    val raw_mcdc_policy = if opts.mcdc_policy == "": "off" else: opts.mcdc_policy
-    val mcdc_policy = McdcPolicy.from_text(raw_mcdc_policy).to_text()
-    compile_options_hash_compute_with_mcdc(
-        opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off,
-        opts.profile, opts.allowed_families, mcdc_policy)
+    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families)
 
 # ============================================================================
 # Exports
@@ -1500,4 +1237,3 @@ fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
 
 export CompileContext, compute_options_hash
 export BackendResult, BackendError
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

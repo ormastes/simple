@@ -34,13 +34,14 @@ fn _arg_i64(args: [text], key: text, fallback: i64) -> i64:
     val raw = _arg_value(args, key, "")
     if raw == "":
         return fallback
-    raw.to_i64()
+    raw.parse_int() ?? fallback
 
 fn _arg_i32(args: [text], key: text, fallback: i32) -> i32:
     val raw = _arg_value(args, key, "")
     if raw == "":
         return fallback
-    raw.to_i32()
+    val parsed = raw.parse_int() ?? fallback.to_i64()
+    parsed.to_i32()
 
 fn _arg_dpi_source(args: [text]) -> text:
     if _arg_value(args, "--dpi", "") == "":
@@ -81,23 +82,47 @@ fn _sort_i64(values: [i64]) -> [i64]:
 fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
     if sorted.len() == 0:
         return 0
-    var idx = ((sorted.len() * pct) + 99) / 100
-    if idx <= 0:
-        idx = 1
-    if idx > sorted.len():
-        idx = sorted.len()
-    sorted[idx - 1]
+    var rank = ((sorted.len() * pct + 99) / 100) - 1
+    if rank < 0:
+        rank = 0
+    if rank >= sorted.len():
+        rank = sorted.len() - 1
+    sorted[rank]
 
 fn _sample_html(fixture_id: text) -> text:
+    if fixture_id == "gui-perf-cpu-base-solid":
+        return "<html><body style='margin:0;background:#102030'></body></html>"
     "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
 
 fn _is_supported_software_backend(backend: text) -> bool:
-    backend == "software" or backend == "cpu" or backend == "cpu_simd"
+    if backend == "software": return true
+    if backend == "cpu": return true
+    backend == "cpu_simd"
 
 fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]:
-    if _is_supported_software_backend(backend):
-        return simple_web_layout_render_html_software_pixels(html, width, height)
-    []
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html, width, height, backend)
+
+fn _backend_family(backend: text) -> text:
+    if backend == "cpu_simd":
+        return "cpu_simd"
+    "software"
+
+fn _runtime_compute_target(backend: text) -> text:
+    if backend == "cpu_simd":
+        return "cpu_simd"
+    "cpu_scalar"
+
+fn _runtime_execution_path(backend: text) -> text:
+    if backend == "cpu_simd":
+        return "simple_web_layout_engine2d_cpu_simd"
+    "simple_web_layout_software"
+
+fn _runtime_status(backend: text, supported: bool) -> text:
+    if supported:
+        if backend == "cpu_simd":
+            return "cpu-simd-render-loop-ready"
+        return "cpu-scalar-baseline-ready"
+    "unsupported-backend"
 
 fn _checksum_u32_pixels(pixels: [u32]) -> i64:
     var checksum: i64 = 0
@@ -111,7 +136,7 @@ fn _nonzero_pixels(pixels: [u32]) -> i64:
     var count: i64 = 0
     var i = 0
     while i < pixels.len():
-        if pixels[i] != 0u32:
+        if (pixels[i] as i64) != 0:
             count = count + 1
         i = i + 1
     count
@@ -227,6 +252,9 @@ pub fn software_only_render_loop_export_sdn(args: [text], clock: FrameClock? = n
     val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
     val width = _arg_i32(args, "--width", 64)
     val height = _arg_i32(args, "--height", 64)
+    var dpi = _arg_i32(args, "--dpi", 300)
+    if dpi <= 0:
+        dpi = 300
     val warmup_count = _arg_i32(args, "--warmup-count", 0)
     val sample_count = _arg_i32(args, "--sample-count", 1)
     val backend = _arg_value(args, "--software-render-backend", "software")
@@ -257,12 +285,17 @@ pub fn software_only_render_loop_export_sdn(args: [text], clock: FrameClock? = n
     var samples: [i64] = []
     var pixels: [u32] = []
     var i = 0
+    reset_simd_hits()
+    engine2d_simd_native_reset()
     if supported_backend:
         while i < sample_count:
             val start_us = ck.now_micros()
             pixels = _render_software_pixels(html, width, height, backend)
             samples.push(_positive_elapsed_us(start_us, ck))
             i = i + 1
+    val hits = simd_hit_counts()
+    val simd_provider_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
+    val native_simd_hits = engine2d_simd_native_hits()
     val sorted = _sort_i64(samples)
     val p50 = _percentile_nearest_rank(sorted, 50)
     val p95 = _percentile_nearest_rank(sorted, 95)

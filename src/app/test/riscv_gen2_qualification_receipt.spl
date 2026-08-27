@@ -13,7 +13,7 @@ use std.common.json.types.{json_to_number, json_to_string}
 use common.provenance.stage4_compiler_provenance.{
     stage4_compiler_provenance_from_text, stage4_compiler_provenance_reason}
 
-val RISCV_GEN2_QUALIFICATION_SCHEMA = "riscv-gen2-hwir-qualification-run-v4"
+val RISCV_GEN2_QUALIFICATION_SCHEMA = "riscv-gen2-hwir-qualification-run-v2"
 val RISCV_GEN2_QUALIFICATION_ROOT =
     "build/evidence/riscv_gen2_hwir_foundation"
 val RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP: i64 = 8000
@@ -148,121 +148,6 @@ fn _g2_parse_env(encoded: text) -> Result<Dict<text, text>, text>:
             return Err("qualification-manifest-row-invalid")
         fields[key] = value
     Ok(fields)
-
-fn _g2_coverage_scope_path_safe(path: text) -> bool:
-    if path == "" or path.contains("//") or path == "." or path == ".." or
-            path.starts_with("./") or path.starts_with("../") or
-            path.contains("/./") or path.contains("/../") or
-            path.ends_with("/.") or path.ends_with("/.."):
-        return false
-    var index: i64 = 0
-    while index < path.len():
-        val c = path[index:index + 1]
-        val allowed = ((c >= "a" and c <= "z") or
-            (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or
-            c == "." or c == "_" or c == "/" or c == "-")
-        if not allowed or (index == 0 and not ((c >= "a" and c <= "z") or
-                (c >= "A" and c <= "Z") or (c >= "0" and c <= "9"))):
-            return false
-        index = index + 1
-    true
-
-fn _g2_coverage_scope_source_path_safe(path: text) -> bool:
-    _g2_coverage_scope_path_safe(path) and path.ends_with(".spl")
-
-fn _g2_coverage_scope_reason_safe(reason: text) -> bool:
-    if reason == "": return false
-    var index: i64 = 0
-    while index < reason.len():
-        val c = reason[index:index + 1]
-        if not ((c >= "a" and c <= "z") or (c >= "0" and c <= "9") or
-                c == "-"):
-            return false
-        index = index + 1
-    true
-
-# This is a data file, never an executable shell environment.  The producer
-# uses the same bounded grammar before it permits coverage to qualify a run.
-fn riscv_gen2_qualification_coverage_scope_valid(encoded: text) -> bool:
-    if (encoded.len() == 0 or
-            encoded.len() > RISCV_GEN2_QUALIFICATION_MAX_MANIFEST_BYTES or
-            not encoded.ends_with("\n") or encoded.ends_with("\n\n")):
-        return false
-    var schema_count: i64 = 0
-    var coverage_spec_count: i64 = 0
-    var owner_count: i64 = 0
-    var changed_count: i64 = 0
-    var direct_test_count: i64 = 0
-    var exclusion_count: i64 = 0
-    var owners: Dict<text, bool> = {}
-    var changed_files: Dict<text, bool> = {}
-    var direct_tests: Dict<text, bool> = {}
-    var exclusions: Dict<text, bool> = {}
-    # Preserve every payload byte: the terminal LF is grammar framing, not
-    # permission to normalize leading or trailing whitespace in evidence rows.
-    val payload = encoded[0:encoded.len() - 1]
-    for line in payload.split("\n"):
-        val separator = line.index_of("=")
-        if separator <= 0: return false
-        val key = line[0:separator]
-        val value = line[separator + 1:]
-        if value == "": return false
-        if key == "schema":
-            schema_count = schema_count + 1
-            if schema_count != 1 or value != RISCV_GEN2_QUALIFICATION_COVERAGE_SCOPE_SCHEMA:
-                return false
-        else if key == "coverage_spec":
-            coverage_spec_count = coverage_spec_count + 1
-            if coverage_spec_count != 1 or
-                    value != RISCV_GEN2_QUALIFICATION_COVERAGE_SPEC:
-                return false
-        else if key == "coverage_owner":
-            if not _g2_coverage_scope_source_path_safe(value) or owners.has(value):
-                return false
-            owners[value] = true
-            owner_count = owner_count + 1
-        else if key == "changed_file":
-            if not _g2_coverage_scope_source_path_safe(value) or changed_files.has(value):
-                return false
-            changed_files[value] = true
-            changed_count = changed_count + 1
-        else if key == "direct_test":
-            if (not _g2_coverage_scope_path_safe(value) or
-                    not value.starts_with("test/") or
-                    direct_tests.has(value)):
-                return false
-            direct_tests[value] = true
-            direct_test_count = direct_test_count + 1
-        else if key == "exclusion":
-            val parts = value.split("|")
-            if (parts.len() != 2 or not _g2_coverage_scope_path_safe(parts[0]) or
-                    not _g2_coverage_scope_reason_safe(parts[1]) or
-                    exclusions.has(value)):
-                return false
-            exclusions[value] = true
-            exclusion_count = exclusion_count + 1
-        else:
-            return false
-    if (schema_count != 1 or coverage_spec_count != 1 or owner_count == 0 or
-            changed_count == 0 or direct_test_count == 0 or exclusion_count == 0 or
-            not owners.has(RISCV_GEN2_QUALIFICATION_COVERAGE_SPEC)):
-        return false
-    for changed_file in changed_files.keys():
-        if not owners.has(changed_file): return false
-    true
-
-fn _g2_coverage_scope_owners(
-        encoded: text) -> Result<Dict<text, bool>, text>:
-    if not riscv_gen2_qualification_coverage_scope_valid(encoded):
-        return Err("qualification-coverage-scope-invalid")
-    var owners: Dict<text, bool> = {}
-    val payload = encoded[0:encoded.len() - 1]
-    for line in payload.split("\n"):
-        val separator = line.index_of("=")
-        val key = line[0:separator]
-        if key == "coverage_owner":
-            owners[line[separator + 1:]] = true
-    Ok(owners)
 
 fn _g2_required(fields: Dict<text, text>, key: text) -> Result<text, text>:
     if not fields.has(key): return Err("qualification-manifest-missing-" + key)

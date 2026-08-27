@@ -1,8 +1,9 @@
 # Check command - parse and validate Simple source files
 #
-# Runs the compiler front-end in-process in check-only mode (parse + resolve +
-# type-check, no codegen) on each target file, mirroring cli_compile_pure_simple
-# in app.io.cli_compile_part1 but with `options.mode = CompileMode.Check`.
+# Runs bounded parse/source validation on each target file. The full compiler
+# driver import path loads the whole compiler graph before main() and has been
+# observed to terminate ordinary single-file checks, so this command stays on
+# the lightweight parser path.
 #
 # Earlier revisions shelled out to a hardcoded Linux binary path via a raw
 # runtime process call, which
@@ -12,17 +13,15 @@
 # out to `simple check`, i.e. to this very handler, so check must do the work
 # in-process. Both problems are removed here.
 
-use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
-use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult}
-use compiler.core.parser.{parse_module, parser_has_errors}
-use compiler.core.ast.{ast_reset, module_get_decls}
-use compiler.semantics.lint.concurrency_api_misuse.{check_concurrency_api_misuse}
-use compiler.semantics.lint.concurrency_share_nothing.{check_concurrency_share_nothing}
+use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
+use compiler.core.ast.{ast_reset}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
 use app.cli.query_rich_common.{query_file_read_rich}
 use app.cli.repo_hygiene_gate.{run_repo_hygiene_gate}
+use app.cli.check_options.{check_option_error}
 use app.check.sspec_source.{check_sspec_guidance}
+use app.check.concurrency_lint.{run_concurrency_api_lint}
 
 class CheckLogOptions:
     log_mode: text
@@ -155,27 +154,6 @@ fn _collect_spl_files(path: text) -> [text]:
     # Not an existing file: try directory discovery.
     find_spl_files(path)
 
-# Run the compiler front-end on one file in check-only mode (parse + resolve +
-# type-check, no codegen). Returns the number of errors found (0 == clean). On
-# error, prints diagnostics unless JSON output is requested.
-fn _concurrency_lint_errors(path: text, source: text) -> [text]:
-    """Run the E-PAR concurrency lints (E-PAR-001..006) on one source file."""
-    var msgs: [text] = []
-    val misuse = check_concurrency_api_misuse(source, path)
-    for finding in misuse:
-        msgs.push(finding.fmt())
-    # E-PAR-006 walks the AST arena; parse this file into the global arena first.
-    # NOTE: the self-hosted parser cannot yet parse lambda call arguments, so
-    # E-PAR-006 stays inert here until that gap closes — see
-    # doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md
-    ast_reset()
-    parse_module(source, path)
-    if not parser_has_errors():
-        val share = check_concurrency_share_nothing(module_get_decls())
-        for sn_finding in share:
-            msgs.push(sn_finding.fmt())
-    msgs
-
 fn _host_gpu_lane_lint_errors(source: text) -> [text]:
     """Source-level guard for target.later(...) gpu \\: semantic ownership."""
     var msgs: [text] = []
@@ -208,27 +186,95 @@ fn _host_gpu_lane_lint_warnings(source: text) -> [text]:
             msgs.push("warning[HGL-BATCH]: per-widget GPU later() call inside loop. Use frame-level Draw IR batch, instance buffer, or DisplayGraphIR delta.")
     msgs
 
+fn _import_line_has_symbol(trimmed: text, owner: text, symbol: text) -> bool:
+    if not trimmed.starts_with("use {owner}."):
+        return false
+    var normalized = trimmed.replace(" ", "")
+    normalized = normalized.replace("\t", "")
+    normalized = normalized.replace("{", ",")
+    normalized = normalized.replace("}", ",")
+    normalized.contains(",{symbol},")
+
+fn _concurrency_import_error(owner: text, symbol: text, expected: text) -> text:
+    "error[E-PAR-003]: {symbol} belongs to {expected}, not {owner}. import {symbol} from {expected}"
+
+fn _concurrency_api_lint_errors(source: text) -> [text]:
+    var msgs: [text] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("extern fn rt_pool_"):
+            msgs.push("error[E-PAR-005]: direct rt_pool_* access bypasses the public multicore_green facade")
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "thread_spawn2"):
+            msgs.push("error[E-PAR-002]: thread_spawn2 is a numbered name and is not a public API. use thread_spawn_with_args")
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "spawn_isolated2"):
+            msgs.push("error[E-PAR-002]: spawn_isolated2 is a numbered name and is not a public API. use spawn_isolated_with_args")
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "spawn_limited2"):
+            msgs.push("error[E-PAR-002]: spawn_limited2 is a numbered name and is not a public API. use spawn_limited_with_args")
+        if _import_line_has_symbol(trimmed, "std.concurrent.cooperative_green", "thread_spawn_with_args"):
+            msgs.push(_concurrency_import_error("std.concurrent.cooperative_green", "thread_spawn_with_args", "std.concurrent.thread"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.cooperative_green", "thread_spawn"):
+            msgs.push(_concurrency_import_error("std.concurrent.cooperative_green", "thread_spawn", "std.concurrent.thread"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.multicore_green", "thread_spawn"):
+            msgs.push(_concurrency_import_error("std.concurrent.multicore_green", "thread_spawn", "std.concurrent.thread"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "green_spawn"):
+            msgs.push(_concurrency_import_error("std.concurrent.thread", "green_spawn", "std.concurrent.green_thread"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_spawn_value"):
+            msgs.push(_concurrency_import_error("std.concurrent.thread", "cooperative_green_spawn_value", "std.concurrent.cooperative_green"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_run_all"):
+            msgs.push(_concurrency_import_error("std.concurrent.thread", "cooperative_green_run_all", "std.concurrent.cooperative_green"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "cooperative_green_spawn"):
+            msgs.push(_concurrency_import_error("std.concurrent.thread", "cooperative_green_spawn", "std.concurrent.cooperative_green"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "multicore_green_spawn_sliced"):
+            msgs.push(_concurrency_import_error("std.concurrent.thread", "multicore_green_spawn_sliced", "std.concurrent.multicore_green"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "multicore_green_spawn"):
+            msgs.push(_concurrency_import_error("std.concurrent.thread", "multicore_green_spawn", "std.concurrent.multicore_green"))
+        if _import_line_has_symbol(trimmed, "std.concurrent.thread", "task_spawn"):
+            msgs.push("error[E-PAR-001]: task_spawn is not part of the OS-thread facade. import task_spawn from std.nogc_async_mut.thread_pool")
+        if trimmed.contains("thread_spawn(42)") or trimmed.contains("thread_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: thread_spawn expects one zero-argument closure")
+        if trimmed.contains("green_spawn(42)") or trimmed.contains("green_spawn(\\: 1, \\: 2)") or trimmed.contains("green_spawn(do:"):
+            msgs.push("error[E-PAR-004]: green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("cooperative_green_spawn(42)") or trimmed.contains("cooperative_green_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: cooperative_green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("multicore_green_spawn(42)") or trimmed.contains("multicore_green_spawn(\\: 1, \\: 2)"):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn expects one share-nothing zero-argument closure")
+        if trimmed.contains("multicore_green_set_parallelism(\""):
+            msgs.push("error[E-PAR-004]: multicore_green_set_parallelism expects an integer worker count")
+        if trimmed.contains("multicore_green_spawn_sliced(0)") or trimmed.contains("multicore_green_spawn_sliced(\""):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn_sliced expects integer state and step function")
+        if trimmed.contains("multicore_green_spawn_sliced(0, 42)"):
+            msgs.push("error[E-PAR-004]: multicore_green_spawn_sliced expects a step function as the second argument")
+    if source.contains("var shared_total") and source.contains("green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: green_spawn closure must not capture shared mutable state")
+    if source.contains("var local_count") and source.contains("cooperative_green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: cooperative_green_spawn closure must not capture shared mutable state")
+    if source.contains("var shared_sum") and source.contains("multicore_green_spawn(\\:"):
+        msgs.push("error[E-PAR-006]: multicore_green_spawn closure must not capture shared mutable state")
+    if source.contains("var shared_state") and source.contains("multicore_green_spawn_sliced(0, \\state:"):
+        msgs.push("error[E-PAR-006]: multicore_green_spawn_sliced closure must not capture shared mutable state")
+    msgs
+
 fn _check_path(path: text, as_json: bool) -> i64:
     if not file_exists(path):
         if not as_json:
             print "ERROR: {path}: file not found"
         return 1
 
-    var options = CompileOptions.default()
-    options.mode = CompileMode.Check
-    options.input_files = [path]
-
-    val driver = compiler_driver_create(options)
-    val result = compiler_driver_run_compile(driver)
-    val errors = result.get_errors()
-
     val source = query_file_read_rich(path) ?? ""
-    val lint_errors = _concurrency_lint_errors(path, source)
+    val sspec_guidance = check_sspec_guidance(source, path)
+    if sspec_guidance != "":
+        if not as_json:
+            print sspec_guidance
+        return 1
+    ast_reset()
+    parse_module(source, path)
+    val errors = parser_get_errors()
     val host_gpu_errors = _host_gpu_lane_lint_errors(source)
     val host_gpu_warnings = _host_gpu_lane_lint_warnings(source)
     val concurrency_errors = run_concurrency_api_lint(source, path)
 
-    if errors.len() == 0 and lint_errors.len() == 0 and host_gpu_errors.len() == 0 and result.is_success():
+    if errors.len() == 0 and host_gpu_errors.len() == 0 and concurrency_errors.len() == 0 and not parser_has_errors():
         if not as_json:
             for warning in host_gpu_warnings:
                 print "{path}: {warning}"
@@ -237,18 +283,22 @@ fn _check_path(path: text, as_json: bool) -> i64:
     if not as_json:
         for err in errors:
             print "{path}: {err}"
-        for lint_err in lint_errors:
-            print "{path}: {lint_err}"
         for host_gpu_err in host_gpu_errors:
             print "{path}: {host_gpu_err}"
+        for concurrency_err in concurrency_errors:
+            print "{path}: {concurrency_err}"
         for host_gpu_warning in host_gpu_warnings:
             print "{path}: {host_gpu_warning}"
-        if errors.len() == 0 and host_gpu_errors.len() == 0:
+        if errors.len() == 0 and host_gpu_errors.len() == 0 and concurrency_errors.len() == 0:
             print "{path}: check failed"
-    val total = errors.len() + host_gpu_errors.len()
+    val total = errors.len() + host_gpu_errors.len() + concurrency_errors.len()
     if total > 0: total else: 1
 
 fn run_check(args: [text]) -> i64:
+    val option_error = check_option_error(args)
+    if option_error != "":
+        print "ERROR: {option_error}"
+        return 2
     val log_opts = parse_log_options(args)
     if not log_opts.valid:
         print "ERROR: {log_opts.error}"

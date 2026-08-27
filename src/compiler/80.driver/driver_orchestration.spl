@@ -1,4 +1,5 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.diagnostics.span.{Span}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_aot_pipeline.*
@@ -8,37 +9,8 @@ use compiler.driver.driver_log_helpers.{
     log_trace,
     log_warn,
     log_error,
-    log_phase
-}
-use compiler.driver.driver_evidence_identity.{driver_evidence_identity_begin}
-use compiler.driver.driver_phase_profile.{
-    phase_profile_begin,
-    phase_profile_physical_descriptor,
-    phase_profile_failed,
-    phase_profile_finish_with_outcome,
-    phase_profile_abort
-}
-use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
-use compiler.driver.driver_mem_snapshot.{
-    mem_snapshot_begin,
-    mem_snapshot_failed,
-    mem_snapshot_finish_with_outcome,
-    mem_snapshot_abort
-}
-use compiler.driver.driver_evidence_identity.{driver_evidence_identity_begin}
-use compiler.driver.driver_phase_profile.{
-    phase_profile_begin,
-    phase_profile_physical_descriptor,
-    phase_profile_failed,
-    phase_profile_finish_with_outcome,
-    phase_profile_abort
-}
-use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
-use compiler.driver.driver_mem_snapshot.{
-    mem_snapshot_begin,
-    mem_snapshot_failed,
-    mem_snapshot_finish_with_outcome,
-    mem_snapshot_abort
+    log_phase,
+    log_build_progress
 }
 use compiler.common.driver_core_types.{CompileMode, CompileResult}
 use compiler.common.attributes.{
@@ -47,7 +19,7 @@ use compiler.common.attributes.{
     VhdlResetSynchrony,
     parse_vhdl_hardware_attrs
 }
-use compiler.frontend.parser_types.{Module, Function}
+use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
 use std.nogc_sync_mut.io.env_ops.{env_get}
@@ -59,9 +31,9 @@ impl CompilerDriver:
     me capture_vhdl_metadata():
         var metadata_rows: [VhdlHardwareMetadataFlatRow] = []
         for module_name in self.ctx.modules.keys():
-            val source_module: Module = self.ctx.modules[module_name]
+            val source_module: ParserModule = self.ctx.modules[module_name]
             for function_name in source_module.functions.keys():
-                val source_function: Function = source_module.functions[function_name]
+                val source_function: ParserFunction = source_module.functions[function_name]
                 val metadata = parse_vhdl_hardware_attrs(source_function.attributes)
                 if metadata.is_hardware:
                     var generic_names: [text] = []
@@ -105,101 +77,71 @@ impl CompilerDriver:
                             0
                     ))
         self.ctx.vhdl_hardware_metadata_rows = metadata_rows
-        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+        if env_get("SIMPLE_COMPILER_TRACE") == "1":
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
 
     me compile() -> CompileResult:
-        self.compile_routed(0)
-
-    me compile_routed(streaming_eligibility_mask: i64) -> CompileResult:
         val log = self.ctx.logger
+        if self.ctx.config.contains_key("mcdc_config_error"):
+            val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
+            self.ctx.add_error(mcdc_config_error)
+            return CompileResult.CodegenError(mcdc_config_error)
         var compile_mode_text = self.ctx.options.mode.to_text()
         if self.ctx.options.cli_mode_text != "":
             compile_mode_text = self.ctx.options.cli_mode_text
 
         log_phase("compile:start")
+        log_build_progress("load_sources", "files", -1, -1,
+            "starting", 0, 6, 0, 0, "running")
         log_phase("phase1:load_sources:start")
+        val sources_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
         val (loaded_ctx, load_ok) = self.load_sources_impl()
-        self.ctx = loaded_ctx
+        # `load_sources_impl` commits directly for the streaming owner. A
+        # second aggregate assignment at this exact boundary corrupted the
+        # returned context under Stage-3 native value semantics, before the
+        # first phase-2 receipt. Legacy non-streaming users retain the returned
+        # context installation.
+        if not sources_streaming_in_place:
+            self.ctx = loaded_ctx
         if not load_ok:
             log_error("phase 1 FAILED")
+            log_build_progress("load_sources", "files", -1, -1,
+                "failed", 0, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
         if compile_mode_text == "aot":
+            log_phase("phase1:load_sources:fingerprint:start")
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
+        log_build_progress("load_sources", "files", self.ctx.sources.len(),
+            self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
 
-        # Capture the pipeline selector while the loaded CompileContext is
-        # still authoritative. Streaming Phase 2 and 3 mutate that same owner
-        # in place and never transport it through a large returned tuple.
-        val streaming_pipeline = driver_streaming_surface_enabled(self.ctx)
-        # The exact predicate above owns both the control-flow branch and the
-        # immutable evidence mode. Capture run identity once before either
-        # Phase-2 branch; both durable streams reuse that frozen scalar.
-        val evidence_mode = if streaming_pipeline:
-            "streaming"
-        else:
-            "nonstreaming"
-        if driver_evidence_identity_begin(evidence_mode) < 0:
-            self.ctx.add_error(
-                "durable compiler evidence requires one valid 8..64 byte SIMPLE_EVIDENCE_RUN_ID")
-            return CompileResult.ParseError(self.ctx.errors)
-        val phase_profile_status = phase_profile_begin()
-        if phase_profile_status < 0:
-            phase_profile_abort()
-            self.ctx.add_error(
-                "SIMPLE_COMPILER_PHASE_PROFILE_FILE could not be established safely")
-            return CompileResult.ParseError(self.ctx.errors)
-        # Bind the phase stream to the exact dense physical-source set before
-        # any lifecycle record. Canonical-path aliases map to the same planner
-        # owner and deliberately emit no compiler descriptor or lifecycle.
-        if phase_profile_status > 0:
-            var descriptor_index_by_path: Dict<text, i64> = {}
-            var descriptor_physical_count: i64 = 0
-            var descriptor_source_index: i64 = 0
-            while descriptor_source_index < self.ctx.sources.len():
-                val descriptor_source = self.ctx.sources[descriptor_source_index]
-                val descriptor_path = module_surface_canonical_path(
-                    descriptor_source.path)
-                if not descriptor_index_by_path.contains_key(descriptor_path):
-                    val physical_index = descriptor_physical_count
-                    descriptor_index_by_path[descriptor_path] = physical_index
-                    descriptor_physical_count = descriptor_physical_count + 1
-                    if not phase_profile_physical_descriptor(
-                        physical_index, descriptor_path,
-                        descriptor_source.module_name):
-                        phase_profile_abort()
-                        self.ctx.add_error(
-                            "durable physical-source descriptor publication failed")
-                        return CompileResult.ParseError(self.ctx.errors)
-                descriptor_source_index = descriptor_source_index + 1
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
-        compiler_coverage_inventory_reset(self.ctx.config.contains_key("coverage"))
-        var parse_ok = false
-        if streaming_pipeline:
-            parse_ok = self.parse_all_streaming_surfaces_impl()
-        else:
-            val (parsed_ctx, returned_parse_ok) = self.parse_all_impl()
-            self.ctx = parsed_ctx
-            parse_ok = returned_parse_ok
+        val mcdc_mode_text = self.ctx.config["mcdc_mode"] ?? "off"
+        val mcdc_enabled = mcdc_mode_text == "on" or mcdc_mode_text == "dynamic"
+        compiler_coverage_inventory_reset(
+            self.ctx.config.contains_key("coverage") or mcdc_enabled,
+            self.ctx.config["mcdc_include"] ?? "",
+            self.ctx.config["mcdc_exclude"] ?? "")
+        val parse_ok = self.parse_all_committing_impl()
         if not parse_ok:
-            log_error("phase 2 FAILED")
+            # Name the recorded diagnostics. A phase-2 verdict of false with an
+            # EMPTY error list used to print this bare line and nothing else,
+            # which is indistinguishable from a real parse error and cost a
+            # whole investigation. Say which of the two it is.
+            log_error("phase 2 FAILED ({self.ctx.error_count_value} recorded error(s))")
+            if self.ctx.error_count_value == 0:
+                log_error("  phase 2 returned a failing verdict with ZERO recorded errors -- internal invariant break in the parse lane (stale CompileContext snapshot under native value semantics), not a source error")
+            var phase2_err_idx = 0
+            while phase2_err_idx < self.ctx.error_count_value:
+                log_error("  {self.ctx.error_message_at(phase2_err_idx)}")
+                phase2_err_idx = phase2_err_idx + 1
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
                 "failed", 1, 6, 1, 0, "failed")
-            if phase_profile_failed() or
-               not phase_profile_finish_with_outcome("phase2-failed"):
-                phase_profile_abort()
-                self.ctx.add_error(
-                    "durable phase evidence terminal publication failed after phase 2")
             return CompileResult.ParseError(self.ctx.errors)
         if self.ctx.config.contains_key("coverage") or mcdc_enabled:
             if not compiler_coverage_inventory_valid():
                 self.ctx.add_error(compiler_coverage_inventory_error())
-                if phase_profile_failed() or
-                   not phase_profile_finish_with_outcome("phase2-failed"):
-                    phase_profile_abort()
-                    self.ctx.add_error(
-                        "durable phase evidence terminal publication failed after coverage validation")
                 return CompileResult.ParseError(self.ctx.errors)
         if self.ctx.config.contains_key("coverage"):
             compiler_coverage_inventory_emit()
@@ -208,12 +150,27 @@ impl CompilerDriver:
         if self.ctx.options.backend == "vhdl":
             self.capture_vhdl_metadata()
         log_debug("phase 2 done")
+        # On the streaming path the SURFACES are the module set -- phase 2
+        # empties ctx.modules by design -- so reporting ctx.modules there
+        # prints a bare `n_modules=0` on a fully successful 692-module parse.
+        # That line cost a whole investigation (it reads as catastrophic loss).
+        # Name the carrier that is actually authoritative for the mode.
+        # NAME the carrier only -- do NOT dereference the retained surface
+        # owner here. An earlier version of this line unwrapped
+        # `streaming_module_surfaces_owner` to print a surface count and
+        # SEGV'd at exactly this point (the log then ended at
+        # `surface:file:released seq=692` with no `parse:done` line at all):
+        # the Option compares non-nil while its payload is not safely
+        # dereferenceable at this boundary. A diagnostic must never be able to
+        # crash the compile it is describing.
+        val parse_streaming_carrier = driver_streaming_surface_enabled(self.ctx)
         val parsed_module_count = self.ctx.modules.keys().len()
-        log_phase("phase2:parse:done n_modules={parsed_module_count}")
+        val parsed_module_carrier = if parse_streaming_carrier: "surfaces" else: "modules"
+        log_phase("phase2:parse:done n_modules={parsed_module_count} carrier={parsed_module_carrier}")
         log_build_progress("parse", "modules", parsed_module_count,
             parsed_module_count, "complete", 2, 6, 0, 0, "running")
 
-        if self.ctx.source_contents_reclaimable() and not streaming_pipeline:
+        if self.ctx.source_contents_reclaimable() and not driver_streaming_surface_enabled(self.ctx):
             log_phase("phase2:source_reclaim:start low_memory=true")
             log_debug("low-memory: evicting source text")
             lexer_release_parse_source_globals()
@@ -222,69 +179,23 @@ impl CompilerDriver:
             self.ctx.evict_sources()
             log_phase("phase2:source_reclaim:done reclaimed={reclaimed_sources}")
 
-        if phase_profile_failed():
-            phase_profile_abort()
-            self.ctx.add_error("durable phase evidence write failed during phase 2")
-            return CompileResult.ParseError(self.ctx.errors)
-        # Memory evidence begins once, above the shared streaming/nonstreaming
-        # HIR branch. Each physical HIR owner emits the same four boundaries.
-        if mem_snapshot_begin() < 0:
-            mem_snapshot_abort()
-            val phase_terminal_ok = phase_profile_finish_with_outcome(
-                "evidence-failed")
-            if not phase_terminal_ok:
-                phase_profile_abort()
-            self.ctx.add_error(
-                "SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
-            return CompileResult.TypeError(self.ctx.errors)
         log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3")
-        var analyze_ok = false
-        if streaming_pipeline:
-            analyze_ok = self.lower_and_check_streaming_surfaces_impl()
-        else:
-            val (analyzed_ctx, returned_analyze_ok) = self.lower_and_check_impl()
+        # Derive routing from stable configuration, not the adjacent mutable
+        # readiness boolean that native value semantics can lose between phase
+        # methods. lower_and_check_streaming_surfaces_impl validates/rebuilds
+        # the frozen owner before doing any work.
+        val hir_streaming_in_place = driver_streaming_surface_enabled(self.ctx)
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        # The streaming path is a canonical `me` owner operation and has
+        # already committed every field directly to self.ctx. Reassigning its
+        # returned whole-context snapshot corrupts adjacent scalar fields under
+        # Stage-3 native value semantics (observed error_count 0 before return,
+        # nonzero at phase 4). Legacy non-streaming paths still return their
+        # newly assembled context and therefore retain the assignment.
+        if not hir_streaming_in_place:
             self.ctx = analyzed_ctx
-            analyze_ok = returned_analyze_ok
         log_trace("AFTER phase 3")
-        if analyze_ok:
-            log_debug("phase 3 done")
-            log_phase("phase3:hir_typecheck:done")
-        else:
-            log_phase("phase3:hir_typecheck:failed")
-
-        # Close both evidence owners exactly once after the common HIR branch.
-        # Any earlier sink failure changes the surviving sink's terminal to
-        # evidence-failed; the failed sink itself is never trusted to publish a
-        # successful terminal.
-        var evidence_outcome = if analyze_ok:
-            "hir-complete"
-        else:
-            "hir-diagnostic"
-        if phase_profile_failed() or mem_snapshot_failed():
-            evidence_outcome = "evidence-failed"
-        var memory_terminal_ok = false
-        if mem_snapshot_failed():
-            mem_snapshot_abort()
-        else:
-            memory_terminal_ok = mem_snapshot_finish_with_outcome(
-                evidence_outcome)
-            if not memory_terminal_ok:
-                evidence_outcome = "evidence-failed"
-                mem_snapshot_abort()
-        var phase_terminal_ok = false
-        if phase_profile_failed():
-            phase_profile_abort()
-        else:
-            phase_terminal_ok = phase_profile_finish_with_outcome(
-                evidence_outcome)
-            if not phase_terminal_ok:
-                phase_profile_abort()
-        if not memory_terminal_ok or not phase_terminal_ok:
-            self.ctx.add_error(
-                "durable Stage-3 evidence terminal publication failed")
-            analyze_ok = false
-
         if not analyze_ok:
             log_error("phase 3 FAILED")
             if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
@@ -302,6 +213,8 @@ impl CompilerDriver:
                 if first_error.contains("Method resolution"):
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
+        log_debug("phase 3 done")
+        log_phase("phase3:hir_typecheck:done")
         log_build_progress("hir", "modules", -1, -1,
             "complete", 3, 6, 0, 0, "running")
 
@@ -315,12 +228,16 @@ impl CompilerDriver:
 
         log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
-        val mono_ok = self.monomorphize_impl()
+        val mono_ok = self.monomorphize_impl(analyze_ok)
         if not mono_ok:
             log_error("phase 4 FAILED")
+            log_build_progress("monomorphize", "modules", -1, -1,
+                "failed", 3, 6, 1, 0, "failed")
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 4 done")
         log_phase("phase4:monomorphize:done")
+        log_build_progress("monomorphize", "modules", -1, -1,
+            "complete", 4, 6, 0, 0, "running")
 
         log_phase("phase5:mode_dispatch:start")
         log_debug("phase 5: mode-specific processing...")
@@ -329,39 +246,39 @@ impl CompilerDriver:
             return CompileResult.Success(nil)
         if compile_mode_text == "sdn":
             log_debug("sdn mode")
-            return _driver_finish_destination_graph_compile(self.process_sdn())
+            return self.process_sdn()
         if compile_mode_text == "interpret":
             log_debug("interpret mode")
-            return _driver_finish_destination_graph_compile(self.interpret())
+            return self.interpret()
         if compile_mode_text == "jit":
             log_debug("jit mode")
-            return _driver_finish_destination_graph_compile(
-                self.jit_compile_and_run())
+            return self.jit_compile_and_run()
         if compile_mode_text == "aot":
             log_debug("aot mode")
-            return _driver_finish_destination_graph_compile(self.aot_compile())
+            return self.aot_compile()
         if compile_mode_text == "smf_exec":
             log_debug("smf_exec mode")
-            return _driver_finish_destination_graph_compile(self.execute_smf())
+            return self.execute_smf()
 
         log_warn("no mode matched, falling through")
-        _driver_finish_destination_graph_compile(CompileResult.Success(nil))
+        CompileResult.Success(nil)
 
     me compile_vhdl_only() -> CompileResult:
         if self.ctx.options.backend != "vhdl" or self.ctx.options.mode != CompileMode.Aot:
             return CompileResult.CodegenError(
                 "fixed VHDL runner requires AOT mode with backend=vhdl")
 
-        val load_ok = self.load_sources_impl()
+        val (loaded_ctx, load_ok) = self.load_sources_impl()
+        self.ctx = loaded_ctx
         if not load_ok:
             return CompileResult.ParseError(self.ctx.errors)
 
-        val (parsed_ctx, parse_ok) = self.parse_all_impl()
-        self.ctx = parsed_ctx
+        val parse_ok = self.parse_all_committing_impl()
         if not parse_ok:
             return CompileResult.ParseError(self.ctx.errors)
         self.capture_vhdl_metadata()
-        val analyze_ok = self.lower_and_check_impl()
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = analyzed_ctx
         if not analyze_ok:
             if self.ctx.has_errors() and self.ctx.error_message_at(0).contains("Method resolution"):
                 return CompileResult.ResolveError(self.ctx.errors)
@@ -369,7 +286,7 @@ impl CompilerDriver:
         if self.ctx.options.low_memory:
             self.ctx.evict_ast()
 
-        if not self.monomorphize_impl():
+        if not self.monomorphize_impl(analyze_ok):
             return CompileResult.TypeError(self.ctx.errors)
         if not self.lower_to_mir():
             # See driver_aot_pipeline.spl's aot_compile() for the full
@@ -388,5 +305,4 @@ impl CompilerDriver:
         val _ = self.process_async()
         self.weave_aop()
         self.apply_debug_trace()
-        _driver_finish_destination_graph_compile(
-            self.compile_to_vhdl(self.ctx.options.output_file ?? "a.out"))
+        self.compile_to_vhdl(self.ctx.options.output_file ?? "a.out")

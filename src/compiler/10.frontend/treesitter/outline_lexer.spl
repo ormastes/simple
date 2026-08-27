@@ -6,6 +6,7 @@
 # Split from outline.spl for modularity.
 
 use compiler.frontend.core.lexer.*
+use compiler.frontend.lexer_types.{TokenKind}
 use compiler.frontend.core.lexer_types.{lex_token_eof}
 use compiler.frontend.treesitter_types.*
 use compiler.frontend.block_types.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
@@ -157,8 +158,8 @@ fn treesitter_check(self: TreeSitter, kind: TokenKind) -> bool:
 
 me treesitter_match_token(self: TreeSitter, kind: TokenKind) -> bool:
         """Match and consume token if it matches."""
-        if self.treesitter_check(kind):
-            self.treesitter_advance()
+        if self.check(kind):
+            self.advance()
             true
         else:
             false
@@ -167,39 +168,17 @@ me treesitter_match_token(self: TreeSitter, kind: TokenKind) -> bool:
 me treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
         """Expect a token, report error if not found."""
         if self.current.kind == kind:
-            self.treesitter_advance()
+            self.advance()
             true
         else:
-            self.treesitter_error(message)
+            self.error(message)
             false
 
 
 fn treesitter_is_at_end(self: TreeSitter) -> bool:
         """Check if at end of input (Eof or nil token)."""
-        # `Token.kind` carries the RAW CoreLexer numeric kind, NOT a TokenKind
-        # ordinal. That numeric space is fixed by lexer_types.spl: lex_token_eof
-        # builds `lex_token_new(190, ...)`, lex_token_error uses 191, and
-        # token_is_keyword tests `kind >= 20 and kind <= 59`. lex_next() also
-        # returns 190 when it fails closed on a dead lexer.
-        #
-        # TokenKind, by contrast, is a bare positional enum: 142 variants, so
-        # its ordinals only span 0..141 and Eof's is 133. The raw Eof value 190
-        # is therefore unreachable by ANY TokenKind ordinal, and the original
-        # `kind == TokenKind.Eof` could never be true for a token produced by
-        # lexer_next_token. The outline parser's top-level loop in outline.spl
-        # (`while not self.treesitter_is_at_end()`) consequently had an exit
-        # condition that could never be reached: it spun forever, burning CPU
-        # at flat RSS with zero I/O, on every file that takes the
-        # outline-authority path. See
-        # doc/08_tracking/bug/outline_authority_parse_spin_treesitter_2026-08-23.md.
-        #
-        # Testing the raw value is what makes the loop terminable. The
-        # TokenKind comparison is kept alongside it so a Token that does carry
-        # an ordinal is still recognised: this is strictly additive, so it can
-        # neither make a previously-terminating parse spin nor cause a token to
-        # be skipped.
         val kind = self.current.kind
-        kind == 190 or kind == TokenKind.Eof
+        kind == TokenKind.Eof
 
 
 me treesitter_error(self: TreeSitter, message: text):
@@ -219,8 +198,8 @@ me treesitter_warning(self: TreeSitter, message: text):
 
 
 me treesitter_skip_newlines(self: TreeSitter):
-        while self.treesitter_check(TokenKind.Newline):
-            self.treesitter_advance()
+        while self.check(TokenKind.Newline):
+            self.advance()
 
 
 me treesitter_take_doc_comment(self: TreeSitter) -> text?:
@@ -230,10 +209,10 @@ me treesitter_take_doc_comment(self: TreeSitter) -> text?:
 
 
 me treesitter_try_parse_body_docstring(self: TreeSitter) -> text?:
-        if self.treesitter_check(TokenKind.StringLit):
+        if self.check(TokenKind.StringLit):
             val doc = self.current.text
-            self.treesitter_advance()
-            self.treesitter_skip_newlines()
+            self.advance()
+            self.skip_newlines()
             return doc
         nil
 
@@ -243,12 +222,12 @@ me treesitter_skip_expression(self: TreeSitter):
         var bracket_depth = 0
         var brace_depth = 0
 
-        while not self.treesitter_is_at_end():
+        while not self.is_at_end():
             if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
-                if self.treesitter_check(TokenKind.Newline) or self.treesitter_check(TokenKind.Dedent) or self.treesitter_check(TokenKind.Comma):
+                if self.check(TokenKind.Newline) or self.check(TokenKind.Dedent) or self.check(TokenKind.Comma):
                     break
 
-            match self.treesitter_peek():
+            match self.peek():
                 case LParen:
                     paren_depth = paren_depth + 1
                 case RParen:
@@ -269,17 +248,17 @@ me treesitter_skip_expression(self: TreeSitter):
                     brace_depth = brace_depth - 1
                 case _:
                     pass
-            self.treesitter_advance()
+            self.advance()
 
 
 me treesitter_synchronize(self: TreeSitter):
-        while not self.treesitter_is_at_end():
-            if self.treesitter_check(TokenKind.Newline):
-                self.treesitter_advance()
+        while not self.is_at_end():
+            if self.check(TokenKind.Newline):
+                self.advance()
                 return
-            if self.treesitter_check(TokenKind.Dedent):
+            if self.check(TokenKind.Dedent):
                 return
-            self.treesitter_advance()
+            self.advance()
 
 
 # ============================================================================

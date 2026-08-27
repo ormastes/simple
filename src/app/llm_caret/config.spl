@@ -4,15 +4,15 @@
 # Resolves API keys from environment variables.
 
 use app.io.mod.{env_get}
+use app.llm_caret.json_helpers.{json_parse_int}
 
-extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 
 # ============================================================================
 # Module-level state
 # ============================================================================
 
-var CONFIG_LOADED = false
+var CONFIG_LOADED: bool = false
 var DEFAULT_PROVIDER = "claude_cli"
 var DEFAULT_HISTORY_FILE = ".llm_caret_history.sdn"
 var DEFAULT_MAX_HISTORY = 100
@@ -21,6 +21,11 @@ var DEFAULT_MAX_HISTORY = 100
 var CLAUDE_CLI_PATH = "claude"
 var CLAUDE_CLI_MODEL = "claude-sonnet-4-20250514"
 var CLAUDE_CLI_EXTRA_ARGS = ""
+
+# OpenCode CLI config
+var OPENCODE_CLI_PATH = "opencode"
+var OPENCODE_CLI_MODEL = ""
+var OPENCODE_CLI_EXTRA_ARGS = ""
 
 # Claude API config
 var CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
@@ -40,6 +45,34 @@ var COMPAT_API_KEY_ENV = ""
 # Local torch config
 var LOCAL_MODEL_PATH = ""
 var LOCAL_PYTHON_PATH = "python3"
+
+# Infrastructure: [mail] section (IMAP/SMTP). Secret comes from the env var
+# named by secret_env - never a literal in the settings file.
+var MAIL_IMAP_HOST = ""
+var MAIL_IMAP_PORT = 993
+var MAIL_SMTP_HOST = ""
+var MAIL_SMTP_PORT = 465
+var MAIL_USER = ""
+var MAIL_SECRET_ENV = ""
+
+# Infrastructure: [storage] section (minio | ftp). Keys come from env vars.
+var STORAGE_BACKEND = ""
+var STORAGE_ENDPOINT = ""
+var STORAGE_BUCKET = ""
+var STORAGE_ACCESS_KEY_ENV = ""
+var STORAGE_SECRET_KEY_ENV = ""
+var STORAGE_TLS = false
+
+# Infrastructure: [wiki] section (confluence | local). The Confluence token
+# comes from the env var named by token_env - never a literal in the file.
+# `root` is the markdown directory for the local backend (relative to the
+# workspace root; default "doc").
+var WIKI_BACKEND = ""
+var WIKI_BASE_URL = ""
+var WIKI_SPACE = ""
+var WIKI_USER = ""
+var WIKI_TOKEN_ENV = ""
+var WIKI_ROOT = "doc"
 
 # ============================================================================
 # Accessors
@@ -63,8 +96,14 @@ fn config_claude_cli_path() -> text:
 fn config_claude_cli_model() -> text:
     CLAUDE_CLI_MODEL
 
+fn config_opencode_cli_path() -> text:
+    OPENCODE_CLI_PATH
+
+fn config_opencode_cli_model() -> text:
+    OPENCODE_CLI_MODEL
+
 fn config_claude_api_key() -> text:
-    val env_val = rt_env_get(CLAUDE_API_KEY_ENV) ?? ""
+    val env_val = env_get(CLAUDE_API_KEY_ENV) ?? ""
     env_val
 
 fn config_claude_api_base_url() -> text:
@@ -74,7 +113,7 @@ fn config_claude_api_model() -> text:
     CLAUDE_API_MODEL
 
 fn config_openai_api_key() -> text:
-    val env_val = rt_env_get(OPENAI_API_KEY_ENV) ?? ""
+    val env_val = env_get(OPENAI_API_KEY_ENV) ?? ""
     env_val
 
 fn config_openai_base_url() -> text:
@@ -92,7 +131,7 @@ fn config_compat_model() -> text:
 fn config_compat_api_key() -> text:
     if COMPAT_API_KEY_ENV == "":
         return ""
-    val env_val = rt_env_get(COMPAT_API_KEY_ENV) ?? ""
+    val env_val = env_get(COMPAT_API_KEY_ENV) ?? ""
     env_val
 
 fn config_local_model_path() -> text:
@@ -101,12 +140,88 @@ fn config_local_model_path() -> text:
 fn config_local_python_path() -> text:
     LOCAL_PYTHON_PATH
 
+fn config_mail_imap_host() -> text:
+    MAIL_IMAP_HOST
+
+fn config_mail_imap_port() -> i64:
+    MAIL_IMAP_PORT
+
+fn config_mail_smtp_host() -> text:
+    MAIL_SMTP_HOST
+
+fn config_mail_smtp_port() -> i64:
+    MAIL_SMTP_PORT
+
+fn config_mail_user() -> text:
+    MAIL_USER
+
+fn config_mail_secret_env() -> text:
+    MAIL_SECRET_ENV
+
+# The secret value itself is only ever read from the environment.
+fn config_mail_secret() -> text:
+    if MAIL_SECRET_ENV == "":
+        return ""
+    env_get(MAIL_SECRET_ENV) ?? ""
+
+fn config_storage_backend() -> text:
+    STORAGE_BACKEND
+
+fn config_storage_endpoint() -> text:
+    STORAGE_ENDPOINT
+
+fn config_storage_bucket() -> text:
+    STORAGE_BUCKET
+
+fn config_storage_access_key_env() -> text:
+    STORAGE_ACCESS_KEY_ENV
+
+fn config_storage_secret_key_env() -> text:
+    STORAGE_SECRET_KEY_ENV
+
+fn config_storage_tls() -> bool:
+    STORAGE_TLS
+
+fn config_storage_access_key() -> text:
+    if STORAGE_ACCESS_KEY_ENV == "":
+        return ""
+    env_get(STORAGE_ACCESS_KEY_ENV) ?? ""
+
+fn config_storage_secret_key() -> text:
+    if STORAGE_SECRET_KEY_ENV == "":
+        return ""
+    env_get(STORAGE_SECRET_KEY_ENV) ?? ""
+
+fn config_wiki_backend() -> text:
+    WIKI_BACKEND
+
+fn config_wiki_base_url() -> text:
+    WIKI_BASE_URL
+
+fn config_wiki_space() -> text:
+    WIKI_SPACE
+
+fn config_wiki_user() -> text:
+    WIKI_USER
+
+fn config_wiki_token_env() -> text:
+    WIKI_TOKEN_ENV
+
+fn config_wiki_root() -> text:
+    WIKI_ROOT
+
+# The token value itself is only ever read from the environment.
+fn config_wiki_token() -> text:
+    if WIKI_TOKEN_ENV == "":
+        return ""
+    env_get(WIKI_TOKEN_ENV) ?? ""
+
 # ============================================================================
 # SDN Parser (line-based, NOT std.sdn.parser)
 # ============================================================================
 
 fn load_config(path: text) -> text:
-    val raw = rt_file_read_text(path) ?? ""
+    val raw = read_file_text(path)
     complete_config_load(path, raw)
 
 fn complete_config_load(path: text, raw: text) -> text:
@@ -147,7 +262,7 @@ fn _apply_config(section: text, key: text, value: text):
         elif key == "history_file":
             DEFAULT_HISTORY_FILE = value
         elif key == "max_history":
-            DEFAULT_MAX_HISTORY = int(value)
+            DEFAULT_MAX_HISTORY = json_parse_int(value)
     elif section == "claude_cli":
         if key == "cli_path":
             CLAUDE_CLI_PATH = value
@@ -155,6 +270,13 @@ fn _apply_config(section: text, key: text, value: text):
             CLAUDE_CLI_MODEL = value
         elif key == "extra_args":
             CLAUDE_CLI_EXTRA_ARGS = value
+    elif section == "opencode_cli":
+        if key == "cli_path":
+            OPENCODE_CLI_PATH = value
+        elif key == "model":
+            OPENCODE_CLI_MODEL = value
+        elif key == "extra_args":
+            OPENCODE_CLI_EXTRA_ARGS = value
     elif section == "claude_api":
         if key == "api_key_env":
             CLAUDE_API_KEY_ENV = value
@@ -181,6 +303,45 @@ fn _apply_config(section: text, key: text, value: text):
             LOCAL_MODEL_PATH = value
         elif key == "python_path":
             LOCAL_PYTHON_PATH = value
+    elif section == "mail":
+        if key == "imap_host":
+            MAIL_IMAP_HOST = value
+        elif key == "imap_port":
+            MAIL_IMAP_PORT = json_parse_int(value)
+        elif key == "smtp_host":
+            MAIL_SMTP_HOST = value
+        elif key == "smtp_port":
+            MAIL_SMTP_PORT = json_parse_int(value)
+        elif key == "user":
+            MAIL_USER = value
+        elif key == "secret_env":
+            MAIL_SECRET_ENV = value
+    elif section == "storage":
+        if key == "backend":
+            STORAGE_BACKEND = value
+        elif key == "endpoint":
+            STORAGE_ENDPOINT = value
+        elif key == "bucket":
+            STORAGE_BUCKET = value
+        elif key == "access_key_env":
+            STORAGE_ACCESS_KEY_ENV = value
+        elif key == "secret_key_env":
+            STORAGE_SECRET_KEY_ENV = value
+        elif key == "tls":
+            STORAGE_TLS = value == "true"
+    elif section == "wiki":
+        if key == "backend":
+            WIKI_BACKEND = value
+        elif key == "base_url":
+            WIKI_BASE_URL = value
+        elif key == "space":
+            WIKI_SPACE = value
+        elif key == "user":
+            WIKI_USER = value
+        elif key == "token_env":
+            WIKI_TOKEN_ENV = value
+        elif key == "root":
+            WIKI_ROOT = value
 
 # ============================================================================
 # Config with defaults (no file needed)
@@ -197,6 +358,9 @@ fn reset_config():
     CLAUDE_CLI_PATH = "claude"
     CLAUDE_CLI_MODEL = "claude-sonnet-4-20250514"
     CLAUDE_CLI_EXTRA_ARGS = ""
+    OPENCODE_CLI_PATH = "opencode"
+    OPENCODE_CLI_MODEL = ""
+    OPENCODE_CLI_EXTRA_ARGS = ""
     CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
     CLAUDE_API_BASE_URL = "https://api.anthropic.com"
     CLAUDE_API_MODEL = "claude-sonnet-4-20250514"
@@ -208,3 +372,21 @@ fn reset_config():
     COMPAT_API_KEY_ENV = ""
     LOCAL_MODEL_PATH = ""
     LOCAL_PYTHON_PATH = "python3"
+    MAIL_IMAP_HOST = ""
+    MAIL_IMAP_PORT = 993
+    MAIL_SMTP_HOST = ""
+    MAIL_SMTP_PORT = 465
+    MAIL_USER = ""
+    MAIL_SECRET_ENV = ""
+    STORAGE_BACKEND = ""
+    STORAGE_ENDPOINT = ""
+    STORAGE_BUCKET = ""
+    STORAGE_ACCESS_KEY_ENV = ""
+    STORAGE_SECRET_KEY_ENV = ""
+    STORAGE_TLS = false
+    WIKI_BACKEND = ""
+    WIKI_BASE_URL = ""
+    WIKI_SPACE = ""
+    WIKI_USER = ""
+    WIKI_TOKEN_ENV = ""
+    WIKI_ROOT = "doc"

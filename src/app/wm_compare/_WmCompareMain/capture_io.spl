@@ -40,6 +40,7 @@ use app.wm_compare.scene_registry.{
     SceneEntry, resolve_scene, fixture_path_for, list_scene_names}
 use app.wm_compare.live_capture.{
     LiveCaptureResult, capture_live_source_b}
+use common.simple_os_primary.{wm_mode_allowed_for_host, wm_mode_validation_error}
 
 # ============================================================================
 # CLI Options
@@ -59,6 +60,8 @@ struct CliOpts:
     source_b_path: text      # --source-b=<path> for bit-compare mode
     out_dir: text            # --out-dir=<dir> for bit-compare mode
     qmp_socket: text         # --qmp-socket=<path> for live_bd_compare mode
+    host_os: text            # linux | macos | windows | simpleos
+    wm_mode: text            # full | window
 
 fn default_opts() -> CliOpts:
     CliOpts(
@@ -73,7 +76,9 @@ fn default_opts() -> CliOpts:
         source_a_path: "",
         source_b_path: "",
         out_dir: "",
-        qmp_socket: ""
+        qmp_socket: "",
+        host_os: "",
+        wm_mode: ""
     )
 
 fn _parse_kv(arg: text, key: text) -> text:
@@ -131,7 +136,18 @@ fn parse_opts(args: [text]) -> CliOpts:
                                                 val v_qmp = _parse_kv(arg, "--qmp-socket")
                                                 if v_qmp != "":
                                                     opts.qmp_socket = v_qmp
+                                                else:
+                                                    val v_host_os = _parse_kv(arg, "--host-os")
+                                                    if v_host_os != "":
+                                                        opts.host_os = v_host_os
+                                                    else:
+                                                        val v_wm_mode = _parse_kv(arg, "--wm-mode")
+                                                        if v_wm_mode != "":
+                                                            opts.wm_mode = v_wm_mode
     opts
+
+fn wm_compare_wm_mode_validation_error(opts: CliOpts) -> text:
+    wm_mode_validation_error(opts.host_os, opts.wm_mode)
 
 fn print_help():
     print "Usage: simple run src/app/wm_compare/main.spl [options]"
@@ -149,6 +165,8 @@ fn print_help():
     print "  --width=<n>              Capture width (default 320)"
     print "  --height=<n>             Capture height (default 240)"
     print "  --mode=<mode>            live_b | bit-compare | live_bd_compare"
+    print "  --host-os=<os>           linux | macos | windows | simpleos"
+    print "  --wm-mode=<mode>         full | window (simpleos accepts full only)"
     print "  --qmp-socket=<path>      QMP socket (live_bd_compare, default /tmp/simpleos_engine2d_qmp.sock)"
     print "  --out-dir=<dir>          Override output dir for bit/live_bd compare"
     print "  -h, --help               Show this help"
@@ -438,17 +456,26 @@ fn compare_pair(src_a: text, src_b: text,
     val perc = compare_perceptual(
         a.pixels, b.pixels, w, h,
         profile.default_yiq_threshold, true)
-    val channels = compare_per_channel(a.pixels, b.pixels, w, h, 0)
-
+    # Per-channel maxima computed directly from the pixel buffers
+    # (compare_per_channel returns only an aggregate ComparisonResult).
     var r_max: i32 = 0
     var g_max: i32 = 0
     var b_max: i32 = 0
     var a_max: i32 = 0
-    for ch in channels:
-        if ch.channel == "R": r_max = ch.max_diff
-        if ch.channel == "G": g_max = ch.max_diff
-        if ch.channel == "B": b_max = ch.max_diff
-        if ch.channel == "A": a_max = ch.max_diff
+    val pixel_count = w * h
+    var pi = 0
+    while pi < pixel_count:
+        val pa = a.pixels[pi]
+        val pb = b.pixels[pi]
+        val dr = (((pa >> 16) & 0xFF) as i32 - ((pb >> 16) & 0xFF) as i32).abs()
+        val dg = (((pa >> 8) & 0xFF) as i32 - ((pb >> 8) & 0xFF) as i32).abs()
+        val db = ((pa & 0xFF) as i32 - (pb & 0xFF) as i32).abs()
+        val da = (((pa >> 24) & 0xFF) as i32 - ((pb >> 24) & 0xFF) as i32).abs()
+        if dr > r_max: r_max = dr
+        if dg > g_max: g_max = dg
+        if db > b_max: b_max = db
+        if da > a_max: a_max = da
+        pi = pi + 1
 
     # Dump diff heat-map
     val diff_path = diff_ppm_path(scene_name, src_a, src_b)

@@ -3,6 +3,7 @@
 use common.ui.draw_ir.{DrawIrBatch, simple_2d_draw_ir_adv_plan}
 use common.ui.draw_ir_sdn.{sdn_to_draw_ir}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.helpers_availability.{backend_is_hardware}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     Engine2dHostGpuRuntimeDispatchResult,
@@ -39,11 +40,26 @@ fn engine2d_draw_ir_adv_batch_runtime_queue(engine: Engine2D, batch: DrawIrBatch
     val packet_bytes = plan.command_count * 64
     val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
     val queue_result = _engine2d_draw_ir_runtime_queue_submit_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
-    var render = Engine2dDrawIrAdvResult(schema: batch.schema, unit_id: batch.batch_id, selected_backend: "host", fallback_required: true, fallback_reason: "runtime queue pending", rendered_command_count: 0, skipped_command_count: 0, pixels: engine.read_pixels(), readback_source: "none", backend_handle: 0, device_identity: 0, readback_checksum: 0)
-    if queue_result.queued_for_gpu:
-        render = engine2d_draw_ir_adv_apply_runtime_dispatch(engine, queue_result.runtime_dispatch)
+    # GPU-first route: on a device-lane engine backend, a successfully queued
+    # and dispatched submission is the frame receipt from the pure-dispatch
+    # core — no CPU re-render, no host readback. The receipt keeps the
+    # dispatch provenance (backend handle + payload hash) so downstream
+    # proven-device checks can verify or fail closed on it.
+    if (queue_result.queued_for_gpu and
+        queue_result.runtime_dispatch.dispatched and
+        backend_is_hardware(engine.backend_name())):
+        var device_render = queue_result.render
+        device_render.backend_handle = queue_result.runtime_dispatch.backend_handle
+        device_render.readback_checksum = queue_result.runtime_dispatch.payload_hash
+        return Engine2dDrawIrRuntimeQueueResult(render: device_render, runtime_submit: queue_result.runtime_submit, runtime_drain: queue_result.runtime_drain, runtime_dispatch: queue_result.runtime_dispatch, queued_for_gpu: queue_result.queued_for_gpu, payload: payload)
+    # CPU-family backend, or device rejection: the existing host fallback.
+    # Both arms return receipts whose fallback_required/fallback_reason record
+    # the degrade honestly (apply_runtime_dispatch marks an undispatched
+    # packet; engine2d_draw_ir_adv_batch carries the plan's fallback fields).
+    val render = if queue_result.queued_for_gpu:
+        engine2d_draw_ir_adv_apply_runtime_dispatch(engine, queue_result.runtime_dispatch)
     else:
-        render = engine2d_draw_ir_adv_batch(engine, batch, gpu_available)
+        engine2d_draw_ir_adv_batch(engine, batch, gpu_available)
     Engine2dDrawIrRuntimeQueueResult(render: render, runtime_submit: queue_result.runtime_submit, runtime_drain: queue_result.runtime_drain, runtime_dispatch: queue_result.runtime_dispatch, queued_for_gpu: queue_result.queued_for_gpu, payload: payload)
 
 fn engine2d_draw_ir_adv_batch_runtime_queue_dispatch_only(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:

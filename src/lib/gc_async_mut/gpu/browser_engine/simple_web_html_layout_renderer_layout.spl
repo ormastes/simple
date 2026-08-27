@@ -154,141 +154,6 @@ fn simple_web_resolve_collapsed_table_borders(
         table = table + 1
     resolved
 
-# Bounded collapsed-border style precedence, from lowest to highest.
-# An empty style is the same as an absent/none edge. Unknown styles fail the
-# bounded admission instead of silently selecting the wrong border.
-fn simple_web_collapsed_border_style_rank(style: text) -> i32:
-    val normalized = style.trim().lower()
-    if normalized == "" or normalized == "none":
-        return 0
-    if normalized == "inset":
-        return 1
-    if normalized == "groove":
-        return 2
-    if normalized == "outset":
-        return 3
-    if normalized == "ridge":
-        return 4
-    if normalized == "dotted":
-        return 5
-    if normalized == "dashed":
-        return 6
-    if normalized == "solid":
-        return 7
-    if normalized == "double":
-        return 8
-    if normalized == "hidden":
-        return 9
-    -1
-
-fn simple_web_collapsed_left_edge_wins(
-    left_style: text, left_width: i32,
-    right_style: text, right_width: i32
-) -> bool:
-    val left_rank = simple_web_collapsed_border_style_rank(left_style)
-    val right_rank = simple_web_collapsed_border_style_rank(right_style)
-    # hidden suppresses every competing border.
-    if left_rank == 9:
-        return true
-    if right_rank == 9:
-        return false
-    # none/absent loses to a present style.
-    if left_rank != right_rank:
-        return left_rank > right_rank
-    if left_width != right_width:
-        return left_width > right_width
-    # The admitted slice is LTR, so the earlier (left) cell wins an exact tie.
-    true
-
-# Bounded CSS border-collapse slice: resolve only adjacent direct table-cell
-# edges in one LTR row. Wider spans, vertical conflicts, row spans, and RTL
-# origin precedence remain outside this admission.
-fn simple_web_resolve_collapsed_table_borders(
-    nodes: [HNode], child_index: HtmlChildIndex, styles: [Style]
-) -> [Style]:
-    var resolved = styles
-    var table = 0
-    while table < nodes.len():
-        if (
-            resolved[table].display == "table" and
-            resolved[table].border_collapse == "collapse"
-        ):
-            val rows = simple_web_collect_table_rows(
-                nodes, child_index, table
-            )
-            var bounded = (
-                rows.rows.len() == 1 and
-                not resolved[table].direction_rtl
-            )
-            for row in rows.rows:
-                if (
-                    resolved[row].display != "table-row" or
-                    resolved[row].direction_rtl
-                ):
-                    bounded = false
-                var direct_cell_count = 0
-                var first_cell = -1
-                var second_cell = -1
-                var bounded_cell = child_index.first_child[row]
-                while bounded_cell >= 0:
-                    if resolved[bounded_cell].display == "table-cell":
-                        direct_cell_count = direct_cell_count + 1
-                        if direct_cell_count == 1:
-                            first_cell = bounded_cell
-                        elif direct_cell_count == 2:
-                            second_cell = bounded_cell
-                        if (
-                            attr_value(
-                                nodes[bounded_cell].attrs_raw, "colspan"
-                            ) != "" or
-                            attr_value(
-                                nodes[bounded_cell].attrs_raw, "rowspan"
-                            ) != ""
-                        ):
-                            bounded = false
-                    bounded_cell = child_index.next_sibling[bounded_cell]
-                if direct_cell_count != 2:
-                    bounded = false
-                elif (
-                    resolved[first_cell].direction_rtl or
-                    resolved[second_cell].direction_rtl or
-                    simple_web_collapsed_border_style_rank(
-                        resolved[first_cell].border_style_r
-                    ) < 0 or
-                    simple_web_collapsed_border_style_rank(
-                        resolved[second_cell].border_style_l
-                    ) < 0
-                ):
-                    bounded = false
-            if not bounded:
-                table = table + 1
-                continue
-            resolved[table].border_spacing_x_px = 0
-            resolved[table].border_spacing_y_px = 0
-            for row in rows.rows:
-                var previous = -1
-                var cell = child_index.first_child[row]
-                while cell >= 0:
-                    if resolved[cell].display == "table-cell":
-                        if previous >= 0:
-                            var left = resolved[previous]
-                            var right = resolved[cell]
-                            if simple_web_collapsed_left_edge_wins(
-                                left.border_style_r, left.border_r,
-                                right.border_style_l, right.border_l
-                            ):
-                                right.border_l = 0
-                                right.border_color_l = 0u32
-                            else:
-                                left.border_r = 0
-                                left.border_color_r = 0u32
-                            resolved[previous] = left
-                            resolved[cell] = right
-                        previous = cell
-                    cell = child_index.next_sibling[cell]
-        table = table + 1
-    resolved
-
 class LayoutResult:
     bx: [i32]
     by: [i32]
@@ -298,6 +163,10 @@ class LayoutResult:
     wrap_ends: [[i32]]
     intrinsic_widths: [i32]
     height: i32
+
+class LayoutSelectedResult:
+    layout: LayoutResult
+    fault: text
 
 class PositionOffsetResult:
     bx: [i32]
@@ -315,6 +184,26 @@ fn offset_layout_subtree(child_index: HtmlChildIndex, node_index: i32, dx: i32, 
         out_by = shifted.by
         child = child_index.next_sibling[child]
     PositionOffsetResult(bx: out_bx, by: out_by)
+
+fn rtl_row_flex_item_offset(
+    child_index: HtmlChildIndex, node_index: i32,
+    content_x: i32, content_w: i32,
+    margin_l: i32, margin_r: i32,
+    st: Style, bx: [i32], by: [i32], bw: [i32]
+) -> PositionOffsetResult:
+    # Row layout is measured once in logical order from the left. For RTL,
+    # reflect each occupied margin box around the content box, then translate
+    # the complete item subtree. Physical left/right margins remain physical;
+    # DOM/order sorting is deliberately unchanged.
+    val relative_x = if st.position_relative: st.left_px else: 0
+    val normal_x = bx[node_index] - relative_x
+    val mirrored_x = (
+        content_x + content_w - (normal_x - content_x) - bw[node_index] +
+        margin_l - margin_r + relative_x
+    )
+    offset_layout_subtree(
+        child_index, node_index, mirrored_x - bx[node_index], 0, bx, by
+    )
 
 class InlineLineAlignment:
     bx: [i32]
@@ -462,10 +351,20 @@ fn style_baseline_offset(st: Style) -> i32:
         baseline = 1
     baseline
 
-fn flex_item_align(parent: Style, child: Style) -> text:
+fn effective_item_align(parent: Style, child: Style) -> text:
     if child.align_self.len() > 0 and child.align_self != "auto":
         return child.align_self
     parent.align_items
+
+fn grid_item_is_replaced(node: HNode) -> bool:
+    val tag = node.tag
+    (
+        tag == "audio" or tag == "button" or tag == "canvas" or
+        tag == "embed" or tag == "iframe" or tag == "img" or
+        tag == "input" or tag == "meter" or tag == "object" or
+        tag == "progress" or tag == "select" or tag == "textarea" or
+        tag == "video"
+    )
 
 fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i: i32) -> [i32]:
     val child_count = child_index.child_count[parent_i]
@@ -488,6 +387,46 @@ fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i:
         return out
     _sort_style_order_indices(out, out_len, styles)
 
+class RowFlexDistribution:
+    start_offset: i32
+    gap_extra: i32
+    auto_margin: i32
+
+fn row_flex_distribution(
+    free_space: i32, item_count: i32, auto_margin_count: i32,
+    justify_content: text
+) -> RowFlexDistribution:
+    var start_offset = 0
+    var gap_extra = 0
+    var auto_margin = 0
+    if free_space > 0 and auto_margin_count > 0:
+        auto_margin = free_space / auto_margin_count
+    elif free_space > 0:
+        if justify_content == "space-between" and item_count > 1:
+            gap_extra = free_space / (item_count - 1)
+        elif justify_content == "space-around" and item_count > 0:
+            start_offset = free_space / (item_count * 2)
+            gap_extra = free_space / item_count
+        elif justify_content == "space-evenly" and item_count > 0:
+            start_offset = free_space / (item_count + 1)
+            gap_extra = free_space / (item_count + 1)
+        elif (
+            justify_content == "center" or
+            justify_content == "safe-center" or
+            justify_content == "unsafe-center"
+        ):
+            start_offset = free_space / 2
+        elif justify_content == "flex-end" or justify_content == "end":
+            start_offset = free_space
+    RowFlexDistribution(
+        start_offset: start_offset,
+        gap_extra: gap_extra,
+        auto_margin: auto_margin
+    )
+
+fn row_flex_main_reversed(st: Style) -> bool:
+    st.direction_rtl != (st.flex_direction == "row-reverse")
+
 fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
     val border_y = st.border_t + st.border_b
@@ -498,7 +437,7 @@ fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     constrained_outer_height(node, st, style_line_h(st))
 
 fn style_with_height_without_grid_fields(st: Style, height_px: i32) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
 
 fn style_with_height(st: Style, height_px: i32) -> Style:
     # Style gained Grid fields after this shared used-value clone was written.
@@ -514,32 +453,21 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.grid_auto_flow_column = st.grid_auto_flow_column
     out.height_auto = false
     out.align_items_authored = st.align_items_authored
+    out.scrollbar_width_none = st.scrollbar_width_none
     out
 
 fn style_with_width_without_height_metadata(
     st: Style, width_px: i32
 ) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
 
 fn style_with_width(st: Style, width_px: i32) -> Style:
     val out = style_with_width_without_height_metadata(st, width_px)
     out.height_auto = st.height_auto
     out.align_items_authored = st.align_items_authored
+    out.scrollbar_width_none = st.scrollbar_width_none
     out
 
-fn styles_with_height(styles: [Style], index: i32, height_px: i32) -> [Style]:
-    val style_count = styles.len()
-    if style_count == 0:
-        return []
-    var result: [Style] = [styles[0]; style_count]
-    var si = 0
-    while si < style_count:
-        if si == index:
-            result[si] = style_with_height(styles[si], height_px)
-        else:
-            result[si] = styles[si]
-        si = si + 1
-    result
 fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
         return IntrinsicWidthResult(width: widths[i], widths: widths)
@@ -630,12 +558,13 @@ fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
         return last_space
     limit
 
-fn skip_wrap_spaces(txt: text, off: i32) -> i32:
-    var out = off
-    val n = txt.len()
-    while out < n and txt.char_code_at(out) == 32:
-        out = out + 1
-    out
+# `skip_wrap_spaces` now lives in ..._foundation.spl (reached here through the
+# export chain). It was defined HERE but also called from ..._style.spl, which
+# sits BELOW this module in the import order and therefore cannot see it. The
+# interpreter's flat function registry resolved that anyway; HIR lowering did
+# not, so the whole renderer module failed JIT compilation with
+# "Unknown variable: skip_wrap_spaces while lowering parse_font_shorthand_family"
+# and silently ran interpreted (~1000x slower).
 
 fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
     var width = 0
@@ -702,6 +631,59 @@ fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st
         used = used + char_w
         i = i + 1
     out + ellipsis
+
+# --- Left-float exclusion band (bug browser_engine_float_no_inline_wrap_
+# beside_float_2026-08-19). Scope, stated honestly: a SINGLE left float per
+# band, default clear only. The band is recorded when a float:left child is
+# placed and expires by document y (text laid out below the band bottom is
+# unaffected), so it needs no per-frame teardown beyond the root reset in
+# layout(). Multiple simultaneous floats, float:right bands, and explicit
+# `clear` interaction are not modeled.
+var g_float_band_bottom: i32 = -2147483648
+var g_float_band_indent: i32 = 0
+
+# Float-band-aware text wrap: lines whose index falls inside the band wrap to
+# narrow_w; later lines wrap to full_w. Mirrors compute_style_wrap_ranges'
+# font-advance path with a cell-width fallback.
+fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, narrow_lines: i32, st: Style) -> LineWrapRanges:
+    val n = txt.len()
+    if n == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    val use_font = st.resolved_font_identity != "" and st.resolved_font_advances.len() == n and full_w > 0 and narrow_w > 0
+    val cw = style_char_w(st)
+    var starts: [i32] = []
+    var ends: [i32] = []
+    var start = 0
+    var line = 0
+    while start < n:
+        val max_width = if line < narrow_lines: narrow_w else: full_w
+        var endv = start
+        if use_font:
+            var used = 0
+            var last_space = -1
+            while endv < n and used + st.resolved_font_advances[endv] <= max_width:
+                used = used + st.resolved_font_advances[endv]
+                if txt.char_code_at(endv) == 32:
+                    last_space = endv
+                endv = endv + 1
+            if endv == start:
+                endv = start + 1
+            elif endv < n and last_space > start:
+                endv = last_space
+        else:
+            var cpl = max_width / cw
+            if cpl < 1:
+                cpl = 1
+            endv = wrap_line_end(txt, start, cpl)
+            if endv <= start:
+                endv = start + 1
+        starts.push(start)
+        ends.push(endv)
+        start = skip_wrap_spaces(txt, endv)
+        line = line + 1
+    if starts.len() == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    LineWrapRanges(starts: starts, ends: ends)
 
 fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
     val txt_len = txt.len()
@@ -809,10 +791,12 @@ fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
 
 fn explicit_auto_table_column_offsets(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
-    table: i32, inner_width: i32
+    table: i32, inner_width: i32, spacing_x: i32, spacing_y: i32
 ) -> [i32]:
-    # ponytail: only explicit single-span unconstrained columns are specialized;
-    # the generic layout remains the safe owner for every other auto table.
+    # Keep the legacy zero-spacing admission narrow. Authored spacing also
+    # admits constrained and spanning cells after their minimum track widths
+    # are resolved here, so gaps never force overlapping boxes.
+    val has_authored_spacing = spacing_x > 0 or spacing_y > 0
     val rows = simple_web_collect_table_rows(nodes, child_index, table)
     val column_count = simple_web_fixed_table_column_count(
         nodes, child_index, rows
@@ -827,11 +811,10 @@ fn explicit_auto_table_column_offsets(
                     nodes[cell], column_count
                 )
                 val cell_style = styles[cell]
-                if (
+                if not has_authored_spacing and (
                     span != 1 or cell_style.width_px <= 0 or
                     cell_style.min_width_px > 0 or
-                    cell_style.max_width_px > 0 or
-                    column >= column_count
+                    cell_style.max_width_px > 0
                 ):
                     return []
                 if span == 1 and column < column_count:
@@ -841,6 +824,14 @@ fn explicit_auto_table_column_offsets(
                         )
                     else:
                         1
+                    # border-collapse: adjacent cell borders are shared, so a
+                    # cell's border-box contributes only half of each vertical
+                    # border to its column track (uniform-width borders only —
+                    # per-edge winner widths stay outside this admission).
+                    if styles[table].border_collapse == "collapse" and cell_width > 1:
+                        cell_width = cell_width - (
+                            (cell_style.border_l + cell_style.border_r) / 2
+                        )
                     if cell_style.max_width_px > 0:
                         val max_width = css_outer_width(
                             nodes[cell], cell_style,
@@ -859,12 +850,71 @@ fn explicit_auto_table_column_offsets(
                         widths[column] = cell_width
                 column = column + span
             cell = child_index.next_sibling[cell]
+    if has_authored_spacing:
+        for row in rows.rows:
+            var span_column = 0
+            var span_cell = child_index.first_child[row]
+            while span_cell >= 0:
+                if styles[span_cell].display == "table-cell":
+                    val span = simple_web_fixed_table_cell_span(
+                        nodes[span_cell], column_count
+                    )
+                    val next_column = if span_column + span < column_count:
+                        span_column + span
+                    else:
+                        column_count
+                    if span > 1 and span_column < column_count:
+                        val span_style = styles[span_cell]
+                        var required_width = if span_style.width_px > 0:
+                            css_outer_width(
+                                nodes[span_cell], span_style,
+                                span_style.width_px
+                            )
+                        else:
+                            0
+                        if span_style.min_width_px > 0:
+                            val span_min_width = css_outer_width(
+                                nodes[span_cell], span_style,
+                                span_style.min_width_px
+                            )
+                            if required_width < span_min_width:
+                                required_width = span_min_width
+                        var current_width = (
+                            spacing_x * (next_column - span_column - 1)
+                        )
+                        var width_column = span_column
+                        while width_column < next_column:
+                            current_width = current_width + widths[width_column]
+                            width_column = width_column + 1
+                        if required_width > current_width:
+                            val deficit = required_width - current_width
+                            val span_count = next_column - span_column
+                            val grow_each = deficit / span_count
+                            val grow_remainder = (
+                                deficit - grow_each * span_count
+                            )
+                            var grow_column = span_column
+                            while grow_column < next_column:
+                                widths[grow_column] = (
+                                    widths[grow_column] +
+                                    grow_each +
+                                    (if (
+                                        grow_column - span_column <
+                                        grow_remainder
+                                    ): 1 else: 0)
+                                )
+                                grow_column = grow_column + 1
+                    span_column = next_column
+                span_cell = child_index.next_sibling[span_cell]
     var minimum_width = 0
     for width in widths:
-        if width <= 0 or width > inner_width - minimum_width:
+        if width <= 0:
             return []
         minimum_width = minimum_width + width
-    val extra = inner_width - minimum_width
+    var grid_width = inner_width - spacing_x * (column_count + 1)
+    if grid_width < minimum_width:
+        grid_width = minimum_width
+    val extra = grid_width - minimum_width
     val extra_each = extra / column_count
     val extra_remainder = extra - extra_each * column_count
     var offsets: [i32] = [0; column_count + 1]
@@ -946,7 +996,7 @@ fn absolute_child_y(parent_y: i32, parent: Style, child_node: HNode, child: Styl
         return parent_y + parent.border_t + containing_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px
     parent_y + parent.border_t + child.top_px
 
-fn absolute_child_styles(styles: [Style], child_index: i32, parent: Style, child: Style, containing_w: i32, containing_h: i32) -> [Style]:
+fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containing_h: i32) -> Style:
     var resolved_child = child
     if child.width_px < 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
@@ -1303,7 +1353,6 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     var out_intrinsic_widths = intrinsic_widths
     out_bx[i] = x
     out_by[i] = y
-    val st = styles[i]
     val node = nodes[i]
     # Budget guard: short-circuit layout of not-yet-processed subtrees on expiry.
     # Emit a zero-size box for this node and return a valid LayoutResult so the
@@ -1335,7 +1384,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             var child_w_contents = w - cml - cmr
             if child_w_contents < 1:
                 child_w_contents = 1
-            val child = layout(nodes, styles, child_index, c_contents, x + cml, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val child = layout_with_style(nodes, styles, child_index, c_contents, x + cml, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, styles[c_contents])
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
@@ -1405,9 +1454,23 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         # check a run that exactly fits its box spuriously wraps at ~5/6 of its
         # length ("Simple Editor" -> "Simple"/"Editor", "EDITOR" -> "EDITO"/"R").
         val full_adv = style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
+        # Active left-float band: lines of this text that vertically overlap
+        # the band wrap to the narrowed width, the rest to the full width.
+        val band_lh = style_line_h(st)
+        var band_narrow_lines = 0
+        var band_narrow_w = node_w
+        if g_float_band_indent > 0 and y < g_float_band_bottom and band_lh > 0 and not st.white_space_nowrap:
+            band_narrow_lines = (g_float_band_bottom - y + band_lh - 1) / band_lh
+            band_narrow_w = node_w - g_float_band_indent
+            if band_narrow_w < 1:
+                band_narrow_w = 1
         if st.white_space_nowrap:
             out_wrap_starts[i] = [0; 1]
             out_wrap_ends[i] = [txt_len; 1]
+        elif band_narrow_lines > 0 and full_adv > band_narrow_w:
+            val band_ranges = compute_style_wrap_ranges_float_band(txt, node_w, band_narrow_w, band_narrow_lines, st)
+            out_wrap_starts[i] = band_ranges.starts
+            out_wrap_ends[i] = band_ranges.ends
         elif full_adv <= node_w:
             out_wrap_starts[i] = [0; 1]
             out_wrap_ends[i] = [txt_len; 1]
@@ -1443,11 +1506,13 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     val scrollbar_gutter = 15
     val content_height_limit = definite_content_height_limit(node, st)
     val auto_column_offsets = if (
-        st.display == "table" and st.table_layout == "auto" and
-        st.width_px > 0
+        st.display == "table" and st.table_layout == "auto"
     ):
+        # width:auto tables shrink to fit: pass 0 as the available inner
+        # width so no leftover space is distributed across the columns.
         explicit_auto_table_column_offsets(
-            nodes, styles, child_index, i, iw,
+            nodes, styles, child_index, i,
+            if st.width_px > 0: iw else: 0,
             st.border_spacing_x_px, st.border_spacing_y_px
         )
     else:
@@ -1455,7 +1520,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     if (
         st.display == "table" and (
             st.table_layout == "fixed" or
-            auto_column_offsets.len() > 0
+            auto_column_offsets.len() > 0 or
+            st.border_spacing_x_px > 0 or
+            st.border_spacing_y_px > 0
         )
     ):
         val table_rows = simple_web_collect_table_rows(
@@ -1464,6 +1531,27 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         val column_count = simple_web_fixed_table_column_count(
             nodes, child_index, table_rows
         )
+        # border-collapse geometry (uniform-border slice, honest limits): the
+        # grid tracks were sized with half-borders shared between neighbours
+        # (see explicit_auto_table_column_offsets); the outer half-border of
+        # the first column/row shifts the grid origin by round-half-up, and
+        # each row sheds the shared half of its cells' top+bottom borders.
+        # Non-uniform per-edge winner widths and row/col spans are NOT
+        # modelled here — they keep the plain separate-model geometry.
+        val table_collapse = st.border_collapse == "collapse"
+        var collapse_outer_x = 0
+        var collapse_outer_y = 0
+        var collapse_row_shave = 0
+        if table_collapse and table_rows.rows.len() > 0:
+            var probe_cell = child_index.first_child[table_rows.rows[0]]
+            while probe_cell >= 0 and styles[probe_cell].display != "table-cell":
+                probe_cell = child_index.next_sibling[probe_cell]
+            if probe_cell >= 0:
+                collapse_outer_x = (styles[probe_cell].border_l + 1) / 2
+                collapse_outer_y = (styles[probe_cell].border_t + 1) / 2
+                collapse_row_shave = (
+                    styles[probe_cell].border_t + styles[probe_cell].border_b
+                ) / 2
         var table_grid_width = if (
             st.table_layout == "auto" and
             auto_column_offsets.len() > column_count
@@ -1479,6 +1567,13 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         )
         if table_inner_width > iw:
             out_bw[i] = out_bw[i] + table_inner_width - iw
+        elif st.width_px <= 0 and auto_column_offsets.len() > 0:
+            # width:auto table shrinks to fit its columns instead of filling
+            # the containing block.
+            out_bw[i] = (
+                table_inner_width + st.pad_l + st.pad_r + border_x +
+                collapse_outer_x
+            )
         var table_row_width = (
             table_grid_width +
             st.border_spacing_x_px * (column_count - 1)
@@ -1488,10 +1583,13 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         var table_y = y + st.border_t + st.pad_t
         var table_child = child_index.first_child[i]
         while table_child >= 0:
-            if styles[table_child].display == "table-caption":
+            if (
+                styles[table_child].display == "table-caption" and
+                styles[table_child].caption_side != "bottom"
+            ):
                 val caption = layout_with_style(
                     nodes, styles, child_index, table_child,
-                    ix, table_y, iw, viewport_h,
+                    ix, table_y, table_inner_width, viewport_h,
                     out_bx, out_by, out_bw, out_bh,
                     out_wrap_starts, out_wrap_ends,
                     out_intrinsic_widths, styles[table_child]
@@ -1506,18 +1604,18 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 table_y = table_y + caption.height
             table_child = child_index.next_sibling[table_child]
         if table_rows.rows.len() > 0:
-            table_y = table_y + st.border_spacing_y_px
+            table_y = table_y + st.border_spacing_y_px + collapse_outer_y
         var table_row_index = 0
         while table_row_index < table_rows.rows.len():
             val table_row = table_rows.rows[table_row_index]
             val table_group = table_rows.groups[table_row_index]
             if table_group >= 0 and out_bh[table_group] == 0:
-                out_bx[table_group] = ix + st.border_spacing_x_px
+                out_bx[table_group] = ix + st.border_spacing_x_px + collapse_outer_x
                 out_by[table_group] = table_y
                 out_bw[table_group] = table_row_width
-            out_bx[table_row] = ix + st.border_spacing_x_px
+            out_bx[table_row] = ix + st.border_spacing_x_px + collapse_outer_x
             out_by[table_row] = table_y
-            out_bw[table_row] = iw
+            out_bw[table_row] = table_row_width
             var row_h = 1
             var used_columns = 0
             var cell = child_index.first_child[table_row]
@@ -1531,13 +1629,13 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         auto_column_offsets.len() > used_columns
                     ):
                         (
-                            ix +
+                            ix + collapse_outer_x +
                             st.border_spacing_x_px * (used_columns + 1) +
                             auto_column_offsets[used_columns]
                         )
                     else:
                         (
-                            ix +
+                            ix + collapse_outer_x +
                             st.border_spacing_x_px * (used_columns + 1) +
                             table_grid_width * used_columns / column_count
                         )
@@ -1549,13 +1647,13 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         auto_column_offsets.len() > next_columns
                     ):
                         (
-                            ix +
+                            ix + collapse_outer_x +
                             st.border_spacing_x_px * next_columns +
                             auto_column_offsets[next_columns]
                         )
                     else:
                         (
-                            ix +
+                            ix + collapse_outer_x +
                             st.border_spacing_x_px * next_columns +
                             table_grid_width * next_columns / column_count
                         )
@@ -1591,16 +1689,43 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         row_h = cell_result.height
                     used_columns = next_columns
                 cell = child_index.next_sibling[cell]
+            if collapse_row_shave > 0 and row_h > collapse_row_shave:
+                row_h = row_h - collapse_row_shave
             cell = child_index.first_child[table_row]
             while cell >= 0:
                 if styles[cell].display == "table-cell":
                     out_bh[cell] = row_h
                 cell = child_index.next_sibling[cell]
             out_bh[table_row] = row_h
-            table_y = table_y + row_h
+            table_y = table_y + row_h + st.border_spacing_y_px
             if table_group >= 0:
-                out_bh[table_group] = table_y - out_by[table_group]
+                out_bh[table_group] = (
+                    table_y - st.border_spacing_y_px -
+                    out_by[table_group]
+                )
             table_row_index = table_row_index + 1
+        table_child = child_index.first_child[i]
+        while table_child >= 0:
+            if (
+                styles[table_child].display == "table-caption" and
+                styles[table_child].caption_side == "bottom"
+            ):
+                val caption = layout_with_style(
+                    nodes, styles, child_index, table_child,
+                    ix, table_y, table_inner_width, viewport_h,
+                    out_bx, out_by, out_bw, out_bh,
+                    out_wrap_starts, out_wrap_ends,
+                    out_intrinsic_widths, styles[table_child]
+                )
+                out_bx = caption.bx
+                out_by = caption.by
+                out_bw = caption.bw
+                out_bh = caption.bh
+                out_wrap_starts = caption.wrap_starts
+                out_wrap_ends = caption.wrap_ends
+                out_intrinsic_widths = caption.intrinsic_widths
+                table_y = table_y + caption.height
+            table_child = child_index.next_sibling[table_child]
         var table_h = (
             table_y - y + st.pad_b + st.border_b
         )
@@ -1744,20 +1869,86 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     grid_columns, st.column_gap_px, grid_column
                 )
             )
+            val grid_margin_t = resolve_vertical_margin_px(
+                grid_child_style.margin_t, viewport_h
+            )
+            val grid_margin_b = resolve_vertical_margin_px(
+                grid_child_style.margin_b, viewport_h
+            )
             val grid_child_y = (
                 y + st.border_t + st.pad_t +
-                grid_track_offset(grid_rows, st.row_gap_px, grid_row)
+                grid_track_offset(grid_rows, st.row_gap_px, grid_row) +
+                grid_margin_t
             )
             val grid_child_width = grid_track_span_size(
                 grid_columns, st.column_gap_px,
                 grid_column, grid_column_span
             )
+            val grid_item_align = effective_item_align(
+                st, grid_child_style
+            )
+            val grid_child_is_replaced = grid_item_is_replaced(
+                nodes[grid_child]
+            )
+            val grid_explicit_stretch = (
+                grid_item_align == "stretch" and (
+                    grid_child_style.align_self == "stretch" or
+                    st.align_items_authored
+                )
+            )
+            # `normal` stretches only when automatic sizing has not already
+            # produced an intrinsic/aspect-ratio block size. Explicit stretch
+            # may replace that automatic used size for this bounded slice.
+            val grid_normal_stretch = (
+                (
+                    grid_item_align == "normal" or (
+                        grid_child_style.align_self == "auto" and
+                        not st.align_items_authored
+                    )
+                ) and
+                grid_child_style.height_px == 0
+            )
+            var resolved_grid_child_style = grid_child_style
+            # This bounded Grid slice does not size spanning rows. Stretch
+            # only an auto-size, non-replaced item occupying one row and one
+            # column, when block-axis auto margins do not own the free space.
+            if (
+                grid_row < explicit_rows.len() and
+                grid_column_span == 1 and
+                grid_row_span == 1 and
+                (grid_explicit_stretch or grid_normal_stretch) and
+                grid_child_style.height_auto and
+                not grid_child_style.margin_t_auto and
+                not grid_child_style.margin_b_auto and
+                not grid_child_is_replaced
+            ):
+                var grid_stretch_outer_h = (
+                    grid_rows[grid_row] - grid_margin_t - grid_margin_b
+                )
+                if grid_stretch_outer_h < 1:
+                    grid_stretch_outer_h = 1
+                var grid_stretch_style_h = grid_stretch_outer_h
+                if not (
+                    nodes[grid_child].has_widget_class or
+                    nodes[grid_child].has_icon_image_class or
+                    grid_child_style.border_box
+                ):
+                    grid_stretch_style_h = (
+                        grid_stretch_outer_h - grid_child_style.pad_t -
+                        grid_child_style.pad_b - grid_child_style.border_t -
+                        grid_child_style.border_b
+                    )
+                if grid_stretch_style_h < 1:
+                    grid_stretch_style_h = 1
+                resolved_grid_child_style = style_with_height(
+                    grid_child_style, grid_stretch_style_h
+                )
             val grid_result = layout_with_style(
                 nodes, styles, child_index, grid_child,
                 grid_child_x, grid_child_y, grid_child_width, viewport_h,
                 out_bx, out_by, out_bw, out_bh,
                 out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
-                grid_child_style
+                resolved_grid_child_style
             )
             out_bx = grid_result.bx
             out_by = grid_result.by
@@ -1794,19 +1985,30 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
             grid_height
         )
-    if st.display == "flex" and st.flex_direction != "column":
+    if (
+        st.display == "flex" and
+        st.flex_direction != "column" and
+        st.flex_direction != "column-reverse"
+    ):
         val children_for_i_count = child_index.child_count[i]
+        val ordered_row_children = flex_ordered_children(styles, child_index, i)
+        val ordered_row_child_count = ordered_row_children.len()
         if st.flex_wrap != "nowrap":
             val row_wrap_column_gap = st.column_gap_px
             val row_wrap_row_gap = st.row_gap_px
             var line_heights: [i32] = [0; children_for_i_count]
+            var line_widths: [i32] = [0; children_for_i_count]
+            var line_item_counts: [i32] = [0; children_for_i_count]
+            var line_auto_margin_counts: [i32] = [0; children_for_i_count]
             var line_count = 0
             var total_line_h = 0
             var cx_measure = 0
             var line_h_measure = 0
             var child_count_measure = 0
-            var fm = child_index.first_child[i]
-            while fm >= 0:
+            var auto_margin_count_measure = 0
+            var fm_i = 0
+            while fm_i < ordered_row_child_count:
+                val fm = ordered_row_children[fm_i]
                 val cst = styles[fm]
                 if not cst.position_absolute:
                     val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
@@ -1817,14 +2019,24 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
-                    val item_outer_w = cml + base_w_wrap + cmr
+                    val measured_ml = if cst.margin_l_auto: 0 else: cml
+                    val measured_mr = if cst.margin_r_auto: 0 else: cmr
+                    val item_auto_margins = (
+                        (if cst.margin_l_auto: 1 else: 0) +
+                        (if cst.margin_r_auto: 1 else: 0)
+                    )
+                    val item_outer_w = measured_ml + base_w_wrap + measured_mr
                     if child_count_measure > 0 and cx_measure + row_wrap_column_gap + item_outer_w > iw:
                         line_heights[line_count] = line_h_measure
+                        line_widths[line_count] = cx_measure
+                        line_item_counts[line_count] = child_count_measure
+                        line_auto_margin_counts[line_count] = auto_margin_count_measure
                         line_count = line_count + 1
                         total_line_h = total_line_h + line_h_measure
                         cx_measure = 0
                         line_h_measure = 0
                         child_count_measure = 0
+                        auto_margin_count_measure = 0
                     if child_count_measure > 0:
                         cx_measure = cx_measure + row_wrap_column_gap
                     cx_measure = cx_measure + item_outer_w
@@ -1832,9 +2044,15 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     if used_h > line_h_measure:
                         line_h_measure = used_h
                     child_count_measure = child_count_measure + 1
-                fm = child_index.next_sibling[fm]
+                    auto_margin_count_measure = (
+                        auto_margin_count_measure + item_auto_margins
+                    )
+                fm_i = fm_i + 1
             if child_count_measure > 0:
                 line_heights[line_count] = line_h_measure
+                line_widths[line_count] = cx_measure
+                line_item_counts[line_count] = child_count_measure
+                line_auto_margin_counts[line_count] = auto_margin_count_measure
                 line_count = line_count + 1
                 total_line_h = total_line_h + line_h_measure
             if line_count > 1:
@@ -1863,24 +2081,34 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 align_content_line_extra = (explicit_content_h - total_line_h) / line_count
                 total_line_h_with_align = total_line_h + align_content_line_extra * line_count
             val reverse_wrap = st.flex_wrap == "wrap-reverse"
-            var cx_wrap = ix
+            var line_distribution = if line_count > 0:
+                row_flex_distribution(
+                    iw - line_widths[0], line_item_counts[0],
+                    line_auto_margin_counts[0], st.justify_content
+                )
+            else:
+                RowFlexDistribution(
+                    start_offset: 0, gap_extra: 0, auto_margin: 0
+                )
+            var cx_wrap = ix + line_distribution.start_offset
             var cy_wrap = if reverse_wrap:
                 y + st.border_t + st.pad_t + align_content_offset + total_line_h_with_align - (if line_count > 0: line_heights[0] + align_content_line_extra else: 0)
             else:
                 y + st.border_t + st.pad_t + align_content_offset
             var line_h_wrap = 0
             var line_index_wrap = 0
-            var fc_wrap = child_index.first_child[i]
             var flex_child_count_wrap = 0
-            while fc_wrap >= 0:
+            var fc_wrap_i = 0
+            while fc_wrap_i < ordered_row_child_count:
+                val fc_wrap = ordered_row_children[fc_wrap_i]
                 val cst = styles[fc_wrap]
                 if cst.position_absolute:
                     val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                     val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
                     val ay = absolute_child_y(y, st, nodes[fc_wrap], cst, absolute_containing_h)
                     val absolute_w = absolute_outer_width(st, nodes[fc_wrap], cst, iw)
-                    val child_styles = absolute_child_styles(styles, fc_wrap, st, cst, iw, absolute_containing_h)
-                    val child = layout(nodes, child_styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
+                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -1890,17 +2118,27 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     out_intrinsic_widths = child.intrinsic_widths
                 else:
                     val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
-                    val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
-                        styles_with_height(styles, fc_wrap, child_height_px)
+                    val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
+                        style_with_height(cst, child_height_px)
                     else:
-                        styles
-                    val resolved_cst = child_styles[fc_wrap]
+                        cst
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                    var effective_cml = if cst.margin_l_auto:
+                        line_distribution.auto_margin
+                    else:
+                        cml
+                    var effective_cmr = if cst.margin_r_auto:
+                        line_distribution.auto_margin
+                    else:
+                        cmr
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
-                    val item_outer_w = cml + base_w_wrap + cmr
-                    if flex_child_count_wrap > 0 and cx_wrap - ix + st.gap_px + item_outer_w > iw:
-                        cx_wrap = ix
+                    if (
+                        flex_child_count_wrap > 0 and
+                        line_index_wrap < line_count and
+                        flex_child_count_wrap >=
+                        line_item_counts[line_index_wrap]
+                    ):
                         if reverse_wrap:
                             cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_count: line_heights[line_index_wrap + 1] + align_content_line_extra else: 0) + row_wrap_row_gap + align_content_gap_extra)
                         else:
@@ -1908,15 +2146,39 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         line_index_wrap = line_index_wrap + 1
                         line_h_wrap = if line_index_wrap < line_count: line_heights[line_index_wrap] + align_content_line_extra else: 0
                         flex_child_count_wrap = 0
+                        line_distribution = if line_index_wrap < line_count:
+                            row_flex_distribution(
+                                iw - line_widths[line_index_wrap],
+                                line_item_counts[line_index_wrap],
+                                line_auto_margin_counts[line_index_wrap],
+                                st.justify_content
+                            )
+                        else:
+                            RowFlexDistribution(
+                                start_offset: 0, gap_extra: 0,
+                                auto_margin: 0
+                            )
+                        cx_wrap = ix + line_distribution.start_offset
+                        effective_cml = if cst.margin_l_auto:
+                            line_distribution.auto_margin
+                        else:
+                            cml
+                        effective_cmr = if cst.margin_r_auto:
+                            line_distribution.auto_margin
+                        else:
+                            cmr
                     if flex_child_count_wrap == 0 and line_index_wrap < line_count:
                         line_h_wrap = line_heights[line_index_wrap] + align_content_line_extra
                     if flex_child_count_wrap > 0:
-                        cx_wrap = cx_wrap + row_wrap_column_gap
-                    cx_wrap = cx_wrap + cml
+                        cx_wrap = (
+                            cx_wrap + row_wrap_column_gap +
+                            line_distribution.gap_extra
+                        )
+                    cx_wrap = cx_wrap + effective_cml
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
-                    val child = layout(nodes, child_styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -1924,9 +2186,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     out_wrap_starts = child.wrap_starts
                     out_wrap_ends = child.wrap_ends
                     out_intrinsic_widths = child.intrinsic_widths
-                    cx_wrap = cx_wrap + out_bw[fc_wrap] + cmr
+                    if row_flex_main_reversed(st):
+                        val shifted = rtl_row_flex_item_offset(
+                            child_index, fc_wrap, ix, iw,
+                            effective_cml, effective_cmr,
+                            resolved_cst, out_bx, out_by, out_bw
+                        )
+                        out_bx = shifted.bx
+                        out_by = shifted.by
+                    cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
                     flex_child_count_wrap = flex_child_count_wrap + 1
-                fc_wrap = child_index.next_sibling[fc_wrap]
+                fc_wrap_i = fc_wrap_i + 1
             var flex_h_wrap = if st.height_px > 0:
                 if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
             else:
@@ -1939,7 +2209,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         # explicit width (px or %) take it; the leftover space is shared by flex-grow
         # weight using left-to-right cumulative rounding so integer remainders stay
         # stable against Chromium for small fixtures.
-        val ordered_flex_children = flex_ordered_children(styles, child_index, i)
+        val ordered_flex_children = ordered_row_children
         val ordered_flex_child_count = ordered_flex_children.len()
         var sum_explicit = 0
         var auto_weight = 0
@@ -1994,27 +2264,20 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         var auto_avail = iw - sum_explicit - gaps_total
         if auto_avail < auto_weight:
             auto_avail = auto_weight
-        val auto_main_margin_px = if shrink_deficit == 0 and auto_weight == 0 and auto_main_margin_count > 0 and main_free_space > 0:
-            main_free_space / auto_main_margin_count
+        val distributable_space = if (
+            shrink_deficit == 0 and auto_weight == 0 and main_free_space > 0
+        ):
+            main_free_space
         else:
             0
-        val positive_free_space = if shrink_deficit == 0 and auto_weight == 0 and auto_main_margin_count == 0 and iw > sum_explicit + gaps_total: iw - sum_explicit - gaps_total else: 0
-        var justify_start_offset = 0
-        var justify_gap_extra = 0
-        if positive_free_space > 0:
-            if st.justify_content == "space-between" and nonabs_count > 1:
-                justify_gap_extra = positive_free_space / (nonabs_count - 1)
-            elif st.justify_content == "space-around" and nonabs_count > 0:
-                justify_start_offset = positive_free_space / (nonabs_count * 2)
-                justify_gap_extra = positive_free_space / nonabs_count
-            elif st.justify_content == "space-evenly" and nonabs_count > 0:
-                justify_start_offset = positive_free_space / (nonabs_count + 1)
-                justify_gap_extra = positive_free_space / (nonabs_count + 1)
-            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
-                justify_start_offset = positive_free_space / 2
-            elif st.justify_content == "flex-end" or st.justify_content == "end":
-                justify_start_offset = positive_free_space
-        elif main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
+        val main_distribution = row_flex_distribution(
+            distributable_space, nonabs_count,
+            auto_main_margin_count, st.justify_content
+        )
+        val auto_main_margin_px = main_distribution.auto_margin
+        var justify_start_offset = main_distribution.start_offset
+        val justify_gap_extra = main_distribution.gap_extra
+        if main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
             justify_start_offset = main_free_space / 2
         var cx = ix + justify_start_offset
         var max_child_h = 0
@@ -2039,7 +2302,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             while pb_self_i < ordered_flex_child_count:
                 val pb_self = ordered_flex_children[pb_self_i]
                 val pcst_self = styles[pb_self]
-                if not pcst_self.position_absolute and flex_item_align(st, pcst_self) == "baseline":
+                if not pcst_self.position_absolute and effective_item_align(st, pcst_self) == "baseline":
                     val baseline_self = pcst_self.margin_t + style_baseline_offset(pcst_self)
                     if baseline_self > max_baseline:
                         max_baseline = baseline_self
@@ -2053,8 +2316,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
                 val ay = absolute_child_y(y, st, nodes[fc], cst, absolute_containing_h)
                 val absolute_w = absolute_outer_width(st, nodes[fc], cst, iw)
-                val child_styles = absolute_child_styles(styles, fc, st, cst, iw, absolute_containing_h)
-                val child = layout(nodes, child_styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
+                val child = layout_with_style(nodes, styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -2141,11 +2404,11 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 if remaining_w < 1:
                     remaining_w = 1
                 val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
-                var child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
-                    styles_with_height(styles, fc, child_height_px)
+                var resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
+                    style_with_height(cst, child_height_px)
                 else:
                     cst
-                val item_align = flex_item_align(st, resolved_cst)
+                val item_align = effective_item_align(st, resolved_cst)
                 var child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t
                 val container_cross_auto = if st.height_px > 0:
                     if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
@@ -2191,8 +2454,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         stretch_style_h = stretch_outer_h - resolved_cst.pad_t - resolved_cst.pad_b - child_border_y
                     if stretch_style_h < 1:
                         stretch_style_h = 1
-                    child_styles = styles_with_height(child_styles, fc, stretch_style_h)
-                val child = layout(nodes, child_styles, child_index, fc, cx, child_y, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    resolved_cst = style_with_height(resolved_cst, stretch_style_h)
+                val child = layout_with_style(nodes, styles, child_index, fc, cx, child_y, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -2202,6 +2465,22 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 out_intrinsic_widths = child.intrinsic_widths
                 if force_used_w:
                     out_bw[fc] = remaining_w
+                if row_flex_main_reversed(st):
+                    val effective_margin_l = if cst.margin_l_auto:
+                        auto_main_margin_px
+                    else:
+                        cml
+                    val effective_margin_r = if cst.margin_r_auto:
+                        auto_main_margin_px
+                    else:
+                        cmr
+                    val shifted = rtl_row_flex_item_offset(
+                        child_index, fc, ix, iw,
+                        effective_margin_l, effective_margin_r,
+                        resolved_cst, out_bx, out_by, out_bw
+                    )
+                    out_bx = shifted.bx
+                    out_by = shifted.by
                 val used_h = cst.margin_t + child.height + cst.margin_b
                 if used_h > max_child_h:
                     max_child_h = used_h
@@ -2296,8 +2575,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
                 val ay = absolute_child_y(y, st, nodes[flex_c], cst, absolute_containing_h)
                 val absolute_w = absolute_outer_width(st, nodes[flex_c], cst, iw)
-                val child_styles = absolute_child_styles(styles, flex_c, st, cst, iw, absolute_containing_h)
-                val child = layout(nodes, child_styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
+                val child = layout_with_style(nodes, styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -2307,11 +2586,10 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 out_intrinsic_widths = child.intrinsic_widths
             else:
                 val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
-                val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
-                    styles_with_height(styles, flex_c, child_height_px)
+                val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
+                    style_with_height(cst, child_height_px)
                 else:
-                    styles
-                val resolved_cst = child_styles[flex_c]
+                    cst
                 val cml = resolve_horizontal_margin_px(resolved_cst.margin_l, iw)
                 val cmr = resolve_horizontal_margin_px(resolved_cst.margin_r, iw)
                 if flex_child_count_col > 0:
@@ -2324,7 +2602,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 if child_w < 1:
                     child_w = 1
                 var child_x = ix + cml
-                val col_item_align = flex_item_align(st, resolved_cst)
+                val col_item_align = effective_item_align(st, resolved_cst)
                 val col_child_outer_w = if resolved_cst.width_px > 0:
                     if nodes[flex_c].has_widget_class or nodes[flex_c].has_icon_image_class or resolved_cst.border_box: resolved_cst.width_px else: resolved_cst.width_px + resolved_cst.pad_l + resolved_cst.pad_r + resolved_cst.border_l + resolved_cst.border_r
                 else:
@@ -2336,7 +2614,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 elif (col_item_align == "flex-end" or col_item_align == "end") and iw > col_child_margin_w:
                     child_x = ix + cml + iw - col_child_margin_w
                     child_w = col_child_outer_w
-                val child = layout(nodes, child_styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                val child = layout_with_style(nodes, styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -2373,8 +2651,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     var child_count = 0
     var prev_margin_b = 0
     var in_inline_run = false
-    var inline_x = 0
+    val inline_start_x = if (
+        node.is_details_summary and st.display == "list-item"
+    ):
+        SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH
+    else:
+        0
+    var inline_x = inline_start_x
     var inline_line_h = 0
+    var inline_baseline_nodes: [i32] = []
+    var inline_baseline_margin_ts: [i32] = []
+    var inline_baseline_margin_bs: [i32] = []
     var c = child_index.first_child[i]
     while c >= 0:
         val cst = styles[c]
@@ -2390,8 +2677,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             val ax = absolute_child_x(x, st, nodes[c], cst, iw)
             val ay = absolute_child_y(y, st, nodes[c], cst, absolute_containing_h)
             val absolute_w = absolute_outer_width(st, nodes[c], cst, iw)
-            val child_styles = absolute_child_styles(styles, c, st, cst, iw, absolute_containing_h)
-            val child = layout(nodes, child_styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
+            val child = layout_with_style(nodes, styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
@@ -2400,6 +2687,41 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
         else:
+            if cst.float_mode == 1:
+                # float:left is out of normal flow: place it at the current
+                # flow position against the left content edge, record its
+                # margin-box as the exclusion band for following inline text,
+                # and do NOT advance cy. Scope (bug browser_engine_float_no_
+                # inline_wrap_beside_float_2026-08-19): a single left float,
+                # default clear only; auto-width floats fall back to their
+                # intrinsic text width rather than true shrink-to-fit.
+                val fml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                val fmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                val fmt = resolve_vertical_margin_px(cst.margin_t, viewport_h)
+                val fmb = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+                var float_w = if cst.width_px > 0:
+                    css_outer_width(nodes[c], cst, cst.width_px)
+                elif cst.width_px < 0:
+                    css_outer_width(nodes[c], cst, iw * (0 - cst.width_px) / 100)
+                else:
+                    val float_intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
+                    out_intrinsic_widths = float_intrinsic.widths
+                    float_intrinsic.width
+                if float_w < 1:
+                    float_w = 1
+                val float_top = cy + fmt
+                val fchild = layout_with_style(nodes, styles, child_index, c, ix + fml, float_top, float_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, cst)
+                out_bx = fchild.bx
+                out_by = fchild.by
+                out_bw = fchild.bw
+                out_bh = fchild.bh
+                out_wrap_starts = fchild.wrap_starts
+                out_wrap_ends = fchild.wrap_ends
+                out_intrinsic_widths = fchild.intrinsic_widths
+                g_float_band_indent = fml + out_bw[c] + fmr
+                g_float_band_bottom = float_top + out_bh[c] + fmb
+                c = child_index.next_sibling[c]
+                continue
             if cst.display == "inline" or cst.display == "inline-block":
                 if cst.display == "inline" and nodes[c].tag == "br":
                     val break_line_h = style_line_h(cst)
@@ -2421,7 +2743,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     out_by = aligned.by
                     cy = cy + aligned.height
                     in_inline_run = false
-                    inline_x = 0
+                    inline_x = inline_start_x
                     inline_line_h = 0
                     inline_baseline_nodes = []
                     inline_baseline_margin_ts = []
@@ -2441,11 +2763,22 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     0
                 if not in_inline_run:
                     in_inline_run = true
-                    inline_x = 0
+                    inline_x = inline_start_x
                     inline_line_h = style_line_h(cst)
                 val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
                 out_intrinsic_widths = intrinsic.widths
                 var inline_w = intrinsic.width
+                var resolved_inline_style = cst
+                if inline_block and cst.width_px > 0:
+                    inline_w = css_outer_width(nodes[c], cst, cst.width_px)
+                elif inline_block and cst.width_px < 0:
+                    val percent_content_w = iw * (0 - cst.width_px) / 100
+                    inline_w = css_outer_width(
+                        nodes[c], cst, percent_content_w
+                    )
+                    resolved_inline_style = style_with_width(
+                        cst, percent_content_w
+                    )
                 val text_advance_w = inline_text_advance_width(nodes[c], cst)
                 if text_advance_w > inline_w:
                     inline_w = text_advance_w
@@ -2461,6 +2794,21 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val avail_inline = iw - inline_x
                     if avail_inline > 0 and inline_w > avail_inline:
                         inline_w = avail_inline
+                # text-align: paint aligns each wrapped line within the #text
+                # BOX, so a shrink-to-fit lone text run can never center/right.
+                # Give a sole #text child of an aligned block the full content
+                # width; the paint-side text_line_aligned_x does the rest.
+                # Scope, stated honestly: single-#text-child runs only —
+                # multi-child inline runs still need run-level shifting.
+                if (
+                    nodes[c].tag == "#text" and
+                    (st.text_align == "center" or st.text_align == "right") and
+                    child_index.child_count[i] == 1 and
+                    not cst.white_space_nowrap
+                ):
+                    val full_inline = iw - inline_x
+                    if full_inline > inline_w:
+                        inline_w = full_inline
                 val inline_outer_w = (
                     inline_margin_l + inline_w + inline_margin_r
                 )
@@ -2477,7 +2825,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     out_bx = aligned.bx
                     out_by = aligned.by
                     cy = cy + aligned.height
-                    inline_x = 0
+                    inline_x = inline_start_x
                     inline_line_h = style_line_h(cst)
                     inline_baseline_nodes = []
                     inline_baseline_margin_ts = []
@@ -2503,25 +2851,56 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val wrap_lines = out_wrap_starts[c].len()
                     val text_lines = if wrap_lines > 0: wrap_lines else: 1
                     out_bh[c] = text_lines * style_line_h(cst)
-                elif nodes[c].tag == "span" and out_bh[c] > 1:
+                elif (
+                    cst.display == "inline" and nodes[c].tag == "span" and
+                    out_bh[c] > 1
+                ):
                     out_bh[c] = out_bh[c] - 1
                 var inline_contribution_h = out_bh[c]
                 if nodes[c].tag == "button":
                     inline_contribution_h = inline_contribution_h + 3
                 if inline_contribution_h > inline_line_h:
                     inline_line_h = inline_contribution_h
-                inline_x = inline_x + out_bw[c]
+                if cst.vertical_align == "baseline" and (
+                    cst.display == "inline" or
+                    child_index.child_count[c] == 0
+                ):
+                    inline_baseline_nodes = inline_baseline_nodes.push(c)
+                    # Baseline math consumes resolved pixels, never the Style
+                    # vh/negative sentinel encoding.
+                    inline_baseline_margin_ts = inline_baseline_margin_ts.push(
+                        resolve_vertical_margin_px(cst.margin_t, viewport_h)
+                    )
+                    inline_baseline_margin_bs = inline_baseline_margin_bs.push(
+                        resolve_vertical_margin_px(cst.margin_b, viewport_h)
+                    )
+                inline_x = (
+                    inline_x + inline_margin_l + out_bw[c] +
+                    inline_margin_r
+                )
                 prev_margin_b = 0
                 child_count = child_count + 1
                 c = child_index.next_sibling[c]
                 continue
             if in_inline_run:
-                cy = cy + inline_line_h
+                val aligned = align_inline_line_baselines(
+                    child_index, st, inline_baseline_nodes,
+                    inline_baseline_margin_ts, inline_baseline_margin_bs,
+                    styles, cy,
+                    inline_line_h, out_bx, out_by, out_bh
+                )
+                out_bx = aligned.bx
+                out_by = aligned.by
+                cy = cy + aligned.height
                 in_inline_run = false
-                inline_x = 0
+                inline_x = inline_start_x
                 inline_line_h = 0
+                inline_baseline_nodes = []
+                inline_baseline_margin_ts = []
+                inline_baseline_margin_bs = []
             if child_count > 0:
                 cy = cy + st.gap_px
+            val prev_margin_b_before_child = prev_margin_b
             val resolved_cst_margin_t = resolve_vertical_margin_px(cst.margin_t, viewport_h)
             val collapsed_margin = collapse_margins_signed(prev_margin_b, resolved_cst_margin_t)
             var child_top_advance = 0
@@ -2531,6 +2910,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 child_top_advance = collapsed_body_top - resolved_st_margin_t
                 cy = cy + child_top_advance
             else:
+                child_top_advance = collapsed_margin
                 cy = cy + collapsed_margin
             var child_inner_w = iw
             if st.overflow_auto_y and content_height_limit > 0:
@@ -2561,11 +2941,11 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     elif cst.margin_l_auto:
                         auto_offset = free
             val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
-            val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
-                styles_with_height(styles, c, child_height_px)
+            val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
+                style_with_height(cst, child_height_px)
             else:
-                styles
-            val child = layout(nodes, child_styles, child_index, c, ix + cml + auto_offset, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                cst
+            val child = layout_with_style(nodes, styles, child_index, c, ix + cml + auto_offset, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
@@ -2574,12 +2954,45 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
             cy = cy + child.height
-            prev_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            val resolved_cst_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
+            # border, padding, height, or content collapses its own top and
+            # bottom margins into ONE margin that then collapses with the
+            # adjacent siblings'. Without this, every blank markdown line in
+            # the office WYSIWYG preview (an empty <p> with 1em margins)
+            # pushed later blocks ~20px below where Chromium/WebKitGTK put
+            # them (three-host office capture diff, 2026-08-19).
+            # child.height <= 1: an empty block is floored to 1px by the
+            # min-size clamp, so 0 and 1 both mean "no content"; a real 1px
+            # box declares height:1px and is excluded by height_px == 0.
+            val self_collapsing = child.height <= 1 and
+                nodes[c].tag != "#text" and
+                cst.border_t == 0 and cst.border_b == 0 and
+                cst.pad_t == 0 and cst.pad_b == 0 and
+                cst.height_px == 0 and cst.min_height_px == 0
+            if self_collapsing:
+                # Pull back the top-margin advance and carry the collapsed
+                # (prev_bottom, own top, own bottom) margin to the next sibling.
+                cy = cy - child_top_advance - child.height
+                out_by[c] = cy
+                prev_margin_b = collapse_margins_signed(
+                    prev_margin_b_before_child,
+                    collapse_margins_signed(resolved_cst_margin_t, resolved_cst_margin_b))
+            else:
+                prev_margin_b = resolved_cst_margin_b
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
         if in_inline_run:
-            cy = cy + inline_line_h
+            val aligned = align_inline_line_baselines(
+                child_index, st, inline_baseline_nodes,
+                inline_baseline_margin_ts, inline_baseline_margin_bs,
+                styles, cy,
+                inline_line_h, out_bx, out_by, out_bh
+            )
+            out_bx = aligned.bx
+            out_by = aligned.by
+            cy = cy + aligned.height
         cy = cy + prev_margin_b
     var h = (cy - y) + st.pad_b + st.border_b
     val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y

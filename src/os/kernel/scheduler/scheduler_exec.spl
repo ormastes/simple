@@ -12,7 +12,7 @@
 
 use os.kernel.types.task_types.{
     TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
-    UserProcessImage, AddressSpace,
+    UserLoadSegment, UserProcessImage, AddressSpace,
     SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
     SchedulerTopology, SchedulerTraceEvent,
     default_task_schedule, default_task_isolation,
@@ -21,12 +21,28 @@ use os.kernel.types.task_types.{
     user_process_image_file_bytes, user_process_image_initial_sp,
     user_process_image_initial_stack_bytes
 }
+use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
+use os.kernel.memory.vmm_address_space.{stage_user_address_space_scalars, staged_user_address_space_root, staged_user_address_space_id}
 use os.kernel.memory.vmm.{vmm_cow_clone_pages}
 use os.kernel.loader.segment_mapper.{verify_direct_load_entry}
+use os.kernel.loader.process_image.{
+    stage_user_process_image_for_scheduler,
+    staged_process_path, staged_process_entry,
+    staged_process_stack_top, staged_process_stack_size,
+    staged_process_argv, staged_process_envp,
+    staged_process_segments, staged_process_segment_count,
+    staged_process_segment_virt_addr, staged_process_segment_mem_size,
+    staged_process_segment_file_size, staged_process_segment_flags,
+    staged_process_segment_align, staged_process_segment_data,
+    staged_process_file_bytes, staged_process_initial_sp,
+    staged_process_initial_stack_bytes
+}
 use os.kernel.log.klog_api.{log_raw_println}
+
+extern fn serial_println(msg: text)
 use os.kernel.scheduler.scheduler_types.{
     TaskControlBlock,
     MAX_TASKS, PRIORITY_LEVELS, TIME_SLICE_TICKS, SCHED_RT_BASE_PRIORITY_UNSET,
@@ -44,6 +60,7 @@ use os.kernel.scheduler.scheduler_task_mgmt.{
 }
 
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.ipc.capability.{register_task_vmspace}
 
 @cfg(arm64)
 extern fn rt_arm64_record_user_handoff(entry: u64, sp: u64, ttbr0_root: u64)
@@ -133,7 +150,6 @@ pub fn sched_new_with_topology_impl(detected_topology: SchedulerTopology) -> Sch
     Scheduler(
         tasks: tasks,
         current: TaskId(id: 0),
-        current_slot: -1,
         current_by_cpu: current_by_cpu,
         preempt_pending_by_cpu: preempt_pending_by_cpu,
         ready_queues: queues,
@@ -154,6 +170,11 @@ pub fn sched_new_with_topology_impl(detected_topology: SchedulerTopology) -> Sch
         trace_count: 0,
         tick_count: 0,
         next_task_id: 1,
+        executable_adoption_state: SchedulerExecutableAdoptionOwnerStateV1.Idle,
+        executable_adoption_pid: 0u64,
+        executable_adoption_token_slot: -1,
+        executable_adoption_token_generation: 0u64,
+        executable_adoption_token_nonce: 0u64,
         green_execution_state: green_carrier_execution_state_new(detected_topology.cpu_count as i64),
         green_parallelism_state: green_carrier_parallelism_new(detected_topology.cpu_count as i64)
     )
@@ -219,7 +240,95 @@ pub fn sched_create_user_task_pid_impl(
     )
     var new_tasks = tasks
     new_tasks[slot] = tcb
+    register_task_vmspace(user_next_id.to_u32(), ProcessVmSpace(pml4: user_as.phys_root, id: user_as.id, vma_count: 0, areas: []))
     cap_init_task_record(id, true)
+    (user_next_id, new_tasks, slot)
+
+pub fn sched_create_user_task_from_bytes_pid_impl(
+    tasks: [TaskControlBlock?],
+    current: TaskId,
+    path: text,
+    bytes: [u8],
+    arch: Architecture,
+    priority: TaskPriority,
+    caps: CapabilitySet
+) -> (u64, [TaskControlBlock?], i32):
+    """Stage loader fields and reconstruct the aggregate inside the scheduler."""
+    serial_println("[scheduler-exec] user-stage call")
+    val staged = stage_user_process_image_for_scheduler(path, bytes, arch, [], [])
+    serial_println("[scheduler-exec] user-stage returned status={staged}")
+    if staged <= 0:
+        return (0, tasks, -1)
+    var local_segments: [UserLoadSegment] = []
+    var segment_idx = 0
+    val staged_count = staged_process_segment_count()
+    serial_println("[scheduler-exec] segment-rebuild begin count={staged_count}")
+    while segment_idx < staged_count:
+        local_segments.push(UserLoadSegment(
+            virt_addr: staged_process_segment_virt_addr(segment_idx),
+            mem_size: staged_process_segment_mem_size(segment_idx),
+            file_size: staged_process_segment_file_size(segment_idx),
+            flags: staged_process_segment_flags(segment_idx),
+            align: staged_process_segment_align(segment_idx),
+            data: staged_process_segment_data(segment_idx)
+        ))
+        segment_idx = segment_idx + 1
+    serial_println("[scheduler-exec] segment-rebuild complete count={local_segments.len()}")
+    val entry = staged_process_entry()
+    val stack_top = staged_process_stack_top()
+    val stack_size = staged_process_stack_size()
+    val user_sp = staged_process_initial_sp() & 0xFFFFFFFFFFFFFFF0
+    val initial_stack_bytes = staged_process_initial_stack_bytes()
+    val file_bytes = staged_process_file_bytes()
+    serial_println("[scheduler-exec] staged-fields complete entry={entry} sp={user_sp}")
+    if stack_top == 0 or stack_size == 0 or user_sp == 0:
+        return (0, tasks, -1)
+    if (initial_stack_bytes.len() as u64) > stack_size:
+        return (0, tasks, -1)
+    var slot = _find_empty_slot_in(tasks)
+    if slot < 0:
+        if current.id == 0:
+            slot = 0
+        else:
+            return (0, tasks, -1)
+    serial_println("[scheduler-exec] address-space create begin slot={slot}")
+    if stage_user_address_space_scalars() <= 0:
+        return (0, tasks, -1)
+    val user_as = AddressSpace(phys_root: staged_user_address_space_root(), id: staged_user_address_space_id())
+    serial_println("[scheduler-exec] address-space create complete root={user_as.phys_root}")
+    val map_result = if _address_space_can_map(user_as):
+        _map_user_process_image(user_as, local_segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+    else:
+        0
+    serial_println("[scheduler-exec] image-map complete result={map_result}")
+    if map_result < 0:
+        destroy_user_address_space(user_as)
+        return (0, tasks, -1)
+    val mapped_entry = if _scheduler_uses_direct_load_arena():
+        _scheduler_mapped_entry(user_as, file_bytes, entry)
+    else:
+        entry
+    if mapped_entry != entry:
+        if not verify_direct_load_entry(user_as, file_bytes, entry):
+            destroy_user_address_space(user_as)
+            return (0, tasks, -1)
+    val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
+    val user_next_id = scheduler_next_task_id_take()
+    val id = TaskId(id: user_next_id)
+    val tcb = TaskControlBlock(
+        id: id, name: "user-{id.id}",
+        state: TaskState.Ready, priority: priority, is_user: true,
+        entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
+        address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
+        capabilities: caps, parent: Some(current),
+        schedule: default_task_schedule(priority),
+        isolation: default_task_isolation(user_as.id),
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
+    )
+    var new_tasks = tasks
+    new_tasks[slot] = tcb
+    cap_init_task_record(id, true)
+    serial_println("[scheduler-exec] task-install complete pid={user_next_id} slot={slot}")
     (user_next_id, new_tasks, slot)
 
 pub fn sched_create_bootstrap_user_task_pid_impl(
@@ -256,30 +365,21 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
             destroy_user_address_space(user_as)
             return (0, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        destroy_user_address_space(user_as)
-        return (0u64, tasks)
-    val identity = maybe_identity.unwrap()
-    val user_next_id = identity.task_id
+    val user_next_id = scheduler_next_task_id_take()
     val id = TaskId(id: user_next_id)
     val tcb = TaskControlBlock(
-        id: id, lifecycle_generation: identity.lifecycle_generation,
-        name: "bootstrap-user",
+        id: id, name: "bootstrap-user",
         state: TaskState.Ready, priority: priority, is_user: true,
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
         capabilities: caps, parent: nil,
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
-        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
-        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-        exec_generation: 1u64
+        assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
     )
     var new_tasks = tasks
     new_tasks[0] = tcb
+    register_task_vmspace(user_next_id.to_u32(), ProcessVmSpace(pml4: user_as.phys_root, id: user_as.id, vma_count: 0, areas: []))
     _record_exec_user_handoff(mapped_entry, user_sp, user_as.phys_root)
     cap_init_task_record(id, true)
     (user_next_id, new_tasks)
@@ -300,14 +400,10 @@ pub fn sched_clone_task_impl(
     if parent_tcb == nil:
         return (TaskId(id: 0), tasks, -1)
     val parent = parent_tcb
+    val child_id = TaskId(id: scheduler_next_task_id_take())
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:
         return (TaskId(id: 0), tasks, -1)
-    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
-    if maybe_identity == nil:
-        return (TaskId(id: 0u64), tasks, -1)
-    val identity = maybe_identity.unwrap()
-    val child_id = TaskId(id: identity.task_id)
     val child_as = if parent.address_space == 0 or parent.address_space == 1:
         parent.address_space
     else:
@@ -324,22 +420,17 @@ pub fn sched_clone_task_impl(
         user_ctx.rax = 0
         child_user_ctx = Some(user_ctx)
     val child = TaskControlBlock(
-        id: child_id, lifecycle_generation: identity.lifecycle_generation,
-        name: "{parent.name}:fork",
+        id: child_id, name: "{parent.name}:fork",
         state: TaskState.Ready, priority: parent.priority, is_user: parent.is_user,
         entry_point: parent.entry_point, context: child_ctx, user_context: child_user_ctx,
         address_space: child_as, kernel_stack: parent.kernel_stack, user_stack: parent.user_stack,
         capabilities: parent.capabilities, parent: Some(parent_id),
         schedule: parent.schedule, isolation: default_task_isolation(child_as_id),
-        assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
-        # Fork cannot alias an architecture owner's destruction authority.
-        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
-        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
-        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
-        exec_generation: 1u64
+        assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS
     )
     var new_tasks = tasks
     new_tasks[child_slot] = child
+    register_task_vmspace(child_id.id.to_u32(), ProcessVmSpace(pml4: child_as, id: child_as_id, vma_count: 0, areas: []))
     cap_init_task_record(child_id, true)
     (child_id, new_tasks, child_slot)
 
@@ -365,9 +456,6 @@ pub fn sched_exec_image_impl(
         case _: false
     if is_zombie:
         return (-22, tasks)
-    if old_task.exec_generation == 0u64 or
-        old_task.exec_generation == 0xffffffffffffffffu64:
-        return (-75, tasks)
     val entry = user_process_image_entry(image)
     val stack_top = user_process_image_stack_top(image)
     val stack_size = user_process_image_stack_size(image)
@@ -393,14 +481,11 @@ pub fn sched_exec_image_impl(
             destroy_user_address_space(new_as)
             return (-12, tasks)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
-    _ = server_data_launch_grant_revoke_task_lifecycle_v1(
-        old_task.id.id, old_task.lifecycle_generation)
     sched_release_task_address_space(old_task)
     var new_isolation = old_task.isolation
     new_isolation.address_space_id = new_as.id
     new_isolation.capability_generation = new_isolation.capability_generation + 1
     var task = old_task
-    task.lifecycle_generation = 0u64
     task.is_user = true
     task.entry_point = mapped_entry
     task.context = user_ctx
@@ -410,8 +495,8 @@ pub fn sched_exec_image_impl(
     task.isolation = new_isolation
     task.exit_code = 0
     task.ticks_remaining = TIME_SLICE_TICKS
-    task.exec_generation = old_task.exec_generation + 1u64
     var new_tasks = tasks
     new_tasks[slot] = task
+    register_task_vmspace(task.id.id.to_u32(), ProcessVmSpace(pml4: new_as.phys_root, id: new_as.id, vma_count: 0, areas: []))
     _record_exec_user_handoff(mapped_entry, user_sp, new_as.phys_root)
     (0, new_tasks)

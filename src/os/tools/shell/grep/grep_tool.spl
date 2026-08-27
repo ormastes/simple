@@ -3,29 +3,98 @@
 
 use os.apps.terminal.terminal.{Terminal}
 use os.services.vfs.vfs.{VfsManager}
-use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+use os.tools.shell.grep.grep_artifact_contract.{
+    TEXT_TOOL_MAX_FILES_V1, TEXT_TOOL_MAX_FILE_BYTES_V1,
+    TEXT_TOOL_READ_CHUNK_BYTES_V1
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+fn _grep_write_matching_lines(
+    bytes: [u8],
+    pattern: text,
+    filename: text,
+    terminal: Terminal
+) -> bool:
+    """Scan disjoint line slices once; avoid retained-prefix string copies."""
+    var found = false
+    var line_number: i64 = 1
+    var line_start: i64 = 0
+    var cursor: i64 = 0
+    while cursor <= bytes.len():
+        if cursor == bytes.len() and line_start == bytes.len():
+            break
+        var at_line_boundary = false
+        if cursor == bytes.len():
+            at_line_boundary = true
+        elif bytes[cursor] == 10u8:
+            at_line_boundary = true
+        if at_line_boundary:
+            var line_end = cursor
+            if line_end > line_start and bytes[line_end - 1] == 13u8:
+                line_end = line_end - 1
+            val line = bytes_to_string(bytes.slice(line_start, line_end))
+            if line.contains(pattern):
+                write_line(terminal, "{filename}:{line_number}:{line}")
+                found = true
+            line_start = cursor + 1
+            line_number = line_number + 1
+        cursor = cursor + 1
+    found
 
 fn tool_grep(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
     """Search for pattern in files."""
+    if args.len() == 1 and args[0] == "--version":
+        write_line(terminal, "grep (SimpleOS text tools) 1.0")
+        return 0
+    if args.len() == 1 and args[0] == "--help":
+        write_line(terminal, "usage: grep [--] PATTERN FILE...")
+        return 0
     if args.len() < 2:
-        write_error(terminal, "grep: usage: grep PATTERN FILE...")
-        return 1
-    val pattern = args[0]
+        write_error(terminal, "grep: missing PATTERN or FILE operand")
+        return 2
+    if args.len() > TEXT_TOOL_MAX_FILES_V1 + 2:
+        write_error(terminal, "grep: too many file operands")
+        return 2
+
+    var pattern_index: i64 = 0
+    if args[0] == "--":
+        pattern_index = 1
+    elif args[0].starts_with("-"):
+        write_error(terminal, "grep: unsupported option: {args[0]}")
+        return 2
+    if pattern_index + 1 >= args.len():
+        write_error(terminal, "grep: missing PATTERN or FILE operand")
+        return 2
+
+    val pattern = args[pattern_index]
     var found = false
-    var i = 1
+    var had_error = false
+    var file_count: i64 = 0
+    var i = pattern_index + 1
+    if vfs == nil:
+        write_error(terminal, "grep: no filesystem mounted")
+        return 2
     while i < args.len():
+        file_count = file_count + 1
+        if file_count > TEXT_TOOL_MAX_FILES_V1:
+            write_error(terminal, "grep: too many file operands")
+            return 2
         val path = resolve_path(cwd, args[i])
-        if vfs != nil:
-            val result = vfs.read_text(path)
-            match result:
-                case Ok(content):
-                    var line_num = 1
-                    for line in split_lines(content):
-                        if line.contains(pattern):
-                            write_line(terminal, "{args[i]}:{line_num}:{line}")
-                            found = true
-                        line_num = line_num + 1
-                case Err(err):
-                    write_error(terminal, "grep: {path}: {err}")
+        val result = vfs.read_bytes_bounded(
+            path, TEXT_TOOL_MAX_FILE_BYTES_V1, TEXT_TOOL_READ_CHUNK_BYTES_V1)
+        match result:
+            case Ok(bytes):
+                if _grep_write_matching_lines(bytes, pattern, args[i], terminal):
+                    found = true
+            case Err(err):
+                write_error(terminal, "grep: {path}: {err}")
+                had_error = true
         i = i + 1
-    return 0
+    if had_error:
+        return 2
+    if found:
+        return 0
+    1
+
+export tool_grep

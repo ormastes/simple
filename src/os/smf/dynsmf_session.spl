@@ -1,19 +1,18 @@
-use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen_admitted, smf_dlsym, smf_dlclose, smf_artifact_has_export, smf_artifact_has_exact_exports}
-use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
-use os.smf.aspect_pack_directory.{
-    AspectPackLookupRequest,
-    aspect_pack_directory_parse_from_outer_smf_bytes,
-    aspect_pack_directory_validate_against_manifest
-}
-use std.common.crypto.sha256.{sha256_u8_hex}
+use os.smf.smf_dynlib.{DynLoadRequest, DynLoadResult, smf_dlopen, smf_dlopen_bytes, smf_dlsym, smf_dlclose, smf_artifact_has_export}
+use os.smf.dynsmf_snapshot.{dynsmf_snapshot_capture, dynsmf_snapshot_request_error}
+use os.smf.dynsmf_types.{DynSmfArtifactStatus}
 
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_hash_text(s: text) -> i64
-
-val DYNSMF_FACET_REF_MAX_ISSUED: i64 = 16384
-val DYNSMF_FACET_TOKEN_MAX: i64 = 9223372036854775807
+class DynSmfManifestEntry:
+    id: text
+    path: text
+    source_module: text
+    artifact_kind: text
+    abi_version: text
+    default_autoload: bool
+    exports: [text]
 
 class DynSmfPolicy:
     disabled_all: bool
@@ -26,37 +25,6 @@ class DynSmfLoadedLibrary:
     generation: int
     status: text
     symbol_registry: text
-    path: text
-    abi_version: text
-    content_hash: text
-
-# Module-private dynamic facet capability. Logical catalogs never carry it,
-# callers cannot construct it, and its opaque token has meaning only through
-# the issuing session's private registry.
-struct DynSmfFacetRef:
-    token: text
-
-class DynSmfIssuedFacetRef:
-    facet_id: text
-    library_id: text
-    export_symbol: text
-    handle: int
-    generation: int
-    session_id: text
-    interface_abi_hash: text
-    path: text
-    abi_version: text
-    content_hash: text
-
-class DynSmfTrustedFacetBinding:
-    facet_id: text
-    library_id: text
-    export_symbol: text
-    interface_abi_hash: text
-    path: text
-    abi_version: text
-    pack_content_hash: text
-    artifact_content_hash: text
 
 class DynSmfEvidenceRow:
     library_id: text
@@ -77,13 +45,6 @@ class DynSmfSession:
     policy: DynSmfPolicy
     loaded: [DynSmfLoadedLibrary]
     evidence: [DynSmfEvidenceRow]
-    _next_facet_token: i64
-    _issued_facet_refs: Dict<text, DynSmfIssuedFacetRef>
-    _trusted_facet_bindings: [DynSmfTrustedFacetBinding]
-
-class DynSmfFacetLease:
-    session: DynSmfSession
-    facet_ref: DynSmfFacetRef?
 
 class DynSmfBuildPlan:
     library_id: text
@@ -94,16 +55,10 @@ class DynSmfBuildPlan:
     status: text
     reason: text
 
-class DynSmfArtifactStatus:
-    library_id: text
+class DynSmfArtifactSnapshot:
     path: text
-    ready: bool
-    reason: text
-    byte_count: int
-    magic_hex: text
-
-    me to_text() -> text:
-        return self.library_id + ":" + self.path + ":" + self.ready.to_text() + ":" + self.reason + ":bytes" + self.byte_count.to_text() + ":magic" + self.magic_hex
+    data: [u8]
+    file_present: bool
 
 fn dynsmf_default_manifest() -> [DynSmfManifestEntry]:
     [
@@ -119,7 +74,10 @@ fn dynsmf_default_manifest() -> [DynSmfManifestEntry]:
         # false for all five — they are invoked on demand, not startup libraries.
         DynSmfManifestEntry(id: "mcp_diag_tools", path: "build/dynsmf/mcp_diag_tools.smf", source_module: "app.mcp.main_lazy_diag_tools", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["format_new_diagnostics_block"]),
         DynSmfManifestEntry(id: "fmt_tool", path: "build/dynsmf/fmt_tool.smf", source_module: "compiler.tools.formatter", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"]),
-        DynSmfManifestEntry(id: "lint_tool", path: "build/dynsmf/lint_tool.smf", source_module: "compiler.tools.lint", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"]),
+        # lint_tool exports lint_main, not main: main.spl no longer re-exports
+        # a symbol literally named `main` (renamed 2026-08-01; see
+        # doc/08_tracking/bug/test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md).
+        DynSmfManifestEntry(id: "lint_tool", path: "build/dynsmf/lint_tool.smf", source_module: "compiler.tools.lint", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["lint_main"]),
         DynSmfManifestEntry(id: "fix_tool", path: "build/dynsmf/fix_tool.smf", source_module: "compiler.tools.fix", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"]),
         DynSmfManifestEntry(id: "todo_scan", path: "build/dynsmf/todo_scan.smf", source_module: "app.todo_scan", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["main"])
     ]
@@ -154,6 +112,16 @@ fn dynsmf_manifest_source_path(entry: DynSmfManifestEntry) -> text:
         return "src/app/ui.render/tui_widgets.spl"
     if entry.id == "ui_html":
         return "src/lib/common/ui/html_ui/dynsmf_entry.spl"
+    if entry.id == "mcp_diag_tools":
+        return "src/app/mcp/main_lazy_diag_tools.spl"
+    if entry.id == "fmt_tool":
+        return "src/compiler/90.tools/formatter/main.spl"
+    if entry.id == "lint_tool":
+        return "src/compiler/90.tools/lint/main.spl"
+    if entry.id == "fix_tool":
+        return "src/compiler/90.tools/fix/main.spl"
+    if entry.id == "todo_scan":
+        return "src/app/todo_scan/main.spl"
     ""
 
 fn dynsmf_build_plan(entry: DynSmfManifestEntry) -> DynSmfBuildPlan:
@@ -225,28 +193,161 @@ fn dynsmf_source_hash_stored(artifact_path: text) -> i64:
         return -1
     raw.trim().to_i64() ?? -1
 
+fn dynsmf_abi_path(artifact_path: text) -> text:
+    artifact_path + ".abi"
+
+fn dynsmf_abi_stored(artifact_path: text) -> text:
+    val sidecar = dynsmf_abi_path(artifact_path)
+    if not rt_file_exists(sidecar):
+        return ""
+    val raw = rt_file_read_text(sidecar) ?? ""
+    raw.trim()
+
+fn dynsmf_ifacehash_path(artifact_path: text) -> text:
+    artifact_path + ".ifacehash"
+
+# ponytail: heuristic line-level interface fingerprint — matches exported
+# signature lines only (pub fn/struct/class/enum, trait, export), trimmed and
+# hashed with the same primitive srchash uses (rt_hash_text). Good enough to
+# tell "impl body changed" from "exported interface changed" for dynSMF
+# staleness without pulling compiler internals into the os/smf layer. Upgrade
+# path: reuse the compiler's SHB interface-hash extractor (src/compiler/80.driver/)
+# once it is reachable from here.
+fn dynsmf_interface_line_is_exported(trimmed_line: text) -> bool:
+    trimmed_line.starts_with("pub fn") or trimmed_line.starts_with("pub struct") or
+        trimmed_line.starts_with("pub class") or trimmed_line.starts_with("pub enum") or
+        trimmed_line.starts_with("pub trait") or
+        trimmed_line.starts_with("trait") or trimmed_line.starts_with("export")
+
+fn dynsmf_interface_fingerprint(source_text: text) -> text:
+    var rows: [text] = []
+    val lines = source_text.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        val trimmed = lines[idx].trim()
+        if dynsmf_interface_line_is_exported(trimmed):
+            rows.push(trimmed)
+        idx = idx + 1
+    rows.join("\n")
+
+fn dynsmf_interface_hash_of_text(source_text: text) -> i64:
+    rt_hash_text(dynsmf_interface_fingerprint(source_text))
+
+fn dynsmf_interface_hash_current(source_path: text) -> i64:
+    val content = rt_file_read_text(source_path) ?? ""
+    dynsmf_interface_hash_of_text(content)
+
+fn dynsmf_interface_hash_stored(artifact_path: text) -> i64:
+    val sidecar = dynsmf_ifacehash_path(artifact_path)
+    if not rt_file_exists(sidecar):
+        return -1
+    val raw = rt_file_read_text(sidecar) ?? ""
+    if raw == "":
+        return -1
+    raw.trim().to_i64() ?? -1
+
+# Known size of the hollow stub currently emitted by `simple compile -o
+# *.smf` for ANY input (doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md):
+# valid `SMF\0` magic, a tiny code section, and a single `main` symbol, always
+# exactly this many bytes.
+val dynsmf_known_stub_byte_count: int = 219
+
+# ponytail: honesty floor applied to EVERY manifest entry, not only ones with
+# an empty `exports` list. Reason: the hollow stub already contains a literal
+# `main` symbol (see bug doc), so an entry whose required witness is exactly
+# ["main"] (fmt_tool, fix_tool, todo_scan today) would trivially "pass" a
+# name-only check against the very stub this feature exists to catch. The
+# size floor is therefore unconditional (ANDed with the name witness below,
+# not just a fallback for exports:[]) — a real artifact is expected to carry
+# more than a no-op stub's payload regardless of how many exports it lists.
+# Upgrade path: once the Rust emitter fix lands, replace this heuristic with
+# an exact real-payload check (e.g. a compile-receipt sidecar) that does not
+# depend on the current stub's specific byte count.
+fn dynsmf_artifact_size_exceeds_stub_floor(data: [u8]) -> bool:
+    data.len() > dynsmf_known_stub_byte_count
+
+fn dynsmf_artifact_witnesses_exports(entry: DynSmfManifestEntry, data: [u8]) -> bool:
+    if not dynsmf_artifact_size_exceeds_stub_floor(data):
+        return false
+    var idx = 0
+    while idx < entry.exports.len():
+        if not smf_artifact_has_export(data, entry.exports[idx]):
+            return false
+        idx = idx + 1
+    true
+
 fn dynsmf_artifact_status_with_hash(entry: DynSmfManifestEntry, file_present: bool, data: [u8], source_path: text) -> DynSmfArtifactStatus:
     val base = dynsmf_artifact_status_from_bytes(entry, file_present, data)
     if not base.ready:
         return base
+    # Stub-artifact honesty check runs right after the magic check and
+    # before the abi/hash sidecar checks below: a hollow artifact (no
+    # witnessed exports) is invalid regardless of how fresh its sidecars
+    # look. This is exactly today's real-world failure mode — the 219-byte
+    # stub passes magic validation and can carry freshly-written abi/srchash/
+    # ifacehash sidecars, yet executes nothing.
+    if not dynsmf_artifact_witnesses_exports(entry, data):
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stub_artifact", byte_count: base.byte_count, magic_hex: base.magic_hex)
+    # abi_version enforcement is fail-closed: a missing or mismatched `.abi`
+    # sidecar means the artifact must never be treated as loadable, even if
+    # the srchash/ifacehash sidecars still look fresh. It needs no source
+    # path, so it runs before the source-path guard below.
+    val stored_abi = dynsmf_abi_stored(entry.path)
+    if stored_abi == "" or stored_abi != entry.abi_version:
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "abi_mismatch", byte_count: base.byte_count, magic_hex: base.magic_hex)
     if source_path == "":
         return base
     val stored = dynsmf_source_hash_stored(entry.path)
     if stored == -1:
         return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
     val current = dynsmf_source_hash_current(source_path)
-    if current != stored:
+    if current == stored:
+        return base
+    # Whole-source hash moved. Use the interface-hash sidecar to tell an
+    # impl-only edit (module-only rebuild is sufficient) apart from an
+    # exported-interface edit (dependents need a rebuild too). When the
+    # ifacehash sidecar itself is absent we cannot make that distinction, so
+    # fall back to the original generic "stale_source" reason.
+    val stored_iface = dynsmf_interface_hash_stored(entry.path)
+    if stored_iface == -1:
         return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
-    base
+    val current_iface = dynsmf_interface_hash_current(source_path)
+    if current_iface == stored_iface:
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_impl", byte_count: base.byte_count, magic_hex: base.magic_hex)
+    DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_interface", byte_count: base.byte_count, magic_hex: base.magic_hex)
 
 fn dynsmf_artifact_status(entry: DynSmfManifestEntry) -> DynSmfArtifactStatus:
-    if entry.path == "":
-        return dynsmf_artifact_status_from_bytes(entry, false, [])
-    if not rt_file_exists(entry.path):
-        return dynsmf_artifact_status_from_bytes(entry, false, [])
-    val data = rt_file_read_bytes(entry.path) ?? []
-    val source_path = dynsmf_manifest_source_path(entry)
-    dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+    dynsmf_artifact_snapshot_status(entry, dynsmf_artifact_snapshot(entry))
+
+fn dynsmf_artifact_snapshot_from_bytes(entry: DynSmfManifestEntry, file_present: bool, data: [u8]) -> DynSmfArtifactSnapshot:
+    DynSmfArtifactSnapshot(path: entry.path, data: data, file_present: file_present)
+
+fn dynsmf_artifact_snapshot(entry: DynSmfManifestEntry) -> DynSmfArtifactSnapshot:
+    val captured = dynsmf_snapshot_capture(entry.path)
+    dynsmf_artifact_snapshot_from_bytes(entry, captured.1, captured.0)
+
+fn dynsmf_artifact_snapshot_status(entry: DynSmfManifestEntry, snapshot: DynSmfArtifactSnapshot) -> DynSmfArtifactStatus:
+    if snapshot.path != entry.path:
+        return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "snapshot_path_mismatch", byte_count: snapshot.data.len(), magic_hex: dynsmf_artifact_magic_hex(snapshot.data))
+    dynsmf_artifact_status_with_hash(entry, snapshot.file_present, snapshot.data, dynsmf_manifest_source_path(entry))
+
+fn dynsmf_open_snapshot(entry: DynSmfManifestEntry, req: DynLoadRequest, next_handle: int, snapshot: DynSmfArtifactSnapshot) -> DynLoadResult:
+    # Validate the captured bytes exactly once, then logically open that same
+    # capture. No caller-supplied `ready` receipt can bypass validation.
+    val request_error = dynsmf_snapshot_request_error(entry.path, req.search_path, snapshot.path)
+    if request_error != "":
+        return DynLoadResult.fail(req.library_name, request_error)
+    val status = dynsmf_artifact_snapshot_status(entry, snapshot)
+    if not status.ready:
+        return DynLoadResult.fail(req.library_name, "artifact_" + status.reason)
+    smf_dlopen_bytes(req, next_handle, snapshot.data)
+
+fn dynsmf_open_captured_bytes(entry: DynSmfManifestEntry, req: DynLoadRequest, next_handle: int, file_present: bool, data: [u8]) -> DynLoadResult:
+    dynsmf_open_snapshot(entry, req, next_handle, dynsmf_artifact_snapshot_from_bytes(entry, file_present, data))
+
+fn dynsmf_checked_open_entry(entry: DynSmfManifestEntry, req: DynLoadRequest, next_handle: int) -> DynLoadResult:
+    val snapshot = dynsmf_artifact_snapshot(entry)
+    dynsmf_open_snapshot(entry, req, next_handle, snapshot)
 
 fn dynsmf_artifacts_ready(manifest: [DynSmfManifestEntry]) -> bool:
     var idx = 0
@@ -300,7 +401,20 @@ fn dynsmf_session_request_background_compiles(session: DynSmfSession, manifest: 
     dynsmf_session_request_background_compiles_from_statuses(session, manifest, [], true, true)
 
 fn dynsmf_session_queue_missing_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
-    dynsmf_session_request_background_compiles_from_statuses(session, manifest, [], false, false)
+    # Startup only pre-warms entries that startup itself will autoload. On-demand
+    # entries (default_autoload:false, e.g. toolchain entries invoked lazily by
+    # their own callers) are excluded here so plain startup evidence/behavior does
+    # not regress when new on-demand entries are added to the manifest. They still
+    # get their own build plan (dynsmf_build_plan/dynsmf_build_plans) for an
+    # explicit/manual compile; this function just does not auto-queue a background
+    # compile for them on every ordinary startup.
+    var autoload_only: [DynSmfManifestEntry] = []
+    var idx = 0
+    while idx < manifest.len():
+        if manifest[idx].default_autoload:
+            autoload_only.push(manifest[idx])
+        idx = idx + 1
+    dynsmf_session_request_background_compiles_from_statuses(session, autoload_only, [], false, false)
 
 fn dynsmf_policy_default() -> DynSmfPolicy:
     DynSmfPolicy(disabled_all: false, disabled_ids: [], source: "default")
@@ -339,32 +453,8 @@ fn dynsmf_policy_from_args_env(args: [text], env_dynsmf: text, env_disable: text
         arg_idx = arg_idx + 1
     DynSmfPolicy(disabled_all: disabled_all, disabled_ids: disabled_ids, source: source)
 
-fn _dynsmf_revoke_library_facet_refs(session: DynSmfSession, library_id: text) -> DynSmfSession:
-    var out = session
-    var retained: Dict<text, DynSmfIssuedFacetRef> = {}
-    for token in out._issued_facet_refs.keys():
-        val issued = out._issued_facet_refs[token]
-        if issued.library_id != library_id:
-            retained[token] = issued
-    var trusted: [DynSmfTrustedFacetBinding] = []
-    var trusted_index = 0
-    while trusted_index < out._trusted_facet_bindings.len():
-        val binding = out._trusted_facet_bindings[trusted_index]
-        if binding.library_id != library_id:
-            trusted.push(binding)
-        trusted_index = trusted_index + 1
-    out._issued_facet_refs = retained
-    out._trusted_facet_bindings = trusted
-    out
-
 fn dynsmf_session_new(session_id: text, policy: DynSmfPolicy) -> DynSmfSession:
-    val issued_facet_refs: Dict<text, DynSmfIssuedFacetRef> = {}
-    DynSmfSession(session_id: session_id, generation: 1, next_handle: 100, policy: policy, loaded: [], evidence: [], _next_facet_token: 1, _issued_facet_refs: issued_facet_refs, _trusted_facet_bindings: [])
-
-fn _dynsmf_facet_token_key(session_id: text, sequence: i64) -> text:
-    # Length-prefixing makes the session/sequence boundary unambiguous. This
-    # is an opaque module-private identity, not a cryptographic random value.
-    session_id.len().to_text() + ":" + session_id + ":" + sequence.to_text()
+    DynSmfSession(session_id: session_id, generation: 1, next_handle: 100, policy: policy, loaded: [], evidence: [])
 
 fn dynsmf_id_disabled(policy: DynSmfPolicy, id: text) -> bool:
     if policy.disabled_all:
@@ -397,148 +487,42 @@ fn dynsmf_session_add_evidence(session: DynSmfSession, row: DynSmfEvidenceRow) -
     out.evidence.push(row)
     out
 
-fn dynsmf_snapshot_artifact_bytes(data: [u8]) -> [u8]:
-    var snapshot: [u8] = []
-    for byte in data:
-        snapshot.push(byte)
-    snapshot
-
-fn dynsmf_session_load_without_admission(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text) -> DynSmfSession:
-    """Fail-closed compatibility path for callers that do not own exact bytes.
-
-    Path validation cannot authorize executable mapping: reopening a path after
-    validation would race the admitted object. Startup owners must retain their
-    one digest-verified byte image and call `dynsmf_session_load_admitted`.
-    """
+fn dynsmf_session_load_impl(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text, require_artifact: bool) -> DynSmfSession:
     var out = session
     val entry_opt = dynsmf_manifest_find(manifest, id)
     if not entry_opt:
         return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "unknown_library"))
     if dynsmf_id_disabled(out.policy, id):
         return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "skip", policy_source: out.policy.source, status: "skipped", handle: 0, generation: out.generation, reason: "disabled"))
+    val entry = entry_opt!
     var loaded_idx = 0
     while loaded_idx < out.loaded.len():
         val existing = out.loaded[loaded_idx]
         if existing.id == id and existing.status == "loaded":
             return out
         loaded_idx = loaded_idx + 1
-    dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "admitted_artifact_bytes_required"))
+    val request = DynLoadRequest.lazy(entry.id, entry.path, out.session_id)
+    val load = if require_artifact: dynsmf_checked_open_entry(entry, request, out.next_handle) else: smf_dlopen(request, out.next_handle)
+    if not load.success:
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: load.error_msg))
+    val handle = load.handle_id
+    var action = "load"
+    loaded_idx = 0
+    while loaded_idx < out.loaded.len():
+        val existing = out.loaded[loaded_idx]
+        if existing.id == id and existing.status == "unloaded":
+            action = "reload"
+        loaded_idx = loaded_idx + 1
+    out.next_handle = out.next_handle + 1
+    out.loaded.push(DynSmfLoadedLibrary(id: id, handle: handle, generation: out.generation, status: "loaded", symbol_registry: dynsmf_symbol_registry(entry, handle)))
+    out.evidence.push(DynSmfEvidenceRow(library_id: id, action: action, policy_source: out.policy.source, status: "loaded", handle: handle, generation: out.generation, reason: "smf_dlopen"))
+    out
 
 fn dynsmf_session_load(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text) -> DynSmfSession:
-    dynsmf_session_load_without_admission(session, manifest, id)
+    dynsmf_session_load_impl(session, manifest, id, false)
 
 fn dynsmf_session_load_checked(session: DynSmfSession, manifest: [DynSmfManifestEntry], id: text) -> DynSmfSession:
-    dynsmf_session_load_without_admission(session, manifest, id)
-
-fn dynsmf_session_load_admitted(
-    session: DynSmfSession,
-    id: text,
-    trusted_request: AspectPackLookupRequest,
-    artifact_bytes: [u8]
-) -> DynSmfSession:
-    """Load the exact bytes admitted by an explicit trusted aspect request."""
-    var out = session
-    val artifact = trusted_request.artifact
-    val manifest = trusted_request.manifest
-    val exact_bytes = dynsmf_snapshot_artifact_bytes(artifact_bytes)
-    if dynsmf_id_disabled(out.policy, id):
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "skip", policy_source: out.policy.source, status: "skipped", handle: 0, generation: out.generation, reason: "disabled"))
-    if id == "" or artifact.library_id != id or artifact.path == "" or artifact.content_hash == "":
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "artifact_identity_invalid"))
-    if sha256_u8_hex(exact_bytes) != artifact.content_hash:
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "artifact_content_hash_mismatch"))
-    val parsed_outer = aspect_pack_directory_parse_from_outer_smf_bytes(exact_bytes)
-    if not parsed_outer.ok:
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "artifact_aspect_pack_invalid:" + parsed_outer.error_code))
-    val trusted_admission = aspect_pack_directory_validate_against_manifest(
-        parsed_outer.directory,
-        trusted_request.catalog,
-        trusted_request.manifest,
-        trusted_request.artifact,
-        trusted_request.export_contracts
-    )
-    if not trusted_admission.ok:
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "trusted_aspect_admission_invalid"))
-    var manifest_matches = 0
-    var manifest_path = ""
-    var manifest_abi = ""
-    var manifest_exports: [text] = []
-    var manifest_index = 0
-    while manifest_index < manifest.len():
-        if manifest[manifest_index].id == id:
-            manifest_matches = manifest_matches + 1
-            manifest_path = manifest[manifest_index].path
-            manifest_abi = manifest[manifest_index].abi_version
-            manifest_exports = manifest[manifest_index].exports
-        manifest_index = manifest_index + 1
-    if manifest_matches != 1 or manifest_path != artifact.path or manifest_abi == "":
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "manifest_artifact_identity_mismatch"))
-    if not smf_artifact_has_exact_exports(exact_bytes, manifest_exports):
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "artifact_manifest_export_set_mismatch"))
-    var trusted_matches = 0
-    var trusted_index = 0
-    while trusted_index < trusted_admission.facets.len():
-        if trusted_admission.facets[trusted_index].library_id == id:
-            trusted_matches = trusted_matches + 1
-        trusted_index = trusted_index + 1
-    if trusted_matches == 0:
-        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "trusted_aspect_admission_empty"))
-    var already_loaded = false
-    var loaded_index = 0
-    while loaded_index < out.loaded.len():
-        val existing = out.loaded[loaded_index]
-        if existing.id == id and existing.status == "loaded":
-            if existing.path == artifact.path and existing.abi_version == manifest_abi and existing.content_hash == artifact.content_hash:
-                already_loaded = true
-            else:
-                return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: existing.handle, generation: existing.generation, reason: "different_artifact_already_loaded"))
-        loaded_index = loaded_index + 1
-    if not already_loaded:
-        val request = DynLoadRequest.lazy(id, artifact.path, out.session_id)
-        val load = smf_dlopen_admitted(request, out.next_handle, exact_bytes)
-        if not load.success:
-            return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: id, action: "load_admitted", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: load.error_msg))
-        var action = "load"
-        loaded_index = 0
-        while loaded_index < out.loaded.len():
-            val existing = out.loaded[loaded_index]
-            if existing.id == id and existing.status == "unloaded":
-                action = "reload"
-            loaded_index = loaded_index + 1
-        if action == "reload":
-            out = _dynsmf_revoke_library_facet_refs(out, id)
-        val handle = load.handle_id
-        out.next_handle = out.next_handle + 1
-        out.loaded.push(DynSmfLoadedLibrary(id: id, handle: handle, generation: out.generation, status: "loaded", symbol_registry: "", path: artifact.path, abi_version: manifest_abi, content_hash: artifact.content_hash))
-        out.evidence.push(DynSmfEvidenceRow(library_id: id, action: action, policy_source: out.policy.source, status: "loaded", handle: handle, generation: out.generation, reason: "smf_dlopen_admitted"))
-    trusted_index = 0
-    while trusted_index < trusted_admission.facets.len():
-        val trusted = trusted_admission.facets[trusted_index]
-        if trusted.library_id == id:
-            var duplicate = false
-            var existing_index = 0
-            while existing_index < out._trusted_facet_bindings.len():
-                val existing = out._trusted_facet_bindings[existing_index]
-                if (existing.facet_id == trusted.facet_id and existing.library_id == trusted.library_id and
-                    existing.export_symbol == trusted.export_symbol and existing.interface_abi_hash == trusted.interface_abi_hash and
-                    existing.path == artifact.path and existing.abi_version == trusted.library_abi_version and
-                    existing.pack_content_hash == trusted.pack_content_hash and
-                    existing.artifact_content_hash == artifact.content_hash):
-                    duplicate = true
-                existing_index = existing_index + 1
-            if not duplicate:
-                out._trusted_facet_bindings.push(DynSmfTrustedFacetBinding(
-                    facet_id: trusted.facet_id,
-                    library_id: trusted.library_id,
-                    export_symbol: trusted.export_symbol,
-                    interface_abi_hash: trusted.interface_abi_hash,
-                    path: artifact.path,
-                    abi_version: trusted.library_abi_version,
-                    pack_content_hash: trusted.pack_content_hash,
-                    artifact_content_hash: artifact.content_hash
-                ))
-        trusted_index = trusted_index + 1
-    out
+    dynsmf_session_load_impl(session, manifest, id, true)
 
 fn dynsmf_session_autoload(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
     var out = session
@@ -568,145 +552,6 @@ fn dynsmf_session_find_loaded(session: DynSmfSession, id: text) -> DynSmfLoadedL
         idx = idx + 1
     nil
 
-fn _dynsmf_facet_lease_none(session: DynSmfSession) -> DynSmfFacetLease:
-    DynSmfFacetLease(session: session, facet_ref: nil)
-
-fn dynsmf_session_lookup_facet(session: DynSmfSession, request: AspectPackLookupRequest) -> DynSmfFacetLease:
-    """Resolve one unambiguous dynamic facet through this session.
-
-    The catalog supplies the explicit export symbol.  Lookup never derives a
-    symbol from the facet id. The returned lease carries the updated session
-    whose private registry owns the opaque reference.
-    """
-    val facet_id = request.facet_id
-    # A caller-supplied nonempty session identity is the namespace for this
-    # session-owned monotonic allocator. Empty identities cannot issue refs.
-    if session.session_id == "" or facet_id == "":
-        return _dynsmf_facet_lease_none(session)
-    val admission = aspect_pack_directory_validate_against_manifest(
-        request.directory,
-        request.catalog,
-        request.manifest,
-        request.artifact,
-        request.export_contracts
-    )
-    if not admission.ok:
-        return _dynsmf_facet_lease_none(session)
-    var facet_matches = 0
-    var admitted_index = 0
-    var library_id = ""
-    var export_symbol = ""
-    var interface_abi_hash = ""
-    var pack_content_hash = ""
-    var library_abi_version = ""
-    while admitted_index < admission.facets.len():
-        val entry = admission.facets[admitted_index]
-        if entry.facet_id == facet_id:
-            facet_matches = facet_matches + 1
-            library_id = entry.library_id
-            export_symbol = entry.export_symbol
-            interface_abi_hash = entry.interface_abi_hash
-            pack_content_hash = entry.pack_content_hash
-            library_abi_version = entry.library_abi_version
-        admitted_index = admitted_index + 1
-    if facet_matches != 1:
-        return _dynsmf_facet_lease_none(session)
-    var trusted_matches = 0
-    var trusted_index = 0
-    while trusted_index < session._trusted_facet_bindings.len():
-        val trusted = session._trusted_facet_bindings[trusted_index]
-        if (trusted.facet_id == facet_id and trusted.library_id == library_id and
-            trusted.export_symbol == export_symbol and trusted.interface_abi_hash == interface_abi_hash and
-            trusted.path == request.artifact.path and trusted.abi_version == library_abi_version and
-            trusted.pack_content_hash == pack_content_hash and
-            trusted.artifact_content_hash == request.artifact.content_hash):
-            trusted_matches = trusted_matches + 1
-        trusted_index = trusted_index + 1
-    if trusted_matches != 1:
-        return _dynsmf_facet_lease_none(session)
-
-    var loaded_matches = 0
-    var handle = 0
-    var generation = 0
-    var registry = ""
-    var loaded_path = ""
-    var loaded_abi = ""
-    var loaded_hash = ""
-    var loaded_index = 0
-    while loaded_index < session.loaded.len():
-        val library = session.loaded[loaded_index]
-        if (library.id == library_id and library.status == "loaded" and
-            library.path == request.artifact.path and
-            library.abi_version == library_abi_version and
-            library.content_hash == request.artifact.content_hash):
-            loaded_matches = loaded_matches + 1
-            handle = library.handle
-            generation = library.generation
-            registry = library.symbol_registry
-            loaded_path = library.path
-            loaded_abi = library.abi_version
-            loaded_hash = library.content_hash
-        loaded_index = loaded_index + 1
-    if loaded_matches != 1:
-        return _dynsmf_facet_lease_none(session)
-    val symbol = smf_dlsym(handle, export_symbol, registry)
-    if not symbol.found:
-        return _dynsmf_facet_lease_none(session)
-
-    if session._issued_facet_refs.keys().len() >= DYNSMF_FACET_REF_MAX_ISSUED:
-        return _dynsmf_facet_lease_none(session)
-    if session._next_facet_token <= 0 or session._next_facet_token > DYNSMF_FACET_TOKEN_MAX:
-        return _dynsmf_facet_lease_none(session)
-    var out = session
-    val sequence = out._next_facet_token
-    val token = _dynsmf_facet_token_key(out.session_id, sequence)
-    if out._issued_facet_refs.contains_key(token):
-        return _dynsmf_facet_lease_none(session)
-    if sequence == DYNSMF_FACET_TOKEN_MAX:
-        out._next_facet_token = 0
-    else:
-        out._next_facet_token = sequence + 1
-    out._issued_facet_refs[token] = DynSmfIssuedFacetRef(
-        facet_id: facet_id,
-        library_id: library_id,
-        export_symbol: export_symbol,
-        handle: handle,
-        generation: generation,
-        session_id: session.session_id,
-        interface_abi_hash: interface_abi_hash,
-        path: loaded_path,
-        abi_version: loaded_abi,
-        content_hash: loaded_hash
-    )
-    DynSmfFacetLease(session: out, facet_ref: DynSmfFacetRef(token: token))
-
-fn dynsmf_session_validate_facet_ref(session: DynSmfSession, facet_ref: DynSmfFacetRef) -> bool:
-    """True only while the exact registry-issued library generation is live."""
-    if facet_ref.token == "" or not session._issued_facet_refs.contains_key(facet_ref.token):
-        return false
-    val issued = session._issued_facet_refs[facet_ref.token]
-    if issued.session_id != session.session_id:
-        return false
-    if (issued.facet_id == "" or issued.library_id == "" or
-        issued.export_symbol == "" or issued.interface_abi_hash == "" or
-        issued.path == "" or issued.abi_version == "" or issued.content_hash == ""):
-        return false
-    if issued.handle <= 0 or issued.generation <= 0:
-        return false
-    var matches = 0
-    var index = 0
-    while index < session.loaded.len():
-        val library = session.loaded[index]
-        if (library.id == issued.library_id and library.status == "loaded" and
-            library.handle == issued.handle and library.generation == issued.generation and
-            library.path == issued.path and library.abi_version == issued.abi_version and
-            library.content_hash == issued.content_hash):
-            val symbol = smf_dlsym(library.handle, issued.export_symbol, library.symbol_registry)
-            if symbol.found:
-                matches = matches + 1
-        index = index + 1
-    matches == 1
-
 fn dynsmf_session_symbol(session: DynSmfSession, id: text, symbol: text) -> DynSmfEvidenceRow:
     var idx = 0
     while idx < session.loaded.len():
@@ -735,7 +580,7 @@ fn dynsmf_session_unload(session: DynSmfSession, id: text) -> DynSmfSession:
                 val close = smf_dlclose(lib.handle)
                 if close.success:
                     found = true
-                    loaded.push(DynSmfLoadedLibrary(id: lib.id, handle: lib.handle, generation: lib.generation, status: "unloaded", symbol_registry: "", path: lib.path, abi_version: lib.abi_version, content_hash: lib.content_hash))
+                    loaded.push(DynSmfLoadedLibrary(id: lib.id, handle: lib.handle, generation: lib.generation, status: "unloaded", symbol_registry: ""))
                     out.generation = out.generation + 1
                     out.evidence.push(DynSmfEvidenceRow(library_id: id, action: "unload", policy_source: out.policy.source, status: "unloaded", handle: lib.handle, generation: out.generation, reason: "smf_dlclose"))
                 else:
@@ -750,11 +595,186 @@ fn dynsmf_session_unload(session: DynSmfSession, id: text) -> DynSmfSession:
         out.evidence.push(DynSmfEvidenceRow(library_id: id, action: "unload", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: "not_loaded"))
     else:
         out.loaded = loaded
-        out = _dynsmf_revoke_library_facet_refs(out, id)
     out
 
+# --- Phase B: config-driven dynload settings (presence/placement/activation) ---
+# Three independent axes per research doc §5.1/§5.3/§5.4, expressed as
+# val-constant text dispatch (not payload enums). The settings layer is an
+# OVERLAY keyed by library_id so the existing DynSmfManifestEntry constructor
+# contract (and every existing spec that builds entries) stays unchanged.
+# Back-compat mapping: default_autoload:false == presence=auto +
+# activation=first_use; default_autoload:true == presence=auto +
+# activation=startup. Placement defaults to auto either way.
+
+fn dynsmf_presence_off() -> text:
+    "off"
+fn dynsmf_presence_auto() -> text:
+    "auto"
+fn dynsmf_presence_on() -> text:
+    "on"
+
+fn dynsmf_placement_auto() -> text:
+    "auto"
+fn dynsmf_placement_static() -> text:
+    "static"
+fn dynsmf_placement_dynamic() -> text:
+    "dynamic"
+
+fn dynsmf_activation_startup() -> text:
+    "startup"
+fn dynsmf_activation_command() -> text:
+    "command"
+fn dynsmf_activation_first_use() -> text:
+    "first_use"
+fn dynsmf_activation_manual() -> text:
+    "manual"
+
+fn dynsmf_outcome_absent() -> text:
+    "absent"
+fn dynsmf_outcome_static() -> text:
+    "static"
+fn dynsmf_outcome_dynamic() -> text:
+    "dynamic"
+fn dynsmf_outcome_error() -> text:
+    "error"
+
+class DynSmfDynloadSetting:
+    library_id: text
+    presence: text
+    placement: text
+    activation: text
+
+class DynSmfDynloadParse:
+    ok: bool
+    reason: text
+    setting: DynSmfDynloadSetting
+
+class DynSmfDynloadDecision:
+    library_id: text
+    outcome: text
+    activation: text
+    reason: text
+
+    me to_text() -> text:
+        return self.library_id + ":" + self.outcome + ":" + self.activation + ":" + self.reason
+
+fn dynsmf_presence_valid(v: text) -> bool:
+    v == dynsmf_presence_off() or v == dynsmf_presence_auto() or v == dynsmf_presence_on()
+
+fn dynsmf_placement_valid(v: text) -> bool:
+    v == dynsmf_placement_auto() or v == dynsmf_placement_static() or v == dynsmf_placement_dynamic()
+
+fn dynsmf_activation_valid(v: text) -> bool:
+    v == dynsmf_activation_startup() or v == dynsmf_activation_command() or
+        v == dynsmf_activation_first_use() or v == dynsmf_activation_manual()
+
+fn dynsmf_dynload_setting_default(entry: DynSmfManifestEntry) -> DynSmfDynloadSetting:
+    val activation = if entry.default_autoload: dynsmf_activation_startup() else: dynsmf_activation_first_use()
+    DynSmfDynloadSetting(library_id: entry.id, presence: dynsmf_presence_auto(), placement: dynsmf_placement_auto(), activation: activation)
+
+# Parse a comma-separated `key=value` axis spec, e.g.
+# "presence=off,placement=dynamic,activation=manual". Omitted axes keep the
+# entry's back-compat defaults. Unknown keys and unknown values are hard
+# parse failures (fail closed, no silent fallback to a default axis value).
+fn dynsmf_dynload_setting_parse(entry: DynSmfManifestEntry, spec: text) -> DynSmfDynloadParse:
+    var setting = dynsmf_dynload_setting_default(entry)
+    val trimmed_spec = spec.trim()
+    if trimmed_spec == "":
+        return DynSmfDynloadParse(ok: true, reason: "defaults", setting: setting)
+    val parts = trimmed_spec.split(",")
+    var idx = 0
+    while idx < parts.len():
+        val part = parts[idx].trim()
+        if part != "":
+            val kv = part.split("=")
+            if kv.len() != 2:
+                return DynSmfDynloadParse(ok: false, reason: "malformed_axis:" + part, setting: setting)
+            val key = kv[0].trim()
+            val value = kv[1].trim()
+            if key == "presence":
+                if not dynsmf_presence_valid(value):
+                    return DynSmfDynloadParse(ok: false, reason: "unknown_presence:" + value, setting: setting)
+                setting.presence = value
+            elif key == "placement":
+                if not dynsmf_placement_valid(value):
+                    return DynSmfDynloadParse(ok: false, reason: "unknown_placement:" + value, setting: setting)
+                setting.placement = value
+            elif key == "activation":
+                if not dynsmf_activation_valid(value):
+                    return DynSmfDynloadParse(ok: false, reason: "unknown_activation:" + value, setting: setting)
+                setting.activation = value
+            else:
+                return DynSmfDynloadParse(ok: false, reason: "unknown_axis:" + key, setting: setting)
+        idx = idx + 1
+    DynSmfDynloadParse(ok: true, reason: "parsed", setting: setting)
+
+fn dynsmf_dynload_setting_find(settings: [DynSmfDynloadSetting], id: text) -> DynSmfDynloadSetting?:
+    var idx = 0
+    while idx < settings.len():
+        if settings[idx].library_id == id:
+            return settings[idx]
+        idx = idx + 1
+    nil
+
+# Resolution per research doc §5.3. static_impl_hash / configured_impl_hash
+# use -1 as "unknown"; an unknown configured hash can never certify a static
+# fold, so placement=auto falls through to dynamic (fail toward the external
+# artifact, never toward a stale static pick). Unknown axis values resolve to
+# an ERROR outcome — never to a silent default.
+fn dynsmf_resolve_dynload(setting: DynSmfDynloadSetting, static_present: bool, static_impl_hash: i64, configured_impl_hash: i64) -> DynSmfDynloadDecision:
+    if not dynsmf_presence_valid(setting.presence):
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "unknown_presence:" + setting.presence)
+    if not dynsmf_placement_valid(setting.placement):
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "unknown_placement:" + setting.placement)
+    if not dynsmf_activation_valid(setting.activation):
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "unknown_activation:" + setting.activation)
+    if setting.presence == dynsmf_presence_off():
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_absent(), activation: setting.activation, reason: "presence_off")
+    val static_hash_matches = static_present and configured_impl_hash != -1 and static_impl_hash == configured_impl_hash
+    if setting.placement == dynsmf_placement_static():
+        if not static_present:
+            return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "static_required_missing")
+        if not static_hash_matches:
+            return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "static_required_stale")
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_static(), activation: setting.activation, reason: "static_pinned")
+    if setting.placement == dynsmf_placement_dynamic():
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_dynamic(), activation: setting.activation, reason: "dynamic_pinned")
+    if static_hash_matches:
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_static(), activation: setting.activation, reason: "auto_static_match")
+    DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_dynamic(), activation: setting.activation, reason: "auto_dynamic")
+
+# Build the load plan for a manifest under a settings overlay. presence=off
+# entries (e.g. an aspect log/trace pack) contribute ZERO plan rows — no
+# registration residue at all. Error decisions ARE kept in the plan so a
+# misconfigured entry is visible and fail-closed rather than silently loaded.
+fn dynsmf_dynload_load_plan(manifest: [DynSmfManifestEntry], settings: [DynSmfDynloadSetting]) -> [DynSmfDynloadDecision]:
+    var plan: [DynSmfDynloadDecision] = []
+    var idx = 0
+    while idx < manifest.len():
+        val entry = manifest[idx]
+        val found = dynsmf_dynload_setting_find(settings, entry.id)
+        var setting = dynsmf_dynload_setting_default(entry)
+        if found.?:
+            setting = found!
+        # No static table exists for dynSMF entries today: every entry is an
+        # external precompiled artifact, so static_present=false and hashes
+        # are unknown. placement=auto therefore resolves dynamic; a future
+        # static-table provider passes real values via dynsmf_resolve_dynload.
+        val decision = dynsmf_resolve_dynload(setting, false, -1, -1)
+        if decision.outcome != dynsmf_outcome_absent():
+            plan.push(decision)
+        idx = idx + 1
+    plan
+
+fn dynsmf_dynload_plan_has_errors(plan: [DynSmfDynloadDecision]) -> bool:
+    var idx = 0
+    while idx < plan.len():
+        if plan[idx].outcome == dynsmf_outcome_error():
+            return true
+        idx = idx + 1
+    false
+
 export DynSmfManifestEntry, DynSmfPolicy, DynSmfLoadedLibrary, DynSmfEvidenceRow, DynSmfSession, DynSmfBuildPlan, DynSmfArtifactStatus
-export dynsmf_session_lookup_facet, dynsmf_session_validate_facet_ref, dynsmf_session_load_admitted
 export DynSmfDynloadSetting, DynSmfDynloadParse, DynSmfDynloadDecision
 export dynsmf_presence_off, dynsmf_presence_auto, dynsmf_presence_on
 export dynsmf_placement_auto, dynsmf_placement_static, dynsmf_placement_dynamic
@@ -767,7 +787,11 @@ export dynsmf_background_compile_action, dynsmf_session_add_evidence
 export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest_source_path
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
+export dynsmf_open_captured_bytes
 export dynsmf_srchash_path, dynsmf_source_hash_current, dynsmf_source_hash_stored, dynsmf_artifact_status_with_hash
+export dynsmf_known_stub_byte_count, dynsmf_artifact_size_exceeds_stub_floor, dynsmf_artifact_witnesses_exports
+export dynsmf_abi_path, dynsmf_abi_stored, dynsmf_ifacehash_path
+export dynsmf_interface_fingerprint, dynsmf_interface_hash_of_text, dynsmf_interface_hash_current, dynsmf_interface_hash_stored
 export dynsmf_session_request_background_compiles, dynsmf_session_request_background_compiles_from_statuses, dynsmf_session_queue_missing_background_compiles
 export dynsmf_policy_default, dynsmf_policy_from_args_env
 export dynsmf_session_new, dynsmf_session_autoload, dynsmf_session_autoload_checked, dynsmf_session_load, dynsmf_session_load_checked

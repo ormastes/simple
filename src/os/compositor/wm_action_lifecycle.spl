@@ -1,6 +1,10 @@
 # Shared lifecycle-only WM action capsule.
 use os.services.wm.wm_action.{WmAction, wm_action_none}
 use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_GUI,
+    WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+}
 export use common.ui.window_scene_draw_ir.{wm_taskbar_item_width, wm_taskbar_dock_width, wm_taskbar_item_x}
 
 val WM_WORK_AREA_TOP: i32 = 48
@@ -47,6 +51,7 @@ class WmLifecycleWindowState:
     content: text
     process_id: i64
     app_id: text
+    content_owner: i32 = HOST_CONTENT_OWNER_LOCAL_WEB
     minimized: bool
     focused: bool
     maximized: bool = false
@@ -168,6 +173,9 @@ fn wm_lifecycle_find_window_index(windows: [WmLifecycleWindowState], window_id: 
         i = i + 1
     -1
 
+fn wm_lifecycle_owner_allows_source(owner_port: i64, src_port: u64) -> bool:
+    src_port == 0 or (owner_port > 0 and owner_port.to_u64() == src_port)
+
 fn wm_lifecycle_focus_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
     val idx = wm_lifecycle_find_window_index(windows, window_id)
     if idx < 0:
@@ -194,6 +202,41 @@ fn wm_lifecycle_focus_top_visible_window(windows: [WmLifecycleWindowState]) -> [
             return wm_lifecycle_focus_window(windows, win.id)
         i = i - 1
     windows
+
+fn wm_lifecycle_reconcile_display_focus(windows: [WmLifecycleWindowState]) -> [WmLifecycleWindowState]:
+    """Restore the single-focus invariant after a display topology change.
+
+    Display removal can arrive between a minimize/focus transition and its
+    next frame.  In that interval the old display may leave either no visible
+    focused window, more than one focused window, or focus on a minimized
+    window.  Keep the topmost visible focused window when it is valid;
+    otherwise focus the topmost visible window.  When every window is
+    minimized, clear focus rather than retaining an invisible input owner.
+    """
+    var keep_id: i64 = 0
+    var i = windows.len() - 1
+    while i >= 0:
+        if windows[i].focused and not windows[i].minimized:
+            keep_id = windows[i].id
+            i = -1
+        else:
+            i = i - 1
+    if keep_id == 0:
+        i = windows.len() - 1
+        while i >= 0:
+            if not windows[i].minimized:
+                keep_id = windows[i].id
+                i = -1
+            else:
+                i = i - 1
+    var out: [WmLifecycleWindowState] = []
+    i = 0
+    while i < windows.len():
+        var window = windows[i]
+        window.focused = keep_id != 0 and window.id == keep_id
+        out.push(window)
+        i = i + 1
+    out
 
 fn wm_lifecycle_destroy_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
     var out: [WmLifecycleWindowState] = []
@@ -302,7 +345,8 @@ fn wm_lifecycle_resize_grip_hit(window_x: i32, window_y: i32, window_width: i32,
 fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, interaction: WmPointerInteractionState, x: i32, y: i32) -> WmLifecyclePointerResult:
     var out_windows = windows
     var out_interaction = interaction
-    if out_interaction.resize_window_id != 0:
+    if (out_interaction.resizing and
+        out_interaction.resize_window_id != 0):
         val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.resize_window_id)
         if idx >= 0:
             val nw = wm_lifecycle_bounded_window_width(
@@ -316,7 +360,7 @@ fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: 
             val resized = apply_wm_action_to_lifecycle_windows(out_windows, next_window_id, desktop_width, desktop_height, wm_resize_action(out_interaction.resize_window_id, nw, nh))
             out_windows = resized.windows
         return WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
-    if out_interaction.drag_window_id != 0:
+    if out_interaction.dragging and out_interaction.drag_window_id != 0:
         val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.drag_window_id)
         if idx >= 0:
             var nx = x - out_interaction.drag_offset_x
@@ -328,6 +372,11 @@ fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: 
             val moved = apply_wm_action_to_lifecycle_windows(out_windows, next_window_id, desktop_width, desktop_height, wm_move_action(out_interaction.drag_window_id, nx, ny))
             out_windows = moved.windows
         return WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
+    out_interaction.resize_window_id = 0
+    out_interaction.resize_start_x = 0
+    out_interaction.resize_start_y = 0
+    out_interaction.resize_start_w = 0
+    out_interaction.resize_start_h = 0
     var i = 0
     while i < out_windows.len():
         val win = out_windows[i]
@@ -360,34 +409,47 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
     if not wm_action_is_shared_lifecycle(action.kind):
         return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: 0, applied: false)
     if action.kind == "create_window" or action.kind == "create_web_window":
+        if not wm_lifecycle_owner_allows_source(
+            action.owner_port.to_i64(), action.src_port
+        ):
+            return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: 0, applied: false)
         val id = next_id
         next_id = next_id + 1
-        out_windows.push(WmLifecycleWindowState(id: id, owner_port: action.owner_port.to_i64(), title: action.title, x: action.x, y: action.y, w: action.width, h: action.height, content: action.content, process_id: action.process_id.to_i64(), app_id: action.app_id, minimized: false, focused: true))
+        val content_owner = host_content_owner_default(
+            action.owner_port.to_i64(), action.app_id, action.kind
+        )
+        out_windows.push(WmLifecycleWindowState(id: id, owner_port: action.owner_port.to_i64(), title: action.title, x: action.x, y: action.y, w: action.width, h: action.height, content: action.content, process_id: action.process_id.to_i64(), app_id: action.app_id, content_owner: content_owner, minimized: false, focused: true))
         out_windows = wm_lifecycle_focus_window(out_windows, id)
         return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: id, applied: true)
+    val i = wm_lifecycle_find_window_index(out_windows, action.window_id.to_i64())
+    if i < 0 or not wm_lifecycle_owner_allows_source(
+        out_windows[i].owner_port, action.src_port
+    ):
+        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: false)
     if action.kind == "destroy_window":
         return WmLifecycleApplyResult(windows: wm_lifecycle_destroy_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     if action.kind == "focus":
         return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
-    val i = wm_lifecycle_find_window_index(out_windows, action.window_id.to_i64())
-    if i < 0:
-        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: false)
     var win = out_windows[i]
     if action.kind == "update_tree":
         win.content = action.content
     elif action.kind == "resize":
         win.w = action.width
         win.h = action.height
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
     elif action.kind == "move":
         win.x = action.x
         win.y = action.y
     elif action.kind == "set_title":
         win.title = action.title
     elif action.kind == "minimize":
+        val was_focused = win.focused
         win.minimized = true
         win.focused = false
         out_windows[i] = win
-        return WmLifecycleApplyResult(windows: wm_lifecycle_focus_top_visible_window(out_windows), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
+        if was_focused:
+            out_windows = wm_lifecycle_focus_top_visible_window(out_windows)
+        return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "maximize":
         if not win.maximized:
             win.restore_x = win.x
@@ -398,9 +460,10 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
         win.focused = true
         win.maximized = true
         win.x = 0
-        win.y = 48
+        win.y = WM_WORK_AREA_TOP
         win.w = desktop_width
         win.h = desktop_height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
+        win = wm_lifecycle_clamp_to_work_area(win, desktop_width, desktop_height)
         out_windows[i] = win
         return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "restore":

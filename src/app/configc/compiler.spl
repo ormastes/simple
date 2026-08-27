@@ -2,7 +2,7 @@
 # Provider artifacts are inputs; this module never builds or executes them.
 
 use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
-use app.io.mod.{file_read, file_write_bytes, file_delete, rt_file_rename}
+use app.io.mod.{file_read, file_write_bytes, file_delete, file_rename}
 
 class ConfigCompileResultV1:
     ok: bool
@@ -12,16 +12,6 @@ class ConfigCompileResultV1:
     byte_count: i64
     composition_digest: text
 
-class ConfigExtensionCompileResultV1:
-    ok: bool
-    code: text
-    message: text
-    output_path: text
-    byte_count: i64
-    composition_digest: text
-    config_sha256: text
-    artifact_sha256: text
-
 fn compile_composition_text_v1(source: text, output_path: text) -> ConfigCompileResultV1:
     if output_path == "":
         return ConfigCompileResultV1(ok: false, code: "CONFIGC_OUTPUT", message: "output path is required", output_path: output_path, byte_count: 0, composition_digest: "")
@@ -29,18 +19,7 @@ fn compile_composition_text_v1(source: text, output_path: text) -> ConfigCompile
         case Err(e):
             ConfigCompileResultV1(ok: false, code: "CONFIGC_SOURCE", message: e, output_path: output_path, byte_count: 0, composition_digest: "")
         case Ok(ir):
-            val encoded = match composition_cli_extension_routes_v1(source):
-                case Err(e): return ConfigCompileResultV1(false, "CONFIGC_EXTENSION", e, output_path, 0, "")
-                case Ok(routes):
-                    if routes.len() == 0:
-                        encode_composition_image_v1(ir)
-                    else:
-                        val generated = sci_generate_route_section_v1(routes, 1)
-                        if not generated.ok:
-                            return ConfigCompileResultV1(false, "CONFIGC_EXTENSION", generated.error_code + ": " + generated.error_message, output_path, 0, "")
-                        match encode_composition_image_with_cli_option_route_v1(ir, generated.bytes):
-                            case Ok(bytes): bytes
-                            case Err(e): return ConfigCompileResultV1(false, "CONFIGC_EXTENSION", e, output_path, 0, "")
+            val encoded = encode_composition_image_v1(ir)
             val checked = decode_composition_image_v1(encoded)
             if not checked.ok:
                 return ConfigCompileResultV1(ok: false, code: "CONFIGC_READBACK", message: checked.diagnostic.code + ": " + checked.diagnostic.message, output_path: output_path, byte_count: 0, composition_digest: "")
@@ -48,7 +27,7 @@ fn compile_composition_text_v1(source: text, output_path: text) -> ConfigCompile
             file_delete(temporary_path)
             if not file_write_bytes(temporary_path, encoded):
                 return ConfigCompileResultV1(ok: false, code: "CONFIGC_WRITE", message: "could not write composition image", output_path: output_path, byte_count: 0, composition_digest: "")
-            if not rt_file_rename(temporary_path, output_path):
+            if not file_rename(temporary_path, output_path):
                 file_delete(temporary_path)
                 return ConfigCompileResultV1(ok: false, code: "CONFIGC_COMMIT", message: "could not atomically commit composition image", output_path: output_path, byte_count: 0, composition_digest: "")
             ConfigCompileResultV1(ok: true, code: "CONFIGC_OK", message: "composition image written and verified", output_path: output_path, byte_count: encoded.len(), composition_digest: checked.image.composition_digest)
@@ -60,54 +39,3 @@ fn compile_composition_file_v1(source_path: text, output_path: text) -> ConfigCo
     if source == "":
         return ConfigCompileResultV1(ok: false, code: "CONFIGC_INPUT", message: "composition source is empty or unreadable", output_path: output_path, byte_count: 0, composition_digest: "")
     compile_composition_text_v1(source, output_path)
-
-fn compile_composition_extensions_text_v1(composition_source: text,
-        extension_source: text, generation: i64,
-        output_path: text) -> ConfigExtensionCompileResultV1:
-    if output_path == "":
-        return ConfigExtensionCompileResultV1(false, "CONFIGC_OUTPUT",
-            "output path is required", output_path, 0, "", "", "")
-    val image = match parse_composition_source_v1(composition_source):
-        case Ok(value): value
-        case Err(message):
-            return ConfigExtensionCompileResultV1(false, "CONFIGC_SOURCE",
-                message, output_path, 0, "", "", "")
-    val artifact = sci_compile_extension_config_v1(image, extension_source, generation)
-    if not artifact.ok:
-        return ConfigExtensionCompileResultV1(false, "CONFIGC_EXTENSION",
-            artifact.error, output_path, 0, "", artifact.config_sha256, "")
-    val checked = decode_composition_image_v1(artifact.bytes)
-    if not checked.ok:
-        return ConfigExtensionCompileResultV1(false, "CONFIGC_READBACK",
-            checked.diagnostic.code + ": " + checked.diagnostic.message,
-            output_path, 0, "", artifact.config_sha256, artifact.artifact_sha256)
-    val temporary_path = output_path + ".tmp-" + artifact.artifact_sha256
-    file_delete(temporary_path)
-    if not file_write_bytes(temporary_path, artifact.bytes):
-        return ConfigExtensionCompileResultV1(false, "CONFIGC_WRITE",
-            "could not write composition image", output_path, 0, "",
-            artifact.config_sha256, artifact.artifact_sha256)
-    if not file_rename(temporary_path, output_path):
-        file_delete(temporary_path)
-        return ConfigExtensionCompileResultV1(false, "CONFIGC_COMMIT",
-            "could not atomically commit composition image", output_path, 0,
-            "", artifact.config_sha256, artifact.artifact_sha256)
-    ConfigExtensionCompileResultV1(true, "CONFIGC_OK",
-        "composition image with CLI extension routes written and verified",
-        output_path, artifact.bytes.len(), checked.image.composition_digest,
-        artifact.config_sha256, artifact.artifact_sha256)
-
-fn compile_composition_extensions_file_v1(composition_path: text,
-        extension_path: text, generation: i64,
-        output_path: text) -> ConfigExtensionCompileResultV1:
-    val composition_source = file_read(composition_path)
-    val extension_source = file_read(extension_path)
-    if composition_source == "" or extension_source == "":
-        return ConfigExtensionCompileResultV1(false, "CONFIGC_INPUT",
-            "composition or extension source is empty or unreadable",
-            output_path, 0, "", "", "")
-    compile_composition_extensions_text_v1(composition_source,
-        extension_source, generation, output_path)
-
-export ConfigExtensionCompileResultV1, compile_composition_extensions_text_v1,
-    compile_composition_extensions_file_v1

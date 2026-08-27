@@ -11,33 +11,6 @@ pub struct Rv64ProcessOwnedScene:
     process_id: u64
     process_surface_count: i64
 
-# O(1) correlation for a scene produced by rv64_process_owned_scene: retained
-# windows prove ownership while process_surface_count deliberately counts only
-# visible surfaces that require content frames.
-pub fn rv64_process_owned_render_cardinality_valid(
-    owned: Rv64ProcessOwnedScene, content_frame_count: i64
-) -> bool:
-    (owned.scene.windows.len() > 0 and owned.process_surface_count >= 0 and
-        content_frame_count == owned.process_surface_count)
-
-# Public producer snapshots are ordinary values, so presentation revalidates
-# every retained window instead of trusting only the top-level PID claim.
-# The scan allocates nothing and is dominated by the subsequent O(W) render.
-pub fn rv64_process_owned_presentation_binding_valid(
-    owned: Rv64ProcessOwnedScene, expected_pid: u64, content_frame_count: i64
-) -> bool:
-    if expected_pid == 0u64 or owned.process_id != expected_pid:
-        return false
-    if not rv64_process_owned_render_cardinality_valid(owned, content_frame_count):
-        return false
-    var visible_count: i64 = 0
-    for window in owned.scene.windows:
-        if window.process_id != expected_pid:
-            return false
-        if not window.minimized:
-            visible_count = visible_count + 1
-    visible_count == owned.process_surface_count
-
 fn _rv64_scene_mix_i64(seed: i64, value: i64) -> i64:
     ((seed * 131 + value) % 2147483647) + 1
 
@@ -53,52 +26,41 @@ pub fn rv64_process_owned_scene(compositor: Compositor, process_id: u64) -> Rv64
     var windows: [SharedWmWindow] = []
     var revision: i64 = 17
     var process_surface_count: i64 = 0
-    revision = _rv64_scene_mix_i64(revision, compositor.screen_width.to_i64())
-    revision = _rv64_scene_mix_i64(revision, compositor.screen_height.to_i64())
-    var compositor_index = 0
+    var z_index = 0
     for surface in compositor.surfaces:
         val owner_pid = if surface.process_id > 0: surface.process_id.to_u64() else: 0u64
-        # PID zero is the compositor/global authority domain, never a process
-        # snapshot. Retain every surface owned by the exact nonzero process,
-        # including minimized surfaces, so restore state remains representable.
-        if process_id > 0u64 and owner_pid == process_id:
-            val focused = compositor_index == compositor.focused_idx
-            if surface.visible:
-                process_surface_count = process_surface_count + 1
-            windows.push(SharedWmWindow(
-                surface_id: surface.id.to_text(),
-                window_id: surface.id.to_text(),
-                surface_kind: "simpleos-compositor",
-                process_id: owner_pid,
-                app_id: surface.app_id,
-                title: surface.title,
-                language: "und",
-                x: surface.x,
-                y: surface.y,
-                width: surface.width,
-                height: surface.height,
-                tree: nil,
-                html: "",
-                minimized: not surface.visible,
-                focused: focused,
-                # Preserve compositor-global stacking semantics; compacting
-                # retained windows would silently rewrite their z positions.
-                z_index: compositor_index,
-                chrome_kind: WM_CHROME_KIND_TITLED
-            ))
-            revision = _rv64_scene_mix_i64(revision, compositor_index.to_i64())
-            revision = _rv64_scene_mix_i64(revision, if focused: 1 else: 0)
-            revision = _rv64_scene_mix_i64(revision, surface.id.to_i64())
-            revision = _rv64_scene_mix_i64(revision, surface.x.to_i64())
-            revision = _rv64_scene_mix_i64(revision, surface.y.to_i64())
-            revision = _rv64_scene_mix_i64(revision, surface.width.to_i64())
-            revision = _rv64_scene_mix_i64(revision, surface.height.to_i64())
-            revision = _rv64_scene_mix_i64(revision, surface.content_revision)
-            revision = _rv64_scene_mix_i64(revision, surface.process_id)
-            revision = _rv64_scene_mix_text(revision, surface.app_id)
-            revision = _rv64_scene_mix_text(revision, surface.title)
-            revision = _rv64_scene_mix_i64(revision, if surface.visible: 1 else: 0)
-        compositor_index = compositor_index + 1
+        if owner_pid == process_id and surface.visible:
+            process_surface_count = process_surface_count + 1
+        windows.push(SharedWmWindow(
+            surface_id: surface.id.to_text(),
+            window_id: surface.id.to_text(),
+            surface_kind: "simpleos-compositor",
+            process_id: owner_pid,
+            app_id: surface.app_id,
+            title: surface.title,
+            language: "und",
+            x: surface.x,
+            y: surface.y,
+            width: surface.width,
+            height: surface.height,
+            tree: nil,
+            html: "",
+            minimized: not surface.visible,
+            focused: z_index == compositor.focused_idx,
+            z_index: z_index,
+            chrome_kind: WM_CHROME_KIND_TITLED
+        ))
+        revision = _rv64_scene_mix_i64(revision, surface.id.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.x.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.y.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.width.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.height.to_i64())
+        revision = _rv64_scene_mix_i64(revision, surface.content_revision)
+        revision = _rv64_scene_mix_i64(revision, surface.process_id)
+        revision = _rv64_scene_mix_text(revision, surface.app_id)
+        revision = _rv64_scene_mix_text(revision, surface.title)
+        revision = _rv64_scene_mix_i64(revision, if surface.visible: 1 else: 0)
+        z_index = z_index + 1
     val scene = SharedWmScene(
         width: compositor.screen_width,
         height: compositor.screen_height,

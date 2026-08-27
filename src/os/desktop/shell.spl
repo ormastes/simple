@@ -6,11 +6,23 @@
 #
 # The taskbar is itself a special compositor surface pinned to the bottom
 # of the screen.
+export use os.desktop._DesktopShell.shell_workspace_methods.*
+export use os.desktop._DesktopShell.shell_runtime_methods.*
+export use os.desktop._DesktopShell.shell_input_methods.*
 
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent}
 use nogc_sync_mut.ui.session.{UISession, new_session}
 use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow}
+use common.ui.taskbar_pin_wire.{
+    TASKBAR_PIN_WIRE_HEADER,
+    taskbar_pin_wire_app_id,
+    taskbar_pin_wire_display_name,
+    taskbar_pin_wire_icon,
+    taskbar_pin_wire_line,
+    taskbar_pin_wire_line_valid,
+}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, WM_CHROME_KIND_TITLED, shared_wm_background_color}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_id}
 use common.ui.wm_runtime_dispatch.{WmRuntimeDispatchCommand, WmRuntimeShellState, wm_runtime_shell_state_empty}
 use common.ui.builder.{
     column, row, panel, text_widget, button, label, statusbar,
@@ -37,10 +49,12 @@ use os.compositor.simple_web_window_renderer.{
 }
 use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id, wm_lifecycle_owner_allows_source}
 use os.compositor.app_content.{app_state_new}
-use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.services.wm.wm_service.{WmService, WmAction}
-use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect}
+use common.window_protocol.geometry.{WindowId, ProcessId, Point, Size, Rect, KeyCode, Modifiers}
+use common.window_protocol.window_protocol.{WM_STATUS_ERROR, WmInputEvent}
+use common.window_protocol.input_translator.{ascii_code_for_key, pointer_to_wm_mouse_event}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
@@ -62,7 +76,13 @@ use os.compositor.rv64_process_owned_scene.{Rv64ProcessOwnedScene, rv64_process_
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
 use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
-use os.kernel.boot.cpu.{port_inb}
+use common.ui.host_input_event.{HostInputEvent}
+use os.compositor.baremetal_input_ingress.{
+    baremetal_input_ingress_register_poller,
+    baremetal_input_ingress_register_legacy_ready,
+    baremetal_input_ingress_poll,
+    baremetal_input_ingress_legacy_ready,
+}
 use os.services.vfs.vfs_init.{g_vfs_read_file_text}
 use os.services.vfs.vfs_write_ops.{g_vfs_write_file_text}
 use os.desktop.shell_types.{
@@ -291,6 +311,12 @@ class DesktopShell:
     launcher_id: u64
     clock_text: text
     shortcuts: [KeyboardShortcut]
+    pinned_app_ids: [text]
+    pinned_display_names: [text]
+    pinned_icons: [text]
+    pinned_layout_loaded: bool
+    pinned_layout_persisted: bool
+    pinned_layout_error_count: i64
     baremetal_apps: [text]
     launcher_initialized: bool
     selected_process_idx: i64
@@ -302,6 +328,9 @@ class DesktopShell:
     baremetal_web_caches: [WebRenderPixelArtifactCache]
     last_rendered_scene_revision: i64
     last_rendered_taskbar_revision: i64
+    # Opaque scalar into the bounded architecture-owned ingress registry.
+    # Common shell stores neither trait/class state nor hardware callbacks.
+    baremetal_input_handle: i64
 
 impl DesktopShell:
 
@@ -315,6 +344,7 @@ impl DesktopShell:
         log_info("[desktop] " + "[shell] new: creating minimal session (no builder DSL)...")
         # Use nil session — the builder DSL crashes in baremetal
         val wm = WmService.new()
+        wm.set_damage_bounds(compositor.screen_width, compositor.screen_height)
         log_info("[desktop] " + "[shell] new: WmService created")
 
         # Agent δ (2026-04-13): Agent V's `launcher_init()`-in-`new()`
@@ -333,6 +363,20 @@ impl DesktopShell:
             launcher_id: 0,
             clock_text: "00:00",
             shortcuts: _default_shortcuts(),
+            pinned_app_ids: [
+                APP_ID_HELLO_WORLD,
+                APP_ID_SHELL,
+                APP_ID_SIMPLE_BROWSER
+            ],
+            pinned_display_names: [
+                "Hello World",
+                "Terminal",
+                "Simple Browser"
+            ],
+            pinned_icons: ["H", "T", "W"],
+            pinned_layout_loaded: false,
+            pinned_layout_persisted: false,
+            pinned_layout_error_count: 0,
             baremetal_apps: [],
             launcher_initialized: false,
             selected_process_idx: 0,
@@ -343,8 +387,29 @@ impl DesktopShell:
             baremetal_web_cache_ids: [],
             baremetal_web_caches: [],
             last_rendered_scene_revision: 0,
-            last_rendered_taskbar_revision: 0
+            last_rendered_taskbar_revision: 0,
+            baremetal_input_handle: 0
         )
+
+    me install_baremetal_event_poller(poll_event: fn() -> HostInputEvent?):
+        """Install an architecture-owned producer callback.
+
+        The callback's module retains concrete decoder state; the shell stores
+        no trait/class alias and therefore cannot copy that state on unwrap.
+        """
+        if self.baremetal_input_handle != 0:
+            return
+        self.baremetal_input_handle = baremetal_input_ingress_register_poller(poll_event)
+
+    me install_legacy_baremetal_readiness(ready: fn() -> bool):
+        """Install an architecture-owned legacy readiness capability.
+
+        Only the x86 composition root imports the i8042 provider. Common and
+        ARM/RV entry closures contain no call edge to port I/O.
+        """
+        if self.baremetal_input_handle != 0:
+            return
+        self.baremetal_input_handle = baremetal_input_ingress_register_legacy_ready(ready)
 
     me set_task_reaper_enabled(enabled: bool):
         """Toggle kernel-backed task polling inside `reconcile_dead_process_windows`.

@@ -11,7 +11,7 @@
 #   lsp_symbols(file)
 #   lsp_diagnostics(file)
 #
-# Subprocess calls via rt_process_run to:
+# Subprocess calls via process_run to:
 #   bin/release/simple src/app/lsp/lsp_query.spl <subcmd> <file> <line+1> <col+1>
 #   bin/release/simple lint <file>
 
@@ -30,7 +30,7 @@ val LSP_QUERY_PATH = "src/app/lsp/lsp_query.spl"
 
 # --- Protocol state ---
 
-var USE_JSON_LINES = false
+var USE_JSON_LINES: bool = false
 
 # --- JSON helpers (inlined subset) ---
 
@@ -90,11 +90,7 @@ fn mcp_substr(s: text, start: i64, end_pos: i64) -> text:
 
 fn extract_field(json: text, key: text) -> text:
     val search = Q() + key + Q() + ":"
-    val idx_result = json.index_of(search)
-    var idx = -1
-    match idx_result:
-        Some(i): idx = i
-        nil: return ""
+    val idx = json.index_of(search)
     if idx < 0:
         return ""
     val start = idx + search.len()
@@ -102,11 +98,7 @@ fn extract_field(json: text, key: text) -> text:
     val trimmed = after.trim()
     if trimmed.starts_with(Q()):
         val after_quote = mcp_substr(trimmed, 1, trimmed.len())
-        val end_idx_result = after_quote.index_of(Q())
-        var end_idx = -1
-        match end_idx_result:
-            Some(i): end_idx = i
-            nil: return ""
+        val end_idx = after_quote.index_of(Q())
         if end_idx < 0:
             return ""
         return mcp_substr(after_quote, 0, end_idx)
@@ -120,11 +112,7 @@ fn extract_field(json: text, key: text) -> text:
 
 fn extract_field_raw(json: text, key: text) -> text:
     val search = Q() + key + Q() + ":"
-    val idx_result = json.index_of(search)
-    var idx = -1
-    match idx_result:
-        Some(i): idx = i
-        nil: return "null"
+    val idx = json.index_of(search)
     if idx < 0:
         return "null"
     var start = idx + search.len()
@@ -164,11 +152,7 @@ fn extract_id(json: text) -> text:
 
 fn extract_nested(json: text, key: text) -> text:
     val params_search = Q() + "params" + Q() + ":"
-    val params_idx_result = json.index_of(params_search)
-    var params_idx = -1
-    match params_idx_result:
-        Some(i): params_idx = i
-        nil: return ""
+    val params_idx = json.index_of(params_search)
     if params_idx < 0:
         return ""
     val params_start = params_idx + params_search.len()
@@ -189,25 +173,61 @@ fn text_byte_len(s: text) -> i64:
 
 # --- Protocol I/O ---
 
+fn read_line_raw() -> text:
+    var parts: [text] = []
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if parts.len() == 0:
+                return ""
+            return parts.join("")
+        parts.push(ch)
+        if ch == "\n":
+            return parts.join("")
+
+fn read_chars_raw(count: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        parts.push(ch)
+        i = i + 1
+    return parts.join("")
+
+# Spec-conformant Content-Length header loop (LSP 3.17 / MCP stdio):
+# unrecognized header fields are skipped, the blank line ends the header part,
+# and exactly `Content-Length` bytes of body are consumed. The previous
+# implementation read one line then blindly called input() twice, which dropped
+# any message carrying a Content-Type header and corrupted any body containing
+# a newline. See doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md
 fn read_stdin_message() -> text:
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = mcp_substr(line, 0, line.len() - 1)
-    if line.starts_with(LB()):
-        USE_JSON_LINES = true
-        return line
-    if line.starts_with("Content-Length:"):
-        var len_str = line.replace("Content-Length:", "")
-        len_str = len_str.trim()
-        val content_length = int(len_str)
-        if content_length == 0:
+    var content_length = 0
+    while true:
+        var line = read_line_raw()
+        if line == "":
+            if content_length > 0:
+                break
             return ""
-        input()
-        var body = input()
-        return body
-    ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\n"):
+            line = mcp_substr(line, 0, line.len() - 1)
+        if line.ends_with("\r"):
+            line = mcp_substr(line, 0, line.len() - 1)
+        if line.starts_with(LB()):
+            USE_JSON_LINES = true
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    read_chars_raw(content_length)
 
 fn write_stdout_message(body: text):
     if USE_JSON_LINES:
@@ -221,19 +241,19 @@ fn write_stdout_message(body: text):
 # --- Binary finder ---
 
 fn _mcp_find_simple_binary() -> text:
-    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
-    val os_env = rt_env_get("OS") ?? ""
+    val os_env = env_get("OS") ?? ""
     val is_win = os_env.contains("Windows")
     if is_win:
-        if rt_file_exists("bin/release/simple.exe"):
+        if file_exists("bin/release/simple.exe"):
             return "bin/release/simple.exe"
-        if rt_file_exists("bin/simple.exe"):
+        if file_exists("bin/simple.exe"):
             return "bin/simple.exe"
-    if rt_file_exists("bin/release/simple"):
+    if file_exists("bin/release/simple"):
         return "bin/release/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
+    if file_exists("bin/release/linux-x86_64/simple"):
         return "bin/release/linux-x86_64/simple"
     "bin/simple"
 
@@ -293,7 +313,7 @@ fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run(bin, [LSP_QUERY_PATH, subcmd, file, line1, char1])
+    (stdout, stderr, rc) = process_run(bin, [LSP_QUERY_PATH, subcmd, file, line1, char1])
     stdout.trim()
 
 fn run_lsp_symbols(file: text) -> text:
@@ -301,7 +321,7 @@ fn run_lsp_symbols(file: text) -> text:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run(bin, [LSP_QUERY_PATH, "symbols", file])
+    (stdout, stderr, rc) = process_run(bin, [LSP_QUERY_PATH, "symbols", file])
     stdout.trim()
 
 fn run_lsp_diagnostics(file: text) -> text:
@@ -309,7 +329,7 @@ fn run_lsp_diagnostics(file: text) -> text:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run(bin, ["lint", file])
+    (stdout, stderr, rc) = process_run(bin, ["lint", file])
     stdout.trim()
 
 fn tool_text_result(id: text, output: text) -> text:

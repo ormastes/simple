@@ -4,22 +4,19 @@
 use std.common.env_access.model.*
 use std.common.env_access.executor.{EnvAccessCapability, env_access_execute}
 use std.common.env_access.plan_sdn.{
-    ENV_ACCESS_PLAN_SDN_MAX_BYTES, env_access_plan_parse_sdn_v1,
-    env_access_plan_canonical_identity_v1
+    ENV_ACCESS_PLAN_SDN_MAX_BYTES, env_access_plan_parse_sdn_v1
 }
 use app.io.env_ops.{env_get, host_arch, host_os}
 use app.io.file_ops.{file_hash_sha256, file_is_regular_no_follow, file_read_text_at, file_size_raw, path_absolute}
 use app.io.process_ops.{process_run_bounded, process_bounded_timed_out}
 use app.io.sysinfo_ops.{hostname}
-use app.io.time_ops.{time_now_micros}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
-use app.io.rt_hal_isolated_host.{rt_hal_compiler_stage_isolated_exact_host}
+use app.io.time_ops.{current_time_ms}
+use app.io.rt_hal_isolated_host.{rt_hal_install_isolated_exact_host_from_plan}
 
 class HostEnvAccessCapability:
     tools: [EnvToolIdentity]
     probe_identities: [EnvHardwareProbeIdentity]
     probes: [HostHardwareProbeAdapter]
-    physical_adapters: [HostPhysicalAccessAdapter]
 
 # Hardware probes are registered as typed function ports. Adapters must call a
 # typed HAL owner directly; command/process execution is not part of this port.
@@ -28,37 +25,21 @@ pub struct HostHardwareProbeAdapter:
     platform_available_fn: fn() -> bool
     execute_fn: fn([text], i64, i64, i64) -> EnvAccessRawResult
 
-# Production physical port. The kind is part of authority, so a socket adapter
-# can never be reused for MMIO/DMA merely because resource text collides.
-pub struct HostPhysicalAccessAdapter:
-    kind: EnvAccessKind
-    identity: EnvHardwareProbeIdentity
-    platform_available_fn: fn() -> bool
-    execute_fn: fn([text], i64, i64, i64) -> EnvAccessRawResult
-
 var _host_hardware_probe_adapters: [HostHardwareProbeAdapter] = []
 var _host_hardware_probe_registry_sealed = false
-var _host_hardware_probe_registry_lock: Mutex = mutex_new(0)
 
 pub fn register_host_hardware_probe(adapter: HostHardwareProbeAdapter) -> Result<bool, text>:
-    if mutex_lock(_host_hardware_probe_registry_lock) == nil:
-        return Err("ENV-E-PROBE-REGISTRY-LOCK")
     if _host_hardware_probe_registry_sealed:
-        mutex_unlock(_host_hardware_probe_registry_lock, 0)
         return Err("ENV-E-PROBE-REGISTRY-SEALED")
     val problem = env_hardware_probe_identity_error(adapter.identity)
     if problem != "":
-        mutex_unlock(_host_hardware_probe_registry_lock, 0)
         return Err(problem)
     if _host_hardware_probe_adapters.len() >= 64:
-        mutex_unlock(_host_hardware_probe_registry_lock, 0)
         return Err("ENV-E-PROBE-REGISTRY-CAP")
     for registered in _host_hardware_probe_adapters:
         if registered.identity.probe_id == adapter.identity.probe_id:
-            mutex_unlock(_host_hardware_probe_registry_lock, 0)
             return Err("ENV-E-PROBE-DUPLICATE")
     _host_hardware_probe_adapters.push(adapter)
-    mutex_unlock(_host_hardware_probe_registry_lock, 0)
     return Ok(true)
 
 fn unsupported_probe(probe_id: text, detail: text) -> EnvAccessRawResult:
@@ -70,9 +51,9 @@ fn unsupported_probe(probe_id: text, detail: text) -> EnvAccessRawResult:
         discarded_bytes: 0,
         elapsed_ms: 0,
         reason: detail,
-        prerequisite: "register or enable the admitted typed physical adapter for " + probe_id,
+        prerequisite: "register or enable the typed hardware probe adapter for " + probe_id,
         owner: "environment-executor",
-        artifact_paths: ["doc/07_guide/language/environment_access_plans.md"],
+        artifact_paths: [],
         resume_command: "rerun the same typed environment plan"
     )
 
@@ -85,17 +66,7 @@ fn execute_hardware_probe(probes: [HostHardwareProbeAdapter],
             expected_schema = identity.schema_id
     for adapter in probes:
         if adapter.identity.probe_id == instruction.resource:
-            var admitted_identity: EnvHardwareProbeIdentity? = nil
-            for identity in identities:
-                if identity.probe_id == instruction.resource: admitted_identity = Some(identity)
-            if admitted_identity == nil:
-                return unsupported_probe(instruction.resource, "registered hardware probe has no admitted identity")
-            val admitted = admitted_identity!
-            if (adapter.identity.schema_id != expected_schema or
-                adapter.identity.max_arguments != admitted.max_arguments or
-                adapter.identity.max_timeout_ms != admitted.max_timeout_ms or
-                adapter.identity.max_stdout_bytes != admitted.max_stdout_bytes or
-                adapter.identity.max_stderr_bytes != admitted.max_stderr_bytes):
+            if adapter.identity.schema_id != expected_schema:
                 return unsupported_probe(instruction.resource, "registered hardware probe schema does not match the admitted plan")
             if (instruction.arguments.len() > adapter.identity.max_arguments or
                 instruction.timeout_ms > adapter.identity.max_timeout_ms or
@@ -104,7 +75,7 @@ fn execute_hardware_probe(probes: [HostHardwareProbeAdapter],
                 return unsupported_probe(instruction.resource, "registered hardware probe bounds are narrower than the admitted request")
             if not adapter.platform_available_fn():
                 return unsupported_probe(instruction.resource, "registered hardware probe is unavailable on this platform")
-            val started_ms = time_now_micros() / 1000
+            val started_ms = current_time_ms()
             val observed = adapter.execute_fn(
                 instruction.arguments,
                 instruction.timeout_ms,
@@ -113,18 +84,7 @@ fn execute_hardware_probe(probes: [HostHardwareProbeAdapter],
             )
             var stdout = observed.stdout
             var stderr = observed.stderr
-            var discarded_bytes = observed.discarded_bytes
-            var reason = observed.reason
-            var prerequisite = observed.prerequisite
-            var owner = observed.owner
-            var artifact_paths = observed.artifact_paths
-            var resume_command = observed.resume_command
-            if observed.status == EnvAccessStatus.Blocked or observed.status == EnvAccessStatus.Unsupported:
-                if reason.trim() == "": reason = "hardware probe could not execute the admitted operation"
-                if prerequisite.trim() == "": prerequisite = "make the admitted hardware probe available"
-                if owner.trim() == "": owner = "environment-executor"
-                if artifact_paths.len() == 0: artifact_paths = ["doc/07_guide/language/environment_access_plans.md"]
-                if resume_command.trim() == "": resume_command = "rerun the same typed environment plan"
+            var discarded_bytes = 0
             if stdout.len() > instruction.max_stdout_bytes:
                 discarded_bytes = discarded_bytes + stdout.len() - instruction.max_stdout_bytes
                 stdout = stdout.substring(0, instruction.max_stdout_bytes)
@@ -137,76 +97,14 @@ fn execute_hardware_probe(probes: [HostHardwareProbeAdapter],
                 stdout: stdout,
                 stderr: stderr,
                 discarded_bytes: discarded_bytes,
-                elapsed_ms: (time_now_micros() / 1000) - started_ms,
-                reason: reason,
-                prerequisite: prerequisite,
-                owner: owner,
-                artifact_paths: artifact_paths,
-                resume_command: resume_command
+                elapsed_ms: current_time_ms() - started_ms,
+                reason: observed.reason,
+                prerequisite: observed.prerequisite,
+                owner: observed.owner,
+                artifact_paths: observed.artifact_paths,
+                resume_command: observed.resume_command
             )
     return unsupported_probe(instruction.resource, "no typed hardware probe adapter is registered")
-
-fn execute_physical_access(adapters: [HostPhysicalAccessAdapter],
-                           identities: [EnvHardwareProbeIdentity],
-                           instruction: EnvAccessInstruction) -> EnvAccessRawResult:
-    var expected_schema = ""
-    for identity in identities:
-        if identity.probe_id == instruction.resource:
-            expected_schema = identity.schema_id
-    for adapter in adapters:
-        if adapter.kind == instruction.kind and adapter.identity.probe_id == instruction.resource:
-            var admitted_identity: EnvHardwareProbeIdentity? = nil
-            for identity in identities:
-                if identity.probe_id == instruction.resource:
-                    admitted_identity = Some(identity)
-            if admitted_identity == nil:
-                return unsupported_probe(instruction.resource, "physical adapter has no admitted identity")
-            val admitted = admitted_identity!
-            if (adapter.identity.schema_id != expected_schema or
-                adapter.identity.max_arguments != admitted.max_arguments or
-                adapter.identity.max_timeout_ms != admitted.max_timeout_ms or
-                adapter.identity.max_stdout_bytes != admitted.max_stdout_bytes or
-                adapter.identity.max_stderr_bytes != admitted.max_stderr_bytes):
-                return unsupported_probe(instruction.resource, "physical adapter schema does not match the admitted plan")
-            if (instruction.arguments.len() > adapter.identity.max_arguments or
-                instruction.timeout_ms > adapter.identity.max_timeout_ms or
-                instruction.max_stdout_bytes > adapter.identity.max_stdout_bytes or
-                instruction.max_stderr_bytes > adapter.identity.max_stderr_bytes):
-                return unsupported_probe(instruction.resource, "physical adapter bounds are narrower than the admitted request")
-            if not adapter.platform_available_fn():
-                return unsupported_probe(instruction.resource, "physical adapter is unavailable on this platform")
-            val started_ms = time_now_micros() / 1000
-            val observed = adapter.execute_fn(
-                instruction.arguments, instruction.timeout_ms,
-                instruction.max_stdout_bytes, instruction.max_stderr_bytes)
-            var stdout = observed.stdout
-            var stderr = observed.stderr
-            var discarded_bytes = observed.discarded_bytes
-            var reason = observed.reason
-            var prerequisite = observed.prerequisite
-            var owner = observed.owner
-            var artifact_paths = observed.artifact_paths
-            var resume_command = observed.resume_command
-            if observed.status == EnvAccessStatus.Blocked or observed.status == EnvAccessStatus.Unsupported:
-                if reason.trim() == "": reason = "physical adapter could not execute the admitted operation"
-                if prerequisite.trim() == "": prerequisite = "make the admitted physical resource available"
-                if owner.trim() == "": owner = "environment-executor"
-                if artifact_paths.len() == 0: artifact_paths = ["doc/07_guide/language/environment_access_plans.md"]
-                if resume_command.trim() == "": resume_command = "rerun the same typed environment plan"
-            if stdout.len() > instruction.max_stdout_bytes:
-                discarded_bytes = discarded_bytes + stdout.len() - instruction.max_stdout_bytes
-                stdout = stdout.substring(0, instruction.max_stdout_bytes)
-            if stderr.len() > instruction.max_stderr_bytes:
-                discarded_bytes = discarded_bytes + stderr.len() - instruction.max_stderr_bytes
-                stderr = stderr.substring(0, instruction.max_stderr_bytes)
-            return EnvAccessRawResult(
-                status: observed.status, exit_code: observed.exit_code,
-                stdout: stdout, stderr: stderr, discarded_bytes: discarded_bytes,
-                elapsed_ms: (time_now_micros() / 1000) - started_ms, reason: reason,
-                prerequisite: prerequisite, owner: owner,
-                artifact_paths: artifact_paths,
-                resume_command: resume_command)
-    return unsupported_probe(instruction.resource, "no kind-bound production physical adapter is registered")
 
 impl EnvAccessCapability for HostEnvAccessCapability:
     fn canonical_repo_path(canonical_repo_root: text, relative_path: text) -> text?:
@@ -241,7 +139,7 @@ impl EnvAccessCapability for HostEnvAccessCapability:
 
     fn execute_bounded(instruction: EnvAccessInstruction,
                        canonical_resource: text) -> EnvAccessRawResult:
-        val started_ms = time_now_micros() / 1000
+        val started_ms = current_time_ms()
         var status = EnvAccessStatus.Executed
         var exit_code = 0
         var stdout = ""
@@ -282,45 +180,6 @@ impl EnvAccessCapability for HostEnvAccessCapability:
                     resume_command = "rerun the same typed environment plan"
             case EnvAccessKind.HardwareProbe:
                 return execute_hardware_probe(self.probes, self.probe_identities, instruction)
-            case EnvAccessKind.SocketConnect:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.SocketSend:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.SocketReceive:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.SocketClose:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DeviceRead:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DeviceWrite:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.MmioRead:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.MmioWrite:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.IrqEnable:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.IrqWait:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.IrqAcknowledge:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.IrqDisable:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DmaMap:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DmaSyncForDevice:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DmaSyncForCpu:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DmaSubmit:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DmaWait:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.DmaUnmap:
-                return execute_physical_access(self.physical_adapters, self.probe_identities, instruction)
-            case EnvAccessKind.ClockRead:
-                val observed_ms = time_now_micros() / 1000
-                stdout = "{observed_ms}"
 
         var discarded_bytes = 0
         if stdout.len() > instruction.max_stdout_bytes:
@@ -329,7 +188,7 @@ impl EnvAccessCapability for HostEnvAccessCapability:
         if stderr.len() > instruction.max_stderr_bytes:
             discarded_bytes = discarded_bytes + stderr.len() - instruction.max_stderr_bytes
             stderr = stderr.substring(0, instruction.max_stderr_bytes)
-        val elapsed_ms = (time_now_micros() / 1000) - started_ms
+        val elapsed_ms = current_time_ms() - started_ms
         return EnvAccessRawResult(
             status: status,
             exit_code: exit_code,
@@ -340,49 +199,18 @@ impl EnvAccessCapability for HostEnvAccessCapability:
             reason: reason,
             prerequisite: prerequisite,
             owner: owner,
-            artifact_paths: if status == EnvAccessStatus.Blocked: ["doc/07_guide/language/environment_access_plans.md"] else: [],
+            artifact_paths: [],
             resume_command: resume_command
         )
 
 pub fn execute_host_env_access_plan(plan: EnvAccessPlan) -> Result<[EnvAccessReceipt], text>:
-    return execute_host_env_access_plan_with_physical(plan, [])
-
-# The parent passes its exact immutable adapter set with the plan. There is no
-# ambient physical registry for untrusted importers to preempt. Mutable socket
-# and device handles remain owned behind each adapter function port.
-pub fn execute_host_env_access_plan_with_physical(
-    plan: EnvAccessPlan,
-    physical_adapters: [HostPhysicalAccessAdapter]
-) -> Result<[EnvAccessReceipt], text>:
-    val plan_problem = env_access_plan_error(plan)
-    if plan_problem != "": return Err(plan_problem)
-    if physical_adapters.len() > 64: return Err("ENV-E-PROBE-REGISTRY-CAP")
-    var adapter_index = 0
-    while adapter_index < physical_adapters.len():
-        val adapter = physical_adapters[adapter_index]
-        if (not env_access_kind_requires_physical_adapter(adapter.kind) or
-            adapter.kind == EnvAccessKind.HardwareProbe): return Err("ENV-E-PHYSICAL-KIND")
-        val adapter_problem = env_hardware_probe_identity_error(adapter.identity)
-        if adapter_problem != "": return Err(adapter_problem)
-        var prior_index = 0
-        while prior_index < adapter_index:
-            val prior = physical_adapters[prior_index]
-            if prior.kind == adapter.kind and prior.identity.probe_id == adapter.identity.probe_id:
-                return Err("ENV-E-PROBE-DUPLICATE")
-            prior_index = prior_index + 1
-        adapter_index = adapter_index + 1
     # Startup registration ends at the first execution. The immutable snapshot
     # thereafter prevents adapter mutation racing concurrent environment plans.
-    if mutex_lock(_host_hardware_probe_registry_lock) == nil:
-        return Err("ENV-E-PROBE-REGISTRY-LOCK")
     _host_hardware_probe_registry_sealed = true
-    val probe_snapshot = _host_hardware_probe_adapters
-    mutex_unlock(_host_hardware_probe_registry_lock, 0)
     val capability = HostEnvAccessCapability(
         tools: plan.allowed_tools,
         probe_identities: plan.allowed_hardware_probes,
-        probes: probe_snapshot,
-        physical_adapters: physical_adapters
+        probes: _host_hardware_probe_adapters
     )
     return env_access_execute(plan, capability)
 
@@ -401,11 +229,7 @@ fn canonical_plan_path(path: text) -> text?:
 
 # Compiler-injected cold-main entrypoint. Loading is bounded and canonical;
 # parsing/parent validation completes before any adapter or process is installed.
-pub fn rt_hal_install_isolated_exact_host_from_plan_path(path: text,
-        required_assurance_rank:i64, expected_plan_identity:text) -> text:
-    if required_assurance_rank<0 or required_assurance_rank>4:
-        return "RTHAL-E-ASSURANCE"
-    if expected_plan_identity.len()!=64:return "RTHAL-E-PLAN-PROVENANCE"
+pub fn rt_hal_install_isolated_exact_host_from_plan_path(path: text) -> text:
     match canonical_plan_path(path):
         case nil: return "ENV-E-PLAN-PATH"
         case Some(canonical):
@@ -419,54 +243,13 @@ pub fn rt_hal_install_isolated_exact_host_from_plan_path(path: text,
                     match env_access_plan_parse_sdn_v1(source):
                         case Err(problem): return problem
                         case Ok(loaded):
-                            if loaded.required_assurance_rank!=required_assurance_rank:
-                                return "RTHAL-E-ASSURANCE-PROVENANCE"
-                            match env_access_plan_canonical_identity_v1(loaded):
-                                case Err(_): return "RTHAL-E-PLAN-PROVENANCE"
-                                case Ok(actual_identity):
-                                    if actual_identity!=expected_plan_identity:
-                                        return "RTHAL-E-PLAN-PROVENANCE"
-                            # Public path entrypoints are compatibility
-                            # surfaces.  They deliberately do not stage a
-                            # host: only the compiler-named wrapper below may
-                            # pair this canonical plan with the immediately
-                            # following exit-schema/controller seal.
-                            return "RTHAL-E-COMPILER-STAGED-ONLY"
+                            return rt_hal_install_isolated_exact_host_from_plan(
+                                loaded.plan, loaded.compare_c, loaded.compare_rust,
+                                loaded.c_tool_id, loaded.rust_tool_id,
+                                loaded.worker_count, loaded.queue_capacity,
+                                loaded.timeout_ticks, loaded.max_output_bytes
+                            )
 
-pub fn rt_hal_install_isolated_exact_host_from_plan_path_or_fail(path: text,
-        required_assurance_rank:i64, expected_plan_identity:text):
-    val problem = rt_hal_install_isolated_exact_host_from_plan_path(path,required_assurance_rank,expected_plan_identity)
+pub fn rt_hal_install_isolated_exact_host_from_plan_path_or_fail(path: text):
+    val problem = rt_hal_install_isolated_exact_host_from_plan_path(path)
     if problem != "": panic("RTHAL-E-INSTALL: {problem}")
-
-# Compiler-injected cold entry.  The parse and identity proof stay here at the
-# environment authority boundary; the package-private host routine consumes
-# the complete immutable install record and leaves lifecycle state Installing
-# until MIR registers exact schemas and seals the controller.
-pub(package) fn rt_hal_compiler_stage_isolated_exact_host_from_plan_path(path: text,
-        required_assurance_rank:i64, expected_plan_identity:text) -> text:
-    if required_assurance_rank<0 or required_assurance_rank>4:
-        return "RTHAL-E-ASSURANCE"
-    if expected_plan_identity.len()!=64:return "RTHAL-E-PLAN-PROVENANCE"
-    match canonical_plan_path(path):
-        case nil: return "ENV-E-PLAN-PATH"
-        case Some(canonical):
-            val size = file_size_raw(canonical)
-            if size <= 0 or size > ENV_ACCESS_PLAN_SDN_MAX_BYTES: return "ENV-E-PLAN-SIZE"
-            match file_read_text_at(canonical, 0, ENV_ACCESS_PLAN_SDN_MAX_BYTES + 1):
-                case Err(_): return "ENV-E-PLAN-READ"
-                case Ok(source):
-                    if source.len() != size or source.len() > ENV_ACCESS_PLAN_SDN_MAX_BYTES:
-                        return "ENV-E-PLAN-SIZE"
-                    match env_access_plan_parse_sdn_v1(source):
-                        case Err(problem): return problem
-                        case Ok(loaded):
-                            if loaded.required_assurance_rank!=required_assurance_rank:
-                                return "RTHAL-E-ASSURANCE-PROVENANCE"
-                            rt_hal_compiler_stage_isolated_exact_host(
-                                loaded, expected_plan_identity)
-
-pub(package) fn rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail(path: text,
-        required_assurance_rank:i64, expected_plan_identity:text):
-    val problem=rt_hal_compiler_stage_isolated_exact_host_from_plan_path(
-        path,required_assurance_rank,expected_plan_identity)
-    if problem!="":panic("RTHAL-E-INSTALL: {problem}")

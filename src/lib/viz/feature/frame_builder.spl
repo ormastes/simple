@@ -1,228 +1,240 @@
-# Canonical Viz CompositorFrame builder.
+# CompositorFrame builder — accumulates render passes + quads for Viz.
 #
-# The builder owns only construction state. Its output is the entity-level
-# CompositorFrame consumed directly by AggregatorEntry and DisplayCompositor;
-# it deliberately does not define a parallel frame/quad/pass wire format.
+# Mirrors cc::CompositorFrame + viz::CompositorFrame. A frame is a tree of
+# RenderPasses, each with a list of DrawQuads. The root pass is the one
+# directly composited to the display surface.
+#
+# Builder usage:
+#   var b = frame_builder_new()
+#   val pass_id = b.begin_render_pass(bounds)
+#   b.add_solid_color_quad(rect, color)
+#   b.end_render_pass()
+#   val frame = b.build()
 
 use std.skia.entity.geometry.{SkRect}
-use std.skia.entity.matrix.{Matrix3x3}
 use std.skia.entity.color.{SkColor4f}
-use std.skia.entity.enums.{SkBlendMode}
-use std.viz.entity.compositor_frame.{CompositorFrame}
-use std.viz.entity.render_pass.{RenderPass}
-use std.viz.entity.draw_quad.{DrawQuad, DrawQuadKind, SharedQuadState}
-use std.viz.entity.shared_image.{SharedImageMailbox}
-use std.viz.entity.surface_id.{SurfaceId}
 
-# Keep canonical producers below the registry/aggregate retention budgets.
-const FRAME_BUILDER_MAX_PASSES: i32 = 256
-const FRAME_BUILDER_MAX_QUADS: i32 = 4096
-const FRAME_BUILDER_MAX_SQS: i32 = 4096
-const FRAME_BUILDER_MAX_REFERENCED_SURFACES: i32 = 4096
-const FRAME_BUILDER_MAX_PAYLOAD_BYTES: i64 = 1048576i64
+# ============================================================================
+# enum DrawQuadKind
+# Mirrors viz::DrawQuad::Material discriminator for the quads this builder
+# emits.  SolidColor/DebugBorder read the color field; TextureQuad reads
+# texture_id; SurfaceQuad/RenderPassQuad read surface_id.
+# ============================================================================
+
+enum DrawQuadKind:
+    SolidColor
+    TextureQuad
+    SurfaceQuad
+    RenderPassQuad
+    DebugBorder
+
+# ============================================================================
+# class DrawQuad
+# Flat-field quad record appended to a RenderPass's quad list.
+# ============================================================================
+
+class DrawQuad:
+    kind: DrawQuadKind
+    rect: SkRect
+    visible_rect: SkRect
+    color: SkColor4f
+    texture_id: i64
+    surface_id: i64
+    opacity: f64
+
+# ============================================================================
+# class RenderPass
+# Ordered quad list bounded by output_rect.  needs_sync_tokens indicates a
+# pass references a texture that may require GPU sync before composite.
+# ============================================================================
+
+class RenderPass:
+    id: i64
+    output_rect: SkRect
+    quads: [DrawQuad]
+    needs_sync_tokens: bool
+
+# ============================================================================
+# class CompositorFrame
+# Tree of RenderPasses plus the root_pass_id the compositor should rasterize
+# directly to the display surface.
+# ============================================================================
+
+class CompositorFrame:
+    render_passes: [RenderPass]
+    root_pass_id: i64
+
+# ============================================================================
+# class CompositorFrameBuilder
+# Accumulator state.  passes holds completed passes; current_pass is the
+# in-progress pass between begin_render_pass / end_render_pass.  next_pass_id
+# is monotonically incremented on each begin.
+# ============================================================================
 
 class CompositorFrameBuilder:
     passes: [RenderPass]
     current_pass: Option<RenderPass>
-    next_pass_id: i32
-    referenced_surfaces: [SurfaceId]
+    next_pass_id: i64
+
+# ============================================================================
+# fn frame_builder_new
+# Construct an empty builder with no passes and next_pass_id starting at 1.
+# ============================================================================
 
 fn frame_builder_new() -> CompositorFrameBuilder:
-    CompositorFrameBuilder(passes: [], current_pass: None, next_pass_id: 1, referenced_surfaces: [])
-
-fn _default_sqs(rect: SkRect, opacity: f64) -> SharedQuadState:
-    SharedQuadState(
-        quad_to_target_transform: Matrix3x3.identity(),
-        visible_layer_rect: rect,
-        clip_rect: rect,
-        is_clipped: false,
-        opacity: opacity,
-        blend_mode: SkBlendMode.SrcOver,
-        sorting_context_id: 0
+    """Construct an empty CompositorFrameBuilder."""
+    CompositorFrameBuilder(
+        passes: [],
+        current_pass: None,
+        next_pass_id: 1
     )
 
-fn _finite_coordinate(value: f64) -> bool:
-    # NaN is not equal to itself; the magnitude limit also rejects infinities
-    # and keeps producer coordinates within a deterministic finite envelope.
-    value == value and value >= -1.0e308 and value <= 1.0e308
+# ============================================================================
+# helpers
+# ============================================================================
 
-fn _valid_rect(rect: SkRect) -> bool:
-    _finite_coordinate(rect.left) and _finite_coordinate(rect.top) and
-    _finite_coordinate(rect.right) and _finite_coordinate(rect.bottom) and
-    not rect.is_empty()
+fn _zero_color() -> SkColor4f:
+    SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0)
 
-fn _valid_quad_input(rect: SkRect, opacity: f64) -> bool:
-    _valid_rect(rect) and _finite_coordinate(opacity) and opacity >= 0.0 and opacity <= 1.0
-
-# SkColor4f is the canonical normalized RGBA entity. Reject non-finite and
-# out-of-domain channels before backend conversion or packing.
-fn _valid_color(color: SkColor4f) -> bool:
-    _finite_coordinate(color.r) and _finite_coordinate(color.g) and
-    _finite_coordinate(color.b) and _finite_coordinate(color.a) and
-    color.r >= 0.0 and color.r <= 1.0 and
-    color.g >= 0.0 and color.g <= 1.0 and
-    color.b >= 0.0 and color.b <= 1.0 and
-    color.a >= 0.0 and color.a <= 1.0
-
-fn _completed_quad_count(builder: CompositorFrameBuilder) -> i32:
-    var total = 0
-    var i = 0
-    while i < builder.passes.len().to_i32():
-        val count = builder.passes[i.to_i64()].quads.len().to_i32()
-        if count < 0 or count > FRAME_BUILDER_MAX_QUADS - total:
-            return FRAME_BUILDER_MAX_QUADS + 1
-        total = total + count
-        i = i + 1
-    total
-
-fn _completed_sqs_count(builder: CompositorFrameBuilder) -> i32:
-    var total = 0
-    var i = 0
-    while i < builder.passes.len().to_i32():
-        val count = builder.passes[i.to_i64()].shared_quad_states.len().to_i32()
-        if count < 0 or count > FRAME_BUILDER_MAX_SQS - total:
-            return FRAME_BUILDER_MAX_SQS + 1
-        total = total + count
-        i = i + 1
-    total
-
-fn _completed_texture_payload_bytes(builder: CompositorFrameBuilder) -> i64:
-    var total = 0i64
-    var pass_index = 0
-    while pass_index < builder.passes.len().to_i32():
-        val pass = builder.passes[pass_index.to_i64()]
-        var quad_index = 0
-        while quad_index < pass.quads.len().to_i32():
-            val bytes = pass.quads[quad_index.to_i64()].texture_mailbox.bytes.len()
-            if bytes > FRAME_BUILDER_MAX_PAYLOAD_BYTES - total:
-                return FRAME_BUILDER_MAX_PAYLOAD_BYTES + 1i64
-            total = total + bytes
-            quad_index = quad_index + 1
-        pass_index = pass_index + 1
-    total
-
-fn _pass_texture_payload_bytes(pass: RenderPass) -> i64:
-    var total = 0i64
-    var quad_index = 0
-    while quad_index < pass.quads.len().to_i32():
-        val bytes = pass.quads[quad_index.to_i64()].texture_mailbox.bytes.len()
-        if bytes > FRAME_BUILDER_MAX_PAYLOAD_BYTES - total:
-            return FRAME_BUILDER_MAX_PAYLOAD_BYTES + 1i64
-        total = total + bytes
-        quad_index = quad_index + 1
-    total
-
-fn _append_quad(builder: CompositorFrameBuilder, quad: DrawQuad, sqs: SharedQuadState) -> bool:
-    if not _valid_quad_input(quad.rect, sqs.opacity):
-        return false
+fn _append_to_current(builder: CompositorFrameBuilder, q: DrawQuad) -> CompositorFrameBuilder:
+    """Append quad q to builder.current_pass, if any.  Returns builder unchanged
+    when current_pass is None (mirrors viz's silent-drop on stray appends)."""
     match builder.current_pass:
-        case Some(current):
-            if _completed_quad_count(builder) > FRAME_BUILDER_MAX_QUADS - current.quads.len().to_i32() - 1 or
-                _completed_sqs_count(builder) > FRAME_BUILDER_MAX_SQS - current.shared_quad_states.len().to_i32() - 1:
-                return false
-            val mailbox_bytes = quad.texture_mailbox.bytes.len()
-            val completed_payload = _completed_texture_payload_bytes(builder)
-            val current_payload = _pass_texture_payload_bytes(current)
-            if completed_payload > FRAME_BUILDER_MAX_PAYLOAD_BYTES - current_payload or
-                mailbox_bytes > FRAME_BUILDER_MAX_PAYLOAD_BYTES - completed_payload - current_payload:
-                return false
-            val sqs_index = current.add_shared_quad_state(sqs)
-            quad.shared_quad_state_index = sqs_index
-            current.add_quad(quad)
-            builder.current_pass = Some(current)
-            true
+        case Some(p):
+            p.quads.push(q)
+            builder.current_pass = Some(p)
         case None:
-            false
+            pass_do_nothing
+    builder
 
-fn _completed_pass_exists(builder: CompositorFrameBuilder, pass_id: i32) -> bool:
-    var i = 0
-    while i < builder.passes.len().to_i32():
-        if builder.passes[i.to_i64()].id == pass_id:
-            return true
-        i = i + 1
-    false
-
-fn _copy_passes(passes: [RenderPass]) -> [RenderPass]:
-    var copied: [RenderPass] = []
-    var i = 0
-    while i < passes.len().to_i32():
-        copied.push(passes[i.to_i64()])
-        i = i + 1
-    copied
-
-fn _copy_surfaces(surfaces: [SurfaceId]) -> [SurfaceId]:
-    var copied: [SurfaceId] = []
-    var i = 0
-    while i < surfaces.len().to_i32():
-        copied.push(surfaces[i.to_i64()])
-        i = i + 1
-    copied
+# ============================================================================
+# impl CompositorFrameBuilder
+# ============================================================================
 
 impl CompositorFrameBuilder:
-    me begin_render_pass(output_rect: SkRect) -> i32:
-        if not _valid_rect(output_rect):
-            return -1
-        match me.current_pass:
-            case Some(_): return -1
-            case None: pass_do_nothing
-        if me.passes.len().to_i32() >= FRAME_BUILDER_MAX_PASSES:
-            return -1
-        if me.next_pass_id <= 0 or me.next_pass_id == 2147483647:
-            return -1
-        val pass_id = me.next_pass_id
+
+    me begin_render_pass(output_rect: SkRect) -> i64:
+        """Start a new render pass with output_rect; returns the new pass id."""
+        val pid = me.next_pass_id
         me.next_pass_id = me.next_pass_id + 1
-        me.current_pass = Some(RenderPass.new(pass_id, output_rect))
-        pass_id
+        val rp = RenderPass(
+            id: pid,
+            output_rect: output_rect,
+            quads: [],
+            needs_sync_tokens: false
+        )
+        me.current_pass = Some(rp)
+        pid
 
-    me end_render_pass() -> bool:
+    me end_render_pass() -> ():
+        """Push current_pass into passes and clear current_pass."""
         match me.current_pass:
-            case Some(current):
-                me.passes.push(current)
+            case Some(p):
+                me.passes.push(p)
                 me.current_pass = None
-                true
             case None:
-                false
+                pass_do_nothing
 
-    me add_solid_color_quad(rect: SkRect, color: SkColor4f) -> bool:
-        if not _valid_color(color):
-            return false
-        _append_quad(me, DrawQuad.solid_color(-1, rect, color), _default_sqs(rect, 1.0))
-
-    me add_texture_quad(rect: SkRect, mailbox: SharedImageMailbox, opacity: f64) -> bool:
-        if mailbox.bytes.len() == 0 or mailbox.bytes.len() > FRAME_BUILDER_MAX_PAYLOAD_BYTES:
-            return false
-        _append_quad(me, DrawQuad.texture(-1, rect, mailbox), _default_sqs(rect, opacity))
-
-    me add_render_pass_quad(rect: SkRect, referenced_pass_id: i32, opacity: f64) -> bool:
-        if not _completed_pass_exists(me, referenced_pass_id):
-            return false
-        _append_quad(me, DrawQuad.render_pass(-1, rect, referenced_pass_id), _default_sqs(rect, opacity))
-
-    me add_surface_quad(rect: SkRect, surface: SurfaceId, opacity: f64) -> bool:
-        if not _valid_quad_input(rect, opacity):
-            return false
-        if me.referenced_surfaces.len() >= FRAME_BUILDER_MAX_REFERENCED_SURFACES.to_i64():
-            return false
-        if not _append_quad(me, DrawQuad.surface(-1, rect, surface), _default_sqs(rect, opacity)):
-            return false
-        me.referenced_surfaces.push(surface)
-        true
-
-    me add_debug_border(rect: SkRect, color: SkColor4f) -> bool:
-        if not _valid_color(color):
-            return false
-        val quad = DrawQuad.solid_color(-1, rect, color)
-        quad.kind = DrawQuadKind.Debug
-        quad.debug_width = 1
-        _append_quad(me, quad, _default_sqs(rect, 1.0))
-
-    me build() -> Option<CompositorFrame>:
+    me add_solid_color_quad(rect: SkRect, color: SkColor4f) -> ():
+        """Append a SolidColor DrawQuad to the current pass."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.SolidColor,
+            rect: rect,
+            visible_rect: rect,
+            color: color,
+            texture_id: 0,
+            surface_id: 0,
+            opacity: 1.0
+        )
         match me.current_pass:
-            case Some(_): return None
-            case None: pass_do_nothing
-        val frame = CompositorFrame.empty()
-        frame.render_pass_list = _copy_passes(me.passes)
-        frame.referenced_surfaces = _copy_surfaces(me.referenced_surfaces)
-        if frame.render_pass_list.len() > 0:
-            frame.device_viewport_rect = frame.render_pass_list[(frame.render_pass_list.len() - 1)].output_rect
-        Some(frame)
+            case Some(p):
+                p.quads.push(q)
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_texture_quad(rect: SkRect, texture_id: i64, opacity: f64) -> ():
+        """Append a TextureQuad referencing texture_id with the given opacity."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.TextureQuad,
+            rect: rect,
+            visible_rect: rect,
+            color: _zero_color(),
+            texture_id: texture_id,
+            surface_id: 0,
+            opacity: opacity
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads.push(q)
+                p.needs_sync_tokens = true
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_surface_quad(rect: SkRect, surface_id: i64) -> ():
+        """Append a SurfaceQuad referencing an external surface id."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.SurfaceQuad,
+            rect: rect,
+            visible_rect: rect,
+            color: _zero_color(),
+            texture_id: 0,
+            surface_id: surface_id,
+            opacity: 1.0
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads.push(q)
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_render_pass_quad(rect: SkRect, referenced_pass_id: i64, opacity: f64) -> ():
+        """Append a RenderPassQuad referencing a previously-built pass id."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.RenderPassQuad,
+            rect: rect,
+            visible_rect: rect,
+            color: _zero_color(),
+            texture_id: 0,
+            surface_id: referenced_pass_id,
+            opacity: opacity
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads.push(q)
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me add_debug_border(rect: SkRect, color: SkColor4f) -> ():
+        """Append a DebugBorder quad with the given color."""
+        val q = DrawQuad(
+            kind: DrawQuadKind.DebugBorder,
+            rect: rect,
+            visible_rect: rect,
+            color: color,
+            texture_id: 0,
+            surface_id: 0,
+            opacity: 1.0
+        )
+        match me.current_pass:
+            case Some(p):
+                p.quads.push(q)
+                me.current_pass = Some(p)
+            case None:
+                pass_do_nothing
+
+    me build() -> CompositorFrame:
+        """Finalize and return a CompositorFrame.  root_pass_id is the id of
+        the LAST added pass; returns an empty frame with root_pass_id=0 when
+        no passes have been added."""
+        val n = me.passes.len().to_i64()
+        var root_id = 0
+        if n > 0:
+            root_id = me.passes[n - 1].id
+        CompositorFrame(
+            render_passes: me.passes,
+            root_pass_id: root_id
+        )

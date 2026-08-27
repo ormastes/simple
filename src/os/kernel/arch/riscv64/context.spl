@@ -10,12 +10,14 @@
 # See os.kernel.arch.arch_context.Riscv64Context for the full
 # register state layout.
 
-use os.kernel.arch.arch_context.{ArchContext, Riscv64Context}
+use os.kernel.arch.arch_context.{ArchContext, ExtendedCtxRv, Riscv64Context}
 use os.kernel.arch.riscv64.cpu.{csrr_sepc, csrr_sstatus, csrw_sepc, csrw_sstatus}
 use os.kernel.arch.riscv64.trap_model.{create_rv64_kernel_context, create_rv64_user_context}
 
+extern fn unsafe_addr_of(ref: any) -> u64
+
 # Implemented in trap_vector.spl — first entry into U-mode from scheduler
-extern fn _rv64_enter_user(ctx_addr: u64)
+extern fn _rv64_enter_user(ctx_addr: u64) -> i64
 
 # ============================================================================
 # Rv64ContextSwitch
@@ -25,9 +27,9 @@ struct Rv64ContextSwitch:
     """RISC-V 64-bit context switching implementation.
 
     Saves and restores the callee-saved register set for cooperative
-    and preemptive context switching. The full trap frame (all 31 GPRs +
-    CSRs) is used for interrupt-driven switches; the lighter callee-saved
-    set is used for voluntary yields.
+    and preemptive context switching. The full trap frame (all 31 GPRs, CSRs,
+    and F/D state) is used for interrupt-driven switches; the lighter
+    callee-saved set is used for integer-only voluntary kernel yields.
 
     Named Rv64ContextSwitch (not Rv64Context) to avoid collision
     with the Riscv64Context register state struct in arch_context.spl.
@@ -45,12 +47,54 @@ fn _create_initial_context(entry_point: u64, stack_top: u64, arg: u64) -> Riscv6
 # Context Save (Callee-Saved Only)
 # ============================================================================
 
+@naked
+fn _save_fp_callee(state_addr: u64):
+    """Save the LP64D callee-saved registers into ExtendedCtxRv."""
+    asm volatile:
+        "fsd fs0, 64(a0)"
+        "fsd fs1, 72(a0)"
+        "fsd fs2, 144(a0)"
+        "fsd fs3, 152(a0)"
+        "fsd fs4, 160(a0)"
+        "fsd fs5, 168(a0)"
+        "fsd fs6, 176(a0)"
+        "fsd fs7, 184(a0)"
+        "fsd fs8, 192(a0)"
+        "fsd fs9, 200(a0)"
+        "fsd fs10, 208(a0)"
+        "fsd fs11, 216(a0)"
+        "frcsr t0"
+        "sw t0, 256(a0)"
+        "ret"
+
+@naked
+fn _restore_fp_callee(state_addr: u64):
+    """Restore the LP64D callee-saved registers from ExtendedCtxRv."""
+    asm volatile:
+        "fld fs0, 64(a0)"
+        "fld fs1, 72(a0)"
+        "fld fs2, 144(a0)"
+        "fld fs3, 152(a0)"
+        "fld fs4, 160(a0)"
+        "fld fs5, 168(a0)"
+        "fld fs6, 176(a0)"
+        "fld fs7, 184(a0)"
+        "fld fs8, 192(a0)"
+        "fld fs9, 200(a0)"
+        "fld fs10, 208(a0)"
+        "fld fs11, 216(a0)"
+        "lw t0, 256(a0)"
+        "csrw fcsr, t0"
+        "ret"
+
 fn _save_callee_saved() -> Riscv64Context:
     """Save callee-saved registers and CSRs into a Riscv64Context.
 
     For voluntary context switches (yield), we only need to save
     the callee-saved registers (s0-s11, ra, sp) plus sepc and sstatus.
     The caller-saved registers are already saved by the C calling convention.
+
+    LP64D callee-saved registers fs0-fs11 and fcsr are preserved as well.
     """
     var ra_val: u64 = 0
     var sp_val: u64 = 0
@@ -100,6 +144,8 @@ fn _save_callee_saved() -> Riscv64Context:
 
     val sepc_val = csrr_sepc()
     val sstatus_val = csrr_sstatus()
+    var fp_state = ExtendedCtxRv(bytes: [0; 264])
+    _save_fp_callee(unsafe_addr_of(fp_state))
 
     Riscv64Context(
         ra: ra_val,
@@ -135,7 +181,9 @@ fn _save_callee_saved() -> Riscv64Context:
         t6: 0,
         sepc: sepc_val,
         sstatus: sstatus_val,
-        scause: 0
+        scause: 0,
+        fp_state: fp_state,
+        fp_pad: 0
     )
 
 # ============================================================================
@@ -150,6 +198,7 @@ fn _restore_callee_saved(ctx: Riscv64Context):
     """
     csrw_sepc(ctx.sepc)
     csrw_sstatus(ctx.sstatus)
+    _restore_fp_callee(unsafe_addr_of(ctx.fp_state))
 
     unsafe:
         asm volatile:

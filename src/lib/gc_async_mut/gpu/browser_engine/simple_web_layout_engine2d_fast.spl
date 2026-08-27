@@ -2,8 +2,8 @@
 #
 # This is the native-accelerated counterpart to the software layout renderer
 # (simple_web_layout_render_html_software_pixels) and the pinned heuristic
-# renderer (simple_web_engine2d_render_html_pixels). Neither of those is touched
-# here — the bit-exact gates depend on them. This entry runs the real
+# renderer (simple_web_engine2d_render_html_pixels), which remain explicit
+# compatibility oracles. This entry runs the real
 # layout/paint Draw IR on an Engine2D created in no-mirror fast mode, so the
 # per-op interpreted framebuffer mirror (the entire render cost at desktop
 # resolution — see
@@ -12,9 +12,24 @@
 # single FFI hop.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    SimpleWebLayoutMaterialWitness,
+    simple_web_layout_last_render_degraded,
     simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_render_html_draw_ir_result_with_images,
     simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    simple_web_layout_render_budget_floor_ms,
+    simple_web_layout_restore_render_budget_floor_ms,
+    simple_web_layout_set_render_budget_floor_ms
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    WebGpuPaintTimingEvidence,
+    present_layout_pixels_with_engine2d_readback,
+    web_gpu_paint_backend_verdict,
+    web_gpu_paint_enabled,
+    web_gpu_paint_timing_evidence
 }
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
@@ -23,11 +38,17 @@ use std.gc_async_mut.io.mod_stub.{env_get}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_with_images,
+    engine2d_resolved_draw_ir_image
+}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 # Shared clock for the perf-instrumentation start/end pairs below (phase
 # timing, upload/gpu route timing). Module-level rather than per-call so it
@@ -37,6 +58,14 @@ var _fast_clock: FrameClock = default_frame_clock()
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
     material_fallback: WebRenderMaterialFallbackProvenance
+    # True iff the layout/style pass that produced this result tripped its
+    # wall-clock budget and stopped early (see
+    # simple_web_layout_last_render_degraded). Every vector_font_* field below
+    # is then derived from an INCOMPLETE cascade and must not be read as
+    # evidence -- nodes the cascade never reached keep renderer_default_style()
+    # (sans-serif/16px), so the reported identity and pixel size describe the
+    # default face rather than the document's. Consumers gate on this FIRST.
+    render_degraded: bool
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -73,32 +102,114 @@ class SimpleWebLayoutEngine2DReadbackResult:
     vector_font_device_executed: bool
     vector_font_promotion_ready: bool
 
-struct SimpleWebVectorFontEvidence:
-    identity: text
-    pixel_size: i32
+class _WebDrawIrRouteState:
+    key: text
+    upload_samples: [i64]
+    gpu_samples: [i64]
+    oracle_fingerprint: i64
+    pixels_match: bool
+    upload_device_proven: bool
+    gpu_device_proven: bool
+    commands_complete: bool
+    device_identity: i64
+    complete: bool
+    evidence: WebGpuPaintTimingEvidence
 
-fn _simple_web_vector_font_evidence(composition: DrawIrComposition) -> SimpleWebVectorFontEvidence:
+class _WebDrawIrTimedRoute:
+    readback: Engine2DReadback
+    oracle_pixels: [u32]
+    elapsed_us: i64
+    skipped_command_count: i32
+
+# ponytail: process-local cache matches the current single-render-thread
+# contract; move it into BrowserRenderer before concurrent renderers are admitted.
+var _web_draw_ir_route_states: [_WebDrawIrRouteState] = []
+var _web_draw_ir_route_consults: i32 = 0
+var _web_draw_ir_route_canonical_submissions: i32 = 0
+var _web_draw_ir_last_comparison_receipt: text = ""
+var _web_draw_ir_last_evidence: WebGpuPaintTimingEvidence = web_gpu_paint_timing_evidence("", 0, 0, 0, 0, 0, false, false, false)
+val WEB_DRAW_IR_ROUTE_CACHE_MAX: i32 = 16
+
+fn _web_draw_ir_copy_evidence(value: WebGpuPaintTimingEvidence) -> WebGpuPaintTimingEvidence:
+    WebGpuPaintTimingEvidence(
+        backend_name: value.backend_name,
+        available: value.available,
+        sample_count: value.sample_count,
+        upload_bound_p50_us: value.upload_bound_p50_us,
+        upload_bound_p95_us: value.upload_bound_p95_us,
+        gpu_paint_p50_us: value.gpu_paint_p50_us,
+        gpu_paint_p95_us: value.gpu_paint_p95_us,
+        pixels_match: value.pixels_match,
+        upload_device_proven: value.upload_device_proven,
+        gpu_device_proven: value.gpu_device_proven,
+        commands_complete: value.commands_complete,
+        should_offload: value.should_offload,
+        reason: value.reason,
+        speed_verdict: value.speed_verdict
+    )
+
+pub fn web_draw_ir_gpu_route_policy_reset():
+    _web_draw_ir_route_states = []
+    _web_draw_ir_route_consults = 0
+    _web_draw_ir_route_canonical_submissions = 0
+    _web_draw_ir_last_comparison_receipt = ""
+    _web_draw_ir_last_evidence = web_gpu_paint_timing_evidence(
+        "", 0, 0, 0, 0, 0, false, false, false)
+
+pub fn web_draw_ir_gpu_route_policy_consult_count() -> i32:
+    _web_draw_ir_route_consults
+
+pub fn web_draw_ir_gpu_route_canonical_submission_count() -> i32:
+    _web_draw_ir_route_canonical_submissions
+
+pub fn web_draw_ir_gpu_route_last_comparison_receipt() -> text:
+    _web_draw_ir_last_comparison_receipt
+
+pub fn web_draw_ir_gpu_route_last_evidence() -> WebGpuPaintTimingEvidence:
+    _web_draw_ir_copy_evidence(_web_draw_ir_last_evidence)
+
+fn _web_draw_ir_key_text(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+fn _web_draw_ir_key(composition: DrawIrComposition, width: i32, height: i32, backend_name: text) -> text:
+    (
+        _web_draw_ir_key_text(draw_ir_to_sdn(composition)) +
+        width.to_text() + ";" + height.to_text() + ";" +
+        _web_draw_ir_key_text(backend_name) +
+        _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_ONE_CALL_UPLOAD")) +
+        _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_BULK_UPLOAD")) +
+        _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_SPL_GPU_TRANSFER_PATH")) +
+        _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_ONE_CALL_READBACK"))
+    )
+
+fn _web_draw_ir_env(key: text) -> text:
+    env_get(key) ?? ""
+
+fn _simple_web_draw_ir_last_text_font_pixel_size(
+    composition: DrawIrComposition, font_identity: text
+) -> i32:
+    if font_identity == "":
+        return 0
+    var pixel_size = 0
     for batch in composition.batches:
         for command in batch.commands:
-            if command.kind == "text" and
-                    command.text_value.contains("Simple Web 300 DPI"):
-                var identity = ""
-                var pixel_size = 0
+            if command.kind == "text":
+                var command_identity = ""
+                var command_pixel_size = 0
                 for prop in command.computed_style:
                     if prop.key == "font-identity":
-                        identity = prop.value
+                        command_identity = prop.value
                     elif prop.key == "font-size":
                         val parsed = prop.value.to_i64()
                         if parsed != nil and parsed > 0:
-                            pixel_size = parsed.to_i32()
-                return SimpleWebVectorFontEvidence(
-                    identity: identity, pixel_size: pixel_size)
-    SimpleWebVectorFontEvidence(identity: "", pixel_size: 0)
+                            command_pixel_size = parsed.to_i32()
+                if command_identity == font_identity:
+                    pixel_size = command_pixel_size
+    pixel_size
 
-fn _simple_web_layout_render_html_engine2d_execution(
-    html: text, width: i32, height: i32, backend_name: text,
-    animation_time_ms: i64,
-    animation_instances: [BrowserCssAnimationInstance],
+fn _simple_web_layout_execute_draw_ir_composition(
+    composition: DrawIrComposition, material_witness: SimpleWebLayoutMaterialWitness,
+    width: i32, height: i32, backend_name: text,
     image_resources: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutEngine2DExecutionResult:
     val render = _simple_web_layout_render_draw_ir_composition(
@@ -112,7 +223,7 @@ fn _simple_web_layout_render_html_engine2d_execution(
         backend_name != "software" and backend_name != "cpu" and
         render.readback_source == "cpu_fallback")
     val material_fallback = simple_web_layout_material_provenance_after_backend_execution(
-        layout_result.material_witness,
+        material_witness,
         render.skipped_command_count,
         render.pixels.len(),
         width * height,
@@ -130,7 +241,9 @@ fn _simple_web_layout_render_html_engine2d_execution(
         # trustworthy when this is false.
         render_degraded: simple_web_layout_last_render_degraded() or lane_demoted,
         vector_font_identity: render.font_identity,
-        vector_font_pixel_size: vector_font.pixel_size,
+        vector_font_pixel_size:
+            _simple_web_draw_ir_last_text_font_pixel_size(
+                composition, render.font_identity),
         vector_font_execution_target: render.font_execution_target,
         vector_font_batch_identity: render.font_batch_identity,
         vector_font_readback_source: render.font_readback_source,
@@ -158,21 +271,84 @@ fn _simple_web_layout_render_draw_ir_composition(
     engine.shutdown()
     render
 
+fn _simple_web_layout_draw_ir_once(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    if animation_time_ms >= 0:
+        return simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+            html, width, height, animation_time_ms, animation_instances,
+            image_resources
+        )
+    simple_web_layout_render_html_draw_ir_result_with_images(
+        html, width, height, image_resources
+    )
+
+# One bounded retry floor for a budget-truncated cascade, matching the
+# sanctioned showcase calibration (simple_web_layout_set_render_budget_floor_ms
+# in web_showcase_full_gpu_offload_spec.spl). See
+# _simple_web_layout_draw_ir_with_degraded_retry below.
+val WEB_LAYOUT_DEGRADED_RETRY_FLOOR_MS: i64 = 900000
+
+# A budget-truncated style cascade leaves every node past the break on
+# renderer-default styles, so class/id-selector styling silently vanishes
+# from the frame while the readback still reports plausible pixels (the
+# "seems able but can't" family: observed 2026-08-01 as class-selector boxes
+# dropping to 0 painted pixels on the readback-result entry under the
+# interpreter, load-dependent). Documents needing selector matching must
+# reach the REAL resolved cascade: retry the layout ONCE with the platform
+# budget floor raised to the showcase calibration, then restore the caller's
+# floor. If the retry still trips its (floored) deadline, render_degraded
+# stays latched and is propagated — honest fallback, never a silent publish
+# of dropped styling.
+#
+# Scope: the READBACK-RESULT entry only. The pixels parity lanes (cpu oracle
+# vs offload lane in web_engine2d_gpu_offload_parity_spec) deliberately keep
+# the single-pass layout: a retry there doubles interpreted layout ops per
+# render and blows the spec runner's per-example operation limit, and both
+# lanes of a parity comparison run the identical single-pass cascade anyway.
+fn _simple_web_layout_draw_ir_with_degraded_retry(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    val first = _simple_web_layout_draw_ir_once(
+        html, width, height, animation_time_ms, animation_instances,
+        image_resources
+    )
+    if not simple_web_layout_last_render_degraded():
+        return first
+    val saved_floor = simple_web_layout_render_budget_floor_ms()
+    if saved_floor >= WEB_LAYOUT_DEGRADED_RETRY_FLOOR_MS:
+        # The first pass already ran under an adequate floor; a retry under
+        # the same wall-clock budget cannot resolve more styles.
+        return first
+    simple_web_layout_set_render_budget_floor_ms(WEB_LAYOUT_DEGRADED_RETRY_FLOOR_MS)
+    val retried = _simple_web_layout_draw_ir_once(
+        html, width, height, animation_time_ms, animation_instances,
+        image_resources
+    )
+    simple_web_layout_restore_render_budget_floor_ms(saved_floor)
+    retried
+
 fn _simple_web_layout_render_html_engine2d_execution(
     html: text, width: i32, height: i32, backend_name: text,
     animation_time_ms: i64,
     animation_instances: [BrowserCssAnimationInstance],
-    image_resources: [SimpleOsHostGpuImageResource]
+    image_resources: [SimpleOsHostGpuImageResource],
+    retry_degraded: bool
 ) -> SimpleWebLayoutEngine2DExecutionResult:
     val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
-    val layout_result = if animation_time_ms >= 0:
-        simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+    val layout_result = if retry_degraded:
+        _simple_web_layout_draw_ir_with_degraded_retry(
             html, width, height, animation_time_ms, animation_instances,
             image_resources
         )
     else:
-        simple_web_layout_render_html_draw_ir_result_with_images(
-            html, width, height, image_resources
+        _simple_web_layout_draw_ir_once(
+            html, width, height, animation_time_ms, animation_instances,
+            image_resources
         )
     val _phase_paint_start_us = _fast_clock.now_micros()
     val _phase_execution = _simple_web_layout_execute_draw_ir_composition(
@@ -438,12 +614,17 @@ pub fn web_draw_ir_gpu_route_sample(
 # and — for Metal — arming gpu_frame_complete so read_pixels() takes the GPU
 # download path rather than the shrunken mirror.
 pub fn simple_web_layout_render_html_engine2d_result(html: text, width: i32, height: i32, backend_name: text) -> Engine2dDrawIrAdvResult:
-    val ir = simple_web_layout_render_html_draw_ir(html, width, height)
-    var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
-    engine.clear(0u32)
-    val result = engine2d_draw_ir_adv_composition(engine, ir, true)
-    engine.shutdown()
-    result
+    _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, -1, [], [], false
+    ).render
+
+pub fn simple_web_layout_render_html_engine2d_result_with_images(
+    html: text, width: i32, height: i32, backend_name: text,
+    images: [SimpleOsHostGpuImageResource]
+) -> Engine2dDrawIrAdvResult:
+    _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, -1, [], images, false
+    ).render
 
 pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
@@ -498,7 +679,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time(html: text, width: 
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, [], []
+        html, width, height, backend_name, animation_time_ms, [], [], false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -511,7 +692,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_images(
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, [], images
+        html, width, height, backend_name, animation_time_ms, [], images, false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -526,7 +707,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations(
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms,
-        animation_instances, []
+        animation_instances, [], false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -542,7 +723,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_wit
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms,
-        animation_instances, images
+        animation_instances, images, false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -564,7 +745,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             vector_font_promotion_ready: false
         )
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, [], []
+        html, width, height, backend_name, animation_time_ms, [], [], true
     )
     if execution.render.skipped_command_count != 0:
         return SimpleWebLayoutEngine2DReadbackResult(
@@ -604,16 +785,18 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         vector_font_device_executed: execution.vector_font_device_executed,
         vector_font_promotion_ready: execution.vector_font_promotion_ready)
 
+pub fn simple_web_layout_render_html_readback_engine2d_result(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DReadbackResult:
+    _simple_web_layout_render_html_readback_engine2d_result_at_time(
+        html, width, height, backend_name, -1
+    )
+
+pub fn simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> SimpleWebLayoutEngine2DReadbackResult:
+    _simple_web_layout_render_html_readback_engine2d_result_at_time(
+        html, width, height, backend_name, animation_time_ms
+    )
+
 pub fn simple_web_layout_render_html_readback_engine2d(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
-    if width <= 0 or height <= 0:
-        return engine2d_readback([], "unavailable")
-    val result = simple_web_layout_render_html_engine2d_result(html, width, height, backend_name)
-    if result.skipped_command_count != 0:
-        return engine2d_readback([], "unavailable")
-    val pixel_count = result.pixels.len().to_i64()
-    Engine2DReadback(pixels: result.pixels, source: result.readback_source,
-        backend_handle: result.backend_handle, device_identity: result.device_identity,
-        pixel_count: pixel_count, checksum: result.readback_checksum)
+    simple_web_layout_render_html_readback_engine2d_result(html, width, height, backend_name).readback
 
 # True when the Metal native fast path is genuinely available, so callers (e.g.
 # the WM compositor at desktop resolution) can gate on it before routing a large
@@ -625,5 +808,13 @@ pub fn engine2d_fast_metal_available() -> bool:
 
 export simple_web_layout_render_html_pixels_engine2d
 export simple_web_layout_render_html_readback_engine2d
+export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result
+export SimpleWebLayoutEngine2DReadbackResult
 export engine2d_fast_metal_available
+export web_draw_ir_gpu_route_policy_reset
+export web_draw_ir_gpu_route_policy_consult_count
+export web_draw_ir_gpu_route_canonical_submission_count
+export web_draw_ir_gpu_route_last_comparison_receipt
+export web_draw_ir_gpu_route_last_evidence
+export web_draw_ir_gpu_route_sample

@@ -1,16 +1,11 @@
-# MountTable — tracks active filesystem mounts.
-#
-# MountEntry associates a mount point path with a DriverInstance.
-# MountTable provides mount/unmount/lookup/resolve operations.
-# Longest-prefix match is used for path resolution.
-#
-# Source: doc/05_design/fs_driver_interface.md §3, §8.
-
+# MountTable — active mounts resolved by longest path prefix.
 use std.fs_driver.types.{Path, MountOptions, StatInfo, FileHandle, DirHandle, DirEntry, OpenFlags, ExecuteTrust}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{Capability, FsCapabilitySet, FS_CAPABILITY_V1}
-use common.string_core.{str_char_at}
+use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES, mount_handle_encode,
+    mount_handle_slot, mount_handle_generation, mount_path_canonical, text_has_mount_prefix,
+    driver_positioned_read_bytes, driver_positioned_write_bytes}
 use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_capabilities, _driver_stat_path,
     _driver_fstat, _driver_open_path, _driver_opendir_path, _driver_readdir_handle,
     _driver_read_handle, _driver_mkdir_path, _driver_write_text_handle,
@@ -18,43 +13,14 @@ use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_capabilities, _dr
     _driver_fsync, _driver_fdatasync, _file_stat_is_directory,
     _driver_unlink_path_text, _driver_rename_path_text, _driver_ftruncate_handle,
     _driver_mmap_shared_writable_handle, _driver_link_path_text}
-
 val MOUNT_ID_MAX: u32 = 0xFFFFFFFFu32
 val HANDLE_ID_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
 val MOUNT_TABLE_MAX_MOUNTS: i64 = 4096
 val MOUNT_TABLE_MAX_OPEN_FILES: i64 = 65536
 val MOUNT_TABLE_MAX_OPEN_DIRS: i64 = 65536
-val MOUNT_TABLE_MAX_PATH_BYTES: i64 = 4096
 val MOUNT_TABLE_MAX_IO_BYTES: i64 = 16 * 1024 * 1024
 val MOUNT_TABLE_MAX_EXECUTABLE_BYTES: u64 = 281474976710656u64
-
-fn _mount_path_canonical(path: text) -> bool:
-    if path.len() == 0 or path.len() > MOUNT_TABLE_MAX_PATH_BYTES or
-        not path.starts_with("/") or path.contains("\\") or
-        path.contains("\0") or path.contains("\n") or path.contains("\r"):
-        return false
-    if path == "/":
-        return true
-    if path.ends_with("/") or path.contains("//") or path.contains("/./") or
-        path.ends_with("/.") or path.contains("/../") or path.ends_with("/.."):
-        return false
-    true
-
-fn _text_has_mount_prefix(source: text, prefix: text) -> bool:
-    if prefix == "/":
-        return source.starts_with("/")
-    if source == prefix:
-        return true
-    if prefix.len() > source.len():
-        return false
-    var idx: i64 = 0
-    while idx < prefix.len():
-        if str_char_at(source, idx) != str_char_at(prefix, idx):
-            return false
-        idx = idx + 1
-    if source.len() <= prefix.len():
-        return false
-    str_char_at(source, prefix.len()) == "/"
+val MOUNT_HANDLE_GENERATION_MAX: u32 = 0xFFFFFFFFu32
 
 struct MountId:
     """Opaque mount table index. Assigned sequentially; not reused after unmount."""
@@ -80,6 +46,10 @@ struct MountEntry:
     driver:      DriverInstance
     opts:        MountOptions
     active_caps: u32   # FsCapabilitySet.bits after negotiation
+    capability_version: u32
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
 
 struct MountResolution:
     """Resolved mount id plus path relative to the mounted filesystem."""
@@ -87,27 +57,21 @@ struct MountResolution:
     relpath:  Path
 
 struct OpenFileBinding:
+    active: bool
+    retired: bool
+    generation: u32
     virtual_handle: u64
     mount_id: MountId
-    mount_slot: i32
     inner_handle: FileHandle
-    canonical_source_path: text
-    execute_trust: ExecuteTrust?
 
 struct ExecuteOpenBinding:
     """Owned, backend-neutral executable-open identity and generation snapshot."""
     mount_id: MountId
-    _owner_nonce: u64
     backend_name: text
-    backend_kind: text
-    canonical_source_path: text
     file_handle: FileHandle
     mount_generation: u64
     namespace_generation: u64
     content_generation: u64
-    execute_observation: ExecuteFileObservationV1
-    # Descriptive receipt only. Authority is the private generational row.
-    execute_trust: ExecuteTrust
     size: i64
 
 struct OpenDirBinding:
@@ -134,30 +98,11 @@ fn _retired_dir_binding(binding: OpenDirBinding) -> OpenDirBinding:
         virtual_handle: 0u64, mount_id: binding.mount_id,
         inner_handle: binding.inner_handle)
 
-fn _mount_mutation_allowed(entry: MountEntry) -> Result<(), FsError>:
-    """Apply the shared read-only policy before any backend mutation."""
-    if entry.opts.read_only:
-        return Err(FsError.Permission)
-    Ok(())
-
-fn _open_flags_request_mutation(flags: OpenFlags) -> bool:
-    """Conservatively classify opens that can create, truncate, or write."""
-    flags.is_writable() or (flags.bits & (64u32 | 512u32 | 1024u32)) != 0u32
-
 struct MountTable:
-    """Registry of active mounts.
-
-    mounts       — ordered list of MountEntry; lookup uses longest-prefix match.
-    next_id      — next MountId to assign (monotonically increasing).
-
-    Thread safety: callers are responsible for holding an appropriate lock
-    before calling mutating methods (mount, unmount). Reads (lookup, resolve)
-    may race only if the caller guarantees no concurrent mounts/unmounts.
-    """
+    """Bounded mount and generational open-handle registry."""
     mounts:           [MountEntry]
     next_id:          u32
     open_files:       [OpenFileBinding]
-    next_file_handle: u64
     open_dirs:        [OpenDirBinding]
     dir_capacity_limit: i64
 
@@ -210,36 +155,40 @@ impl MountTable:
         Ok(DirHandle(id: handle))
 
     me fn _file_binding(handle: FileHandle) -> OpenFileBinding?:
-        var i: i32 = 0
-        while i < self.open_files.len() as i32:
-            if self.open_files[i].virtual_handle == handle.id:
-                return Some(self.open_files[i])
-            i = i + 1
+        val slot = mount_handle_slot(handle.id)
+        if slot < 0 or slot >= self.open_files.len() as i32:
+            return nil
+        val binding = self.open_files[slot]
+        if binding.active and binding.generation == mount_handle_generation(handle.id):
+            return Some(binding)
         nil
 
     me fn _dir_binding(handle: DirHandle) -> OpenDirBinding?:
-        var i: i32 = 0
-        while i < self.open_dirs.len() as i32:
-            if self.open_dirs[i].virtual_handle == handle.id:
-                return Some(self.open_dirs[i])
-            i = i + 1
+        val slot = mount_handle_slot(handle.id)
+        if slot < 0 or slot >= self.open_dirs.len() as i32:
+            return nil
+        val binding = self.open_dirs[slot]
+        if binding.active and binding.generation == mount_handle_generation(handle.id):
+            return Some(binding)
         nil
 
     me fn _unbind_file_handle(handle: FileHandle):
-        var i: i32 = 0
-        while i < self.open_files.len() as i32:
-            if self.open_files[i].virtual_handle == handle.id:
-                self.open_files = self.open_files.remove(i)
-                return
-            i = i + 1
+        val slot = mount_handle_slot(handle.id)
+        if slot < 0 or slot >= self.open_files.len() as i32:
+            return
+        val binding = self.open_files[slot]
+        if not binding.active or binding.generation != mount_handle_generation(handle.id):
+            return
+        self.open_files[slot] = _retired_file_binding(binding)
 
     me fn _unbind_dir_handle(handle: DirHandle):
-        var i: i32 = 0
-        while i < self.open_dirs.len() as i32:
-            if self.open_dirs[i].virtual_handle == handle.id:
-                self.open_dirs = self.open_dirs.remove(i)
-                return
-            i = i + 1
+        val slot = mount_handle_slot(handle.id)
+        if slot < 0 or slot >= self.open_dirs.len() as i32:
+            return
+        val binding = self.open_dirs[slot]
+        if not binding.active or binding.generation != mount_handle_generation(handle.id):
+            return
+        self.open_dirs[slot] = _retired_dir_binding(binding)
 
     me fn mount(path: text, driver: DriverInstance, opts: MountOptions) -> Result<MountId, FsError>:
         """Add a new mount at path.
@@ -247,7 +196,7 @@ impl MountTable:
         Fails with AlreadyExists if path is already a mount point.
         Assigns a fresh MountId and appends the entry.
         """
-        if not _mount_path_canonical(path):
+        if not mount_path_canonical(path):
             return Err(FsError.InvalidArg)
         if self.mounts.len() >= MOUNT_TABLE_MAX_MOUNTS:
             return Err(FsError.TooLarge)
@@ -255,33 +204,30 @@ impl MountTable:
             if entry.mount_point == path:
                 return Err(FsError.AlreadyExists)
 
+        if self.next_id == MOUNT_ID_MAX:
+            return Err(FsError.TooLarge)
+        val supported = _driver_capabilities(driver)
+        val required = FsCapabilitySet(bits: opts.require_caps)
+        if (supported.bits & required.bits) != required.bits:
+            return Err(FsError.Unsupported)
+        val want = FsCapabilitySet(bits: opts.want_caps)
+        # An empty request preserves historical mounts: all backend capabilities
+        # are active unless the caller explicitly narrows the request.
+        val active = if want.is_empty(): supported else supported.intersect(want)
         val id = MountId(id: self.next_id)
         self.next_id = self.next_id + 1
-        val want = opts.want_caps
-        val active = want   # full negotiation done in vfs_mount; stub passes through
         val entry = MountEntry(
             id: id,
             mount_point: path,
             driver: driver,
             opts: opts,
-            active_caps: active
+            active_caps: active.bits,
+            capability_version: FS_CAPABILITY_V1,
+            mount_generation: 1u64,
+            namespace_generation: 1u64,
+            content_generation: 1u64
         )
-        var mount_slot: i32 = -1
-        var slot_scan: i32 = 0
-        while slot_scan < self.mount_slots.len() as i32:
-            if self.mount_slots[slot_scan] == nil:
-                mount_slot = slot_scan
-                break
-            slot_scan = slot_scan + 1
-        if mount_slot < 0:
-            if self.mount_slots.len() >= MOUNT_TABLE_MAX_MOUNTS:
-                return Err(FsError.TooLarge)
-            mount_slot = self.mount_slots.len() as i32
-            self.mount_slots.push(Some(entry))
-        else:
-            self.mount_slots[mount_slot] = Some(entry)
         self.mounts = self.mounts.push(entry)
-        self.mount_slot_by_active_index.push(mount_slot)
         Ok(id)
 
     me fn unmount(path: text) -> Result<(), FsError>:
@@ -290,7 +236,7 @@ impl MountTable:
         Fails with NotFound if no mount exists at exactly that path.
         Callers must ensure no open handles before calling unmount.
         """
-        if not _mount_path_canonical(path):
+        if not mount_path_canonical(path):
             return Err(FsError.InvalidArg)
         var idx: i64 = -1
         var i: i64 = 0
@@ -302,13 +248,12 @@ impl MountTable:
             return Err(FsError.NotFound)
         val mount_id = self.mounts[idx as i32].id
         for binding in self.open_files:
-            if binding.mount_id == mount_id:
+            if binding.active and binding.mount_id == mount_id:
                 return Err(FsError.Busy)
         for binding in self.open_dirs:
-            if binding.mount_id == mount_id:
+            if binding.active and binding.mount_id == mount_id:
                 return Err(FsError.Busy)
         self.mounts = self.mounts.remove(idx as i32)
-        self.mount_slot_by_active_index = self.mount_slot_by_active_index.remove(idx as i32)
         Ok(())
 
     me fn lookup_text(path: text) -> MountEntry?:
@@ -318,7 +263,7 @@ impl MountTable:
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val mp = self.mounts[i].mount_point
-            if _text_has_mount_prefix(path, mp):
+            if text_has_mount_prefix(path, mp):
                 val mp_len = mp.len()
                 if mp_len > best_len:
                     best_len = mp_len
@@ -352,23 +297,6 @@ impl MountTable:
                     i = i + 1
                 Err(FsError.StaleHandle)
 
-    me fn positioned_fstat(file_object_id: u64) -> Result<FileStat, FsError>:
-        """Stat one live MountTable virtual handle through its owning driver."""
-        if file_object_id == 0:
-            return Err(FsError.StaleHandle)
-        val binding_opt = self._file_binding(FileHandle(id: file_object_id))
-        match binding_opt:
-            case nil:
-                Err(FsError.StaleHandle)
-            case Some(binding):
-                var i: i32 = 0
-                while i < self.mounts.len() as i32:
-                    if self.mounts[i].id == binding.mount_id:
-                        return _driver_fstat(
-                            self.mounts[i].driver, binding.inner_handle)
-                    i = i + 1
-                Err(FsError.StaleHandle)
-
     me fn positioned_write_bytes(
         file_object_id: u64, kind: PositionedDriverKind,
         offset: u64, data: [u8]
@@ -389,11 +317,7 @@ impl MountTable:
                     if self.mounts[i].id == binding.mount_id:
                         val written = driver_positioned_write_bytes(
                             self.mounts[i].driver, kind, binding.inner_handle,
-                            offset as i64, data)
-                        # A backend may write a prefix before reporting failure.
-                        # Invalidate after every admitted mutating call, not only Ok.
-                        self._advance_generation_at(i, false)?
-                        val written = result?
+                            offset as i64, data)?
                         if written < 0 or written > data.len() as i64:
                             return Err(FsError.IoError(code: 0u32))
                         return Ok(written as u64)
@@ -402,7 +326,7 @@ impl MountTable:
 
     me fn lookup(path: Path) -> MountEntry?:
         """Return the MountEntry whose mount_point is the longest prefix of path."""
-        if not _mount_path_canonical(path.raw):
+        if not mount_path_canonical(path.raw):
             return nil
         self.lookup_text(path.raw)
 
@@ -412,7 +336,7 @@ impl MountTable:
         relpath is the suffix of path after stripping the mount point prefix.
         Fails with NotFound if no mount covers path.
         """
-        if not _mount_path_canonical(path.raw):
+        if not mount_path_canonical(path.raw):
             return Err(FsError.InvalidArg)
         val entry_opt = self.lookup_text(path.raw)
         match entry_opt:
@@ -453,9 +377,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        return _driver_stat_path(
-                            self.mounts[i].driver, relpath,
-                            not self.mounts[i].opts.read_only)
+                        return _driver_stat_path(self.mounts[i].driver, relpath)
                     i = i + 1
                 Err(FsError.NotFound)
 
@@ -471,10 +393,8 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        if _open_flags_request_mutation(flags):
-                            _mount_mutation_allowed(self.mounts[i])?
                         if (flags.bits & 64) != 0:
-                            self._generation_available_at(i, true)?
+                            self._generation_available(mount_id, true)?
                         if (flags.bits & 512) != 0:
                             self._generation_available(mount_id, false)?
                         val opened = _driver_open_path(self.mounts[i].driver, relpath, flags)
@@ -482,13 +402,11 @@ impl MountTable:
                             case Err(e):
                                 return Err(e)
                             case Ok(inner):
-                                val virtual_handle = self.next_file_handle
-                                self.next_file_handle = self.next_file_handle + 1u64
-                                self.open_files = self.open_files.push(OpenFileBinding(
-                                    virtual_handle: virtual_handle,
-                                    mount_id: mount_id,
-                                    inner_handle: inner
-                                ))
+                                val bound = self._bind_file(mount_id, inner)
+                                if bound.is_err():
+                                    val _ = _driver_close_handle(self.mounts[i].driver, inner)
+                                    return Err(bound.unwrap_err())
+                                val virtual_handle = bound.unwrap().id
                                 if (flags.bits & 64) != 0:
                                     val generation_result = self._advance_generation(mount_id, true)
                                     if generation_result.is_err():
@@ -507,24 +425,17 @@ impl MountTable:
 
     me fn open_for_execute(path: text, trust: ExecuteTrust) -> Result<ExecuteOpenBinding, FsError>:
         """Resolve once, enforce mount execute policy, and own the opened file."""
-        if self.owner_nonce == 0u64:
-            return Err(FsError.TooLarge)
         val resolved = self.resolve(Path(raw: path))?
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             if self.mounts[i].id == resolved.mount_id:
                 val entry = self.mounts[i]
-                if self.next_file_handle == HANDLE_ID_MAX or
-                    self.open_files.len() >= MOUNT_TABLE_MAX_OPEN_FILES:
-                    return Err(FsError.TooLarge)
                 val caps = FsCapabilitySet(bits: entry.active_caps)
                 if entry.opts.noexec or not caps.has(Capability.Execute):
                     return Err(FsError.Permission)
                 if trust == ExecuteTrust.Untrusted and not entry.opts.allow_untrusted_exec:
                     return Err(FsError.Permission)
-                val opened_result = _driver_open_path(
-                    entry.driver, resolved.relpath, OpenFlags.read_only(),
-                    not entry.opts.read_only)
+                val opened_result = _driver_open_path(entry.driver, resolved.relpath, OpenFlags.read_only())
                 val opened = match opened_result:
                     case Err(error): return Err(error)
                     case Ok(handle): handle
@@ -542,29 +453,18 @@ impl MountTable:
                 if stat.size < 1u64 or stat.size > MOUNT_TABLE_MAX_EXECUTABLE_BYTES:
                     _driver_close_handle(entry.driver, opened)
                     return Err(FsError.TooLarge)
-                val virtual_handle = self.next_file_handle
-                self.next_file_handle = self.next_file_handle + 1u64
-                self.open_files = self.open_files.push(OpenFileBinding(
-                    virtual_handle: virtual_handle,
-                    mount_id: entry.id,
-                    inner_handle: opened
-                ))
+                val bound = self._bind_file(entry.id, opened)
+                if bound.is_err():
+                    _driver_close_handle(entry.driver, opened)
+                    return Err(bound.unwrap_err())
+                val virtual_handle = bound.unwrap().id
                 return Ok(ExecuteOpenBinding(
                     mount_id: entry.id,
-                    _owner_nonce: self.owner_nonce,
                     backend_name: _driver_name(entry.driver),
-                    backend_kind: backend_kind,
-                    canonical_source_path: path,
                     file_handle: FileHandle(id: virtual_handle),
                     mount_generation: entry.mount_generation,
                     namespace_generation: entry.namespace_generation,
-                    # Compatibility field consumed by admission callers as the
-                    # executable's file generation. Never publish the mount's
-                    # global mutation counter here: an unrelated write must not
-                    # invalidate this retained executable inode.
-                    content_generation: binding_content_generation,
-                    execute_observation: execute_observation,
-                    execute_trust: trust,
+                    content_generation: entry.content_generation,
                     size: stat.size as i64
                 ))
             i = i + 1
@@ -587,65 +487,18 @@ impl MountTable:
             i = i + 1
         false
 
-    fn execute_binding_is_current(binding: ExecuteOpenBinding) -> bool:
-        val open_binding = match self._file_binding(binding.file_handle):
-            case nil: return false
-            case Some(value): value
-        val entry = match self._mount_entry_for_file(open_binding):
-            case nil: return false
-            case Some(value): value
-        self._execute_binding_is_current_with_rows(
-            binding, open_binding, entry)
-
-    me fn read_execute_binding_exact_v1(
-        binding: ExecuteOpenBinding, max_bytes: u64
-    ) -> Result<[u8], FsError>:
-        """Read one retained executable object as exact binary bytes.
-
-        The MountTable selects the recorded mount and its positioned-I/O route;
-        callers cannot reopen the pathname or supply a backend discriminator.
-        The returned driver buffer is transferred directly on an exact read.
-        """
-        if max_bytes == 0u64 or max_bytes > POSITIONED_DRIVER_MAX_BYTES:
-            return Err(FsError.InvalidArg)
-        if binding.size < 1:
-            return Err(FsError.InvalidArg)
-        val size = binding.size as u64
-        if size > max_bytes:
-            return Err(FsError.TooLarge)
-        if size != binding.execute_observation.size:
-            return Err(FsError.StaleHandle)
-        val file = match self._file_binding(binding.file_handle):
-            case nil: return Err(FsError.StaleHandle)
-            case Some(value): value
-        val entry = match self._mount_entry_for_file(file):
-            case nil: return Err(FsError.StaleHandle)
-            case Some(value): value
-        val kind = driver_positioned_kind(entry.driver)?
-        # This is deliberately the last operation before the single driver
-        # read. The file, mount, and route above all came from retained rows.
-        if not self._execute_binding_is_current_with_rows(binding, file, entry):
-            return Err(FsError.StaleHandle)
-        val bytes = driver_positioned_read_bytes(
-            entry.driver, kind, file.inner_handle, 0, size as i64)?
-        if not self.execute_binding_is_current(binding):
-            return Err(FsError.StaleHandle)
-        if bytes.len() as u64 != size:
-            return Err(FsError.Corrupt)
-        Ok(bytes)
-
     me fn bump_namespace_generation(mount_id: MountId) -> Result<(), FsError>:
         self._advance_generation(mount_id, true)
 
     me fn bump_content_generation(mount_id: MountId) -> Result<(), FsError>:
         self._advance_generation(mount_id, false)
 
-    me fn _advance_generation(mount_id: MountId, namespace: bool) -> Result<(), FsError>:
+    me fn _advance_generation(mount_id: MountId, is_namespace: bool) -> Result<(), FsError>:
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             if self.mounts[i].id == mount_id:
                 var entry = self.mounts[i]
-                if namespace:
+                if is_namespace:
                     if entry.namespace_generation == 0xFFFFFFFFFFFFFFFFu64:
                         return Err(FsError.TooLarge)
                     entry.namespace_generation = entry.namespace_generation + 1u64
@@ -658,11 +511,11 @@ impl MountTable:
             i = i + 1
         Err(FsError.NotFound)
 
-    fn _generation_available(mount_id: MountId, namespace: bool) -> Result<(), FsError>:
+    fn _generation_available(mount_id: MountId, is_namespace: bool) -> Result<(), FsError>:
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             if self.mounts[i].id == mount_id:
-                val generation = if namespace:
+                val generation = if is_namespace:
                     self.mounts[i].namespace_generation
                 else:
                     self.mounts[i].content_generation
@@ -684,27 +537,22 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        if self.next_dir_handle == HANDLE_ID_MAX or
-                            self.open_dirs.len() >= MOUNT_TABLE_MAX_OPEN_DIRS:
+                        if not self._dir_admission_available():
                             return Err(FsError.TooLarge)
                         val opened = _driver_opendir_path(self.mounts[i].driver, relpath)
                         match opened:
                             case Err(e):
                                 return Err(e)
                             case Ok(inner):
-                                val virtual_handle = self.next_dir_handle
-                                self.next_dir_handle = self.next_dir_handle + 1u64
-                                self.open_dirs = self.open_dirs.push(OpenDirBinding(
-                                    virtual_handle: virtual_handle,
-                                    mount_id: mount_id,
-                                    inner_handle: inner
-                                ))
-                                return Ok(DirHandle(id: virtual_handle))
+                                val bound = self._bind_dir(mount_id, inner)
+                                if bound.is_err():
+                                    return Err(bound.unwrap_err())
+                                return bound
                     i = i + 1
                 Err(FsError.NotFound)
 
     me fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
-        """Read directory entries via the driver that owns the handle (probe each mount)."""
+        """Read directory entries via the binding's recorded mount only."""
         val binding_opt = self._dir_binding(handle)
         match binding_opt:
             case Some(binding):
@@ -713,17 +561,13 @@ impl MountTable:
                     if self.mounts[i].id == binding.mount_id:
                         return _driver_readdir_handle(self.mounts[i].driver, binding.inner_handle)
                     i = i + 1
-            case nil: pass_dn
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val r = _driver_readdir_handle(self.mounts[i].driver, handle)
-            if r.is_ok():
-                return r
-            i = i + 1
-        Err(FsError.NotFound)
+            case nil: Err(FsError.StaleHandle)
+        Err(FsError.StaleHandle)
 
     me fn read(handle: FileHandle, length: i64) -> Result<text, FsError>:
-        """Read up to length bytes; probe each mount to find handle owner."""
+        """Read up to length bytes via the binding's recorded mount only."""
+        if length < 0 or length > MOUNT_TABLE_MAX_IO_BYTES:
+            return Err(FsError.TooLarge)
         val binding_opt = self._file_binding(handle)
         match binding_opt:
             case Some(binding):
@@ -732,14 +576,8 @@ impl MountTable:
                     if self.mounts[i].id == binding.mount_id:
                         return _driver_read_handle(self.mounts[i].driver, binding.inner_handle, length)
                     i = i + 1
-            case nil: pass_dn
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val r = _driver_read_handle(self.mounts[i].driver, handle, length)
-            if r.is_ok():
-                return r
-            i = i + 1
-        Err(FsError.NotFound)
+            case nil: Err(FsError.StaleHandle)
+        Err(FsError.StaleHandle)
 
     me fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
         """Create directory at path via the appropriate mounted driver."""
@@ -755,7 +593,8 @@ impl MountTable:
                     if self.mounts[i].id == mount_id:
                         self._generation_available(mount_id, true)?
                         val result = _driver_mkdir_path(self.mounts[i].driver, relpath.raw, mode)
-                        self._advance_generation_at(i, true)?
+                        if result.is_ok():
+                            self._advance_generation(mount_id, true)?
                         return result
                     i = i + 1
                 Err(FsError.NotFound)
@@ -770,7 +609,9 @@ impl MountTable:
                 Ok(_driver_name(entry.driver))
 
     me fn write(handle: FileHandle, content: text) -> Result<(), FsError>:
-        """Write text content to an open file handle; probe each mount to find handle owner."""
+        """Write text content through the binding's recorded mount only."""
+        if content.len() > MOUNT_TABLE_MAX_IO_BYTES:
+            return Err(FsError.TooLarge)
         val binding_opt = self._file_binding(handle)
         match binding_opt:
             case Some(binding):
@@ -783,17 +624,13 @@ impl MountTable:
                             self._advance_generation(binding.mount_id, false)?
                         return result
                     i = i + 1
-            case nil: pass_dn
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val r = _driver_write_text_handle(self.mounts[i].driver, handle, content)
-            if r.is_ok():
-                return r
-            i = i + 1
-        Err(FsError.NotFound)
+            case nil: Err(FsError.StaleHandle)
+        Err(FsError.StaleHandle)
 
     me fn pwrite(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
-        """Write text patch at offset; probe each mount to find handle owner."""
+        """Write text patch through the binding's recorded mount only."""
+        if offset < 0 or patch.len() > MOUNT_TABLE_MAX_IO_BYTES:
+            return Err(FsError.TooLarge)
         val binding_opt = self._file_binding(handle)
         match binding_opt:
             case Some(binding):
@@ -806,17 +643,13 @@ impl MountTable:
                             self._advance_generation(binding.mount_id, false)?
                         return result
                     i = i + 1
-            case nil: pass_dn
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val r = _driver_pwrite_text_handle(self.mounts[i].driver, handle, patch, offset)
-            if r.is_ok():
-                return r
-            i = i + 1
-        Err(FsError.NotFound)
+            case nil: Err(FsError.StaleHandle)
+        Err(FsError.StaleHandle)
 
     me fn pread(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
-        """Read length chars at offset; probe each mount to find handle owner."""
+        """Read length chars through the binding's recorded mount only."""
+        if offset < 0 or length < 0 or length > MOUNT_TABLE_MAX_IO_BYTES:
+            return Err(FsError.TooLarge)
         val binding_opt = self._file_binding(handle)
         match binding_opt:
             case Some(binding):
@@ -825,17 +658,11 @@ impl MountTable:
                     if self.mounts[i].id == binding.mount_id:
                         return _driver_pread_text_handle(self.mounts[i].driver, binding.inner_handle, offset, length)
                     i = i + 1
-            case nil: pass_dn
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val r = _driver_pread_text_handle(self.mounts[i].driver, handle, offset, length)
-            if r.is_ok():
-                return r
-            i = i + 1
-        Err(FsError.NotFound)
+            case nil: Err(FsError.StaleHandle)
+        Err(FsError.StaleHandle)
 
     me fn close(handle: FileHandle) -> Result<(), FsError>:
-        """Close an open file handle; probe each mount to find handle owner."""
+        """Close an open file handle through its recorded mount only."""
         val binding_opt = self._file_binding(handle)
         match binding_opt:
             case Some(binding):
@@ -847,14 +674,38 @@ impl MountTable:
                             self._unbind_file_handle(handle)
                         return r
                     i = i + 1
-            case nil: pass_dn
-        var i: i32 = 0
-        while i < self.mounts.len() as i32:
-            val r = _driver_close_handle(self.mounts[i].driver, handle)
-            if r.is_ok():
-                return r
-            i = i + 1
-        Err(FsError.NotFound)
+            case nil: Err(FsError.StaleHandle)
+        Err(FsError.StaleHandle)
+
+    me fn fsync(handle: FileHandle) -> Result<(), FsError>:
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        val caps = FsCapabilitySet(bits: self.mounts[i].active_caps)
+                        if not caps.has(Capability.DurableSync):
+                            return Err(FsError.Unsupported)
+                        return _driver_fsync(self.mounts[i].driver, binding.inner_handle)
+                    i = i + 1
+                Err(FsError.StaleHandle)
+            case nil: Err(FsError.StaleHandle)
+
+    me fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        val caps = FsCapabilitySet(bits: self.mounts[i].active_caps)
+                        if not caps.has(Capability.DurableSync):
+                            return Err(FsError.Unsupported)
+                        return _driver_fdatasync(self.mounts[i].driver, binding.inner_handle)
+                    i = i + 1
+                Err(FsError.StaleHandle)
+            case nil: Err(FsError.StaleHandle)
 
     me fn unlink(path: text) -> Result<(), FsError>:
         """Remove a file from the filesystem."""
@@ -870,7 +721,8 @@ impl MountTable:
                     if self.mounts[i].id == mount_id:
                         self._generation_available(mount_id, true)?
                         val result = _driver_unlink_path_text(self.mounts[i].driver, relpath.raw)
-                        self._advance_generation_at(i, true)?
+                        if result.is_ok():
+                            self._advance_generation(mount_id, true)?
                         return result
                     i = i + 1
                 Err(FsError.NotFound)
@@ -894,7 +746,8 @@ impl MountTable:
                             if self.mounts[i].id == old_pair.mount_id:
                                 self._generation_available(old_pair.mount_id, true)?
                                 val result = _driver_rename_path_text(self.mounts[i].driver, old_pair.relpath.raw, new_pair.relpath.raw)
-                                self._advance_generation_at(i, true)?
+                                if result.is_ok():
+                                    self._advance_generation(old_pair.mount_id, true)?
                                 return result
                             i = i + 1
                         Err(FsError.NotFound)
@@ -928,7 +781,8 @@ impl MountTable:
                     if self.mounts[i].id == binding.mount_id:
                         self._generation_available(binding.mount_id, false)?
                         val result = _driver_mmap_shared_writable_handle(self.mounts[i].driver, binding.inner_handle, offset, length)
-                        self._advance_generation_at(i, false)?
+                        if result.is_ok():
+                            self._advance_generation(binding.mount_id, false)?
                         return result
                     i = i + 1
                 Err(FsError.StaleHandle)

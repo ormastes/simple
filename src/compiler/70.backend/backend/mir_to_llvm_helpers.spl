@@ -6,7 +6,6 @@
 use compiler.mir.mir_data.*
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, is_float_type}
 use compiler.backend.backend.mir_to_llvm.MirToLlvm
-use compiler.frontend.parser_types_expr.{AsmLocation}
 
 # ============================================================================
 # LLVM-Specific Helpers (not part of trait)
@@ -39,6 +38,10 @@ impl MirToLlvm:
         val str_len = escaped_string_byte_len(value) + 1
         val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
         self.string_globals = self.string_globals.push(decl)
+        if self.string_global_text.len() == 0:
+            self.string_global_text = decl
+        else:
+            self.string_global_text = "{self.string_global_text}\n{decl}"
         global_name
 
     fn select_cast_instruction(src_ty: text, target_ty: text) -> text:
@@ -57,6 +60,8 @@ impl MirToLlvm:
             return "trunc"
         if src_ty == "i1" and (target_ty == "i8" or target_ty == "i16" or target_ty == "i32" or target_ty == "i64"):
             return "zext"
+        if (src_ty == "i8" or src_ty == "i16" or src_ty == "i32" or src_ty == "i64") and target_ty == "i1":
+            return "trunc"
         if (src_ty == "i8" or src_ty == "i16" or src_ty == "i32" or src_ty == "i64") and target_ty == "double":
             return "sitofp"
         if (src_ty == "i8" or src_ty == "i16" or src_ty == "i32" or src_ty == "i64") and target_ty == "float":
@@ -105,6 +110,13 @@ impl MirToLlvm:
 
         if dest_ty == "i1":
             self.builder.emit("  {dest_name} = {cmp_prefix} {cmp_pred} {cmp_ty} {left_val}, {right_val}")
+        elif dest_ty == "ptr":
+            # zext i1 -> ptr is an invalid cast opcode; go through i64.
+            val tmp = self.builder.fresh_local()
+            val tmp_int = self.builder.fresh_local()
+            self.builder.emit("  {tmp} = {cmp_prefix} {cmp_pred} {cmp_ty} {left_val}, {right_val}")
+            self.builder.emit("  {tmp_int} = zext i1 {tmp} to i64")
+            self.builder.emit("  {dest_name} = inttoptr i64 {tmp_int} to ptr")
         else:
             val tmp = self.builder.fresh_local()
             self.builder.emit("  {tmp} = {cmp_prefix} {cmp_pred} {cmp_ty} {left_val}, {right_val}")

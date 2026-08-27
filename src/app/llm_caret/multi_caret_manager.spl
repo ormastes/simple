@@ -16,6 +16,16 @@ struct MultiCaretManager:
 fn _empty_team(manager_id: text) -> AgentTeamProcess:
     summarize_agent_team(manager_id, [])
 
+fn _leaked_processes(team: AgentTeamProcess) -> i64:
+    # A child that was really spawned but whose kill failed is still ALIVE and
+    # unowned. `stop_agent_process` reports that as status "error"; a pid <= 0
+    # was never spawned and is not a leak.
+    var leaked = 0
+    for proc in team.processes:
+        if proc.status == "error" and proc.pid > 0:
+            leaked = leaked + 1
+    leaked
+
 fn _manager(manager_id: text, status: text, reason: text, capacity: i64,
         team: AgentTeamProcess) -> MultiCaretManager:
     # The process team is the canonical parent-owned state. The embedded
@@ -47,6 +57,12 @@ pub fn launch_multi_caret_manager(manager_id: text,
     if launched.status != "started":
         # Fail closed: the parent tears down every child from a partial batch.
         val rolled_back = stop_agent_team(launched)
+        val leaked = _leaked_processes(rolled_back)
+        if leaked > 0:
+            # Do not report a clean rollback while children are still running.
+            return _manager(manager_id, "error",
+                "launch_rollback_incomplete:" + leaked.to_text(), capacity,
+                rolled_back)
         return _manager(manager_id, "not_started", "launch_rolled_back",
             capacity, rolled_back)
     _manager(manager_id, "running", "all_processes_started", capacity, launched)
@@ -56,7 +72,11 @@ pub fn poll_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager
         return manager
     val polled = agent_team_status(manager.team)
     var status = "running"
-    if polled.status != "started":
+    if polled.status == "partial":
+        # Some children are alive: "exited" would hide the survivors from a
+        # supervisor and invite a double-spawn.
+        status = "degraded"
+    elif polled.status != "started":
         status = "exited"
     _manager(manager.manager_id, status, "processes_polled", manager.capacity,
         polled)
@@ -68,7 +88,11 @@ pub fn stop_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager
         return _manager(manager.manager_id, "stopped", "no_processes",
             manager.capacity, manager.team)
     val stopped = stop_agent_team(manager.team)
-    _manager(manager.manager_id, "stopped", "stop_attempted",
+    val leaked = _leaked_processes(stopped)
+    if leaked > 0:
+        return _manager(manager.manager_id, "stop_failed",
+            "stop_incomplete:" + leaked.to_text(), manager.capacity, stopped)
+    _manager(manager.manager_id, "stopped", "processes_stopped",
         manager.capacity, stopped)
 
 export MultiCaretManager

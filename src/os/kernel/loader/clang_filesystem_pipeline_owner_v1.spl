@@ -27,17 +27,10 @@ use os.kernel.scheduler.scheduler_types.{
 use os.kernel.loader.installed_artifact_catalog_v1.{
     installed_artifact_catalog_lookup_target_v1
 }
-use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
-    installed_artifact_active_target_v1
-}
 use os.kernel.loader.clang_sysroot_launch_grants_v1.{
     CLANG_SYSROOT_READ_GRANT_COUNT_V1,
     clang_sysroot_caps_exact_v1,
     clang_sysroot_catalog_projection_v1
-}
-use os.kernel.loader.clang_cc1_argv_contract_v1.{
-    clang_filesystem_cc1_argv_plan_v1,
-    clang_filesystem_cc1_source_binding_valid_v1
 }
 use os.services.vfs.vfs_include_tree_proof_v1.{
     vfs_include_tree_prove_and_seal_v1
@@ -126,7 +119,6 @@ pub(package) struct ClangFilesystemPipelineDispatchV1:
 pub(package) struct ClangFilesystemBackendCommandV1:
     dispatch: ClangFilesystemPipelineDispatchV1
     compile_argv: [text]
-    compile_source_argv_index: i64
     link_argv: [text]
     execute_argv: [text]
 
@@ -436,14 +428,6 @@ pub(package) fn clang_filesystem_pipeline_reserve_v1(
     if not clang_filesystem_pipeline_request_valid_v1(request, caps):
         return Err("invalid-request-or-authority")
     val target = _target_v1(request.target_triple) ?? return Err("invalid-target")
-    # The boot catalog is selected for the running target.  Reject a valid
-    # cross-target triple before its catalog lookup, sysroot proof, or pipeline
-    # reservation can select authority outside that active target.
-    val active = installed_artifact_active_target_v1() ??
-        return Err("active-target-unavailable")
-    if target.os != active.os or target.arch != active.arch or
-        target.abi != active.abi:
-        return Err("active-target-mismatch")
     val clang_record = installed_artifact_catalog_lookup_target_v1(
         "/usr/bin/clang", target) ?? return Err("clang-not-authenticated")
     val lld_record = installed_artifact_catalog_lookup_target_v1(
@@ -610,25 +594,13 @@ pub(package) fn clang_filesystem_pipeline_begin_current_v1(
         _clang_pipeline_owner_v1.quarantined = true
         _ = _unlock_v1()
         return Err("unsupported-linker-emulation")
-    val cc1_plan = clang_filesystem_cc1_argv_plan_v1(
-        dispatch.clang_path, dispatch.target_triple,
-        dispatch.object_path, dispatch.source_path)
-    if not cc1_plan.?:
-        _clang_pipeline_owner_v1.quarantined = true
-        _ = _unlock_v1()
-        return Err("unsupported-cc1-target")
-    val compile = cc1_plan.unwrap()
-    if not clang_filesystem_cc1_source_binding_valid_v1(
-        compile.argv, compile.source_argv_index, dispatch.source_path):
-        _clang_pipeline_owner_v1.quarantined = true
-        _ = _unlock_v1()
-        return Err("invalid-cc1-source-binding")
     val command = ClangFilesystemBackendCommandV1(
         dispatch: dispatch,
         # Ring-3 FS exec has no fork. Invoke the proven in-process frontend
         # form directly; driver mode would need to spawn a second clang.
-        compile_argv: compile.argv,
-        compile_source_argv_index: compile.source_argv_index,
+        compile_argv: [dispatch.clang_path, "-cc1", "-triple",
+            dispatch.target_triple, "-emit-obj", "-o", dispatch.object_path,
+            "-x", "c", dispatch.source_path],
         # Invoke LLD directly, so spell every target/startup/runtime input that
         # the Clang driver would otherwise contribute.  In particular, an
         # object file alone can link while still producing a non-runnable ELF

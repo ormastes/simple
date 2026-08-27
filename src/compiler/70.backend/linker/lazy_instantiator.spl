@@ -6,7 +6,7 @@
 # Phase 4: Link-Time Lazy Instantiation
 
 use compiler.mono.monomorphize.note_sdn.*
-use compiler.common.compilation_context (GenericTemplate, ConcreteType)
+use compiler.common.compilation_context (GenericTemplate, TemplateConcreteType)
 use compiler.common.compilation_context.{TypeRegistry}
 use compiler.common.di.{DiContainer}
 use compiler.common.driver_core_types.{BootLogger}
@@ -23,18 +23,12 @@ fn _lazy_split_type_params(raw: text) -> [text]:
         params = params.push(part.trim())
     params
 
-fn _lazy_concrete_type_args(raw: text) -> [ConcreteType]:
-    var args: [ConcreteType] = []
+fn _lazy_concrete_type_args(raw: text) -> [TemplateConcreteType]:
+    var args: [TemplateConcreteType] = []
     for part in raw.split(","):
-        args = args.push(ConcreteType(part.trim()))
+        args = args.push(TemplateConcreteType(part.trim()))
     args
 
-fn _lazy_remove_text(items: [text], value: text) -> [text]:
-    var kept: [text] = []
-    for item in items:
-        if item != value:
-            kept = kept.push(item)
-    kept
 
 # ============================================================================
 # Result Types
@@ -85,7 +79,7 @@ struct LazyInstantiator:
     config: LazyInstantiatorConfig
     input_metadata: Dict<text, NoteSdnMetadata>
     output_metadata: NoteSdnMetadata
-    in_progress: Set<text>
+    in_progress: [text]
     depth: i32
     instantiated: Dict<text, [u8]>
 
@@ -143,21 +137,35 @@ me lazyinstantiator_try_instantiate(self: LazyInstantiator, symbol: text) -> Laz
                 return LazyInstantiationResult.Deferred(symbol)
 
         # Start instantiation
-        self.in_progress = self.in_progress.insert(symbol)
+        self.in_progress = self.in_progress.push(symbol)
         self.depth = self.depth + 1
 
         if self.config.verbose:
             print "[lazy-inst] Instantiating {symbol} from {source_path}"
 
         # Perform instantiation
-        val result = self.lazyinstantiator_do_instantiate(entry, source_path)
+        val result = self.do_instantiate(entry, source_path)
 
         # Cleanup
-        self.in_progress = _lazy_remove_text(self.in_progress, symbol)
+        lazyinstantiator_drop_in_progress(self, symbol)
         self.depth = self.depth - 1
 
         result
 
+
+me lazyinstantiator_drop_in_progress(self: LazyInstantiator, value: text):
+    """Drop `value` from in_progress by rebuilding into a fresh, unaliased
+    list — never a helper that takes and returns the field, which keeps the
+    old Arc live across the call and deep-copies it (COW-alias class,
+    doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md).
+    """
+    var kept: [text] = []
+    var index = 0
+    while index < self.in_progress.len():
+        if self.in_progress[index] != value:
+            kept.push(self.in_progress[index])
+        index = index + 1
+    self.in_progress = kept
 
 me lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstantiationEntry, source_path: text) -> LazyInstantiationResult:
         """Perform the actual instantiation through unified CompilationContext pipeline."""

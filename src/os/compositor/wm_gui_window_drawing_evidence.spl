@@ -19,11 +19,12 @@
 # build/wm_gui_window_drawing/report.md.
 
 use os.compositor.wm_scene.{standard_wm_scene, shared_wm_scene_to_chromed_wm_scene, render_scene_to_backend}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED, shared_wm_background_color}
 use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend}
 use common.window_protocol.geometry.{Size}
-use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
 use std.common.image.ppm_decode.{encode_ppm_p6}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -52,13 +53,14 @@ struct SceneMetrics:
     max_glyph_run_px: i64
     ppm_path: text
 
-# Background is the same literal (0xFF0F172A / theme.compositor_bg) across all
-# three captures: standard_wm_scene's desktop_chrome element, the chromed
+# Background is the same live theme.compositor_bg value (Aqua desktop_bg
+# 0xff5a7fb5, see common.ui.wm_chrome_theme.wm_chrome_theme_defaults) across
+# all three captures: standard_wm_scene's desktop_chrome element, the chromed
 # scene's desktop_chrome element, and host_compositor_entry's clear()/CSS
 # backdrop all use wm_chrome_theme().compositor_bg.
-val BG_R: i64 = 15
-val BG_G: i64 = 23
-val BG_B: i64 = 42
+val BG_R: i64 = 90
+val BG_G: i64 = 127
+val BG_B: i64 = 181
 
 # Single flat pass: non-background / near-white ("bright") / exact-white text
 # ink / saturated-accent counts, plus the giant-glyph pathology detector
@@ -217,6 +219,7 @@ fn _demo_window(id: i64, title: text, x: i32, y: i32, w: i32, h: i32, focused: b
         process_id: id.to_u64(),
         app_id: "/sys/apps/demo{id}",
         title: title,
+        language: "und",
         x: x,
         y: y,
         width: w,
@@ -225,7 +228,8 @@ fn _demo_window(id: i64, title: text, x: i32, y: i32, w: i32, h: i32, focused: b
         html: "",
         minimized: false,
         focused: focused,
-        z_index: id.to_i32()
+        z_index: id.to_i32(),
+        chrome_kind: WM_CHROME_KIND_TITLED
     )
 
 # (b) CSS scene lane, richer scene: 3 internal windows + full chrome (taskbar,
@@ -236,7 +240,7 @@ fn _render_wm_scene_windows(out_dir: text) -> SceneMetrics:
         _demo_window(2, "Editor", 460, 130, 420, 300, false),
         _demo_window(3, "Files", 140, 420, 380, 240, false)
     ]
-    val scene = SharedWmScene(width: CAPTURE_W, height: CAPTURE_H, backend: "evidence", windows: windows)
+    val scene = SharedWmScene(width: CAPTURE_W, height: CAPTURE_H, backend: "evidence", windows: windows, background: shared_wm_background_color(wm_chrome_theme().compositor_bg))
     val taskbar = TaskbarModel(
         pinned: [
             AppRef(app_id: "/sys/apps/terminal", display_name: "Terminal", icon: "terminal"),
@@ -260,8 +264,8 @@ fn _render_wm_scene_windows(out_dir: text) -> SceneMetrics:
 # buffer back.
 #
 # Window sizes are deliberately modest (~240x170): render_frame runs one FULL
-# CSS render per window content (render_simple_web_app_content ->
-# compositor_render_request_artifact) on top of the full-frame chrome render,
+# CSS render per window content (simple_web_content_frame_cached ->
+# cache.request_to_pixel_artifact) on top of the full-frame chrome render,
 # and content cost scales with window area under the interpreter. Windows of
 # 360x260..420x300 pushed the whole scene past a 3600s timeout; these smaller
 # windows keep the exact same code path (chrome CSS lane + per-window content

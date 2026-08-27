@@ -16,14 +16,16 @@ struct NativeRegistry:
 impl NativeRegistry:
     static fn new() -> NativeRegistry:
         return NativeRegistry {
-            functions: Dict.new()
+            functions: {}
         }
 
     fn register(name: String, func: NativeFunction):
-        self.functions.set(name, func)
+        self.functions[name] = func
 
     fn get(name: &str) -> Option<&NativeFunction>:
-        return self.functions.get(name)
+        if self.functions.contains_key(name):
+            return Some(self.functions[name])
+        return nil
 
     fn has(name: &str) -> bool:
         return self.functions.contains_key(name)
@@ -112,66 +114,3 @@ enum NativeValue:
     String(String)
     Array(Array<NativeValue>)
     Opaque(Box<Value>)
-
-# Call into compiled Simple module
-fn call_compiled_function(module: &str, function: &str, args: Array<Value>) -> Result<Value, InterpreterError>:
-    # Load compiled module using extern library loading
-    import .extern.{load_library, resolve_symbol}
-
-    # Determine library path based on platform
-    val lib_path = get_module_library_path(module)
-
-    # Load the library
-    val lib = match load_library(&lib_path):
-        case Ok(l): l
-        case Err(e): return Err(e)
-
-    # Simple function names are mangled: simple_<module>_<function>
-    val symbol_name = "simple_{module}_{function}"
-
-    # Resolve the function symbol
-    val symbol = match resolve_symbol(&lib, &symbol_name):
-        case Ok(s): s
-        case Err(e): return Err(e)
-
-    # Call the function with marshalling
-    # Simple ABI: all args passed as u64, returns u64
-    return symbol.call(args)
-
-# Get the library path for a compiled Simple module
-fn get_module_library_path(module: &str) -> String:
-    # Platform-specific library naming
-    #[cfg(target_os = "linux")]
-    return "lib{module}.so"
-
-    #[cfg(target_os = "macos")]
-    return "lib{module}.dylib"
-
-    #[cfg(target_os = "windows")]
-    return "{module}.dll"
-
-# Cache of loaded compiled modules
-static mut COMPILED_MODULES: Option<Dict<String, ExternLib>> = nil
-
-fn get_or_load_module(module: &str) -> Result<&ExternLib, InterpreterError>:
-    import .extern.{load_library, ExternLib}
-
-    unsafe:
-        if COMPILED_MODULES.is_none():
-            COMPILED_MODULES = Some({})
-
-        if value Some(ref mut cache) = COMPILED_MODULES:
-            # Check cache first
-            if value Some(lib) = cache.get(module):
-                return Ok(lib)
-
-            # Load and cache
-            val lib_path = get_module_library_path(module)
-            match load_library(&lib_path):
-                case Ok(lib):
-                    cache[module.to_string()] = lib
-                    return Ok(cache.get(module).unwrap())
-                case Err(e):
-                    return Err(e)
-
-    return Err(InterpreterError.LoadError("failed to initialize module cache".to_string()))

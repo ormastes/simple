@@ -8,7 +8,6 @@
 use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send, socket_recv}
 use os.userlib.fs.{read_file_bytes_direct, read_file_bytes_direct_owned}
 use os.userlib.syscall_raw.{syscall}
-use os.userlib.server_startup.{server_startup_admission_consume_v1}
 use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.response.{serialize_response, with_default_security_headers}
@@ -16,9 +15,6 @@ use std.nogc_sync_mut.http_server.mime.{mime_from_path}
 use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
 use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
 use os.apps.dbd.dbd.{DbdServer}
-use os.apps.dbd.dbd_close_owner.{
-    DbdCloseOwnerV1, DbdCloseDispositionV1
-}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
@@ -27,6 +23,7 @@ use os.apps.servers_user.database_persistence_adapter.{
 }
 
 val HTTP_PORT: u16 = 8080u16
+val DB_PORT: u16 = 5433u16
 val MAX_IDLE_POLLS: i64 = 10000000
 val DB_CREDENTIAL_PATH: text = "/SYS/SRVDB.KEY"
 val DB_CERTIFICATE_PATH: text = "/SYS/SRVDB.CRT"
@@ -39,17 +36,8 @@ fn debug_line(message: text):
     for byte in bytes:
         val _ = syscall(60, byte as u64, 0, 0, 0, 0)
 
-fn close_fd(fd: i32) -> bool:
-    syscall(33, fd as u64, 0, 0, 0, 0) >= 0
-
-fn server_shutdown_exit_code_v1(
-    websocket_closed: bool, http_listener_closed: bool,
-    database_closed: bool
-) -> i64:
-    """Return success only after every live server resource owner closes."""
-    if websocket_closed and http_listener_closed and database_closed:
-        return 0
-    9
+fn close_fd(fd: i32):
+    val _ = syscall(33, fd as u64, 0, 0, 0, 0)
 
 fn send_all(sock: Socket, bytes: [u8]) -> bool:
     var sent: u64 = 0
@@ -159,15 +147,6 @@ fn handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
             close_fd(client.fd)
             true
 
-fn server_store() -> SdnDatabase:
-    val loaded = SdnDatabase.load(DB_PATH)
-    var store = loaded ?? SdnDatabase.new(DB_PATH)
-    if not store.get_table("records").?:
-        store.set_table("records", SdnTable.new(
-            "records", ["id", "value", "valid", "_db_server_version"]
-        ))
-    store
-
 fn publish_credential_zeroization(phase: text, report: SecureZeroReport, hash_workspace_zeroized: bool):
     val status = if report.verified(): "verified" else: "failed"
     val hash_status = if hash_workspace_zeroized: "verified" else: "failed"
@@ -182,7 +161,7 @@ fn credential_byte_is_space(b: u8) -> bool:
     # never has to become a `text` to be trimmed.
     b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8 or b == 11u8 or b == 12u8
 
-fn load_server_policy() -> CapabilityTable?:
+fn provision_database_service(server: DbdServer) -> bool:
     # The credential exists ONLY as mutable byte buffers, from the file read
     # through digest registration.  Nothing here builds a `text` from it: an
     # immutable `text` cannot be zeroized, so every copy would survive for the
@@ -194,47 +173,41 @@ fn load_server_policy() -> CapabilityTable?:
     match read_file_bytes_direct_owned(DB_CREDENTIAL_PATH, MAX_DB_CREDENTIAL_BYTES + 1u64):
         Err(_): nil
         Ok(loaded_bytes):
-            var bytes = loaded_bytes
-            if (bytes.len() == 0u64 or bytes.len() > MAX_DB_CREDENTIAL_BYTES or
-                credential_byte_is_space(bytes[0u64]) or
-                credential_byte_is_space(bytes[bytes.len() - 1u64])):
-                if bytes.len() > 0u64:
-                    val rejected_report = secure_zero_u8_slots(bytes)
-                    publish_credential_zeroization("loaded-rejected", rejected_report, false)
-                nil
-            else:
-                var policy = CapabilityTable.new()
-                val registration_ok = policy.register_authenticated_bytes(capability_with("operator", [
-                    grant_key("records", "read"), grant_key("records", "write")
-                ]), bytes)
-                val loaded_report = secure_zero_u8_slots(bytes)
-                publish_credential_zeroization("loaded", loaded_report, registration_ok)
-                if registration_ok and loaded_report.verified():
-                    Some(policy)
-                else:
-                    nil
-
-fn handle_db(listener: Socket, server: DbServerCapsule) -> bool:
-    match accept(listener):
-        Err(_): false
-        Ok(client):
-            match socket_recv(client, 8192):
-                Err(_): debug_line("[arm64-servers-user] db recv=fail")
-                Ok(bytes):
-                    val line = bytes_to_string(bytes).trim()
-                    val reply = server.handle_message(line) + "\n"
-                    val _ = send_all(client, text_to_bytes_pure(reply))
-            close_fd(client.fd)
-            true
+            var credential = loaded_bytes
+            if (credential.len() == 0u64 or credential.len() > MAX_DB_CREDENTIAL_BYTES or
+                credential_byte_is_space(credential[0u64]) or
+                credential_byte_is_space(credential[credential.len() - 1u64])):
+                val rejected_report = secure_zero_u8_slots(credential)
+                publish_credential_zeroization("loaded-rejected", rejected_report, false)
+                return false
+            match read_file_bytes_direct_owned(DB_CERTIFICATE_PATH, 65536u64):
+                Err(_):
+                    val report = secure_zero_u8_slots(credential)
+                    publish_credential_zeroization("certificate-missing", report, false)
+                    false
+                Ok(loaded_cert):
+                    var cert = loaded_cert
+                    match read_file_bytes_direct_owned(DB_PRIVATE_KEY_PATH, 16384u64):
+                        Err(_):
+                            val _ = secure_zero_u8_slots(cert)
+                            val report = secure_zero_u8_slots(credential)
+                            publish_credential_zeroization("private-key-missing", report, false)
+                            false
+                        Ok(loaded_key):
+                            var key = loaded_key
+                            val admitted = server.provision_service(
+                                "operator", credential, [cert], key, 0x0807u16)
+                            val credential_report = secure_zero_u8_slots(credential)
+                            val cert_report = secure_zero_u8_slots(cert)
+                            val key_report = secure_zero_u8_slots(key)
+                            val all_wiped = credential_report.verified() and
+                                cert_report.verified() and key_report.verified()
+                            publish_credential_zeroization(
+                                "loaded", credential_report, admitted and all_wiped)
+                            admitted and all_wiped
 
 fn main() -> i64:
-    # DBD owns its endpoint and persistence namespace.  This filesystem
-    # launcher only consumes the one-shot startup receipt before handing off
-    # to that canonical owner; it must not recreate either authority locally.
-    var db_server = DbdServer.new_filesystem_launched_v1()
-    if not db_server.startup_evidence_ready_v1():
-        debug_line("[simpleos-servers-user] startup-evidence=blocked")
-        return 8
+    var db_server = DbdServer.new()
     if not provision_database_service(db_server):
         debug_line("[simpleos-servers-user] credential=blocked path=" + DB_CREDENTIAL_PATH)
         return 5
@@ -262,7 +235,7 @@ fn main() -> i64:
         return 2
 
     val http_result = bind_listener(HTTP_PORT)
-    val db_listener = db_server.bind_listener()
+    val db_listener = db_server.bind_listener(DB_PORT.to_i64())
     if http_result.is_err() or db_listener < 0:
         debug_line("[simpleos-servers-user] listener bind=fail")
         val _ = db_server.close_service()
@@ -270,7 +243,7 @@ fn main() -> i64:
     val http_listener = http_result.unwrap()
 
     debug_line("[simpleos-servers-user] executable=/SERVERS.ELF launch=ok")
-    debug_line("[simpleos-servers-user] http=:8080 db=:" + DBD_PORT.to_text() + " ready=ok")
+    debug_line("[simpleos-servers-user] http=:8080 db=:5433 ready=ok")
 
     var idle_polls: i64 = 0
     var accepted_connections: i64 = 0

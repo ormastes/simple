@@ -32,28 +32,58 @@ enum LintReadFileResult:
     ReadFileOk(String)
     ReadFileErr(String)
 
-fn read_file(path: String) -> LintReadFileResult:
+fn lint_read_file(path: String) -> LintReadFileResult:
     val file_content = file_read(path)
     if file_content == "":
         return LintReadFileResult.ReadFileErr("Failed to read file: {path}")
     return LintReadFileResult.ReadFileOk(file_content)
 
-# Lint levels
-enum LintLevel:
-    Allow
-    Warn
-    Deny
-
 # Strictness tiers (script modes) — the lint-tier axis, orthogonal to the stdlib
 # memory tiers (nogc_sync_mut, ...). See
-# doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md and glossary.md.
-#   moderate  — relaxed: deny defaults downgraded to warn (advisory only)
-#   lib       — current defaults (the regression-safe baseline)
-#   reliable  — strictest: public-surface + safety/correctness lints raised to deny
+# doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md,
+# doc/02_requirements/language/mission_critical_profile.md § Profile ladder
+# rename, and glossary.md.
+#   moderate — relaxed: deny defaults downgraded to warn (advisory only)
+#   strict   — current defaults (the regression-safe baseline); formerly `lib`
+#   robust   — strictest: public-surface + safety/correctness lints raised to
+#              deny; Rust-parity level; formerly `reliable`
+#   critical — robust + REQ-MC rules (bare_primitive_internal=warn); formerly
+#              `mission-critical` / `mission_critical`
+#
+# Renamed 2026-07-28 (user-approved). Old names (`lib`, `reliable`,
+# `mission-critical`/`mission_critical`) are kept working as deprecated
+# aliases in parse_lint_profile below — they still resolve to the new
+# variant, but emit a one-time deprecation warning per distinct old
+# spelling (see _warn_deprecated_profile_alias_once).
 enum LintProfile:
     Moderate
-    Lib
-    Reliable
+    Strict
+    Robust
+    Critical
+
+# Tracks which deprecated profile spellings have already warned this
+# process. Module-level state, not a struct field: a once-only flag
+# threaded through a struct would not persist (structs are value types) and
+# a per-call-site warning would spam an entire build for one file attribute.
+# Keyed by the exact old spelling; counts (not just a bool) so specs can
+# prove "fires once, not N times" without scraping log output.
+var _DEPRECATED_PROFILE_ALIAS_WARN_COUNTS: Dict<String, i64> = {}
+
+# Emit the deprecation notice for `old_name` -> `new_name` exactly once per
+# process, no matter how many times parse_lint_profile is called with it.
+fn _warn_deprecated_profile_alias_once(old_name: String, new_name: String):
+    if _DEPRECATED_PROFILE_ALIAS_WARN_COUNTS.contains_key(old_name):
+        return
+    _DEPRECATED_PROFILE_ALIAS_WARN_COUNTS[old_name] = 1
+    info("lint", "lint profile '{old_name}' is deprecated, use '{new_name}' instead")
+
+# Test-support accessor: how many times has the deprecation notice actually
+# fired for this old spelling (0 or 1, never more)? Not used by production
+# logic — exists so specs can prove the warn-once contract directly.
+fn deprecated_profile_alias_warn_count(old_name: String) -> i64:
+    if _DEPRECATED_PROFILE_ALIAS_WARN_COUNTS.contains_key(old_name):
+        return _DEPRECATED_PROFILE_ALIAS_WARN_COUNTS[old_name]
+    return 0
 
 # Parse a profile string into LintProfile. Returns nil for unknown strings.
 # Accepts both current names and deprecated pre-2026-07-28 aliases.
@@ -105,7 +135,7 @@ fn all_lint_names() -> [text]:
      "unnamed_duplicate_typed_args", "resource_leak",
      "wildcard_match", "non_exhaustive_match",
      "export_outside_init", "init_boundary_violation",
-     "bypass_with_code_files", "unknown_decorator", "stub_impl",
+     "bypass_with_code_files", "unknown_annotation", "unknown_decorator", "stub_impl",
      "unknown_attribute", "too_many_arguments", "dummy_accessor",
      "parser_contextual_keyword", "deprecated_if_let",
      "struct_construction_parens", "short_grammar_refactor",
@@ -113,11 +143,12 @@ fn all_lint_names() -> [text]:
      "similar_parent_method_name", "nonexistent_type",
      "required_comment",
      "ui_no_raw_widget_kind", "ui_no_raw_variant", "ui_no_raw_theme_name",
-     "stale_md_diagrams", "hash_bracket_attribute",
+     "stale_md_diagrams", "hash_bracket_attribute", "llvm_backend_type_safety",
      # Newly-configurable families (previously unmapped — see
      # map_lint_code_to_config_name). Default warn (regression-safe).
      "unused_code", "style_convention", "unsafe_pattern", "concurrency_misuse",
      "closure_capture", "ignored_return", "multiline_bool", "memory_safety",
+     "collection_performance",
      "visibility_boundary", "database_integrity", "tracking_traceability",
      # Freestanding/kernel-risk entry-closure codegen defect avoidance
      # (C1/C4/C5/C7) — scoped to src/os/** and examples/09_embedded/**.
@@ -134,6 +165,7 @@ fn all_lint_names() -> [text]:
      # by default (would flood non-MC FFI glue); warn under the critical
      # tier. Deny at profile v2 (deliberately not implemented here).
      "unwrapped_foreign_resource",
+     "raw_sffi_call",
      # Silent-default / fail-open (W-MC-DEF-001/002/003) — WARN by default so
      # existing code keeps compiling. PROMOTION TO A HARD ERROR IS THE ONE-LINE
      # CHANGE `levels["silent_default"] = "deny"` below, and nothing else.
@@ -185,7 +217,7 @@ fn lint_name_is_known(name: text) -> bool:
 # Most are Warn; exceptions: spipe_no_print_based_tests=Deny,
 # spipe_placeholder_tests=Deny, spipe_empty_examples=Deny,
 # export_outside_init=Deny,
-# stub_impl=Deny, wildcard_match=Allow.
+# stub_impl=Deny, wildcard_match=Allow, style_convention=Allow.
 fn build_default_levels() -> Dict<String, String>:
     var levels: Dict<String, String> = {}
     levels["primitive_api"] = "deny"
@@ -208,29 +240,41 @@ fn build_default_levels() -> Dict<String, String>:
     levels["export_outside_init"] = "deny"
     levels["init_boundary_violation"] = "warn"
     levels["bypass_with_code_files"] = "warn"
+    levels["unknown_annotation"] = "warn"
     levels["unknown_decorator"] = "warn"
     levels["stub_impl"] = "deny"
     levels["unknown_attribute"] = "warn"
+    levels["parser_contextual_keyword"] = "warn"
+    levels["deprecated_if_let"] = "warn"
+    levels["struct_construction_parens"] = "warn"
+    levels["short_grammar_refactor"] = "warn"
+    levels["raw_unit_postfix"] = "warn"
+    levels["simd_opportunity"] = "warn"
     levels["too_many_arguments"] = "warn"
     levels["dummy_accessor"] = "warn"
     levels["similar_parent_method_name"] = "warn"
+    levels["nonexistent_type"] = "warn"
     levels["required_comment"] = "warn"
     levels["ui_no_raw_widget_kind"] = "warn"
     levels["ui_no_raw_variant"] = "warn"
     levels["ui_no_raw_theme_name"] = "warn"
     levels["stale_md_diagrams"] = "warn"
+    levels["llvm_backend_type_safety"] = "deny"
     levels["hash_bracket_attribute"] = "warn"
-    # Newly-configurable families — all warn so that mapping them is behavior-
-    # identical at the unset/lib baseline (apply_config_level / should_keep_lint_result
-    # treat Warn as pass-through). Elevation happens only in profile_default_levels.
+    # Newly-configurable families. Preserve the original suppression level for
+    # style diagnostics until --warn-all or an explicit config promotes them.
     levels["unused_code"] = "warn"
-    levels["style_convention"] = "warn"
+    levels["style_convention"] = "allow"
     levels["unsafe_pattern"] = "warn"
     levels["concurrency_misuse"] = "warn"
     levels["closure_capture"] = "warn"
     levels["ignored_return"] = "warn"
     levels["multiline_bool"] = "warn"
     levels["memory_safety"] = "warn"
+    # Stable policy owner for COLL001-COLL019 and future typed CollectionPlan
+    # diagnostics. Moderate/strict report warnings; robust/critical may deny
+    # typed high-confidence defects. The AST fallback caps itself at warning.
+    levels["collection_performance"] = "warn"
     levels["visibility_boundary"] = "warn"
     levels["database_integrity"] = "warn"
     levels["tracking_traceability"] = "warn"
@@ -243,6 +287,7 @@ fn build_default_levels() -> Dict<String, String>:
     levels["const_ref_default"] = "warn"
     levels["bare_primitive_internal"] = "allow"
     levels["unwrapped_foreign_resource"] = "allow"
+    levels["raw_sffi_call"] = "allow"
     # ===== SILENT-DEFAULT ESCALATION POINT =====
     # "warn" today: existing code must keep compiling ("at least warning now,
     # latter bug when sw stable for compatibility"). Change this single line to
@@ -260,13 +305,15 @@ fn build_default_levels() -> Dict<String, String>:
     levels
 
 # Per-tier default levels, layered on top of build_default_levels().
-#   Lib      = current defaults (regression-safe baseline)
+#   Strict   = current defaults (regression-safe baseline); formerly `Lib`
 #   Moderate = advisory: every "deny" default downgraded to "warn"
-#   Reliable = strict: public-surface + safety/correctness lints elevated to "deny"
+#   Robust   = strict: public-surface + safety/correctness lints elevated to
+#              "deny"; formerly `Reliable`
+#   Critical = Robust + REQ-MC rules; formerly `MissionCritical`
 fn profile_default_levels(profile: LintProfile) -> Dict<String, String>:
     val levels = build_default_levels()
     match profile:
-        case Lib:
+        case Strict:
             return levels
         case Moderate:
             var out: Dict<String, String> = {}
@@ -294,7 +341,9 @@ fn _strict_robust_levels(levels: Dict<String, String>) -> Dict<String, String>:
     var strict = levels
     strict["primitive_api"] = "deny"
     strict["unsafe_pattern"] = "deny"
+    strict["raw_sffi_call"] = "deny"
     strict["memory_safety"] = "deny"
+    strict["collection_performance"] = "deny"
     strict["concurrency_misuse"] = "deny"
     strict["visibility_boundary"] = "deny"
     strict["non_exhaustive_match"] = "deny"
@@ -451,9 +500,21 @@ impl LintCliPolicy:
 # Loaded from the simple.sdn `lints:` section and/or file-level attributes.
 class LintConfig:
     levels: Dict<String, String>
+    # Immutable effective defaults for this selected profile. Built once when
+    # the config/profile changes, never once per diagnostic lookup.
+    effective_defaults: Dict<String, String>
+    # Exact simple.sdn path from which this config was parsed; empty for
+    # programmatic/inline configurations.
+    source_path: String
     # Selected strictness tier; nil = unset (legacy build_default_levels behavior).
     profile: Option<LintProfile>
     error: String
+    # WARNING PHASE (2026-08-23): when true, every effective level this config
+    # yields drops EXACTLY ONE severity rung. Lint's floor is Warn, NOT Allow —
+    # `Allow` is silence, and this feature is a severity transform, never a mute
+    # switch. Default false, so a config that never sets it behaves byte-identically
+    # to before. See compiler.common.assurance.warning_phase.
+    warning_phase: bool
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -475,7 +536,9 @@ impl LintConfig:
         val content = file_read(path)
         if content == "":
             return LintConfig.new()
-        LintConfig.from_sdn_string(content)
+        var config = LintConfig.from_sdn_string(content)
+        config.source_path = path
+        config
 
     # Parse config from an SDN string.
     #
@@ -530,7 +593,13 @@ impl LintConfig:
 
                     # profile: <tier> selects the strictness tier (not a lint name).
                     # Handle it BEFORE the all_lint_names() gate or it is dropped.
-                    if lint_name == "profile":
+                    # warning_phase: <bool> is the assurance WARNING PHASE
+                    # modifier — orthogonal to `profile`, never encoded inside
+                    # it. See compiler.common.assurance.warning_phase for why a
+                    # separate key fails CLOSED where a name suffix fails OPEN.
+                    if lint_name == "warning_phase":
+                        config.set_warning_phase_from_value(level_str)
+                    elif lint_name == "profile":
                         if parse_lint_profile(level_str).?:
                             config.set_profile_from_string(level_str)
                         else:
@@ -559,25 +628,17 @@ impl LintConfig:
         if self.levels.has(lint_name):
             level_str = self.levels[lint_name]
         else:
-            # Fall back to tier defaults when a profile is selected, else the
-            # legacy global defaults (nil profile == today's exact behavior).
-            var defaults: Dict<String, String> = build_default_levels()
-            match self.profile:
-                case Some(p):
-                    defaults = profile_default_levels(p)
-                case nil:
-                    val _ = 0
-            if defaults.has(lint_name):
-                level_str = defaults[lint_name]
+            if self.effective_defaults.has(lint_name):
+                level_str = self.effective_defaults[lint_name]
             else:
-                return LintLevel.Warn  # Unknown lint defaults to Warn
+                return phased_lint_level(LintLevel.Warn, self.warning_phase)  # Unknown lint defaults to Warn
 
         val parsed = parse_lint_level(level_str)
         match parsed:
             case Some(level):
-                return level
+                return phased_lint_level(level, self.warning_phase)
             case nil:
-                return LintLevel.Warn
+                return phased_lint_level(LintLevel.Warn, self.warning_phase)
 
     # Select the strictness tier directly.
     me set_profile(profile: LintProfile):
@@ -602,19 +663,26 @@ impl LintConfig:
         val parsed = parse_lint_profile(profile_str)
         match parsed:
             case Some(p):
-                self.profile = Some(p)
+                self.set_profile(p)
             case nil:
                 val _ = 0
 
     # Set the level for a specific lint name.
     me set_level(lint_name: String, level: LintLevel):
+        var value = "warn"
         match level:
             case Allow:
-                self.levels[lint_name] = "allow"
+                value = "allow"
             case Warn:
-                self.levels[lint_name] = "warn"
+                value = "warn"
             case Deny:
-                self.levels[lint_name] = "deny"
+                value = "deny"
+        self.levels[lint_name] = value
+        if lint_name == "unknown_annotation":
+            self.levels["unknown_decorator"] = value
+            self.levels["unknown_attribute"] = value
+        elif lint_name == "unknown_decorator" or lint_name == "unknown_attribute":
+            self.levels["unknown_annotation"] = value
 
     # Apply file-level attribute overrides.
     # Scans the first N lines (before first definition) for:
@@ -623,7 +691,9 @@ impl LintConfig:
     #   @deny(lint1, lint2)
     #   @allow(lint1)  (inner attribute)
     me apply_file_attributes(content: String):
-        val lines = content.split("\n")
+        self.apply_file_attributes_lines(content.split("\n"))
+
+    me apply_file_attributes_lines(lines: [String]):
         for line in lines:
             val trimmed = line.trim()
 
@@ -682,9 +752,8 @@ impl LintConfig:
                             continue
                         # Handle meta-lint unknown_annotation
                         if clean_name == "unknown_annotation":
-                            self.set_level("unknown_decorator", level)
-                            self.set_level("unknown_attribute", level)
-                        elif all_lint_names().contains(clean_name):
+                            self.set_level("unknown_annotation", level)
+                        elif lint_name_is_known(clean_name):
                             self.set_level(clean_name, level)
 
     # Create a child config that inherits all current settings.
@@ -703,11 +772,16 @@ impl LintConfig:
                    warning_phase: self.warning_phase)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
+    resolve_lint_config_with_lines(base, path, content.split("\n"))
+
+fn resolve_lint_config_with_lines(
+    base: LintConfig, path: String, lines: [String]
+) -> LintConfig:
     var config = base.child()
-    config.apply_file_attributes(content)
+    config.apply_file_attributes_lines(lines)
 
     val sdn_path = find_project_sdn(path)
-    if sdn_path != "":
+    if sdn_path != "" and sdn_path != base.source_path:
         val file_config = LintConfig.from_sdn_file(sdn_path)
         for key in file_config.levels.keys():
             if not config.levels.has(key):
@@ -730,7 +804,7 @@ fn should_keep_lint_result(config: LintConfig, lint_code: String) -> Bool:
         case Deny:
             return true
 
-# Override lint level from config if Deny.
+# Promote lint levels according to config without downgrading stricter diagnostics.
 fn apply_config_level(config: LintConfig, lint_code: String, original_level: LintLevel) -> LintLevel:
     val config_name = map_lint_code_to_config_name(lint_code)
     if config_name == "":
@@ -742,17 +816,31 @@ fn apply_config_level(config: LintConfig, lint_code: String, original_level: Lin
         case Allow:
             return original_level  # Suppression handled by should_keep_lint_result
         case Warn:
+            if original_level == LintLevel.Allow:
+                return LintLevel.Warn
             return original_level
 
 # Map internal lint code (e.g. "T001") to config name (e.g. "todo_format").
 # Returns "" for codes with no direct mapping.
 fn map_lint_code_to_config_name(code: String) -> String:
-    if code == "primitive_api":
-        return "primitive_api"
-    if code == "bare_bool":
-        return "bare_bool"
-    if code == "simple_script_required":
-        return "simple_script_required"
+    if code.starts_with("COLL"):
+        return "collection_performance"
+    match code:
+        case "primitive_api" | "bare_bool" | "simple_script_required" |
+             "print_in_test_spec" | "spipe_no_print_based_tests" |
+             "spipe_missing_docstrings" | "spipe_minimal_docstrings" |
+             "spipe_manual_assertions" | "unnamed_duplicate_typed_args" |
+             "resource_leak" | "non_exhaustive_match" |
+             "export_outside_init" | "init_boundary_violation" |
+             "bypass_with_code_files" | "unknown_annotation" | "unknown_decorator" |
+             "unknown_attribute" | "stub_impl": return code
+        case "parser_contextual_keyword" | "deprecated_if_let" |
+             "struct_construction_parens" | "raw_unit_postfix" |
+             "simd_opportunity": return code
+        case "short_grammar_method_ref" | "short_grammar_function_ref" |
+             "short_grammar_placeholder" | "short_grammar_ignored_param":
+            return "short_grammar_refactor"
+        case _: pass
     if code == "T001" or code == "T002" or code == "T003" or code == "T004":
         return "todo_format"
     if code == "ARG001" or code == "ARG002":
@@ -761,6 +849,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "wm_lane_boundary"
     if code == "ACC001":
         return "dummy_accessor"
+    if code == "TYPE001" or code == "TYPE002":
+        return "nonexistent_type"
     if code == "NAME001":
         return "similar_parent_method_name"
     if code == "STUB001" or code == "STUB002" or code == "STUB003":
@@ -804,7 +894,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "required_comment"
     if code == "SAFE001" or code == "SAFE003":
         return "memory_safety"  # safety
-    if code == "W0401" or code == "W0402" or code == "W0403" or code == "W0404":
+    if (code == "W0401" or code == "W0402" or code == "W0403" or
+        code == "W0404" or code == "W0406"):
         return "visibility_boundary"  # visibility
     if code == "UI001":
         return "ui_no_raw_widget_kind"
@@ -826,7 +917,9 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "freestanding_global_call_init"
     if code == "MODINIT001":
         return "module_init_literal"
-    if code == "RAW-RT-001":
+    if code == "PERF-COW-001" or code == "PERF-COW-002" or code == "PERF-COW-003":
+        return "cow_alias_hotpath"
+    if code == "RAW-RT-001" or code == "RAW-RT-002" or code == "RAW-RT-003":
         return "raw_rt_access"
     if code == "W-MC-REF-001":
         return "const_ref_default"
@@ -834,6 +927,8 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "bare_primitive_internal"
     if code == "W-MC-RES-001":
         return "unwrapped_foreign_resource"
+    if code == "SFFI009" or code == "SFFI010":
+        return "raw_sffi_call"
     if code == "W-MC-DEF-001" or code == "W-MC-DEF-002" or code == "W-MC-DEF-003":
         return "silent_default"
     ""
@@ -884,39 +979,147 @@ class LintDiag:
     message: String
     fix_hint: Option<String>
     easy_fix: Option<EasyFix>
+    evidence: [String]
+    uncertainty: Option<String>
+    evidence_tier: LintEvidenceTier
 
-impl Lint:
-    fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint:
-        Lint(
+impl LintDiag:
+    fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> LintDiag:
+        LintDiag(
             code: code,
             level: level,
             category: category,
             message: message,
             fix_hint: nil,
-            easy_fix: nil
+            easy_fix: nil,
+            evidence: [],
+            uncertainty: nil,
+            evidence_tier: LintEvidenceTier.LegacyCompatible
         )
 
-    fn with_fix(hint: String) -> Lint:
-        Lint(
+    fn with_fix(hint: String) -> LintDiag:
+        LintDiag(
             code: self.code,
             level: self.level,
             category: self.category,
             message: self.message,
             fix_hint: Some(hint),
-            easy_fix: self.easy_fix
+            easy_fix: self.easy_fix,
+            evidence: self.evidence,
+            uncertainty: self.uncertainty,
+            evidence_tier: self.evidence_tier
         )
 
-    fn with_easy_fix(fix: EasyFix) -> Lint:
-        Lint(
+    fn with_easy_fix(fix: EasyFix) -> LintDiag:
+        LintDiag(
             code: self.code,
             level: self.level,
             category: self.category,
             message: self.message,
             fix_hint: self.fix_hint,
-            easy_fix: Some(fix)
+            easy_fix: Some(fix),
+            evidence: self.evidence,
+            uncertainty: self.uncertainty,
+            evidence_tier: self.evidence_tier
         )
 
-class LintResult:
+    fn with_evidence(evidence: [String]) -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: evidence,
+            uncertainty: self.uncertainty,
+            evidence_tier: self.evidence_tier
+        )
+
+    fn with_uncertainty(reason: String) -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: self.evidence,
+            uncertainty: Some(reason), evidence_tier: self.evidence_tier
+        )
+
+    fn with_evidence_tier(tier: LintEvidenceTier) -> LintDiag:
+        LintDiag(
+            code: self.code, level: self.level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: self.evidence,
+            uncertainty: self.uncertainty, evidence_tier: tier
+        )
+
+    fn with_level(level: LintLevel) -> LintDiag:
+        LintDiag(
+            code: self.code, level: level, category: self.category,
+            message: self.message, fix_hint: self.fix_hint,
+            easy_fix: self.easy_fix, evidence: self.evidence,
+            uncertainty: self.uncertainty, evidence_tier: self.evidence_tier
+        )
+
+fn lint_code_is_performance(code: text) -> bool:
+    code.starts_with("COLL") or code.starts_with("LOOP") or
+    code.starts_with("MEM") or code.starts_with("COPY") or
+    code.starts_with("LAYOUT") or code.starts_with("ALLOC") or
+    code.starts_with("ESCAPE") or code.starts_with("RETENTION") or
+    code.starts_with("CACHE") or code.starts_with("STACK")
+
+fn lint_evidence_tier_is_unproven(tier: LintEvidenceTier) -> bool:
+    match tier:
+        case SourcePattern | ParsedStructural | Incomplete: true
+        case LegacyCompatible | TypedProven: false
+
+fn lint_diag_is_unproven_performance_advisory(lint: LintDiag) -> bool:
+    lint_code_is_performance(lint.code) and
+        lint_evidence_tier_is_unproven(lint.evidence_tier)
+
+fn apply_config_level_for_evidence(
+    config: LintConfig, code: String, default_level: LintLevel,
+    evidence_tier: LintEvidenceTier
+) -> LintLevel:
+    val configured = apply_config_level(config, code, default_level)
+    if configured == LintLevel.Deny and lint_code_is_performance(code) and
+       lint_evidence_tier_is_unproven(evidence_tier):
+        return LintLevel.Warn
+    configured
+
+struct LintPolicyDecision:
+    keep: bool
+    level: LintLevel
+
+fn lint_policy_decision(
+    config: LintConfig, code: String, default_level: LintLevel,
+    evidence_tier: LintEvidenceTier
+) -> LintPolicyDecision:
+    """Resolve suppression and severity with one code map and level lookup."""
+    val config_name = map_lint_code_to_config_name(code)
+    if config_name == "":
+        return LintPolicyDecision(true, default_level)
+    val configured = config.get_level(config_name)
+    match configured:
+        case Allow:
+            return LintPolicyDecision(false, default_level)
+        case Deny:
+            if lint_code_is_performance(code) and
+               lint_evidence_tier_is_unproven(evidence_tier):
+                return LintPolicyDecision(true, LintLevel.Warn)
+            return LintPolicyDecision(true, LintLevel.Deny)
+        case Warn:
+            if default_level == LintLevel.Allow:
+                return LintPolicyDecision(true, LintLevel.Warn)
+            return LintPolicyDecision(true, default_level)
+
+fn lint_diag_effective_level(lint: LintDiag, deny_all: bool) -> LintLevel:
+    if lint.level != LintLevel.Warn or not deny_all:
+        return lint.level
+    # `--deny-all` is not evidence. Source-shape performance guesses remain
+    # advisory until a producer explicitly supplies typed-proven receiver,
+    # effect, alias, and cardinality facts. Missing uncertainty text alone is
+    # never interpreted as proof.
+    if lint_diag_is_unproven_performance_advisory(lint):
+        return LintLevel.Warn
+    LintLevel.Deny
+
+class LintRunResult:
     file_path: String
     line: Int
     column: Int
@@ -941,21 +1144,26 @@ impl LintRunResult:
             case Deny:
                 level_str = "error"
 
-        var output = self.file_path + ":" + self.line.to_string() + ":" + self.column.to_string() + ": " + level_str + "[" + self.lint.code + "]: " + self.lint.message
+        var lines: [text] = [
+            self.file_path + ":" + self.line.to_string() + ":" +
+            self.column.to_string() + ": " + level_str + "[" +
+            self.lint.code + "]: " + self.lint.message
+        ]
 
         match self.lint.fix_hint:
             case Some(hint):
-                output = output + "\n" + "  hint: " + hint
+                lines.push("  hint: " + hint)
             case nil:
                 val _ = 0
 
         match self.lint.easy_fix:
             case Some(fix):
-                output = output + "\n" + "  fix: available [{fix.id}] ({fix.confidence_str()})"
+                lines.push("  fix: available [{fix.id}] ({fix.confidence_str()})")
             case nil:
                 val _ = 0
 
-        return output
+        for evidence_line in self.lint.evidence:
+            lines.push("  evidence: " + evidence_line)
 
         if self.lint.evidence_tier != LintEvidenceTier.LegacyCompatible:
             lines.push("  confidence: " + lint_evidence_tier_name(self.lint.evidence_tier))
@@ -971,8 +1179,16 @@ impl LintRunResult:
     fn has_easy_fix() -> Bool:
         self.lint.easy_fix.? == true
 
+fn lint_run_result_apply_cli_policy(result: LintRunResult, deny_all: bool) -> LintRunResult:
+    val effective_level = lint_diag_effective_level(result.lint, deny_all)
+    if effective_level == result.lint.level:
+        return result
+    LintRunResult.new(
+        result.file_path, result.line, result.column,
+        result.lint.with_level(effective_level))
+
 enum LintFileResult:
-    LintFileOk([LintResult])
+    LintFileOk([LintRunResult])
     LintFileErr(String)
 
 # Valid TODO areas and priorities
@@ -984,8 +1200,8 @@ fn _todo_priorities() -> [text]:
     ["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"]
 
 class Linter:
-    lints: [Lint]
-    results: [LintResult]
+    lints: [LintDiag]
+    results: [LintRunResult]
     config: LintConfig
     last_resolved_path: String
     last_resolved_config: LintConfig?
@@ -994,6 +1210,9 @@ class Linter:
     last_source_function_lines: Dict<String, i64>
     last_source_collection_fix_lines: Dict<String, i64>
     last_source_export_star_lines: Dict<String, i64>
+    # Compact source-rule output retained only until the parsed append. Never
+    # retain the file-sized canonical line array across the parser boundary.
+    last_option_me_warnings: [OptionMeCallWarning]
     # Command-scoped parsed-policy cache. An index plus flat storage avoids
     # struct-valued dictionary retrieval and remains explicitly bounded.
     parsed_sdn_index: Dict<String, i64>

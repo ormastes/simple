@@ -1,10 +1,14 @@
 # SCV three-way tree merge with conflicts as data.
 
-use app.io.mod (file_exists, file_read, file_delete, dir_walk)
+use app.io.mod (file_exists, file_read, file_delete, file_size, dir_walk)
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.scv.core.{scv_object_path, scv_chunk_path, scv_state_private, scv_line_set_contains, scv_worktree_path_safe}
-use std.scv.store.{scv_hash_text, scv_write_text, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+use std.scv.store.{scv_hash_text, scv_write_text, scv_write_chunk_from_file, scv_write_tree_object, scv_write_commit, scv_write_operation, scv_current_op, scv_commit_tree}
+use std.scv.identity_merge.{scv_identity_merge_groups}
 use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script, scv_parser_index_root_node, scv_text_block_names, scv_structural_merge_from_text}
+use std.scv.region_merge.{scv_region_merge_text}
+use std.scv.merge_validation.{scv_merge_validation_accept}
+use std.scv.conflict_v2.{scv_conflict_v2_payload, scv_conflict_v2_write, scv_conflict_v2_classify}
 
 # ---------------------------------------------------------------------------
 # Structural merge helpers
@@ -60,6 +64,9 @@ fn scv_try_structural_merge(root: text, rel: text, base_line: text, left_line: t
         return ""
     val merged = scv_structural_merge_from_text(base_text, left_text, right_text)
     if merged == "":
+        return ""
+    # SCV-IMPL-D-06: aggressive output is validated before acceptance.
+    if not scv_merge_validation_accept(merged):
         return ""
     scv_write_merged_line_file(root, rel, merged)
 
@@ -160,6 +167,32 @@ fn scv_add_paths_from_tree(tree_content: text, paths: text) -> text:
             out = out + rel + "\n"
     out
 
+# SCV-IMPL-D-07 — v2 typed conflict emission for content conflicts. Reads the
+# three sides, classifies signature_conflict vs content_overlap over the
+# region parser's view, and records the attempted algorithms. v1 objects stay
+# byte-stable; v2 lives in objects/conflicts_v2.
+fn scv_write_conflict_v2_content(root: text, rel: text, base_line: text, left_line: text, right_line: text, attempted: text) -> text:
+    var kind = "content_overlap"
+    val base_path = scv_chunk_path(root, scv_tree_line_chunk_id(base_line))
+    val left_path = scv_chunk_path(root, scv_tree_line_chunk_id(left_line))
+    val right_path = scv_chunk_path(root, scv_tree_line_chunk_id(right_line))
+    if file_exists(base_path) and file_exists(left_path) and file_exists(right_path):
+        kind = scv_conflict_v2_classify(file_read(base_path), file_read(left_path), file_read(right_path))
+    val payload = scv_conflict_v2_payload(rel, kind, "", base_line, left_line, right_line, attempted, "no non-conflicting merge found by the attempted algorithms")
+    scv_conflict_v2_write(root, payload)
+
+# True when `side_tree` carries a path absent from `base_tree` — for the D-07
+# entity_identity_ambiguous detection in the identity pre-pass.
+fn scv_tree_has_added_path(side_tree: text, base_tree: text) -> bool:
+    for line in side_tree.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val rel = scv_tree_line_path(trimmed)
+        if rel != "" and scv_tree_line_for_path(base_tree, rel) == "":
+            return true
+    false
+
 fn scv_write_conflict(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     val payload = "path: {rel}\nbase: {base_line}\nleft: {left_line}\nright: {right_line}\ntime_ms: {current_time_ms()}\n"
     val id = scv_hash_text("conflict", payload)
@@ -224,13 +257,18 @@ fn scv_apply_line_side(base_text: text, side_text: text, side_changes: text) -> 
 fn scv_write_merged_line_file(root: text, rel: text, content: text) -> text:
     if not scv_worktree_path_safe(rel):
         return ""
-    val chunk = scv_hash_text("sha256", content)
-    scv_write_text(scv_chunk_path(root, chunk), content)
-    val payload = "path: {rel}\nchunk: {chunk}\nsize: {content.len()}\nmtime: 0\n"
+    # The chunk id MUST be the sha256 of the bytes on disk (export-tree and
+    # fsck recompute it from the file), so the merged text is staged to a file
+    # and chunked exactly like a snapshot does (one digest path, no drift).
+    val staged = "{root}/.scv/merge_stage_{current_time_ms()}_{scv_hash_text(\"stage\", content)}"
+    scv_write_text(staged, content)
+    val chunk = scv_write_chunk_from_file(root, staged)
+    val size = file_size(staged)
+    file_delete(staged)
+    val payload = "path: {rel}\nchunk: {chunk}\nsize: {size}\nmtime: 0\n"
     val file_id = scv_hash_text("file", payload)
     scv_write_text(scv_object_path(root, "files", file_id), payload)
-    "{rel}|{file_id}|{chunk}|{content.len()}|0"
-
+    "{rel}|{file_id}|{chunk}|{size}|0"
 fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
         return ""
@@ -254,6 +292,29 @@ fn scv_try_syntax_node_merge(root: text, rel: text, base_line: text, left_line: 
     val left_applied = scv_apply_line_side(base_text, left_text, left_changes)
     val merged_text = scv_apply_line_side(left_applied, right_text, right_changes)
     scv_write_merged_line_file(root, rel, merged_text)
+
+# SCV-IMPL-D-05 — semistructured region merge, attempted only where every
+# earlier rung failed and a conflict would otherwise be written. Its output is
+# validated by the D-06 ladder's always-available rungs before acceptance.
+fn scv_try_region_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if base_line == "" or left_line == "" or right_line == "":
+        return ""
+    val base_path = scv_chunk_path(root, scv_tree_line_chunk_id(base_line))
+    val left_path = scv_chunk_path(root, scv_tree_line_chunk_id(left_line))
+    val right_path = scv_chunk_path(root, scv_tree_line_chunk_id(right_line))
+    if not file_exists(base_path) or not file_exists(left_path) or not file_exists(right_path):
+        return ""
+    val base_text = file_read(base_path)
+    val left_text = file_read(left_path)
+    val right_text = file_read(right_path)
+    if base_text.contains("\u0000") or left_text.contains("\u0000") or right_text.contains("\u0000"):
+        return ""
+    val merged = scv_region_merge_text(base_text, left_text, right_text)
+    if merged == "":
+        return ""
+    if not scv_merge_validation_accept(merged):
+        return ""
+    scv_write_merged_line_file(root, rel, merged)
 
 fn scv_try_line_merge(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
     if base_line == "" or left_line == "" or right_line == "":
@@ -323,7 +384,13 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
         val merged_line = scv_try_line_merge(root, rel, base_line, left_line, right_line)
         if merged_line != "":
             return (merged_line, "", "structural-fallback-line")
+        # SCV-IMPL-D-05: last aggressive rung before conflict — semistructured
+        # region merge (validated by the D-06 gate inside the helper).
+        val region_line = scv_try_region_merge(root, rel, base_line, left_line, right_line)
+        if region_line != "":
+            return (region_line, "", "region-merge")
         val conflict_id = scv_write_conflict(root, rel, base_line, left_line, right_line)
+        scv_write_conflict_v2_content(root, rel, base_line, left_line, right_line, "structural-anchor,syntax-node,line,region")
         return (left_line, conflict_id, "conflict-data")
     val syntax_merged_line2 = scv_try_syntax_node_merge(root, rel, base_line, left_line, right_line)
     if syntax_merged_line2 != "":
@@ -332,6 +399,7 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
     if merged_line2 != "":
         return (merged_line2, "", "line-fallback")
     val conflict_id2 = scv_write_conflict(root, rel, base_line, left_line, right_line)
+    scv_write_conflict_v2_content(root, rel, base_line, left_line, right_line, "syntax-node,line")
     (left_line, conflict_id2, "conflict-data")
 
 # SCV-IMPL-D-04 — identity-aware pre-pass. Groups are entities the path/chunk
@@ -390,26 +458,6 @@ fn scv_apply_identity_group(root: text, group: text, base_tree: text, left_tree:
     ("", "", "", "")
 
 fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_commit: text) -> text:
-    # FAIL CLOSED on merge inputs that do not resolve.
-    #
-    # Previously an unresolvable `base_commit` produced an EMPTY base tree,
-    # which is indistinguishable from "the file is new on both sides". Every
-    # merge rung (structural / syntax-node / line / region) guards on
-    # `base_line == ""` and returns "" immediately, so the pick fell straight
-    # through to the conflict rung — which returns `left_line`. The merged
-    # tree then carried LEFT's whole file and the RIGHT side's committed edit
-    # never appeared in the worktree. A bad base id must be an ERROR, not a
-    # silent one-sided merge.
-    if not scv_merge_commit_arg_wellformed(base_commit):
-        return "ERROR malformed merge base commit id\n"
-    if not scv_merge_commit_arg_wellformed(left_commit):
-        return "ERROR malformed merge left commit id\n"
-    if not scv_merge_commit_arg_wellformed(right_commit):
-        return "ERROR malformed merge right commit id\n"
-    # Resolution, not emptiness: a legitimately empty base TREE is fine, an
-    # unresolvable base COMMIT is not.
-    if base_commit != "" and scv_commit_tree(root, base_commit) == "":
-        return "ERROR unresolvable merge base commit\n"
     val base_tree = scv_tree_content(root, base_commit)
     val left_tree = scv_tree_content(root, left_commit)
     val right_tree = scv_tree_content(root, right_commit)
@@ -432,9 +480,23 @@ fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_com
     var conflict_count = 0
     var conflict_ids = ""
     var strategies = ""
+    var consumed = ""
+    for group in scv_identity_merge_groups(root, base_commit, left_commit, right_commit):
+        val (g_picked, g_conflict, g_rows, g_consumed) = scv_apply_identity_group(root, group, base_tree, left_tree, right_tree)
+        if g_consumed == "":
+            continue
+        consumed = consumed + g_consumed
+        if g_picked != "":
+            merged_lines.push(g_picked)
+        strategies = strategies + g_rows
+        if g_conflict != "":
+            conflict_count = conflict_count + 1
+            conflict_ids = conflict_ids + g_conflict + "\n"
     for rel in paths.split("\n"):
         val path = rel.trim()
         if path == "":
+            continue
+        if scv_line_set_contains(consumed, path):
             continue
         val base_line = scv_tree_line_for_path(base_tree, path)
         val left_line = scv_tree_line_for_path(left_tree, path)
@@ -448,7 +510,9 @@ fn scv_merge_commits(root: text, base_commit: text, left_commit: text, right_com
             conflict_count = conflict_count + 1
             conflict_ids = conflict_ids + conflict_id + "\n"
     val tree = scv_write_tree_object(root, merged_lines)
-    val commit = scv_write_commit(root, "{left_commit},{right_commit}", tree, scv_state_private())
+    # Parents are SPACE-joined: scv_write_operation validates each parent by
+    # splitting on " " (store.spl), so the old comma join could never be recorded.
+    val commit = scv_write_commit(root, "{left_commit} {right_commit}", tree, scv_state_private())
     val op = scv_write_operation(root, scv_current_op(root), commit, "merge-commits {base_commit} {left_commit} {right_commit}")
     if op.starts_with("ERROR"):
         return op
@@ -458,12 +522,13 @@ fn scv_conflicts(root: text) -> text:
     val dir = "{root}/.scv/objects/conflicts"
     if not file_exists(dir):
         return "no conflicts\n"
-    var out = ""
+    var rows: [text] = []
     for path in dir_walk(dir):
         val content = file_read(path)
         val id_parts = path.split("/")
         val file_name = id_parts[id_parts.len() - 1]
-        out = out + "{file_name}: {content}"
+        rows.push("{file_name}: {content}")
+    val out = rows.join("")
     if out == "":
         "no conflicts\n"
     else:

@@ -7,6 +7,19 @@ use common.ui.widget.{UITree}
 use common.ui.window.{WindowManager, ManagedWindow}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_LEGACY}
 use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.draw_ir.{
+    DrawIrBatch,
+    DrawIrComposition,
+    DrawIrCommand,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_rect_bounds
+}
+use common.engine.interaction.draw_ir_hit_bridge.{draw_ir_hit_forest, draw_ir_node_id}
+use common.engine.interaction.hit_test.{hit_stack}
 
 struct SharedWmWindow:
     surface_id: text
@@ -15,6 +28,7 @@ struct SharedWmWindow:
     process_id: u64
     app_id: text
     title: text
+    language: text
     x: i32
     y: i32
     width: i32
@@ -25,6 +39,9 @@ struct SharedWmWindow:
     focused: bool
     z_index: i32
     chrome_kind: text
+    # Lifecycle state consumed by canonical DrawIR chrome. Geometry alone is
+    # ambiguous after a desktop resize, so the renderer must not infer it.
+    maximized: bool = false
 
 # chrome_kind values: "titled" draws the standard title bar + border chrome;
 # "borderless" renders the window as a pure content surface (taskbar-like
@@ -38,6 +55,229 @@ struct SharedWmRect:
     y: i32
     width: i32
     height: i32
+
+# BackgroundSpec is a provider contract for the scene background, not a
+# hardcoded fill. kind: "color" is implemented now; "image" is implemented via
+# an injected BackgroundImageProvider (see below); "motion" remains reserved
+# and must not be silently treated as "color" — callers that only need a
+# solid fill today will not need to change now that image/motion providers
+# are landing.
+struct BackgroundSpec:
+    kind: text
+    color: u32
+    source: text
+    fit: text
+
+val WM_BACKGROUND_KIND_COLOR: text = "color"
+val WM_BACKGROUND_KIND_IMAGE: text = "image"
+val WM_BACKGROUND_KIND_MOTION: text = "motion"
+
+# fit values for kind:"image": "cover" (default, uniform scale + center-crop),
+# "contain" (uniform scale + letterbox to the desktop-chrome fill color),
+# "stretch" (non-uniform scale to exactly fill target), "tile" (repeat the
+# intrinsic-size image, no scaling).
+val WM_BACKGROUND_FIT_COVER: text = "cover"
+val WM_BACKGROUND_FIT_CONTAIN: text = "contain"
+val WM_BACKGROUND_FIT_STRETCH: text = "stretch"
+val WM_BACKGROUND_FIT_TILE: text = "tile"
+
+fn shared_wm_background_color(color: u32) -> BackgroundSpec:
+    BackgroundSpec(kind: WM_BACKGROUND_KIND_COLOR, color: color, source: "", fit: WM_BACKGROUND_FIT_COVER)
+
+# Decoded RGBA (as ARGB u32) surface already resampled to the requested
+# target_w x target_h per the requested fit policy — the common.ui executor
+# never decodes/resamples itself, it only blits this buffer.
+struct BackgroundSurface:
+    width: i32
+    height: i32
+    pixels: [u32]
+
+struct SharedWmBackgroundResolution:
+    resolved: bool
+    color: u32
+    surface: BackgroundSurface?
+    stale: bool
+    error_message: text
+
+# Outcome returned by a BackgroundImageProvider.resolve(...) call — the
+# provider's raw report before shared_wm_scene_resolve_background wraps it
+# into a SharedWmBackgroundResolution.
+struct BackgroundResolveOutcome:
+    ok: bool
+    surface: BackgroundSurface?
+    stale: bool
+    error_message: text
+
+# The common.ui executor never decodes and never touches the filesystem: a
+# provider is injected (host provides an fs-backed implementation; SimpleOS
+# provides an in-image pre-decoded one). This preserves the baremetal-lane
+# boundary documented in shared_wm_renderer_unification.md (no direct
+# filesystem-existence-check or theme-package reads on the freestanding
+# path) — this trait definition and its registration hook are the only
+# things common.ui knows about image providers.
+trait BackgroundImageProvider:
+    me resolve(source: text, target_w: i32, target_h: i32, fit: text) -> BackgroundResolveOutcome
+
+var _wm_background_image_provider: BackgroundImageProvider? = nil
+
+# Registers (or clears, with nil) the single process-wide image-background
+# provider. Host wiring registers an fs-backed provider at startup; SimpleOS
+# wiring registers an in-image pre-decoded provider; tests register a fake
+# and must unregister (nil) when done so global state does not leak across
+# spec files sharing this process.
+fn shared_wm_scene_register_background_image_provider(provider: BackgroundImageProvider?):
+    _wm_background_image_provider = provider
+
+# Motion (moving-image) background provider (plan item B,
+# doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md; design
+# doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md 'Phase-2
+# Provider Design'). A MotionBackgroundSource yields the frame surface that is
+# current for a caller-supplied wall-clock timestamp — the executor/resolver
+# never owns a clock itself (common.ui never touches an extern time source;
+# the compositor/present-loop layer supplies t_micros), and never decodes: the
+# source has already resolved+resampled the frame to paintable pixels by the
+# time frame_for_time returns.
+#
+# next_frame_due_micros() lets the present loop (hosted_entry.spl) fold "a
+# motion frame is due" into its existing dirty-gated redraw decision without
+# converting the loop into a busy-poll: it is a plain field read, not a wait.
+#
+# Loud-fail note: this trait's return type is a plain BackgroundSurface (no
+# Result/Outcome channel), matching the signature the design doc specifies.
+# A concrete source that cannot produce a real frame (unreadable frame file,
+# decode failure with no prior good frame) returns the documented sentinel
+# BackgroundSurface(width: 0, height: 0, pixels: []) instead of throwing or
+# fabricating pixels; shared_wm_scene_resolve_background below treats a
+# non-positive-area surface as "no frame available" and falls through to the
+# same loud WM_BACKGROUND_UNRESOLVED_MARKER_COLOR path used for an unknown
+# kind / no-provider case. Missing/empty frame sets are caught earlier, at
+# source construction (loud Result-returning factory on the concrete
+# provider), so this call-time sentinel only covers a frame going bad after
+# construction (e.g. a frame file deleted mid-run).
+trait MotionBackgroundSource:
+    me frame_for_time(t_micros: i64) -> BackgroundSurface
+    me next_frame_due_micros() -> i64
+
+var _wm_motion_background_source: MotionBackgroundSource? = nil
+# Scalar mirror of "a source is registered". Stage3 native builds corrupt
+# the module-global Optional trait read above: with nothing registered the
+# `if val` arm still entered and hit the duck-typed no-vtable trap
+# (LLDB-proven in shared_wm_motion_background_next_due_micros from the
+# hosted production loop). The scalar bool is checked FIRST so the
+# unregistered path never touches the Optional or trait dispatch.
+var _wm_motion_background_source_registered: bool = false
+
+# Registers (or clears, with nil) the single process-wide motion-background
+# source. Same lifecycle contract as
+# shared_wm_scene_register_background_image_provider: host wiring registers
+# an fs-backed frame-list source at startup; SimpleOS would register an
+# in-image pre-decoded one (not implemented yet — SimpleOS visual proof of
+# motion is blocked the same way image is, per plan item D); tests register a
+# fake and must unregister (nil) when done.
+fn shared_wm_scene_register_motion_background_source(source: MotionBackgroundSource?):
+    _wm_motion_background_source = source
+    _wm_motion_background_source_registered = source != nil
+
+# Present-loop seam: returns the absolute wall-clock micros at which the next
+# motion-background frame becomes due, or -1 if no motion source is
+# registered (never due). hosted_entry.spl's dirty-gated event loop reads
+# this once per already-scheduled poll iteration and folds
+# "now >= due" into its existing `dirty` decision — this does not introduce
+# any new polling/sleeping, it only adds a condition to a loop that already
+# runs on a fixed cadence.
+fn shared_wm_motion_background_next_due_micros() -> i64:
+    if not _wm_motion_background_source_registered:
+        return -1
+    if val source = _wm_motion_background_source:
+        return source.next_frame_due_micros()
+    -1
+
+# Pure fire decision for the present loop's motion-dirty trigger: fire exactly
+# once per due timestamp (`due != last_fired_due`), and only once that
+# timestamp has arrived (`now >= due`). `due < 0` means "no motion source
+# registered / never due". The once-per-due-value guard is what keeps the
+# present loop dirty-gated (GUI-5a) instead of perpetually dirty: consuming a
+# frame (frame_for_time during render) advances the source's next-due,
+# producing a NEW due value that re-arms the trigger for the next frame; if
+# the due value does not advance (e.g. a render lane that does not consume
+# motion frames), the trigger fires once and then stays quiet rather than
+# degenerating into an unconditional re-present every loop iteration.
+fn shared_wm_motion_dirty_due(now_micros: i64, due_micros: i64, last_fired_due_micros: i64) -> bool:
+    due_micros >= 0 and due_micros != last_fired_due_micros and now_micros >= due_micros
+
+# Present-loop seam: self-re-arm the motion trigger for the timestamp that
+# just fired. Per shared_wm_motion_dirty_due's contract, a due value only
+# re-arms the trigger once frame_for_time() advances next-due to a NEW value
+# — normally that happens as a side effect of render actually consuming the
+# motion frame. Today only the shared-MDI production lane
+# (shared_mdi_framebuffer_scene.render_shared_mdi_framebuffer_scene_for_windows,
+# threaded from this same seam) renders a resolved kind:"motion" background;
+# the hosted chrome lane (host_compositor_entry.render_frame) still direct-
+# draws chrome and does not resolve scene backgrounds at all (deferred,
+# gated on the region-dirty work design invariant I8 needs — see plan item B
+# dependency note). Calling this at the seam right after
+# shared_wm_motion_dirty_due fires means the "due advances" half of the
+# contract holds even on iterations where no render call happens to reach
+# the motion source, so the seam re-arms itself instead of firing once and
+# then going permanently stale.
+fn shared_wm_motion_background_consume_due(t_micros: i64):
+    if not _wm_motion_background_source_registered:
+        return
+    if val source = _wm_motion_background_source:
+        source.frame_for_time(t_micros)
+
+# Resolves a BackgroundSpec to paintable pixels. Unknown/unimplemented kinds
+# (including "image" with no provider registered, and the reserved "motion")
+# never silently fall back to a default fill: they log a diagnostic and
+# report resolved=false with a loud marker color so callers can detect and
+# surface the failure instead of masking it.
+val WM_BACKGROUND_UNRESOLVED_MARKER_COLOR: u32 = 0xFFFF00FFu32
+
+# Loud unresolved-marker path shared by: a truly unknown kind, "motion"
+# (still reserved), and "image" with no provider registered — the error
+# semantics extension in the design doc states the no-provider case is
+# "the same as an unknown kind", so it reuses this exact message shape
+# (existing callers/specs asserting on "unsupported background kind" keep
+# passing unchanged).
+fn _shared_wm_scene_unresolved_background(background: BackgroundSpec) -> SharedWmBackgroundResolution:
+    val message = "shared_wm_scene_resolve_background: unsupported background kind '{background.kind}' (only '{WM_BACKGROUND_KIND_COLOR}' is implemented, or '{WM_BACKGROUND_KIND_IMAGE}' with a registered BackgroundImageProvider); refusing silent fallback"
+    print(message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
+
+fn _shared_wm_scene_image_resolve_failed(background: BackgroundSpec, provider_message: text) -> SharedWmBackgroundResolution:
+    val message = "shared_wm_scene_resolve_background: image provider resolve failed: {provider_message} (kind='{background.kind}', source='{background.source}'); refusing silent fallback"
+    print(message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
+
+fn _shared_wm_scene_motion_frame_unavailable(background: BackgroundSpec) -> SharedWmBackgroundResolution:
+    val message = "shared_wm_scene_resolve_background: motion source returned no frame (kind='{background.kind}', source='{background.source}'); refusing silent fallback"
+    print(message)
+    SharedWmBackgroundResolution(resolved: false, color: WM_BACKGROUND_UNRESOLVED_MARKER_COLOR, surface: nil, stale: false, error_message: message)
+
+# `t_micros` is the caller-supplied wall-clock time used only by kind:"motion"
+# (default 0 keeps every existing kind:"color"/kind:"image" call site
+# byte-identical — those branches never read it). common.ui does not read a
+# clock itself; the compositor/present-loop layer (which already has extern
+# time access) is the one that must pass a real `t_micros` for a motion
+# background to advance.
+fn shared_wm_scene_resolve_background(background: BackgroundSpec, target_w: i32 = 0, target_h: i32 = 0, t_micros: i64 = 0) -> SharedWmBackgroundResolution:
+    if background.kind == WM_BACKGROUND_KIND_COLOR:
+        return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: nil, stale: false, error_message: "")
+    if background.kind == WM_BACKGROUND_KIND_IMAGE:
+        if val provider = _wm_background_image_provider:
+            val outcome = provider.resolve(background.source, target_w, target_h, background.fit)
+            if outcome.ok:
+                return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: outcome.surface, stale: outcome.stale, error_message: outcome.error_message)
+            return _shared_wm_scene_image_resolve_failed(background, outcome.error_message)
+        return _shared_wm_scene_unresolved_background(background)
+    if background.kind == WM_BACKGROUND_KIND_MOTION:
+        if val source = _wm_motion_background_source:
+            val surface = source.frame_for_time(t_micros)
+            if surface.width > 0 and surface.height > 0:
+                return SharedWmBackgroundResolution(resolved: true, color: background.color, surface: surface, stale: false, error_message: "")
+            return _shared_wm_scene_motion_frame_unavailable(background)
+        return _shared_wm_scene_unresolved_background(background)
+    _shared_wm_scene_unresolved_background(background)
 
 struct SharedWmChrome:
     background_color: text
@@ -58,6 +298,10 @@ struct WmSceneRevision:
 
 val WM_CONTENT_ORIGIN_SIMPLE_WEB: text = "simple_web"
 val WM_CONTENT_ORIGIN_GUI: text = "gui"
+val WM_CONTENT_ORIGIN_PIXEL_SURFACE: text = "pixel_surface"
+
+fn wm_content_frame_origin_valid(origin_kind: text) -> bool:
+    origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB or origin_kind == WM_CONTENT_ORIGIN_GUI or origin_kind == WM_CONTENT_ORIGIN_PIXEL_SURFACE
 
 # Canonical rendered content supplied by the Simple Web adapter (or, with
 # origin_kind WM_CONTENT_ORIGIN_GUI, a GUI panel producer). Pixels are ARGB
@@ -113,20 +357,31 @@ fn _wm_lower_hex_sha256_valid(value: text) -> bool:
     true
 
 # Theme-backed Simple Web WM frames must prove that the canonical renderer
-# produced them and that unsupported backdrop sampling was realized as the
-# declared stable solid material. Other content origins have their own
-# producer contracts and are not constrained by this predicate.
+# produced them and that backdrop material handling used one of the two
+# declared realizations. Other content origins have their own producer
+# contracts and are not constrained by this predicate.
 fn wm_content_frame_web_provenance_valid(frame: WmContentFrame) -> bool:
     if frame.origin_kind != WM_CONTENT_ORIGIN_SIMPLE_WEB:
         return true
+    val material_valid = (
+        (frame.material_fallback_kind == "solid-material" and
+            frame.material_fallback_reason ==
+                "cpu-raster-backdrop-sampling-unavailable") or
+        (frame.material_fallback_kind == "cpu-composited-material" and
+            frame.material_fallback_reason ==
+                "native-device-backdrop-path-pending") or
+        (frame.material_fallback_kind ==
+                "metal-device-composited-material" and
+            frame.material_fallback_reason ==
+                "metal-device-glass-dispatch")
+    )
     (frame.engine2d_status == "engine2d_rendered" and
         frame.engine2d_backend != "" and
         frame.engine2d_backend != "native-safe-fallback" and
-        frame.material_fallback_kind == "solid-material" and
-        frame.material_fallback_reason != "" and
-        frame.material_fallback_sha256.len() == 64 and
+        material_valid and
+        _wm_lower_hex_sha256_valid(frame.material_fallback_sha256) and
         frame.theme_id != "" and
-        frame.theme_source_manifest_sha256.len() == 64)
+        _wm_lower_hex_sha256_valid(frame.theme_source_manifest_sha256))
 
 # Shared checksum algorithm for WmContentFrame.checksum. Extracted from the
 # Simple Web adapter (os.compositor.simple_web_window_renderer) so every
@@ -170,6 +425,24 @@ struct SharedWmScene:
     height: i32
     backend: text
     windows: [SharedWmWindow]
+    background: BackgroundSpec
+
+# Rich renderer input. The scene remains the immutable projection; content
+# frames and metrics are inputs rather than new mutable scene ownership.
+struct SharedWmRenderInput:
+    scene: SharedWmScene
+    revision: WmSceneRevision
+    content_frames: [WmContentFrame]
+    metrics: WmRenderMetrics
+    t_micros: i64
+
+# Taskbar-aware rich renderer input. Kept distinct from SharedWmRenderInput so
+# existing content-frame producers remain source compatible while new callers
+# must supply the authoritative shell model and clock label explicitly.
+struct SharedWmTaskbarRenderInput:
+    render: SharedWmRenderInput
+    taskbar: TaskbarModel
+    clock_label: text
 
 struct SharedWmDispatchResult:
     action: text
@@ -201,6 +474,36 @@ struct SharedWmEventTargetTranslationResult:
     translation: SharedWmEventTargetTranslation
     cache: SharedWmEventTargetTranslationCache
 
+fn simple_gui_internal_window(surface_id: text, window_id: text, process_id: u64, app_id: text, title: text, x: i32, y: i32, width: i32, height: i32, html: text, minimized: bool, focused: bool, z_index: i32) -> SharedWmWindow:
+    simple_gui_internal_window_with_chrome_kind(surface_id, window_id, process_id, app_id, title, x, y, width, height, html, minimized, focused, z_index, WM_CHROME_KIND_TITLED)
+
+fn simple_gui_internal_window_with_chrome_kind(surface_id: text, window_id: text, process_id: u64, app_id: text, title: text, x: i32, y: i32, width: i32, height: i32, html: text, minimized: bool, focused: bool, z_index: i32, chrome_kind: text) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: surface_id,
+        window_id: window_id,
+        surface_kind: UI_SURFACE_KIND_LEGACY,
+        process_id: process_id,
+        app_id: app_id,
+        title: title,
+        language: "und",
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        tree: nil,
+        html: html,
+        minimized: minimized,
+        focused: focused,
+        z_index: z_index,
+        chrome_kind: chrome_kind
+    )
+
+fn simple_gui_internal_window_scene(width: i32, height: i32, backend: text, windows: [SharedWmWindow]) -> SharedWmScene:
+    SharedWmScene(width: width, height: height, backend: backend, windows: windows, background: shared_wm_background_color(wm_chrome_theme().compositor_bg))
+
+fn simple_gui_internal_window_renderer_handoff_marker() -> text:
+    "implemented: WM framebuffer rendering can consume common.ui simple_gui_internal_window_scene"
+
 fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> SharedWmWindow:
     val binding = registry.for_surface(window.surface_id)
     if binding != nil:
@@ -211,6 +514,7 @@ fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> 
             process_id: binding.process_id,
             app_id: binding.app_id,
             title: binding.title,
+            language: "und",
             x: window.x,
             y: window.y,
             width: window.width,
@@ -219,7 +523,8 @@ fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> 
             html: window.html,
             minimized: window.minimized,
             focused: window.focused,
-            z_index: window.z_index
+            z_index: window.z_index,
+            chrome_kind: WM_CHROME_KIND_TITLED
         )
     return SharedWmWindow(
         surface_id: window.surface_id,
@@ -228,6 +533,7 @@ fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> 
         process_id: 0u64,
         app_id: "",
         title: window.title,
+        language: "und",
         x: window.x,
         y: window.y,
         width: window.width,
@@ -236,19 +542,21 @@ fn _project_window(window: ManagedWindow, registry: UiWindowSurfaceRegistry) -> 
         html: window.html,
         minimized: window.minimized,
         focused: window.focused,
-        z_index: window.z_index
+        z_index: window.z_index,
+        chrome_kind: WM_CHROME_KIND_TITLED
     )
 
 fn shared_wm_scene_from_window_manager(manager: WindowManager, registry: UiWindowSurfaceRegistry, width: i32, height: i32) -> SharedWmScene:
     val window_count = manager.windows.len()
+    val default_background = shared_wm_background_color(wm_chrome_theme().compositor_bg)
     if window_count == 0:
-        return SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: [])
-    var windows: [SharedWmWindow] = [_project_window(manager.windows[0], registry); window_count]
+        return SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: [], background: default_background)
+    var windows: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
-        windows[idx] = _project_window(manager.windows[idx], registry)
+        windows.push(_project_window(manager.windows[idx], registry))
         idx = idx + 1
-    SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: windows)
+    SharedWmScene(width: width, height: height, backend: manager.current_backend(), windows: windows, background: default_background)
 
 fn shared_wm_visible_windows(scene: SharedWmScene) -> [SharedWmWindow]:
     var visible_count = 0
@@ -257,14 +565,10 @@ fn shared_wm_visible_windows(scene: SharedWmScene) -> [SharedWmWindow]:
             visible_count = visible_count + 1
     if visible_count == 0:
         return []
-    var visible: [SharedWmWindow] = [scene.windows[0]; visible_count]
-    var write_idx = 0
+    var visible: [SharedWmWindow] = []
     for window in scene.windows:
         if not window.minimized:
-            visible[write_idx] = window
-            write_idx = write_idx + 1
-    if write_idx != visible_count:
-        panic("Shared WM visible window count mismatch: wrote {write_idx}, expected {visible_count}")
+            visible.push(window)
     return visible
 
 fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
@@ -279,12 +583,12 @@ fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
 
 fn shared_wm_scene_layout_key(scene: SharedWmScene) -> text:
     val window_count = scene.windows.len()
-    var parts: [text] = [""; 1 + window_count]
-    parts[0] = "w={scene.width};h={scene.height};backend={scene.backend};count={window_count}"
+    var parts: [text] = []
+    parts.push("w={scene.width};h={scene.height};backend={scene.backend};count={window_count}")
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
-        parts.push("{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}")
+        parts.push("{window.surface_id}:{window.window_id}:{window.x},{window.y},{window.width},{window.height}:z{window.z_index}:min{window.minimized}:focus{window.focused}:max{window.maximized}")
         idx = idx + 1
     parts.join(";")
 
@@ -312,7 +616,7 @@ fn shared_wm_scene_chrome(scene: SharedWmScene, dpi_scale_milli: i32, clock_labe
     val taskbar_h = _shared_wm_scale_px(48, dpi_scale_milli)
     val content_h = _shared_wm_nonnegative(scene.height - command_h - taskbar_h)
     SharedWmChrome(
-        background_color: "#101418",
+        background_color: wm_chrome_theme().background_hex,
         command_lane: SharedWmRect(x: 0, y: 0, width: scene.width, height: command_h),
         content_area: SharedWmRect(x: 0, y: command_h, width: scene.width, height: content_h),
         taskbar: SharedWmRect(x: 0, y: command_h + content_h, width: scene.width, height: taskbar_h),
@@ -328,21 +632,22 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
     val min_y = chrome.content_area.y
     val window_count = scene.windows.len()
     if window_count == 0:
-        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [])
-    var moved: [SharedWmWindow] = [scene.windows[0]; window_count]
+        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [], background: scene.background)
+    var moved: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
         if window.surface_id == surface_id and not window.minimized:
             val max_x = _shared_wm_nonnegative(chrome.content_area.x + chrome.content_area.width - window.width)
             val max_y = _shared_wm_nonnegative(chrome.content_area.y + chrome.content_area.height - window.height)
-            moved[idx] = SharedWmWindow(
+            moved.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
                 surface_kind: window.surface_kind,
                 process_id: window.process_id,
                 app_id: window.app_id,
                 title: window.title,
+                language: window.language,
                 x: _shared_wm_clamp(window.x + dx, min_x, max_x),
                 y: _shared_wm_clamp(window.y + dy, min_y, max_y),
                 width: window.width,
@@ -352,29 +657,40 @@ fn shared_wm_drag_window(scene: SharedWmScene, surface_id: text, dx: i32, dy: i3
                 minimized: window.minimized,
                 focused: true,
                 z_index: window.z_index,
-                chrome_kind: window.chrome_kind
+                chrome_kind: window.chrome_kind,
+                maximized: window.maximized
             ))
         else:
-            moved[idx] = window
+            moved.push(window)
         idx = idx + 1
-    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: moved)
+    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: moved, background: scene.background)
 
 fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) -> SharedWmScene:
     val window_count = scene.windows.len()
     if window_count == 0:
-        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [])
-    var focused: [SharedWmWindow] = [scene.windows[0]; window_count]
+        return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [], background: scene.background)
+    var raised_z = 0
+    var z_index = 0
+    while z_index < window_count:
+        if scene.windows[z_index].z_index > raised_z:
+            raised_z = scene.windows[z_index].z_index
+        z_index = z_index + 1
+    val z_saturated = raised_z == 2147483647
+    if not z_saturated:
+        raised_z = raised_z + 1
+    var focused: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
         val window = scene.windows[idx]
         if window.window_id == window_id:
-            focused[idx] = SharedWmWindow(
+            focused.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
                 surface_kind: window.surface_kind,
                 process_id: window.process_id,
                 app_id: window.app_id,
                 title: window.title,
+                language: window.language,
                 x: window.x,
                 y: window.y,
                 width: window.width,
@@ -384,16 +700,22 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 minimized: false,
                 focused: true,
                 z_index: raised_z,
-                chrome_kind: window.chrome_kind
+                chrome_kind: window.chrome_kind,
+                maximized: window.maximized
             ))
         else:
-            focused[idx] = SharedWmWindow(
+            val retained_z = if z_saturated and window.z_index == raised_z:
+                raised_z - 1
+            else:
+                window.z_index
+            focused.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
                 surface_kind: window.surface_kind,
                 process_id: window.process_id,
                 app_id: window.app_id,
                 title: window.title,
+                language: window.language,
                 x: window.x,
                 y: window.y,
                 width: window.width,
@@ -403,10 +725,11 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 minimized: window.minimized,
                 focused: false,
                 z_index: retained_z,
-                chrome_kind: window.chrome_kind
+                chrome_kind: window.chrome_kind,
+                maximized: window.maximized
             ))
         idx = idx + 1
-    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused)
+    SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: focused, background: scene.background)
 
 # Window-local titlebar button geometry. MUST stay in lockstep with the rects
 # emitted by _wm_draw_ir_window_batch (window_scene_draw_ir.spl) and the pixel
@@ -438,7 +761,8 @@ fn _shared_wm_window_with_state(window: SharedWmWindow, minimized: bool, focused
         minimized: minimized,
         focused: focused,
         z_index: window.z_index,
-        chrome_kind: window.chrome_kind
+        chrome_kind: window.chrome_kind,
+        maximized: window.maximized
     )
 
 # Topmost visible window id under the same rule pointer dispatch uses to pick
@@ -492,28 +816,64 @@ fn shared_wm_minimize_window_by_window_id(scene: SharedWmScene, window_id: text)
         return next_scene
     shared_wm_focus_window_by_window_id(next_scene, next_focus)
 
-fn _shared_wm_local_in_button(local_x: i32, local_y: i32, button_x: i32, button_y: i32, button_size: i32) -> bool:
-    local_x >= button_x and local_x < button_x + button_size and local_y >= button_y and local_y < button_y + button_size
-
 fn _shared_wm_dispatch_result(action: text, target_id: text, app_id: text, window_id: text, scene: SharedWmScene) -> SharedWmDispatchResult:
     SharedWmDispatchResult(action: action, target_id: target_id, app_id: app_id, window_id: window_id, scene: scene)
 
 fn _shared_wm_rect_contains(rect: SharedWmRect, x: i32, y: i32) -> bool:
     x >= rect.x and y >= rect.y and x < rect.x + rect.width and y < rect.y + rect.height
 
-fn _shared_wm_window_contains(window: SharedWmWindow, x: i32, y: i32) -> bool:
-    x >= window.x and y >= window.y and x < window.x + window.width and y < window.y + window.height
-
-fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome, x: i32) -> SharedWmDispatchResult:
+# Helper for command-lane hit-test: builds ephemeral DrawIrComposition for
+# icon and clock rects, lifts to hit-forest, resolves with hit_stack.
+# Returns (icon_index, is_clock) where icon_index >= 0 for icon hits,
+# is_clock=true for clock hits, both false/0 for command-lane defaults.
+fn _wm_command_lane_hit_area(scene: SharedWmScene, chrome: SharedWmChrome, x: i32, y: i32) -> (i32, bool):
     val icon_w = _shared_wm_scale_px(32, chrome.dpi_scale_milli)
     val clock_w = _shared_wm_scale_px(72, chrome.dpi_scale_milli)
     val icons_w = icon_w * chrome.right_icon_count
     val icons_start = scene.width - icons_w
-    if chrome.right_icon_count > 0 and x >= icons_start:
-        val rel = x - icons_start
-        val idx = rel / icon_w
-        return _shared_wm_dispatch_result("command_lane_icon", "right_icon_{idx}", "", "", scene)
-    if x >= icons_start - clock_w:
+    val clock_start = icons_start - clock_w
+
+    var commands: [DrawIrCommand] = []
+    var icon_ids: Dict<i64, i32> = {}
+    var clock_id: i64 = -1
+
+    # Build icon commands (right-aligned, each 32px wide)
+    var icon_idx = 0
+    while icon_idx < chrome.right_icon_count:
+        val cid = "wm-command-lane-icon-{icon_idx}"
+        val left = icons_start + (icon_idx * icon_w)
+        val right = left + icon_w
+        var cmd = draw_ir_rect(cid, left, 0, icon_w, chrome.command_lane.height, 0u32)
+        cmd.hit_rect = draw_ir_rect_bounds(left, 0, icon_w, chrome.command_lane.height)
+        commands.push(cmd)
+        icon_ids[draw_ir_node_id(cid)] = icon_idx
+        icon_idx = icon_idx + 1
+
+    # Build clock command
+    val clock_cid = "wm-command-lane-clock"
+    var clock_cmd = draw_ir_rect(clock_cid, clock_start, 0, clock_w, chrome.command_lane.height, 0u32)
+    clock_cmd.hit_rect = draw_ir_rect_bounds(clock_start, 0, clock_w, chrome.command_lane.height)
+    commands.push(clock_cmd)
+    clock_id = draw_ir_node_id(clock_cid)
+
+    # Lift to hit-forest and resolve
+    val embedding = draw_ir_embedding_config("wm-command-lane-hit", "wm-command-lane-hit", 0, 0, scene.width, chrome.command_lane.height, 0, 1000, false)
+    val batch = draw_ir_batch("wm-command-lane-hit", "", embedding, commands)
+    val comp = draw_ir_composition("wm-command-lane-hit", "", "", [batch])
+    val forest = draw_ir_hit_forest(comp)
+    val result = hit_stack(forest.proxies, forest.parents, x, y)
+
+    if icon_ids.contains_key(result.primary):
+        return (icon_ids[result.primary], false)
+    if result.primary == clock_id:
+        return (-1, true)
+    (-1, false)
+
+fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome, x: i32) -> SharedWmDispatchResult:
+    val (icon_idx, is_clock) = _wm_command_lane_hit_area(scene, chrome, x, 0)
+    if icon_idx >= 0:
+        return _shared_wm_dispatch_result("command_lane_icon", "right_icon_{icon_idx}", "", "", scene)
+    if is_clock:
         return _shared_wm_dispatch_result("command_lane_clock", "clock", "", "", scene)
     _shared_wm_dispatch_result("command_lane", "command_lane", "", "", scene)
 
@@ -578,14 +938,22 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
         # focused window. Keep the scan indexed at this existing by-value
         # boundary for the freestanding native-safe profile.
         var running_window_id = ""
-        var best_z = -1
+        var best_visible_z = -1
+        var minimized_window_id = ""
+        var best_minimized_z = -1
         var window_index = 0
         while window_index < scene.windows.len():
             val window = scene.windows[window_index]
-            if window.app_id == app.app_id and window.z_index > best_z:
-                running_window_id = window.window_id
-                best_z = window.z_index
+            if window.app_id == app.app_id:
+                if not window.minimized and window.z_index > best_visible_z:
+                    running_window_id = window.window_id
+                    best_visible_z = window.z_index
+                if window.minimized and window.z_index > best_minimized_z:
+                    minimized_window_id = window.window_id
+                    best_minimized_z = window.z_index
             window_index = window_index + 1
+        if running_window_id == "":
+            running_window_id = minimized_window_id
         if running_window_id != "":
             val focused_scene = shared_wm_focus_window_by_window_id(
                 scene, running_window_id
@@ -595,9 +963,13 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
                 running_window_id, focused_scene
             )
         return _shared_wm_dispatch_result("launch_app", app.app_id, app.app_id, "", scene)
-    val running_index = slot - taskbar.pinned.len()
-    if running_index >= 0 and running_index < taskbar.running.len():
-        val running = taskbar.running[running_index]
+    if running_slot >= 0:
+        val running = taskbar.running[running_slot]
+        if button == "right":
+            return _shared_wm_dispatch_result(
+                "pin_app", running.app_id, running.app_id,
+                running.window_id, scene
+            )
         val focused_scene = shared_wm_focus_window_by_window_id(scene, running.window_id)
         return _shared_wm_dispatch_result("focus_window", running.window_id, running.app_id, running.window_id, focused_scene)
     _shared_wm_dispatch_result("taskbar_empty", "taskbar", "", "", scene)
@@ -612,7 +984,7 @@ fn _wm_content_button_command(component_id: text, bx: i32, by: i32, size: i32) -
     cmd.hit_rect = draw_ir_rect_bounds(bx, by, size, size)
     cmd
 
-# Lifts window body + titlebar close/minimize hit regions into the shared 2D
+# Lifts window body + titlebar close/minimize/maximize hit regions into the shared 2D
 # interaction core (D1/D2 of the 2026-07-30 unified 2D event plan): one batch
 # per visible window, embedding layer = window.z_index so the topmost window
 # wins the hit_stack sort the SAME way the old `if window.z_index > best_z`
@@ -625,13 +997,14 @@ fn _wm_content_button_command(component_id: text, bx: i32, by: i32, size: i32) -
 # (group pushed first, then leaves), matching _shared_wm_local_in_button's
 # per-button precedence over the body/drag fallback in the old code. Buttons
 # are only added for non-borderless windows, same guard as before. Returns
-# (window_index, kind) where kind is "close", "minimize", or "body";
+# (window_index, kind) where kind is "close", "minimize", "maximize", or "body";
 # window_index is -1 when nothing was hit (-> desktop_background).
 fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
     var batches: [DrawIrBatch] = []
     var body_ids: Dict<i64, i32> = {}
     var close_ids: Dict<i64, i32> = {}
     var minimize_ids: Dict<i64, i32> = {}
+    var maximize_ids: Dict<i64, i32> = {}
     var i = 0
     val window_count = scene.windows.len()
     while i < window_count:
@@ -645,12 +1018,15 @@ fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
                 val close_btn_cid = "wm-content-{i}-close-btn"
                 val close_traffic_cid = "wm-content-{i}-close-traffic"
                 val minimize_cid = "wm-content-{i}-minimize"
+                val maximize_cid = "wm-content-{i}-maximize"
                 commands.push(_wm_content_button_command(close_btn_cid, close_x, WM_TITLEBAR_CLOSE_Y, WM_TITLEBAR_CLOSE_SIZE))
                 commands.push(_wm_content_button_command(close_traffic_cid, WM_TITLEBAR_TRAFFIC_RED_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
                 commands.push(_wm_content_button_command(minimize_cid, WM_TITLEBAR_TRAFFIC_YELLOW_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
+                commands.push(_wm_content_button_command(maximize_cid, WM_TITLEBAR_TRAFFIC_GREEN_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
                 close_ids[draw_ir_node_id(close_btn_cid)] = i
                 close_ids[draw_ir_node_id(close_traffic_cid)] = i
                 minimize_ids[draw_ir_node_id(minimize_cid)] = i
+                maximize_ids[draw_ir_node_id(maximize_cid)] = i
             val embedding = draw_ir_embedding_config(body_cid, body_cid, window.x, window.y, window.width, window.height, window.z_index, 1000, true)
             batches.push(draw_ir_batch(body_cid, "", embedding, commands))
         i = i + 1
@@ -661,6 +1037,8 @@ fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
         return (close_ids[result.primary], "close")
     if minimize_ids.contains_key(result.primary):
         return (minimize_ids[result.primary], "minimize")
+    if maximize_ids.contains_key(result.primary):
+        return (maximize_ids[result.primary], "maximize")
     if body_ids.contains_key(result.primary):
         return (body_ids[result.primary], "body")
     (-1, "")
@@ -669,20 +1047,22 @@ fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWm
     val (window_index, hit_kind) = _wm_content_hit_window(scene, x, y)
     if window_index < 0:
         return _shared_wm_dispatch_result("desktop_background", "background", "", "", scene)
-    val window = scene.windows[best_index]
+    val window = scene.windows[window_index]
     val focused_scene = shared_wm_focus_window_by_window_id(scene, window.window_id)
     if hit_kind == "close":
         return _shared_wm_dispatch_result("close_window", window.surface_id, window.app_id, window.window_id, shared_wm_close_window_by_window_id(scene, window.window_id))
     if hit_kind == "minimize":
         return _shared_wm_dispatch_result("minimize_window", window.surface_id, window.app_id, window.window_id, shared_wm_minimize_window_by_window_id(scene, window.window_id))
+    if hit_kind == "maximize":
+        return _shared_wm_dispatch_result("toggle_maximize_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     if y < window.y + _shared_wm_scale_px(28, 1000):
         return _shared_wm_dispatch_result("begin_drag_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     _shared_wm_dispatch_result("focus_window", window.window_id, window.app_id, window.window_id, focused_scene)
 
 fn _shared_wm_component_kind(action: text) -> text:
-    if action == "begin_drag_window" or action == "focus_window" or action == "close_window" or action == "minimize_window":
+    if action == "begin_drag_window" or action == "focus_window" or action == "close_window" or action == "minimize_window" or action == "toggle_maximize_window":
         return "window"
-    if action == "launch_app":
+    if action == "launch_app" or action == "pin_app" or action == "unpin_app":
         return "taskbar"
     if action == "command_lane_clock" or action == "command_lane_icon" or action == "command_lane":
         return "command_lane"
@@ -718,12 +1098,16 @@ fn _shared_wm_event_target_translation(scene_key: text, input_key: text, scene: 
 
 fn shared_wm_dispatch_pointer(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> SharedWmDispatchResult:
     val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
-    if kind != "down" or button != "left":
+    if kind != "down" or (button != "left" and button != "right"):
+        return _shared_wm_dispatch_result("ignored", "", "", "", scene)
+    if button == "right":
+        if _shared_wm_rect_contains(chrome.taskbar, x, y):
+            return _shared_wm_taskbar_dispatch(scene, taskbar, x, y, chrome.taskbar, button)
         return _shared_wm_dispatch_result("ignored", "", "", "", scene)
     if _shared_wm_rect_contains(chrome.command_lane, x, y):
         return _shared_wm_command_lane_dispatch(scene, chrome, x)
     if _shared_wm_rect_contains(chrome.taskbar, x, y):
-        return _shared_wm_taskbar_dispatch(scene, taskbar, x)
+        return _shared_wm_taskbar_dispatch(scene, taskbar, x, y, chrome.taskbar, button)
     if _shared_wm_rect_contains(chrome.content_area, x, y):
         return _shared_wm_content_dispatch(scene, x, y)
     _shared_wm_dispatch_result("outside", "", "", "", scene)

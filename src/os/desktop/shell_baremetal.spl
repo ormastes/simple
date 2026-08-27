@@ -1,4 +1,4 @@
-# Desktop Shell Baremetal Overlay — CompositorBackend rendering
+# Desktop Shell Baremetal Renderer — shared WM scene rendering
 #
 # Companion to shell.spl. Draws the taskbar, launcher grid, launched-app
 # windows, and process panel through the shared CompositorBackend draw
@@ -65,60 +65,41 @@ impl CompositorBackend for BaremetalEngine2dOverlayBackend:
 fn baremetal_engine2d_overlay_backend(engine: Engine2D, screen_w: i32, screen_h: i32) -> BaremetalEngine2dOverlayBackend:
     BaremetalEngine2dOverlayBackend(engine: engine, w: screen_w, h: screen_h)
 
-fn _draw_overlay_text(backend: CompositorBackend, x: i32, y: i32, value: text, fg: u32):
-    backend.draw_text(x, y, value, fg, 0x00000000u32)
+fn render_baremetal_shared_wm_scene(backend: CompositorBackend, scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock: text):
+    """Render the immutable projection of the live SimpleOS compositor.
 
-# ============================================================================
-# Baremetal Overlay (CompositorBackend, no WidgetNode DSL)
-# ============================================================================
-
-fn _draw_baremetal_overlay(
-    backend: CompositorBackend,
-    apps: [text],
-    process_rows: [text],
-    selected_process_idx: i64,
-    screen_w: i32,
-    screen_h: i32,
-    clock: text
-):
-    """Draw the taskbar, launcher grid, and launched-app windows directly
-    via CompositorBackend. Bypasses the widget builder DSL that crashes in baremetal.
-
-    Layout:
-      - Top: title banner
-      - Middle: launcher grid with each app as a colored tile
-      - Bottom: taskbar with clock and list of running apps
+    Window content and taskbar objects are both authoritative inputs. Missing,
+    stale, duplicated, or malformed content frames fail closed in the shared
+    executor instead of selecting title-based canned content.
     """
-    # --- Title banner ---
-    backend.fill_rect(0, 0, screen_w, 28, 0xFF1E1E2E)
-    _draw_overlay_text(backend, 12, 6, "SimpleOS Desktop", 0xFFFFFFFF)
+    val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
+    val revision = WmSceneRevision(scene_revision: scene_revision, input_revision: scene_revision, taskbar_revision: taskbar_revision)
+    val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: 0)
+    val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: taskbar, clock_label: clock)
+    shared_wm_scene_render_taskbar_context_to_backend(backend, taskbar_input)
 
-    # --- Launcher grid (4 apps per row) ---
-    val grid_x0: i32 = 40
-    val grid_y0: i32 = 60
-    val tile_w: i32 = 140
-    val tile_h: i32 = 60
-    val gap: i32 = 16
+fn render_baremetal_shared_wm_scene_to_pixel_buffer(backend: SharedWmPixelBufferBackend, scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock: text):
+    val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
+    val revision = WmSceneRevision(scene_revision: scene_revision, input_revision: scene_revision, taskbar_revision: taskbar_revision)
+    val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: 0)
+    val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: taskbar, clock_label: clock)
+    shared_wm_scene_render_taskbar_context_to_pixel_buffer(backend, taskbar_input)
+    # Hand the freshly composed pixels to the MMIO framebuffer path so the
+    # widget/compositor output actually reaches the screen. Exactly once per
+    # composed frame.
+    present_pixel_buffer_to_framebuffer(backend)
 
 fn present_pixel_buffer_to_framebuffer(backend: SharedWmPixelBufferBackend):
     """Copy the pixel-buffer backend's composed frame into the os.gui.render
     shadow buffer (full-frame dirty) and present it. render_init(fb, w, h) must
     have run first; the blit no-ops until the shadow buffer exists.
 
-    var idx: i32 = 0
-    for manifest in demo_apps:
-        val col = idx % 4
-        val row_i = idx / 4
-        val tx = grid_x0 + col * (tile_w + gap)
-        val ty = grid_y0 + row_i * (tile_h + gap)
-        backend.fill_rect(tx, ty, tile_w, tile_h, 0xFF2E2E3E)
-        backend.fill_rect(tx, ty, tile_w, 18, 0xFF3498DB)
-        _draw_overlay_text(backend, tx + 8, ty + 2, manifest.name, 0xFFFFFFFF)
-        _draw_overlay_text(backend, tx + 8, ty + 26, manifest.icon, 0xFF8BD3FF)
-        _draw_overlay_text(backend, tx + 28, ty + 26, manifest.category, 0xFFB8D8D8)
-        idx = idx + 1
-        if idx >= 12:
-            break
+    Moves the frame ADDRESS-TO-ADDRESS in one rt_memcpy. The previous form went
+    raw buffer -> [u32] -> shadow buffer, which cost two full-frame FFI loops
+    per frame (230,400 rt_ptr_read_i64 + 230,400 rt_mmio_write_u32 at 480x480)
+    and allocated a 230,400-element array that was consumed element-by-element
+    and immediately discarded. Both endpoints are plain RAM holding contiguous
+    little-endian ARGB, so the intermediate array was pure overhead.
 
     Falls back to the array path when the backend has no raw address, so a
     backend that is not on the raw-buffer lane still presents rather than

@@ -4,9 +4,7 @@
 # type representations. Reduces duplication and ensures consistency.
 
 use compiler.mir.mir_data.*
-use compiler.backend.backend_api.*
 use compiler.hir.hir_types.MemorySpace
-use compiler.mir.mir_types.{MirType}
 
 # ============================================================================
 # Type Mapper Trait
@@ -76,24 +74,29 @@ trait TypeMapper:
             case Unit:
                 self.map_primitive(ty.kind)
 
-            case Ptr(inner, mutability):
-                val inner_ty = self.map_type(inner)
-                self.map_pointer(inner_ty, mutability)
+            case Ptr(t_inner, t_mutability):
+                val inner_ty = self.map_type(t_inner)
+                self.map_pointer(inner_ty, t_mutability)
 
-            case Struct(fields):
-                self.map_struct(fields)
+            case Struct(t_fields):
+                self.map_struct(t_fields)
 
-            case Array(element, size):
-                self.map_array(element, size)
+            case Array(t_element, t_size):
+                self.map_array(t_element, t_size)
 
-            case Tuple(elements):
-                self.map_tuple(elements)
+            case Tuple(t_elements):
+                self.map_tuple(t_elements)
 
-            case Union(members):
-                self.map_union(members)
+            case Union(t_members):
+                self.map_union(t_members)
 
-            case Function(params, ret):
-                self.map_function(params, ret)
+            # `Function` is not a MirTypeKind variant — the function-pointer
+            # variant is `FuncPtr(signature: MirSignature)`. A case arm naming a
+            # non-variant with a payload NEVER matches, so this arm was dead and
+            # every function-pointer type fell through to the error arm below.
+            # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+            case FuncPtr(t_sig):
+                self.map_function(t_sig.params, t_sig.return_type)
 
             case _:
                 panic("Unsupported type in {self.backend_name()}: {ty}")
@@ -185,36 +188,18 @@ trait TypeMapper:
         Default implementation uses target-specific info.
         """
         match ty.kind:
-            case I64 | F64 | Ptr(_, _): 8
+            case I64: 8
+            case F64: 8
             case I32: 4
             case F32: 4
             case I16: 2
             case I8: 1
             case Bool: 1
             case Unit: 0
-            case Struct(fields):
-                # Sum of field sizes (unpadded)
-                var field_sizes_sum: i64 = 0
-                for f in fields:
-                    field_sizes_sum = field_sizes_sum + self.size_of(f[1])
-                field_sizes_sum
-            case Array(elem, size):
-                self.size_of(elem) * size
-            case Tuple(elements):
-                var elem_sizes_sum: i64 = 0
-                for e in elements:
-                    elem_sizes_sum = elem_sizes_sum + self.size_of(e)
-                elem_sizes_sum
-            case Union(members):
-                # Tagged union: discriminant (8 bytes) + max member size
-                var max_member_size: i64 = 0
-                for m in members:
-                    val s = self.size_of(m)
-                    if s > max_member_size:
-                        max_member_size = s
-                8 + max_member_size
+            # ponytail: default layout is pointer-sized; concrete backends
+            # override when they need exact aggregate layout.
             case _:
-                error("Cannot compute size of {ty}")
+                8
 
     fn align_of(ty: MirType) -> i64:
         """
@@ -222,45 +207,16 @@ trait TypeMapper:
         Default implementation uses common rules.
         """
         match ty.kind:
-            case I64 | F64 | Ptr(_, _): 8
+            case I64: 8
+            case F64: 8
             case I32: 4
             case F32: 4
             case I16: 2
             case I8: 1
             case Bool: 1
-            case Struct(fields):
-                # Alignment of struct is max alignment of fields
-                if fields.length == 0:
-                    1
-                else:
-                    var max_align: i64 = 1
-                    for f in fields:
-                        val a = self.align_of(f[1])
-                        if a > max_align:
-                            max_align = a
-                    max_align
-            case Array(elem, _):
-                self.align_of(elem)
-            case Tuple(elements):
-                if elements.length == 0:
-                    1
-                else:
-                    var max_elem_align: i64 = 1
-                    for e in elements:
-                        val a = self.align_of(e)
-                        if a > max_elem_align:
-                            max_elem_align = a
-                    max_elem_align
-            case Union(members):
-                # Alignment of union is max of discriminant (8) and all members
-                var max_union_align: i64 = 8
-                for m in members:
-                    val a = self.align_of(m)
-                    if a > max_union_align:
-                        max_union_align = a
-                max_union_align
+            case Unit: 1
             case _:
-                1  # Default alignment
+                8
 
 # ============================================================================
 # Primitive Type Enum (for type mapping)
@@ -327,4 +283,3 @@ fn decompose_result_type(type_name: text, mapper_fn: fn(text) -> text) -> Result
 # ============================================================================
 # Export
 # ============================================================================
-

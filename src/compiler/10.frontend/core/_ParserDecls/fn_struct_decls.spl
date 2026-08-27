@@ -23,9 +23,10 @@ use compiler.core.tokens.{TOK_ARROW}
 use compiler.core.tokens.{TOK_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
-use compiler.core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_STATIC, TOK_KW_ME, TOK_KW_ACTOR}
+use compiler.core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_STATIC, TOK_KW_ME}
 use compiler.core.tokens.{TOK_KW_ASYNC}
 use compiler.core.tokens.{TOK_KW_CONST, TOK_KW_WHERE}
+use compiler.core.tokens.{TOK_KW_PASS}
 use compiler.core.tokens.{TOK_KW_LAZY, TOK_KW_EXTEND, TOK_KW_NEWTYPE, TOK_KW_NEWUNIT}
 use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
@@ -44,14 +45,13 @@ use compiler.core.ast.{decl_set_is_value_type, decl_set_type_params}
 use compiler.core.ast.{decl_set_param_defaults}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
-use compiler.core.ast.{decl_impl_block}
+use compiler.core.ast.{decl_impl_block, decl_set_trait}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
-use compiler.core.ast.{decl_set_base_type, decl_set_trait_types}
 use compiler.core.ast.{module_set_path, module_add_decl}
-use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set, lex_token_start_get, lex_token_end_get}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_live_line_get, lex_live_col_get, lex_force_set_pos}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
@@ -63,12 +63,14 @@ use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backin
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, par_struct_names}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error}
+use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
 use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_expr, parse_while_expr}
+use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
@@ -95,8 +97,10 @@ fn parser_skip_mut_if_present() -> bool:
     # treat `mut` as the modifier when the following token is itself a valid
     # parameter-name token (identifier or `self`) — i.e. `mut buf`/`mut self`,
     # not `mut:` or `mut)` where `mut` is the parameter name.
-    # The mutability annotation is a no-op at the stage4 self-hosted frontend
-    # (the interpreter already permits reassignment of the bound param name).
+    # Returns true when a `mut` modifier was actually consumed, so callers can
+    # thread the marker into PARAM_MUTS (native_freefn_mut_param_no_mutate):
+    # a free-function `mut` param must reach MIR lowering to bind by-reference
+    # instead of taking the Bug #167 defensive struct-value-copy.
     if par_kind_get() == 6 and par_text_get() == "mut":
         val mut_snap = lex_snapshot_save()
         val (mut_tok_nums, mut_tok_text) = parser_tok_save()
@@ -106,6 +110,8 @@ fn parser_skip_mut_if_present() -> bool:
         parser_tok_restore(mut_tok_nums, mut_tok_text)
         if next_is_param_name:
             parser_advance()
+            return true
+    false
 
 fn parser_expect_param_name():
     # Accept IDENT, SELF, UNDERSCORE, or any keyword as parameter name (e.g. cli, mcp, type)
@@ -122,7 +128,10 @@ fn parser_expect_param_name():
         parser_advance()
 
 fn is_domain_block_kind(name: text) -> bool:
-    name == "schema" or
+    name == "arch" or
+        name == "config" or
+        name == "metadata" or
+        name == "schema" or
         name == "style" or
         name == "ui" or
         name == "music" or
@@ -130,6 +139,9 @@ fn is_domain_block_kind(name: text) -> bool:
         name == "cad" or
         name == "city" or
         name == "rtl"
+
+fn is_metadata_block_kind(name: text) -> bool:
+    name == "arch" or name == "config" or name == "metadata"
 
 fn current_ident_followed_by_lbrace() -> bool:
     # Token offsets are character-indexed while text len/slicing is byte-based
@@ -203,8 +215,18 @@ fn current_ident_is_cli_decl() -> bool:
     false
 
 fn parse_raw_domain_block_advance_lexer(start_pos: i64, end_pos: i64):
-    var line = lex_line_get()
-    var col = lex_col_get()
+    # NOTE: was lex_line_get()/lex_col_get() (reads) and
+    # lex_pos_set()/lex_line_set()/lex_col_set() (writes) -- all backed by
+    # the dead legacy lex_state slot that CoreLexer.next_token() never
+    # observes, so the write-back here was silently discarded: the live
+    # CoreLexer's real position never advanced past the raw domain-block
+    # body, and the next lex_next() call would re-scan already-consumed
+    # content from the stale old position. lex_live_line_get()/
+    # lex_live_col_get() read the live struct fields, and lex_force_set_pos
+    # writes all three back into the live CoreLexer (mirrors
+    # parse_raw_asm_advance_lexer in _ParserPrimary/asm_raw_parsing.spl).
+    var line = lex_live_line_get()
+    var col = lex_live_col_get()
     var pos = start_pos
     while pos < end_pos:
         val ch = lex_source_char_at(pos)
@@ -214,12 +236,13 @@ fn parse_raw_domain_block_advance_lexer(start_pos: i64, end_pos: i64):
         else:
             col = col + 1
         pos = pos + 1
-    lex_pos_set(end_pos)
-    lex_line_set(line)
-    lex_col_set(col)
+    lex_force_set_pos(end_pos, line, col)
 
 fn parse_raw_domain_block_payload(kind: text) -> text:
-    val content_start = lex_pos_get()
+    # NOTE: was lex_pos_get() (dead legacy slot); lex_token_end_get() gives
+    # the live end-of-current-token offset, matching
+    # parse_raw_asm_braced_payload's content_start in asm_raw_parsing.spl.
+    val content_start = lex_token_end_get()
     val source_len = lex_source_len()
     var pos = content_start
     var depth = 1
@@ -257,13 +280,30 @@ fn parse_raw_domain_block_payload(kind: text) -> text:
 
 fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
     parser_advance()
-    val payload = parse_raw_domain_block_payload(kind)
+    var payload = ""
+    if is_metadata_block_kind(kind):
+        # Metadata/config blocks are compile-time declarations. Consume their
+        # balanced token region rather than source-slicing it: token offsets
+        # are character-indexed, so byte-indexed slicing corrupts blocks after
+        # non-ASCII comments. Rust likewise lowers these blocks to Pass.
+        parser_expect(TOK_LBRACE)
+        var depth: i64 = 1
+        while depth > 0 and par_kind_get() != TOK_EOF:
+            if par_kind_get() == TOK_LBRACE:
+                depth = depth + 1
+            elif par_kind_get() == TOK_RBRACE:
+                depth = depth - 1
+            parser_advance()
+        if depth > 0:
+            parser_error("unterminated {kind}{...} metadata block")
+    else:
+        payload = parse_raw_domain_block_payload(kind)
     val helper = expr_ident("__domain_block", 0)
     var args: [i64] = []
     args.push(expr_string_lit(kind, 0))
     args.push(expr_string_lit(payload, 0))
     val marker = expr_call(helper, args, 0)
-    decl_val_binding("_expr_" + int_to_str(loop_index), -1, marker, 0)
+    decl_val_binding("_expr_" + int_to_str(loop_index), -1, marker, -1)
 
 # ===== Generic Type Parameter Parsing =====
 
@@ -271,14 +311,33 @@ fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
 var file_generic_constraints: {text: [text]} = {}
 var file_generic_constraint_modes: {text: text} = {}
 
+fn parser_generic_constraints_reset():
+    # These dictionaries contain token text and constraint arrays allocated by
+    # the current parser scope. Generic constraints are file-local; retaining
+    # them across files is both semantically wrong and leaves module globals
+    # pointing into the reclaimed transient graph.
+    file_generic_constraints = {}
+    file_generic_constraint_modes = {}
+
 fn parse_type_param_constraint_list() -> [text]:
-    # Parses [f32, i32, f64, i64] or [f32, i32, *] constraint list
+    # Parses [f32, i32, f64, i64] or [f32, i32, *] constraint list (the
+    # hardware/primitive-set candidate form), OR a bare trait-bound name
+    # (or `+`-joined names) as in `fn f<T: Speaker>` / `fn f<T: A + B>` --
+    # the standard trait-bound syntax used throughout the language
+    # (test/03_system/feature/language/traits_spec.spl,
+    # static_polymorphism_spec.spl). Without this branch, `T: Speaker`
+    # (no brackets) hit the `!= 144` guard below, returned an EMPTY list
+    # having consumed nothing, and left the unconsumed "Speaker>" tokens
+    # to desync the rest of parse_type_params' loop -- confirmed
+    # empirically: `fn announce<T: Speaker>(s: T) -> i64:` derailed into a
+    # cascade of "unexpected token in expression" parser errors starting
+    # at the arg list's closing `)`.
     var types: [text] = []
     if par_kind_get() != 144:
         if par_kind_get() == 6:
             types.push(par_text_get())
             parser_advance()
-            for pi2 in 0..100:
+            while true:
                 if par_kind_get() != 60:
                     break
                 parser_advance()
@@ -288,7 +347,9 @@ fn parse_type_param_constraint_list() -> [text]:
                 parser_advance()
         return types
     parser_advance()
-    for ci in 0..100:
+    var ci: i64 = 0 - 1
+    while true:
+        ci = ci + 1
         if par_kind_get() == 145:
             break
         if ci > 0:
@@ -307,7 +368,7 @@ fn parse_type_param_constraint_list() -> [text]:
     types
 
 fn parse_type_params() -> [text]:
-    # Parses <T>, <T, U>, <T limits [f32, i32]>, <T: [f32, i32]>, etc.
+    # Parses canonical <T> and deprecated [T] declaration parameters.
     # Returns list of type parameter names (e.g., ["T", "U"])
     # Side effect: populates last_type_param_constraints and last_type_param_modes
     var type_params: [text] = []
@@ -315,14 +376,18 @@ fn parse_type_params() -> [text]:
     # Check for < token (either TOK_LT or TOK_LT_GENERIC)
     val has_lt: bool = par_kind_get() == 82
     val has_lt_gen: bool = par_kind_get() == 86
-    val has_generic: bool = has_lt or has_lt_gen
+    val has_square: bool = par_kind_get() == 144
+    val has_angle: bool = has_lt or has_lt_gen
+    val has_generic: bool = has_angle or has_square
     if not has_generic:
         return type_params
 
     parser_advance()
 
     # Parse type parameters with optional inline constraints
-    for pi in 0..100:
+    var pi: i64 = 0 - 1
+    while true:
+        pi = pi + 1
         if pi > 0:
             if par_kind_get() != 160:
                 break
@@ -357,8 +422,13 @@ fn parse_type_params() -> [text]:
                 file_generic_constraints[param_name] = filtered
                 file_generic_constraint_modes[param_name] = mode_str
 
-    # Expect closing >
-    parser_expect(83)
+    # Keep accepting the legacy square form until the source migration is
+    # complete.  The Rust seed accepts it with a deprecation warning, so the
+    # pure-Simple checker must not reject otherwise valid bootstrap inputs.
+    if has_square:
+        parser_expect(145)
+    else:
+        parser_expect(83)
 
     type_params
 
@@ -503,52 +573,40 @@ fn parser_skip_fn_where_clause():
     parser_error("function where clause is too long")
 
 fn parse_fn_decl(is_async: i64) -> i64:
+    val decl_start = lex_token_start_get()
+    val decl_line = par_line_get()
+    val decl_col = par_col_get()
     parser_advance()
-    val fn_name = par_text_get()
-    parser_expect(6)
+    val fn_name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if fn_name == "":
+        parser_expect(TOK_IDENT)
+    else:
+        parser_advance()
 
     # Parse optional type parameters: fn name<T, U>(...)
     val type_params = parse_type_params()
 
-    parser_expect(140)
-
     var param_names: [text] = []
     var param_types: [i64] = []
     var param_defaults: [i64] = []
+    var param_muts: [i64] = []
 
-    if par_kind_get() != 141:
-        # First parameter (skip ~ keyword-only marker if present)
-        parser_skip_tilde_if_present()
-        val pname = par_text_get()
-        parser_expect_param_name()
-        param_names.push(pname)
-        var ptype = 0
-        if par_kind_get() == 161:
-            parser_advance()
-            ptype = parser_parse_type_with_union()
-        param_types.push(ptype)
-        # Optional default value: `= expr`
-        if par_kind_get() == 100:
-            parser_advance()
-            param_defaults.push(parse_expr())
-        else:
-            param_defaults.push(-1)
-
-        for i in 0..100:
-            if par_kind_get() != 160:
-                break
-            parser_advance()
-            if par_kind_get() == 141:
-                break
+    # Canonical zero-argument Simple syntax permits `fn main:` without `()`.
+    if par_kind_get() == 140:
+        parser_advance()
+        if par_kind_get() != 141:
+            # First parameter (skip ~ keyword-only marker + optional `mut` modifier)
             parser_skip_tilde_if_present()
-            val pn = par_text_get()
+            val p0_is_mut = parser_skip_mut_if_present()
+            val pname = par_text_get()
             parser_expect_param_name()
-            param_names.push(pn)
-            var pt = 0
+            param_names.push(pname)
+            param_muts.push(if p0_is_mut: 1 else: 0)
+            var ptype = 0
             if par_kind_get() == 161:
                 parser_advance()
-                pt = parser_parse_type_with_union()
-            param_types.push(pt)
+                ptype = parser_parse_type_with_union()
+            param_types.push(ptype)
             # Optional default value: `= expr`
             if par_kind_get() == 100:
                 parser_advance()
@@ -556,7 +614,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
             else:
                 param_defaults.push(-1)
 
-            for i in 0..100:
+            while true:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
@@ -588,39 +646,40 @@ fn parse_fn_decl(is_async: i64) -> i64:
         parser_advance()
         ret_type = parser_parse_type_with_union()
         # G11: allow Newline+Indent between `-> Type` and `:` body (multiline fn sig)
-        if par_kind_get() == 180:
-            parser_advance()
-            if par_kind_get() == 181:
-                parser_advance()
+        if par_kind_get() == TOK_NEWLINE:
+            parser_try_skip_signature_layout_before_colon()
 
-    # Skip optional where clause: where T: Bound
-    if par_kind_get() == 189:
+    parser_skip_fn_where_clause()
+
+    # Canonical declarations may be bodyless (forward/extern-style surface),
+    # or may use the legacy colonless indented block spelling. Do not consume
+    # the next same-level declaration while deciding between those forms.
+    var body: [i64] = []
+    if par_kind_get() == TOK_COLON:
         parser_advance()
-        # Skip until the body colon
-        for where_i in 0..200:
-            val at_colon: bool = par_kind_get() == 161
-            val at_eof: bool = par_kind_get() == 190
-            if at_colon or at_eof:
-                break
-            parser_advance()
+        body = parse_block()
+    elif parser_newline_starts_indented_block():
+        body = parse_block()
+    elif par_kind_get() == TOK_SEMICOLON:
+        parser_advance()
 
-    # Function body
-    parser_expect(161)
-    val body = parse_block()
-
-    # Function body
-    parser_expect(161)
-    val body = parse_block()
-
-    val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, 0)
+    val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+    val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, decl_span)
     decl_set_param_defaults(fn_decl_idx, param_defaults)
+    decl_set_param_muts(fn_decl_idx, param_muts)
     fn_decl_idx
 
 fn parse_extern_fn_decl() -> i64:
     # Already consumed 'extern'
+    val decl_start = lex_token_start_get()
+    val decl_line = par_line_get()
+    val decl_col = par_col_get()
     parser_expect(20)
-    val fn_name = par_text_get()
-    parser_expect(6)
+    val fn_name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if fn_name == "":
+        parser_expect(TOK_IDENT)
+    else:
+        parser_advance()
 
     # Parse optional type parameters: extern fn name<T>(...)
     val type_params = parse_type_params()
@@ -640,7 +699,7 @@ fn parse_extern_fn_decl() -> i64:
             ptype = parser_parse_type()
         param_types.push(ptype)
 
-        for i in 0..100:
+        while true:
             if par_kind_get() != 160:
                 break
             parser_advance()
@@ -662,7 +721,8 @@ fn parse_extern_fn_decl() -> i64:
         parser_advance()
         ret_type = parser_parse_type()
 
-    decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, 0)
+    val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
+    decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, decl_span)
 
 # ===== @derive Implementation Generator =====
 
@@ -812,17 +872,23 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
 
     # Pre-register struct name so type references resolve during parsing
     val struct_type_id = named_type_register(struct_name, [], [])
-    var base_type = -1
+    # Handle struct inheritance: struct X(Parent):
     if par_kind_get() == 140:
         parser_advance()
-        if par_kind_get() != 141:
-            base_type = parser_parse_type_with_union()
+        # Skip parent type name(s)
+        for i in 0..10:
+            if par_kind_get() == 141:
+                break
+            parser_advance()
         parser_expect(141)
-    # Handle "with" mixin: struct X with Y:
+    # Handle one or more mixins: class X with Read, Write, Close:
     if par_kind_get() == 6:
         if par_text_get() == "with":
             parser_advance()
             parser_expect(6)
+            while par_kind_get() == 160:
+                parser_advance()
+                parser_expect(6)
     parser_expect(161)
     parser_skip_newlines()
     parser_expect(181)
@@ -842,7 +908,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     var layer_field_saw_any = false
     var layer_field_next = ""
 
-    for i in 0..1000:
+    while true:
         parser_skip_newlines()
         if par_kind_get() == 182:
             parser_advance()
@@ -850,12 +916,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         if par_kind_get() == 190:
             break
 
-        # Only a leading body string is documentation. A string after any
-        # field/method is an ordinary body item and must not be reclassified.
+        # Skip docstrings in class/struct body
         if par_kind_get() == 3:
-            if is_actor and actor_doc_position:
-                actor_doc_comment = par_text_get()
-            actor_doc_position = false
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
@@ -908,29 +970,42 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val is_pass_dn: bool = cb_kind == 185
         val is_pass_todo: bool = cb_kind == 183
         val is_pass_dn2: bool = cb_kind == 184
-        val is_pass_kw: bool = cb_kind == 174
+        val is_pass_kw: bool = cb_kind == TOK_KW_PASS
         val is_any_pass: bool = is_pass_dn or is_pass_todo
         val is_any_pass2: bool = is_pass_dn2 or is_pass_kw
         val is_pass: bool = is_any_pass or is_any_pass2
-        if is_pass:
+        if is_pass and not parser_class_member_followed_by_colon():
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
+
+        # Public class members share the same body routes as private members.
+        # Keep the marker so public methods retain visibility on their decl.
+        var class_member_is_pub = false
+        if par_kind_get() == TOK_KW_PUB:
+            class_member_is_pub = true
+            parser_advance()
 
         # Handle methods in class/struct body
         if par_kind_get() == 30:
             val sm_id = parse_class_body_method(struct_name, true, false)
             if sm_id >= 0:
+                if class_member_is_pub:
+                    decl_set_visibility_text(sm_id, "pub")
                 class_method_ids.push(sm_id)
             continue
         if par_kind_get() == 20:
             val fm_id = parse_class_body_method(struct_name, false, false)
             if fm_id >= 0:
+                if class_member_is_pub:
+                    decl_set_visibility_text(fm_id, "pub")
                 class_method_ids.push(fm_id)
             continue
         if par_kind_get() == 34:
             val mm_id = parse_class_body_method(struct_name, false, true)
             if mm_id >= 0:
+                if class_member_is_pub:
+                    decl_set_visibility_text(mm_id, "pub")
                 class_method_ids.push(mm_id)
             continue
 
@@ -939,17 +1014,29 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val is_field_prefix = par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR
         if is_field_prefix and not parser_class_member_followed_by_colon():
             parser_advance()
-        if par_kind_get() != 6:
+        var fname = par_text_get()
+        val fname_kw = use_kw_segment_text(par_kind_get())
+        if par_kind_get() != TOK_IDENT and fname_kw == "":
             # Unparseable member: report once and advance so the loop cannot
             # stall on the same token for the full iteration budget.
             parser_error("unexpected token in class body")
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
-        val fname = par_text_get()
-        parser_expect(6)
-        parser_expect(161)
-        val ftype = parser_parse_type()
+        if fname_kw != "":
+            fname = fname_kw
+            parser_advance()
+        else:
+            parser_expect(TOK_IDENT)
+        # Flat declaration storage is explicitly `[i64]`: keep the temporary
+        # on that raw-tag ABI too.  Inferring this local from the global
+        # TYPE_ANY constant can retain runtime-value provenance across the
+        # later parser_parse_type assignment, so `.push(ftype)` skips scalar
+        # boxing and the array read decodes a raw type tag with `>> 3`.
+        var ftype: i64 = TYPE_ANY
+        if par_kind_get() == TOK_COLON:
+            parser_advance()
+            ftype = parser_parse_type()
         field_names.push(fname)
         field_types.push(ftype)
         # C1: one rename slot per real field, in declaration order. Consumed
@@ -1019,13 +1106,44 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     if type_params.len() > 0:
         decl_set_type_params(struct_d, type_params)
 
-    # If class had methods, create an impl block for them
-    if class_method_ids.len() > 0:
+    # #157: a `trait T:` is parsed via this same struct-body path, collecting its
+    # method decls (abstract + default bodies) in class_method_ids. Mark the decl
+    # as a trait and carry those method ids so module_assembly can rebuild the
+    # trait into module.traits -- without this, module.traits is empty on the
+    # native path and un-overridden trait default methods never resolve. This is
+    # separate from the phantom-impl synthesis skipped below (that route feeds
+    # module.impls; this one feeds module.traits).
+    if is_trait:
+        decl_set_trait(struct_d, class_method_ids)
+
+    # If class had methods, create an impl block for them. `trait T: fn m()
+    # ...` is parsed via this SAME struct-body path (is_trait=true), so
+    # without this guard the trait's own method bodies would ALSO
+    # synthesize a real `impl T: ...` block keyed by the trait's bare NAME
+    # -- module.impls then holds a phantom entry (e.g. "Speaker::speak")
+    # alongside the real "impl Speaker for Dog:" -> "Dog::speak" entry.
+    # MIR's struct_method_first_owner collision scan (module_lowering.spl)
+    # sees two different "owners" of the bare name `speak` and marks it
+    # struct_method_ambiguous, which permanently disables the Unresolved
+    # fast-dispatch fallback (method_calls_literals.spl) for EVERY struct
+    # implementing EVERY trait method -- confirmed empirically: a single
+    # `impl Speaker for Dog` made `d.speak()` fail native-build with
+    # "unresolved method call" even though Dog is the only real
+    # implementor. The trait's own method bodies are never a valid
+    # dispatch target (no value is ever an instance of the phantom trait
+    # struct), so skip generating this impl block entirely for a trait
+    # declaration; whatever trait-default-method support MIR/HIR need is
+    # sourced through the real `impl Trait for Struct` blocks instead.
+    if class_method_ids.len() > 0 and not is_trait:
         val impl_d = decl_impl_block(struct_name, class_method_ids, 0)
+        # Same gap as above, for the synthesized impl block: without this,
+        # `Impl.type_params` (module_assembly.spl tag "9") is always `[]`
+        # even when the enclosing struct/class is generic.
+        if type_params.len() > 0:
+            decl_set_type_params(impl_d, type_params)
         module_add_decl(impl_d)
 
     struct_d
 
-export parse_type_params
+export parse_type_params, parser_generic_constraints_reset
 export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_struct_or_trait_decl
-export parser_skip_mut_if_present

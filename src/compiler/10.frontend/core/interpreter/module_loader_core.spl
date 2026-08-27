@@ -18,32 +18,31 @@ use compiler.core.ast.{
     decl_get_name,
     decl_get_ret_type,
     decl_get_tag,
-    module_decl_at,
-    module_decl_count_get,
     module_get_decls,
     module_get_path
 }
 use compiler.common.gc_config.{is_nogc_family, is_gc_family, is_noalloc_family, is_allocating_family}
 use compiler.core.interpreter.eval.{eval_warnings}
-use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register, func_table_register_owned, struct_table_lookup, struct_table_register, decl_owner_file_set}
+use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register, struct_table_lookup, struct_table_register, decl_owner_file_set}
 use compiler.core.interpreter.interp_resource_tracker.{
     irt_begin_module,
     irt_init,
     irt_track_enum,
-    irt_track_func,
-    irt_track_struct,
+    irt_track_func_owned,
+    irt_track_struct_owned,
     irt_unload_module
 }
+use std.io_runtime.{env_get_opt, file_read_result}
 
-extern fn rt_env_get(key: text) -> text
+var _gc_warning_trace_state: i64 = -1
 
+@always_inline
 fn gc_warning_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    if _gc_warning_trace_state < 0:
+        _gc_warning_trace_state = if env_get_opt("SIMPLE_COMPILER_TRACE") == Some("1"): 1 else: 0
+    _gc_warning_trace_state == 1
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
 use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_path_join(base: text, rel: text) -> text
 
 # AST Declaration Tags (from ast.spl)
 val DECL_FN = 1
@@ -55,7 +54,6 @@ val DECL_USE = 6
 val DECL_EXPORT = 7
 val DECL_ENUM = 8
 val DECL_AOP_ADVICE = 14
-val DECL_DI_BINDING = 15
 val DECL_ARCH_RULE = 16
 
 # Helper struct for building CoreDecl (defined in ast_types.spl)
@@ -85,64 +83,23 @@ var loaded_module_file_paths: [text] = []
 var loaded_module_exports: [[text]] = []
 # Dict for O(1) module loaded check
 var loaded_module_set = {}
+# PERF (2026-08-21): file_path -> FIRST index in the parallel arrays, and
+# module_name -> file_path. Without these, `module_find_by_file_path` (reached
+# from `module_alias_loaded` on EVERY import) and `module_get_file_path` walked
+# `loaded_module_file_paths` linearly, so a run that loads N modules with M
+# imports cost O(N*M) interpreted iterations. Both fall back to the linear scan
+# when the memoized index names a module that has since been unloaded, so the
+# observable semantics (first *currently loaded* match wins) are unchanged.
+# Pinned by test/01_unit/compiler/frontend/module_registry_lookup_o1_spec.spl.
+var loaded_module_file_index = {}
+var loaded_module_name_to_file = {}
+# Counts elements visited by the linear fallback. A registry that is O(1) per
+# lookup leaves this at 0; the spec asserts on it rather than on wall time.
+var loaded_module_scan_steps: i64 = 0
 
-# Source-level module aliases (`use pkg.mod as local`) are namespaces.  Keep
-# their canonical module target separate from the physical-file alias table:
-# the latter deduplicates loading, while this table drives qualified lookup.
-var module_namespace_names: [text] = []
-var module_namespace_targets: [text] = []
-
-fn module_namespace_register(alias_name: text, module_name: text):
-    if alias_name == "" or module_name == "": return
-    var target = module_name
-    val loaded_idx = module_find_by_file_path(module_get_file_path(module_name))
-    if loaded_idx >= 0:
-        target = loaded_module_paths[loaded_idx]
-    var i = 0
-    while i < module_namespace_names.len():
-        if module_namespace_names[i] == alias_name:
-            module_namespace_targets[i] = target
-            return
-        i = i + 1
-    module_namespace_names.push(alias_name)
-    module_namespace_targets.push(target)
-
-fn module_namespace_target(alias_name: text) -> text:
-    var i = module_namespace_names.len()
-    while i > 0:
-        i = i - 1
-        if module_namespace_names[i] == alias_name:
-            return module_namespace_targets[i]
-    ""
-
-# Source-level module aliases (`use pkg.mod as local`) are namespaces.  Keep
-# their canonical module target separate from the physical-file alias table:
-# the latter deduplicates loading, while this table drives qualified lookup.
-var module_namespace_names: [text] = []
-var module_namespace_targets: [text] = []
-
-fn module_namespace_register(alias_name: text, module_name: text):
-    if alias_name == "" or module_name == "": return
-    var target = module_name
-    val loaded_idx = module_find_by_file_path(module_get_file_path(module_name))
-    if loaded_idx >= 0:
-        target = loaded_module_paths[loaded_idx]
-    var i = 0
-    while i < module_namespace_names.len():
-        if module_namespace_names[i] == alias_name:
-            module_namespace_targets[i] = target
-            return
-        i = i + 1
-    module_namespace_names.push(alias_name)
-    module_namespace_targets.push(target)
-
-fn module_namespace_target(alias_name: text) -> text:
-    var i = module_namespace_names.len()
-    while i > 0:
-        i = i - 1
-        if module_namespace_names[i] == alias_name:
-            return module_namespace_targets[i]
-    ""
+pub fn module_registry_scan_steps() -> i64:
+    """Elements visited by the linear registry fallback since init (perf probe)."""
+    loaded_module_scan_steps
 
 # ===== Deferred (Lazy) Module Tracking =====
 
@@ -200,8 +157,9 @@ fn try_force_any_deferred_for(symbol_name: text) -> i64:
             val ok = force_deferred_module(mod_name)
             if ok == 1:
                 # Check if this module provided the symbol
-                val decl_id = func_table_lookup(symbol_name)
-                if decl_id >= 0:
+                val fn_decl = func_table_lookup(symbol_name)
+                val struct_decl = struct_table_lookup(symbol_name)
+                if fn_decl >= 0 or struct_decl >= 0:
                     return 1
         i = i + 1
     0
@@ -211,13 +169,15 @@ fn module_loader_init():
     loaded_module_file_paths = []
     loaded_module_exports = []
     loaded_module_set = {}
-    module_namespace_names = []
-    module_namespace_targets = []
+    loaded_module_file_index = {}
+    loaded_module_name_to_file = {}
+    loaded_module_scan_steps = 0
     deferred_module_names = []
     deferred_module_files = []
     deferred_module_imports = []
     deferred_module_set = {}
     _gc_warn_emitted = {}
+    _gc_warning_trace_state = -1
     module_resolve_cache_reset()
     irt_init()
 
@@ -229,22 +189,40 @@ fn module_is_loaded(module_path: text) -> i64:
     0
 
 fn module_mark_loaded(module_path: text, file_path: text, exports: [text]):
+    val idx = loaded_module_paths.len()
     loaded_module_paths.push(module_path)
     loaded_module_file_paths.push(file_path)
     loaded_module_exports.push(exports)
     loaded_module_set[module_path] = true
+    if not loaded_module_name_to_file.has(module_path):
+        loaded_module_name_to_file[module_path] = file_path
+    if file_path != "" and not loaded_module_file_index.has(file_path):
+        loaded_module_file_index[file_path] = idx
 
 fn module_get_file_path(module_name: text) -> text:
+    if loaded_module_name_to_file.has(module_name):
+        return loaded_module_name_to_file[module_name]
     var i: i64 = 0
     for path in loaded_module_paths:
+        loaded_module_scan_steps = loaded_module_scan_steps + 1
         if path == module_name:
             return loaded_module_file_paths[i]
         i = i + 1
     ""
 
 fn module_find_by_file_path(file_path: text) -> i64:
+    if file_path == "":
+        return -1
+    # Fast path: the first registration for this physical file, if it is still
+    # loaded. A stale hit (module later unloaded) falls through to the scan so
+    # a live alias registered afterwards is still found.
+    if loaded_module_file_index.has(file_path):
+        val hit = loaded_module_file_index[file_path]
+        if module_is_loaded(loaded_module_paths[hit]) == 1:
+            return hit
     var i: i64 = 0
     for loaded_path in loaded_module_file_paths:
+        loaded_module_scan_steps = loaded_module_scan_steps + 1
         val module_name = loaded_module_paths[i]
         if loaded_path == file_path and loaded_path != "" and module_is_loaded(module_name) == 1:
             return i
@@ -291,15 +269,11 @@ fn import_admission_get_deny() -> bool:
 
 # ===== Module Loading =====
 
-fn load_module_source(file_path: text) -> text:
+fn load_module_source(file_path: text) -> Result<text, text>:
     # Read module source file
-    val source = rt_file_read_text(file_path)
-    if source == nil:
-        return ""
-    source
+    file_read_result(file_path)
 
 fn parse_module_ast(source: text, path: text) -> i64:
-    mcdc_interpreter_register_source(path, source)
     # Parse module into AST using APPEND mode to preserve caller's AST.
     # Returns 1 on success, 0 on failure.
     if core_frontend_parse_append(source, path):
@@ -339,29 +313,21 @@ fn extract_module_exports() -> [text]:
 
     exports
 
-fn register_module_functions(module_name: text, decl_start: i64):
+fn register_module_functions():
     # Register all module functions in interpreter's function table
     # This makes them available for calls
 
+    val decls = module_get_decls()
     val mod_path = module_get_path()
-    var decl_index = decl_start
-    val decl_end = module_decl_count_get()
-    while decl_index < decl_end:
-        val did = module_decl_at(decl_index)
+
+    for did in decls:
         val tag = decl_get_tag(did)
-        decl_owner_module_set(did, module_name)
 
         if tag == DECL_FN:
             val name = decl_get_name(did)
             val ret_type = decl_get_ret_type(did)
             func_table_register(name, did)
-            # (module path, name)-keyed twin registration: caller-aware
-            # resolution (func_resolve_for_caller) reads this, so a bare-name
-            # collision between co-compiled modules cannot hijack a caller
-            # that defines or imports the name. Seed-policy mirror, 2026-08-25.
-            func_table_register_owned(mod_path, name, did)
             func_register_return_type(name, ret_type)
-            func_register_return_type(module_name + "." + name, ret_type)
             # pure_interp_registry_2026-07-17: record the owning decl_id so a
             # later bare-name collision from another module doesn't let this
             # module's unload delete the OTHER module's live registration.
@@ -376,30 +342,25 @@ fn register_module_functions(module_name: text, decl_start: i64):
             val name = decl_get_name(did)
             val ret_type = decl_get_ret_type(did)
             func_register_return_type(name, ret_type)
-            irt_track_func(mod_path, name)
+            irt_track_func_owned(mod_path, name, did)
 
         if tag == DECL_STRUCT:
             val name = decl_get_name(did)
             struct_table_register(name, did)
-            struct_table_register(module_name + "." + name, did)
             irt_track_struct_owned(mod_path, name, did)
 
         if tag == DECL_IMPL:
             for method_id in decl_get_body(did):
                 val method_name = decl_get_name(method_id)
                 func_table_register(method_name, method_id)
-                func_table_register_owned(mod_path, method_name, method_id)
                 func_register_return_type(method_name, decl_get_ret_type(method_id))
-                func_register_return_type(module_name + "." + method_name, decl_get_ret_type(method_id))
                 irt_track_func_owned(mod_path, method_name, method_id)
-                decl_owner_module_set(method_id, module_name)
                 # coverage owner-attribution — impl-block methods (RC1 equivalent).
                 decl_owner_file_set(method_id, mod_path)
 
         if tag == DECL_ENUM:
             val name = decl_get_name(did)
             irt_track_enum(mod_path, name)
-        decl_index = decl_index + 1
 
 # ===== Public API =====
 
@@ -415,12 +376,15 @@ fn load_module_parse_only(module_name: text, current_file: text) -> i64:
         return 1
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
-    val source = load_module_source(resolved_path)
+    val source = match load_module_source(resolved_path):
+        case Ok(content): content
+        case Err(_):
+            _module_load_depth = _module_load_depth - 1
+            return 0
     if source == "":
         _module_load_depth = _module_load_depth - 1
         return 0
 
-    val decl_start = module_decl_count_get()
     val parse_ok = parse_module_ast(source, resolved_path)
     _module_load_depth = _module_load_depth - 1
     parse_ok
@@ -439,12 +403,15 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
         return 1
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
-    val source = load_module_source(resolved_path)
+    val source = match load_module_source(resolved_path):
+        case Ok(content): content
+        case Err(_):
+            _module_load_depth = _module_load_depth - 1
+            return 0
     if source == "":
         _module_load_depth = _module_load_depth - 1
         return 0
 
-    val decl_start = module_decl_count_get()
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
         _module_load_depth = _module_load_depth - 1
@@ -452,7 +419,7 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
 
     irt_begin_module(module_name)
     val exports = extract_module_exports()
-    register_module_functions(module_name, decl_start)
+    register_module_functions()
     module_mark_loaded(module_name, resolved_path, exports)
 
     _module_load_depth = _module_load_depth - 1
@@ -487,13 +454,16 @@ fn load_module(module_name: text, current_file: text) -> i64:
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
     # Load source
-    val source = load_module_source(resolved_path)
+    val source = match load_module_source(resolved_path):
+        case Ok(content): content
+        case Err(_):
+            _module_load_depth = _module_load_depth - 1
+            return 0
     if source == "":
         _module_load_depth = _module_load_depth - 1
         return 0
 
     # Parse module (append mode — preserves caller's AST)
-    val decl_start = module_decl_count_get()
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
         _module_load_depth = _module_load_depth - 1
@@ -506,7 +476,7 @@ fn load_module(module_name: text, current_file: text) -> i64:
     val exports = extract_module_exports()
 
     # Register functions (also hooks into irt_track_*)
-    register_module_functions(module_name, decl_start)
+    register_module_functions()
 
     # Mark as loaded
     module_mark_loaded(module_name, resolved_path, exports)
@@ -630,14 +600,16 @@ fn check_gc_family_boundary(importer_path: text, imported_path: text, module_nam
     if is_nogc_family(importer_family) and is_gc_family(imported_family):
         val msg = "[gc-warning] GC module '{module_name}' (family: {imported_family}) imported in no-GC context (family: {importer_family})"
         eval_warnings.push(msg)
-        print msg
+        if gc_warning_trace_enabled():
+            print msg
         return
 
     # Rule 2: noalloc importing from allocating family → warn
     if is_noalloc_family(importer_family) and is_allocating_family(imported_family):
         val msg = "[gc-warning] Allocating module '{module_name}' (family: {imported_family}) imported in no-alloc context (family: {importer_family})"
         eval_warnings.push(msg)
-        print msg
+        if gc_warning_trace_enabled():
+            print msg
         return
 
 fn interp_unload_module(module_name: text) -> i64:

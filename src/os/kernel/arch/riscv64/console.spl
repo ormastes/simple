@@ -20,9 +20,10 @@
 use os.kernel.arch.riscv.console_common.{RISCV_VIRT_UART_BASE, riscv_uart_init, riscv_uart_read_byte, riscv_uart_write_byte, riscv_uart_write, riscv_uart_writeln}
 use os.kernel.arch.riscv64.sbi.{sbi_console_putchar}
 use os.kernel.arch.riscv64.shell_lite.{rv64_shell_banner, rv64_shell_prompt, rv64_shell_dispatch, rv64_shell_format_dir_entries}
-use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
+use os.apps.sshd.ssh_auth.{SshUserDb}
 use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn_with_recipe}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_CONSOLE_SHELL}
 
 # ============================================================================
 # UART MMIO Base Address (QEMU virt)
@@ -166,6 +167,11 @@ fn serial_shell_main(network_ok: i64):
     _uart_init()
     _uart_writeln(rv64_shell_banner())
 
+    if not _serial_login():
+        _uart_writeln("login denied - management shell unavailable")
+        loop:
+            pass
+
     var buf: [u8] = []
     _uart_write(rv64_shell_prompt())
 
@@ -181,9 +187,20 @@ fn serial_shell_main(network_ok: i64):
             _uart_write_byte(0x0A)
             if buf.len() > 0:
                 val line = _bytes_to_text(buf)
-                val resp = rv64_shell_dispatch(line, network_ok)
-                if resp.len() > 0:
-                    _uart_writeln(resp)
+                if line == "ls":
+                    # real directory enumeration via the VFS, not a static manifest
+                    val listing = _shell_ls()
+                    if listing.len() > 0:
+                        _uart_writeln(listing)
+                else if line.starts_with("launch "):
+                    # exec an on-filesystem tool via the real ELF FS-exec loader
+                    val lresp = _shell_launch(line)
+                    if lresp.len() > 0:
+                        _uart_writeln(lresp)
+                else:
+                    val resp = rv64_shell_dispatch(line, network_ok)
+                    if resp.len() > 0:
+                        _uart_writeln(resp)
                 buf = []
             _uart_write(rv64_shell_prompt())
             continue
@@ -238,12 +255,10 @@ fn _read_serial_line(echo_on: bool) -> text:
                 _uart_write_byte(byte)
     ""
 
-# Real serial login gate: reuses the SSH daemon's credential store
-# (sshd_create_default_users -> SshUserDb) with its constant-time password
-# compare, so serial and SSH enforce a single user database (root/simpleos,
-# user/password by default). No duplicated inline credentials.
+# Real serial login gate: this boot fallback has no implicit credentials.
+# An operator-provided credential provider must be wired before enabling login.
 fn _serial_login() -> bool:
-    val db = sshd_create_default_users()
+    val db = SshUserDb.new()
     val max_attempts: i64 = 3
     var attempts: i64 = 0
     while attempts < max_attempts:
@@ -260,7 +275,10 @@ fn _serial_login() -> bool:
 # `ls` — enumerate the mounted root filesystem via the real VFS readdir and
 # format entry names through the pure shell_lite formatter.
 fn _shell_ls() -> text:
-    rv64_shell_format_dir_entries(g_vfs_readdir("/"))
+    val entries_r = g_vfs_readdir("/")
+    if entries_r.is_err():
+        return "ls: unable to read /"
+    rv64_shell_format_dir_entries(entries_r.unwrap())
 
 # `launch <path> [args...]` — exec an on-filesystem tool (clang/llvm/rust or the
 # pure-Simple compiler/interpreter/loader at /sys/apps/<name>) through the real
@@ -276,7 +294,12 @@ fn _shell_launch(line: text) -> text:
     while i < parts.len():
         argv.push(parts[i])
         i = i + 1
-    val pid = fs_exec_spawn(path, argv, [])
+    # Master plan §5.4: the console shell is a migrated caller. The serial
+    # console runs in kernel context, so the caller id stays the kernel-origin
+    # sentinel (0) — but the LAUNCHED PROGRAM no longer inherits `spawn_full()`.
+    # `SPAWN_RECIPE_CONSOLE_SHELL` mints it FileExec+FileRead under `/bin/` plus
+    # ProcessSpawn and nothing else.
+    val pid = fs_exec_spawn_with_recipe(0, SPAWN_RECIPE_CONSOLE_SHELL, path, argv, [])
     if pid > 0:
         return "launched " + path + " pid=" + pid.to_text()
     return "launch failed errno=" + pid.to_text()

@@ -27,10 +27,11 @@ use build_native_types.{BuildOutputFormat, BuildLinkConfig, BuildLinkStats, Buil
 use compiler.driver.driver.{CompilerDriver}
 use compiler.common.driver_core_types.{BackendCompileOptions, CompileMode, CompileResult, OutputFormat as DriverOutputFormat}
 use compiler.driver.driver_api.{aot_native_file_with_backend}
+use compiler.types.simd_capabilities.{SimdFeatureSet, detect_capabilities}
 
 extern fn rt_time_now_unix_millis() -> i64
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_mkdir_p(path: text) -> bool
+use std.io_runtime.{mkdir_p}
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
@@ -62,6 +63,14 @@ fn _simd_features_to_sdn(f: SimdFeatureSet) -> text:
     lines = lines + "}\n"
     lines
 
+fn is_native_target_cpu(target_cpu: text?) -> bool:
+    """True when the build targets the host CPU: target_cpu absent, or Some("native").
+
+    Any other Some(cpu) is a fixed/cross target (e.g. Some("x86-64-v3")) and must
+    NOT pick up host SIMD detection.
+    """
+    target_cpu == nil or target_cpu == Some("native")
+
 fn build_native(config: BuildConfig) -> BuildResult:
     """Build a native binary from Simple source files.
 
@@ -81,7 +90,7 @@ fn build_native(config: BuildConfig) -> BuildResult:
 
     # Detect host SIMD capabilities for native target and persist as sidecar
     var active_config = config
-    val is_native_target = config.target_cpu.is_nil() or config.target_cpu == Some("native")
+    val is_native_target = is_native_target_cpu(config.target_cpu)
     if is_native_target:
         val detected = detect_capabilities()
         active_config = BuildConfig(..config, host_simd: Some(detected))
@@ -136,8 +145,11 @@ fn build_native(config: BuildConfig) -> BuildResult:
 
     # Build target flags from CPU and features
     var target_flags: [text] = []
-    if config.target_cpu.?:
-        target_flags.push("-march={config.target_cpu.unwrap()}")
+    match config.target_cpu:
+        Some(cpu):
+            target_flags.push("-march={cpu}")
+        nil:
+            ()
     for feature in config.target_features:
         target_flags.push("-m{feature}")
 

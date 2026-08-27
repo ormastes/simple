@@ -10,7 +10,6 @@ use common.ui.draw_ir.{
     DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_TEXT, DrawIrComposition
 }
 use common.ui.draw_ir_v3.{DrawIrV3Scene}
-use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
 use common.ui.host_input_event.{HostInputEvent}
 use common.ui.screen_host.{ScreenHost}
 use common.ui.widget.{UIState}
@@ -21,14 +20,9 @@ use gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 }
 use app.ui_showcase.hosts.host_2d.{screen_2d_parse_script}
-use app.ui_showcase.hosts.scene_raster.{RasterSurface, RASTER_BG, raster_scene_into}
-use app.ui_showcase.hosts.host_web.{web_scene_to_html}
 use app.ui_showcase.showcase_core.{
     ShowcaseRunReport, showcase_apply, showcase_build, showcase_report
 }
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
-use common.mission_critical.draw_ir_packed_generation_store_v3.{DrawIrPackedGenerationStoreV3, DrawIrPackedCapacityProbeV3, draw_ir_packed_capacity_probe_v3, draw_ir_packed_owner_preflight_v3}
-use std.gc_async_mut.gpu.engine2d.draw_ir_packed_composition_owner_v3.{engine2d_packed_v3_store, engine2d_packed_v3_prepare_identity, engine2d_packed_v3_finalize_identity, engine2d_packed_v3_identity_artifact}
 
 fn _lower_hex_sha256_valid(value: text) -> bool:
     if value.len() != 64:
@@ -46,34 +40,6 @@ fn _composition_has_text(composition: DrawIrComposition) -> bool:
                 return true
     false
 
-fn _fresh_device_result_accepted(
-    composition: DrawIrComposition,
-    result: Engine2dDrawIrAdvResult,
-    width: i32,
-    height: i32
-) -> bool:
-    val expected_pixels = width.to_i64() * height.to_i64()
-    if (result.selected_backend != "gpu" or result.fallback_required or
-        result.fallback_reason != "" or result.skipped_command_count != 0 or
-        result.rendered_command_count <= 0 or
-        result.readback_source != "device_readback" or
-        result.backend_handle <= 0 or result.device_identity <= 0 or
-        result.readback_checksum <= 0 or
-        result.pixels.len() != expected_pixels):
-        return false
-    if _composition_has_text(composition) and (
-        result.font_execution_target != "vulkan" or
-        result.font_identity == "" or result.font_batch_identity == "" or
-        result.font_readback_source != "device_readback" or
-        result.font_device_checksum != result.font_oracle_checksum or
-        result.font_readback_nonblank_pixels <= 0 or not result.font_parity or
-        not result.font_device_executed or not result.font_promotion_ready or
-        result.font_atlas_upload_count <= 0 or
-        result.font_atlas_upload_bytes <= 0 or
-        not _lower_hex_sha256_valid(result.font_atlas_payload_sha256)):
-        return false
-    true
-
 class Screen2dVulkanHost:
     var w: i32
     var h: i32
@@ -81,27 +47,8 @@ class Screen2dVulkanHost:
     var queue: [HostInputEvent]
     var cursor: i64
     var last_pixels: [u32]
-    var last_cpu_pixels: [u32]
     var last_receipt: text
     var last_rejection: text
-    var last_composition_sdn: text
-    var last_command_count: i64
-    var last_glyph_count: i64
-    var last_image_count: i64
-    var frame_latency_us: [i64]
-    var last_queue_id: text
-    var last_submit_id: text
-    var last_fence_id: text
-    var last_fallback_count: i64
-    var last_web_bytes: text
-    var last_transient_inventory: text
-    var packed_store: DrawIrPackedGenerationStoreV3
-    var last_packed_probe: DrawIrPackedCapacityProbeV3
-    var last_packed_arena: u64
-    var last_packed_generation: u64
-    var last_packed_hash: text
-    var last_packed_store_hash: text
-    var last_packed_identity: text
 
     static fn open(w: i32, h: i32, script: text) -> Screen2dVulkanHost?:
         if w <= 0 or h <= 0:
@@ -113,99 +60,47 @@ class Screen2dVulkanHost:
         Screen2dVulkanHost(
             w: w, h: h, engine: engine,
             queue: screen_2d_parse_script(script), cursor: 0,
-            last_pixels: [], last_cpu_pixels: [],
-            last_receipt: "", last_rejection: "not-rendered",
-            last_composition_sdn: "", last_command_count: 0,
-            last_glyph_count: 0, last_image_count: 0, frame_latency_us: [],
-            last_queue_id: "", last_submit_id: "", last_fence_id: "",
-            last_fallback_count: 0, last_web_bytes: "",
-            last_transient_inventory: "",
-            packed_store: engine2d_packed_v3_store(9001u64),
-            last_packed_probe: draw_ir_packed_capacity_probe_v3(1u32),
-            last_packed_arena: 0u64, last_packed_generation: 0u64,
-            last_packed_hash: "", last_packed_store_hash: "", last_packed_identity: ""
+            last_pixels: [], last_receipt: "", last_rejection: "not-rendered"
         )
 
     me _reject(reason: text) -> bool:
         self.last_pixels = []
-        self.last_cpu_pixels = []
         self.last_receipt = ""
         self.last_rejection = reason
-        self.last_composition_sdn = ""
-        self.last_packed_identity = ""
         false
 
     me _accept_fresh_device_result(composition: DrawIrComposition) -> bool:
         if composition.backend_target != DRAW_IR_BACKEND_GPU:
             return self._reject("vulkan-host-requires-gpu-composition")
         var images: [Engine2dResolvedDrawIrImage] = []
-        val (prepared_store, handoff) = engine2d_packed_v3_prepare_identity(
-            self.packed_store, composition)
-        self.packed_store = prepared_store
-        if not handoff.ok:
-            return self._reject("packed-identity-prepare-rejected")
-        val started = time_now_micros()
         val result: Engine2dDrawIrAdvResult =
             engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
                 self.engine, composition, images)
-        val elapsed = time_now_micros() - started
-        # Validate every device/font receipt field while the generation is
-        # still IN_FLIGHT.  finalize_identity completes only a fully accepted
-        # frame; any rejection poisons the exact generation instead.
-        val render_accepted = _fresh_device_result_accepted(
-            composition, result, self.w, self.h)
-        val (completed_store, completed) = engine2d_packed_v3_finalize_identity(
-            self.packed_store, handoff, composition, render_accepted)
-        self.packed_store = completed_store
-        if not completed:
-            return self._reject("packed-identity-render-rejected")
-        val identity_artifact = engine2d_packed_v3_identity_artifact(handoff.snapshot)
-        if identity_artifact == "":
-            return self._reject("packed-identity-artifact-rejected")
-        self.last_packed_arena = handoff.submission.generation_ref.arena_id
-        self.last_packed_generation = handoff.submission.generation_ref.generation
-        self.last_packed_store_hash = handoff.submission.content_hash
-        self.last_packed_hash = handoff.snapshot.composition_hash
-        self.last_packed_identity = identity_artifact
-        if elapsed > 0:
-            self.frame_latency_us.push(elapsed)
+        val expected_pixels = self.w.to_i64() * self.h.to_i64()
+        if (result.selected_backend != "gpu" or result.fallback_required or
+            result.fallback_reason != "" or result.skipped_command_count != 0 or
+            result.rendered_command_count <= 0 or
+            result.readback_source != "device_readback" or
+            result.backend_handle <= 0 or result.device_identity <= 0 or
+            result.readback_checksum <= 0 or
+            result.pixels.len() != expected_pixels):
+            return self._reject("fresh-device-drawir-receipt-rejected")
+        if _composition_has_text(composition) and (
+            result.font_execution_target != "vulkan" or
+            result.font_identity == "" or result.font_batch_identity == "" or
+            result.font_readback_source != "device_readback" or
+            result.font_device_checksum != result.font_oracle_checksum or
+            result.font_readback_nonblank_pixels <= 0 or not result.font_parity or
+            not result.font_device_executed or not result.font_promotion_ready or
+            result.font_atlas_upload_count <= 0 or
+            result.font_atlas_upload_bytes <= 0 or
+            not _lower_hex_sha256_valid(result.font_atlas_payload_sha256)):
+            return self._reject("fresh-device-font-receipt-rejected")
         self.last_pixels = result.pixels
-        self.last_composition_sdn = handoff.snapshot.composition_serialized
-        self.last_command_count = 0
-        self.last_glyph_count = 0
-        self.last_image_count = 0
-        self.last_queue_id = "vkq-{result.backend_handle}"
-        self.last_submit_id = "vks-{result.device_submission_generation}"
-        self.last_fence_id = "vkf-{result.device_submission_generation}"
-        self.last_fallback_count = if result.fallback_required: 1 else: 0
-        val font_batch_count = if result.font_batch_identity == "": 0 else: 1
-        val font_cache_count = if result.font_identity == "": 0 else: 1
-        self.last_transient_inventory = (
-            "font_batch_count={font_batch_count}\n" +
-            "atlas_upload_count={result.font_atlas_upload_count}\n" +
-            "atlas_upload_bytes={result.font_atlas_upload_bytes}\n" +
-            "font_cache_identity_count={font_cache_count}\n")
-        for batch in composition.batches:
-            for command in batch.commands:
-                self.last_command_count = self.last_command_count + 1
-                self.last_glyph_count = self.last_glyph_count + command.glyph_run.glyph_ids.len()
-                if command.image_uri != "":
-                    self.last_image_count = self.last_image_count + 1
-        self.last_packed_probe = draw_ir_packed_owner_preflight_v3(
-            self.packed_store, self.last_command_count.to_u32())
-        val cpu_scene = draw_ir_v2_to_v3(composition)
-        self.last_web_bytes = web_scene_to_html(cpu_scene, self.w, self.h)
-        var cpu_surface = RasterSurface.new(self.w, self.h, RASTER_BG)
-        val cpu_commands = raster_scene_into(cpu_surface, cpu_scene)
-        self.last_cpu_pixels = cpu_surface.pixels
         self.last_receipt = (
             "renderer=vulkan source={result.readback_source} " +
             "backend_handle={result.backend_handle} device_identity={result.device_identity} " +
             "checksum={result.readback_checksum} rendered={result.rendered_command_count} " +
-            "cpu_rendered={cpu_commands} generation={result.device_submission_generation} " +
-            "submit_count={result.device_submit_count} fence_count={result.device_fence_count} " +
-            "packed_arena={self.last_packed_arena} packed_generation={self.last_packed_generation} " +
-            "packed_hash={self.last_packed_hash} packed_queue=published_taken_completed " +
             "font_target={result.font_execution_target} font_identity={result.font_identity} " +
             "font_batch={result.font_batch_identity} font_source={result.font_readback_source}"
         )
@@ -216,28 +111,6 @@ class Screen2dVulkanHost:
         self._accept_fresh_device_result(composition)
 
     me pixels() -> [u32]: self.last_pixels
-    me cpu_pixels() -> [u32]: self.last_cpu_pixels
-    fn composition_sdn() -> text: self.last_composition_sdn
-    fn command_count() -> i64: self.last_command_count
-    fn glyph_count() -> i64: self.last_glyph_count
-    fn image_count() -> i64: self.last_image_count
-    fn latency_samples_ns() -> text:
-        var out = ""
-        for sample in self.frame_latency_us:
-            out = out + "{sample * 1000}\n"
-        out
-    fn queue_receipt() -> text:
-        "queue_id={self.last_queue_id}\nsubmit_id={self.last_submit_id}\nfence_id={self.last_fence_id}\n"
-    fn fallback_events() -> text:
-        if self.last_fallback_count == 0: "" else: "fallback\n"
-    fn web_bytes() -> text: self.last_web_bytes
-    fn transient_inventory() -> text: self.last_transient_inventory
-    fn packed_capacity_events() -> text: self.last_packed_probe.capacity_events
-    fn packed_before_state() -> text: self.last_packed_probe.before_state
-    fn packed_after_state() -> text: self.last_packed_probe.after_state
-    fn packed_frame_receipt() -> text:
-        "generation={self.last_packed_generation}\narena_id={self.last_packed_arena}\ncomposition_hash={self.last_packed_hash}\npacked_store_hash={self.last_packed_store_hash}\nrender_accepted=true\nqueue_state=published_taken_completed\nbackend=vulkan\n"
-    fn packed_identity_artifact() -> text: self.last_packed_identity
     fn device_receipt() -> text: self.last_receipt
     fn rejection_reason() -> text: self.last_rejection
 

@@ -39,6 +39,58 @@ impl DesktopShell:
                 self.compositor.dragging = true
                 self.compositor.drag_window_id = window_id.to_i32()
             return
+        if command.kind == "window_minimize":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                # Keep the freestanding copy-commit rule used by the other
+                # live-shell mutations in this owner.  minimize_window also
+                # cancels an active drag/resize and transfers focus to the
+                # next topmost input-eligible surface.
+                var next_compositor = self.compositor
+                if next_compositor.surface_index(window_id.to_u64()) >= 0:
+                    next_compositor.minimize_window(window_id.to_u64())
+                    self.compositor = next_compositor
+            return
+        if command.kind == "window_toggle_maximize":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                var next_compositor = self.compositor
+                val surface_index = next_compositor.surface_index(
+                    window_id.to_u64()
+                )
+                if surface_index >= 0:
+                    if next_compositor.surfaces[surface_index].maximized:
+                        next_compositor.restore_window(window_id.to_u64())
+                    else:
+                        next_compositor.maximize_window(window_id.to_u64())
+                    self.compositor = next_compositor
+            return
+        if command.kind == "window_close":
+            val window_id = command.window_id.to_i64()
+            if window_id > 0:
+                var next_compositor = self.compositor
+                val surface_index = next_compositor.surface_index(
+                    window_id.to_u64()
+                )
+                if surface_index >= 0:
+                    # Resolve the process before destroying the authoritative
+                    # surface.  Locally materialized windows are registered in
+                    # WmService, while early/system surfaces may only carry the
+                    # compositor identity, so retain that fallback.
+                    var process_id = self.wm.window_owner_process_id(
+                        window_id.to_u64()
+                    )
+                    if (process_id == 0u64 and
+                        next_compositor.surfaces[surface_index].process_id > 0):
+                        process_id = next_compositor.surfaces[
+                            surface_index
+                        ].process_id.to_u64()
+                    next_compositor.destroy_window(window_id.to_i32())
+                    self.compositor = next_compositor
+                    self.wm.remove_owner(window_id.to_u64())
+                    if process_id > 0u64:
+                        launcher_note_window_closed(process_id)
+            return
         if command.kind == "desktop_background":
             self.compositor.focused_idx = -1
 
@@ -182,9 +234,7 @@ impl DesktopShell:
         if before.scene_revision != snapshot.scene_revision or before.process_surface_count != snapshot.process_surface_count:
             return Rv64WmShellRenderInputs(consistent: false, reason: "snapshot-changed-before-content", taskbar: empty_taskbar, content_frames: [], taskbar_revision: 0, clock_label: self.clock_text)
         val taskbar = self.runtime_taskbar_model()
-        val content_frames = self.runtime_content_frames_for_process(
-            snapshot.scene_revision, snapshot.process_id
-        )
+        val content_frames = self.runtime_content_frames(snapshot.scene_revision)
         val taskbar_revision = simpleos_runtime_taskbar_revision(taskbar, self.clock_text)
         val after = rv64_process_owned_scene(self.compositor, snapshot.process_id)
         if after.scene_revision != snapshot.scene_revision or after.process_surface_count != snapshot.process_surface_count:
@@ -291,7 +341,6 @@ impl DesktopShell:
             val reaped_count = compositor_windows.len().to_u64()
             for window_id in compositor_windows:
                 self.compositor.destroy_window(window_id)
-                self._drop_baremetal_web_cache(window_id.to_i64())
                 self.wm.remove_owner(window_id)
             if reaped_count > 0 or row.windows > 0:
                 log_info("[desktop] " + "[shell] reaped pid={row.pid} app_id={row.app_id} state={row.state} windows={reaped_count}")

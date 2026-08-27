@@ -11,10 +11,6 @@ use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
     FormalDeliveryReceiptFileV1}
 use compiler.common.assurance.formal_interfaces.{HardwareProofReceiptV1,
     CompilerCertificateV1}
-use compiler.backend.backend.riscv_scalar_rvfi_formal.{
-    RiscvScalarFormalArtifactsV1, reduce_rv32_add_external_receipt_v1,
-    reduce_rv32_add_external_equivalence_receipt_v1,
-    reduce_rv32_add_external_sail_receipt_v1}
 use compiler.tools.verify.formal_gate_collectors.{FormalGateCollectionV1,
     TruthfulnessProofEvidenceV1, truthfulness_item_diagnostic_v1,
     finalize_formal_gate_collection_v2}
@@ -282,29 +278,20 @@ pub fn collect_generated_rv32i_end_to_end_gate_v1(
             "FV2-E-RV32I-HWIR-RTL-HASH: compiler certificate payload drifted")
     files.push(FormalDeliveryReceiptFileV1(hwir_to_rtl.certificate_hash,
         compiler_content))
-    # The records and material files above are all public value inputs.  They
-    # prove internal consistency, not that the SBY/equivalence/Sail runners
-    # observed those processes.  Gate 5 stays closed until a runner-owned
-    # authority consumes the retained outputs without public record re-entry.
-    failed_rv32i_collection_v1(
-        "FV2-E-RV32I-EXECUTION-AUTHORITY: canonical runner-owned RV32 evidence assembly is unavailable")
-
-# Production Gate 5 bridge. The external runners retain three independently
-# classified receipt texts; this entrypoint reduces all three fail-closed and
-# immediately binds them through the frozen collector.
-pub fn collect_executed_rv32_add_gate_v1(
-    artifacts: RiscvScalarFormalArtifactsV1,
-    formal_receipt: text,
-    equivalence_receipt: text,
-    sail_receipt: text,
-    hwir_to_rtl: CompilerCertificateV1,
-    materialized_external_evidence: [FormalDeliveryReceiptFileV1]
-) -> FormalGateCollectionV1:
-    val formal = reduce_rv32_add_external_receipt_v1(
-        artifacts, formal_receipt)
-    val equivalence = reduce_rv32_add_external_equivalence_receipt_v1(
-        artifacts, equivalence_receipt)
-    val sail = reduce_rv32_add_external_sail_receipt_v1(
-        artifacts, sail_receipt)
-    collect_generated_rv32i_end_to_end_gate_v1(formal, equivalence, sail,
-        hwir_to_rtl, materialized_external_evidence)
+    val aggregate_content = "GeneratedRv32iEndToEndReceipt-v1" +
+        os_hw_gate_frame_v1(formal.hwir_hash) +
+        os_hw_gate_frame_v1(formal.rtl_hash) +
+        os_hw_gate_frame_v1(equivalence.netlist_hash) +
+        os_hw_gate_frame_v1(formal.rvfi_contract_hash) +
+        os_hw_gate_frame_v1(formal.assumption_manifest_hash) +
+        os_hw_gate_frame_v1(hwir_to_rtl.certificate_hash) +
+        os_hw_gate_frames_v1(required_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    var receipt_hashes = required_hashes
+    receipt_hashes.push(hwir_to_rtl.certificate_hash)
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("GeneratedRv32iEndToEndGate-v1" +
+        os_hw_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.GeneratedRv32iEndToEnd, evidence_hash, files)

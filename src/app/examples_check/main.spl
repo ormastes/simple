@@ -12,7 +12,7 @@ use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.mod.{dir_walk, file_exists, file_write, file_append, process_run_timeout}
 use std.log.{error}
 
-struct ExampleCheckConfig:
+pub struct ExampleCheckConfig:
     binary: text
     root: text
     mode: text
@@ -59,11 +59,90 @@ fn _is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
         arg == "--verbose" or arg == "--dots" or arg == "--count" or
-        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--no-progress" or arg == "--log-mode" or
         arg == "--progress" or arg.starts_with("--log-mode=") or
         arg.starts_with("--surface=") or arg.starts_with("--progress=")
 
-fn parse_args(args: [text]) -> ExampleCheckConfig:
+fn _is_bounded_ascii_decimal(value: text, max_value: text, allow_zero: bool) -> bool:
+    if value.len() == 0:
+        return false
+
+    var i = 0
+    var first_nonzero = value.len()
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch < "0" or ch > "9":
+            return false
+        if first_nonzero == value.len() and ch != "0":
+            first_nonzero = i
+        i = i + 1
+
+    if first_nonzero == value.len():
+        return allow_zero
+
+    val digit_count = value.len() - first_nonzero
+    if digit_count != max_value.len():
+        return digit_count < max_value.len()
+
+    i = 0
+    while i < digit_count:
+        val ch = value[first_nonzero + i:first_nonzero + i + 1]
+        val max_ch = max_value[i:i + 1]
+        if ch != max_ch:
+            return ch < max_ch
+        i = i + 1
+    true
+
+pub fn examples_check_option_error(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        val numeric_value = arg == "--timeout" or arg == "--limit"
+        val needs_value = numeric_value or arg == "--binary" or arg == "--report"
+        if needs_value:
+            if i + 1 >= args.len() or args[i + 1] == "":
+                return "missing value for {arg}"
+            val value = args[i + 1]
+            if numeric_value:
+                val valid_numeric = if arg == "--timeout":
+                    _is_bounded_ascii_decimal(value, "9223372036854775", false)
+                else:
+                    _is_bounded_ascii_decimal(value, "9223372036854775807", true)
+                if not valid_numeric:
+                    return "invalid value for {arg}"
+            elif value.starts_with("-"):
+                return "invalid value for {arg}"
+            i = i + 2
+            continue
+        val equals_numeric = arg.starts_with("--timeout=") or arg.starts_with("--limit=")
+        val equals_path = arg.starts_with("--binary=") or arg.starts_with("--report=")
+        if equals_numeric or equals_path:
+            val value = arg.slice(arg.index_of("=") + 1, arg.len())
+            if value == "":
+                return "missing value for " + arg.slice(0, arg.index_of("="))
+            if equals_numeric:
+                val valid_numeric = if arg.starts_with("--timeout="):
+                    _is_bounded_ascii_decimal(value, "9223372036854775", false)
+                else:
+                    _is_bounded_ascii_decimal(value, "9223372036854775807", true)
+                if not valid_numeric:
+                    return "invalid value for " + arg.slice(0, arg.index_of("="))
+            elif equals_path and value.starts_with("-"):
+                return "invalid value for " + arg.slice(0, arg.index_of("="))
+        val known = (
+            arg == "--run" or arg == "--compile" or arg == "--fail-fast" or arg == "--help" or arg == "-h" or
+            equals_numeric or equals_path or
+            _is_log_option(arg)
+        )
+        if known:
+            i = i + 1
+            continue
+        if arg.starts_with("-"):
+            return "unknown option: {arg}"
+        i = i + 1
+    ""
+
+pub fn parse_args(args: [text]) -> ExampleCheckConfig:
     var root = "examples"
     var mode = "compile"
     var timeout_seconds = 15
@@ -75,9 +154,7 @@ fn parse_args(args: [text]) -> ExampleCheckConfig:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "examples-check":
-            val _unused = 0
-        elif arg == "--run":
+        if arg == "--run":
             mode = "run"
         elif arg == "--compile":
             mode = "compile"
@@ -230,6 +307,11 @@ fn main() -> i64:
     if has_flag(args, "-h") or has_flag(args, "--help"):
         print_help()
         return 0
+
+    val option_error = examples_check_option_error(args)
+    if option_error != "":
+        error("examples-check", option_error)
+        return 2
 
     val config = parse_args(args)
     val as_json = log_opts.log_mode == "json"

@@ -12,26 +12,31 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_web_provenance_valid}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
     shared_wm_content_frame_image_uri,
+    shared_wm_nested_content_frames,
     shared_wm_pixel_buffer_pixels,
     shared_wm_pixel_buffer_resize,
     shared_wm_scene_draw_ir_composition_with_content,
     shared_wm_scene_render_taskbar_context_to_backend,
     shared_wm_scene_render_taskbar_context_to_pixel_buffer,
     shared_wm_scene_render_desktop_chrome,
+    shared_wm_taskbar_object_rect,
     shared_wm_top_content_frame_index,
-    shared_wm_scene_window_content_rect_with_titlebar
+    shared_wm_scene_window_content_rect_with_titlebar,
+    shared_wm_browser_content_extra_height,
+    shared_wm_browser_toolbar_control_at
 }
-use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
+use common.ui.taskbar_model.{AppRef, WindowRef, TrayItem, TaskbarModel}
+use common.ui.widget.{UIEvent, UITree}
+use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
-use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 use os.compositor.dirty_rect.{DirtyRegion}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme, content_paint_full_height}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
@@ -42,14 +47,13 @@ use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use common.ui.native_scalar_text.{ui_native_i64_text}
 use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 use std.io_runtime.{thread_sleep}
 
-extern fn rt_sleep_ms(ms: i64)
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -86,6 +90,77 @@ fn host_wm_force_direct_chrome(enabled: bool):
 fn host_wm_chrome_force_direct() -> bool:
     """True when render_frame() is pinned to the direct-draw chrome path."""
     _host_chrome_force_direct
+
+# A requested host target can carry different semantic material than the
+# canonical local CPU target. Recompose only after the requested composition
+# has failed; CPU is already the local contract and must not be attempted twice.
+fn host_wm_draw_ir_local_recompose_required(selected_backend: text) -> bool:
+    selected_backend != DRAW_IR_BACKEND_CPU
+
+# Validate Metal material evidence against the submitted Draw IR itself.
+# Executor counters are cross-checks only: this owner independently derives the
+# exact ordered material IDs and rejects duplicate producer IDs or any receipt
+# insertion, omission, duplication, or reorder.
+fn host_metal_glass_receipts_valid(
+    composition: DrawIrComposition, result: Engine2dDrawIrAdvResult
+) -> bool:
+    if composition.backend_target != "metal":
+        return true
+    var expected_ids: [text] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.? == false:
+                continue
+            var requested = false
+            for prop in command.computed_style:
+                if (prop.key == "wm-material-request" and
+                    prop.value == "window-surface-glass"):
+                    requested = true
+            if requested:
+                if command.component_id == "":
+                    return false
+                for expected_id in expected_ids:
+                    if expected_id == command.component_id:
+                        return false
+                expected_ids.push(command.component_id)
+
+    val expected_count = expected_ids.len().to_i32()
+    if (result.metal_device_glass_requested_count != expected_count or
+        result.metal_device_glass_material_count != expected_count or
+        result.metal_device_glass_unfulfilled_count != 0 or
+        result.metal_device_glass_receipts.len() != expected_ids.len()):
+        return false
+    if expected_ids.len() == 0:
+        return true
+    if (result.readback_source != "device_readback" or
+        result.backend_handle <= 0 or result.device_identity <= 0):
+        return false
+
+    var index = 0
+    while index < expected_ids.len():
+        val receipt = result.metal_device_glass_receipts[index]
+        if (receipt.material_id != expected_ids[index] or
+            not receipt.fulfilled or
+            receipt.execution_target != "metal-device-glass-v1" or
+            receipt.backend_handle <= 0 or
+            receipt.device_identity <= 0 or
+            receipt.backend_handle != result.backend_handle or
+            receipt.device_identity != result.device_identity or
+            receipt.readback_source != result.readback_source or
+            receipt.readback_checksum != result.readback_checksum):
+            return false
+        index = index + 1
+    true
+
+fn host_wm_draw_ir_result_valid(
+    composition: DrawIrComposition, result: Engine2dDrawIrAdvResult,
+    expected_pixel_count: i32
+) -> bool:
+    host_metal_glass_receipts_valid(composition, result) and
+    not result.fallback_required and
+    result.skipped_command_count == 0 and
+    result.rendered_command_count > 0 and
+    result.pixels.len() == expected_pixel_count
 
 enum HostBackendKind:
     Browser
@@ -259,6 +334,7 @@ class HostedWindow:
     content: text
     process_id: i64
     app_id: text
+    content_owner: i32 = HOST_CONTENT_OWNER_LOCAL_WEB
     minimized: bool
     focused: bool
     maximized: bool = false
@@ -287,6 +363,25 @@ struct HostedWebContentTarget:
 struct HostedBrowserChromeTarget:
     window_id: i64
     control: text
+
+fn _host_active_content_theme_id() -> text:
+    """The one theme identity the compositor treats as authoritative.
+
+    Producers stamp `WmContentFrame.theme_id` with this value when they render
+    (see the content-revision loop below), so acceptance must compare against
+    the same resolution or the theme axis of the gate never engages -- which is
+    exactly what
+    doc/08_tracking/bug/theme_web_frame_acceptance_unguarded_2026-07-27.md
+    records. Extracted rather than reimplemented so the produce side and the
+    accept side cannot drift apart.
+
+    `active_wm_theme_id()` returns "" before any theme is installed; the
+    registry default stands in for that window, matching what the producer
+    stamps. This is deliberately NOT a new policy -- it is the resolution this
+    file already used on the produce path.
+    """
+    val active_theme_id = active_wm_theme_id()
+    if active_theme_id != "": active_theme_id else: default_theme_id()
 
 fn _host_empty_external_web_frame() -> WmContentFrame:
     WmContentFrame(
@@ -332,8 +427,10 @@ fn _host_evidence_json_text(value: text) -> text:
     # Hoisted local is REQUIRED: stage3 native builds emit an interpolation
     # containing escaped string literals as literal source text (see
     # hosted_wm_evidence._json_text for the live-proven failure).
-    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-    "\"{escaped}\""
+    val escaped_slashes = value.replace("\\", "\\\\")
+    val escaped_quotes = escaped_slashes.replace("\"", "\\\"")
+    val escaped_newlines = escaped_quotes.replace("\n", "\\n")
+    "\"{escaped_newlines}\""
 
 fn host_compositor_taskbar_model(comp: HostCompositor) -> TaskbarModel:
     """Project authoritative host process and window state into shell objects.
@@ -515,11 +612,17 @@ class HostCompositor:
     native_pixel_lane: bool
     native_cache_window_ids: [i64]
     native_content_caches: [WebRenderPixelArtifactCache]
+    # Scalar index kept separately from the class-valued cache dictionary:
+    # native code can safely look up the compact i32 slot while the cache
+    # itself remains in the parallel array required by the stage3 backend.
+    # This removes a full cache-id scan for every visible window each frame.
+    native_cache_indices: Dict<i64, i32>
     width: i32
     height: i32
     windows: [HostedWindow]
     next_window_id: i64
     app_processes: [HostWmAppProcess]
+    pinned_apps: [AppRef]
     dragging: bool
     drag_window_id: i64
     drag_offset_x: i32
@@ -553,6 +656,8 @@ class HostCompositor:
     # mouse-up if the release hit-test still resolves to the same target.
     armed_chrome_target: text
     armed_chrome_window_id: i64
+    armed_chrome_app_id: text
+    pending_taskbar_launch_app_id: text
     # Cache for the CSS/GUI-web chrome render lane (see render_frame). The key
     # is host_chrome_scene_fingerprint(); the pixels are the last full-scene
     # chrome rasterization. Empty key means "no cached chrome yet".
@@ -614,11 +719,13 @@ class HostCompositor:
             native_pixel_lane: false,
             native_cache_window_ids: [],
             native_content_caches: [],
+            native_cache_indices: {},
             width: size.width as i32,
             height: size.height as i32,
             windows: [],
             next_window_id: 1,
             app_processes: [],
+            pinned_apps: [],
             dragging: false,
             drag_window_id: 0,
             drag_offset_x: 0,
@@ -636,6 +743,8 @@ class HostCompositor:
             scroll_offsets: {},
             armed_chrome_target: "",
             armed_chrome_window_id: 0,
+            armed_chrome_app_id: "",
+            pending_taskbar_launch_app_id: "",
             _chrome_cache_key: "",
             _chrome_cache_pixels: [],
             content_caches: {},
@@ -672,9 +781,8 @@ class HostCompositor:
 
     fn requires_external_web_frame(window_id: i64) -> bool:
         val index = self._find_window_index(window_id)
-        index >= 0 and (
-            self.windows[index].app_id == "browser" or
-            self.windows[index].owner_port > 0
+        index >= 0 and host_content_owner_requires_browser_renderer(
+            self.windows[index].content_owner
         )
 
     me _drop_external_web_frame(window_id: i64) -> bool:
@@ -714,6 +822,15 @@ class HostCompositor:
             if self.native_cache_window_ids[native_index] == window_id:
                 self.native_cache_window_ids.remove(native_index)
                 self.native_content_caches.remove(native_index)
+                self.native_cache_indices.remove(window_id)
+                # Array removal shifts every following slot left once. Cache
+                # destruction is cold; pay the linear repair here so render
+                # and animation polling retain constant-time lookup.
+                while native_index < self.native_cache_window_ids.len():
+                    self.native_cache_indices[
+                        self.native_cache_window_ids[native_index]
+                    ] = native_index
+                    native_index = native_index + 1
                 return
             native_index = native_index + 1
 
@@ -783,62 +900,14 @@ class HostCompositor:
 
     me release_external_web_frame(window_id: i64):
         if self._drop_external_web_frame(window_id):
-            self.dirty.add_full_screen(self.width, self.height)
-
-    fn has_pending_damage() -> bool:
-        not self.dirty.is_empty()
-
-    me _add_external_local_damage(
-        window: HostedWindow, frame: WmContentFrame
-    ):
-        val content_origin_x = window.x.to_i64() + 4
-        val content_origin_y = (
-            window.y.to_i64() + 32 +
-            shared_wm_browser_content_extra_height(window.app_id).to_i64()
-        )
-        val screen_right = self.width.to_i64()
-        val screen_bottom = self.height.to_i64()
-        if screen_right <= 0 or screen_bottom <= 0:
-            return
-        var offset: i64 = 0
-        while offset < frame.damage_rects.len():
-            val left = content_origin_x + frame.damage_rects[offset]
-            val top = content_origin_y + frame.damage_rects[offset + 1]
-            val right = left + frame.damage_rects[offset + 2]
-            val bottom = top + frame.damage_rects[offset + 3]
-            val clipped_left = if left < 0: 0 else: left
-            val clipped_top = if top < 0: 0 else: top
-            val clipped_right = if right > screen_right:
-                screen_right
-            else:
-                right
-            val clipped_bottom = if bottom > screen_bottom:
-                screen_bottom
-            else:
-                bottom
-            if (clipped_right > clipped_left and
-                clipped_bottom > clipped_top):
-                # Values are narrowed only after clipping to the non-negative
-                # i32-sized compositor viewport.
-                self.dirty.add_rect(
-                    clipped_left.to_i32(), clipped_top.to_i32(),
-                    (clipped_right - clipped_left).to_i32(),
-                    (clipped_bottom - clipped_top).to_i32()
+            val window_index = self._find_window_index(window_id)
+            if window_index >= 0:
+                var window = self.windows[window_index]
+                window.content_owner = host_content_owner_default(
+                    window.owner_port, window.app_id, ""
                 )
-            offset = offset + 4
-
-    me _add_external_frame_damage(
-        window: HostedWindow,
-        previous: WmContentFrame,
-        current: WmContentFrame
-    ):
-        if not _host_external_damage_incremental_valid(previous, current):
+                self.windows[window_index] = window
             self.dirty.add_full_screen(self.width, self.height)
-            return
-        if current.damage_mode == WM_CONTENT_DAMAGE_LOCAL:
-            self._add_external_local_damage(window, current)
-        # A validated NONE receipt deliberately leaves the outer compositor
-        # clean. Every other state already failed closed above.
 
     me set_external_web_frame(
         window_id: i64,
@@ -1142,25 +1211,25 @@ class HostCompositor:
     # correctly a miss+store, not a stale hit.
     me _content_cache_for(window_id: i64, cw: i32, full_h: i32, backend_name: text) -> WebRenderPixelArtifactCache:
         if self.native_pixel_lane:
-            var native_idx = 0
-            while native_idx < self.native_cache_window_ids.len():
-                if self.native_cache_window_ids[native_idx] == window_id:
-                    val native_cache = self.native_content_caches[native_idx]
-                    if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
-                        return native_cache
-                    val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
-                    self.native_content_caches[native_idx] = replacement
-                    return replacement
-                native_idx = native_idx + 1
+            if self.native_cache_indices.contains_key(window_id):
+                val native_idx = self.native_cache_indices[window_id]
+                val native_cache = self.native_content_caches[native_idx]
+                if native_cache.width == cw and native_cache.height == full_h and native_cache.backend_name == backend_name:
+                    return native_cache
+                val replacement = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+                self.native_content_caches[native_idx] = replacement
+                return replacement
             val native_fresh = web_render_pixel_artifact_cache(cw, full_h, backend_name)
+            self.native_cache_indices[window_id] = self.native_cache_window_ids.len() as i32
             self.native_cache_window_ids.push(window_id)
             self.native_content_caches.push(native_fresh)
             return native_fresh
-        val existing = self.content_caches.get(window_id)
-        if existing != nil and existing.width == cw and existing.height == full_h and existing.backend_name == backend_name:
-            return existing
+        if self.content_caches.contains_key(window_id):
+            val existing = self.content_caches[window_id]
+            if existing.width == cw and existing.height == full_h and existing.backend_name == backend_name:
+                return existing
         val fresh = web_render_pixel_artifact_cache(cw, full_h, backend_name)
-        self.content_caches.set(window_id, fresh)
+        self.content_caches[window_id] = fresh
         fresh
 
     # Receiver-based taskbar projection. Stage3 native codegen yields nil
@@ -1183,23 +1252,76 @@ class HostCompositor:
         while wi < self.windows.len():
             val window = self.windows[wi]
             if not window.focused:
-                running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
+                running.push(WindowRef(window_id: ui_native_i64_text(window.id), app_id: window.app_id, title: window.title, minimized: window.minimized))
             wi = wi + 1
         wi = 0
         while wi < self.windows.len():
             val window = self.windows[wi]
             if window.focused:
-                running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
+                running.push(WindowRef(window_id: ui_native_i64_text(window.id), app_id: window.app_id, title: window.title, minimized: window.minimized))
             wi = wi + 1
+
+        var pinned: [AppRef] = []
+        var pinned_index = 0
+        while pinned_index < self.pinned_apps.len():
+            pinned.push(AppRef(
+                app_id: self.pinned_apps[pinned_index].app_id,
+                display_name: self.pinned_apps[pinned_index].display_name,
+                icon: self.pinned_apps[pinned_index].icon
+            ))
+            pinned_index = pinned_index + 1
 
         val process_label = "{active_process_count}/{self.app_processes.len()} active"
         TaskbarModel(
-            # HostCompositor has no pinned-launcher registry. Processes are not
-            # launchers, so presenting them as pinned would synthesize authority.
-            pinned: [],
+            pinned: pinned,
             running: running,
             tray: [TrayItem(item_id: "host-processes", label: process_label, icon: "process")]
         )
+
+    me pin_taskbar_app(app_id: text, display_name: text, icon: text) -> bool:
+        if app_id == "":
+            return false
+        var i = 0
+        while i < self.pinned_apps.len():
+            if self.pinned_apps[i].app_id == app_id:
+                return true
+            i = i + 1
+        self.pinned_apps.push(AppRef(
+            app_id: app_id,
+            display_name: display_name,
+            icon: icon
+        ))
+        self.dirty.add_full_screen(self.width, self.height)
+        true
+
+    me unpin_taskbar_app(app_id: text) -> bool:
+        if app_id == "":
+            return false
+        var kept: [AppRef] = []
+        var removed = false
+        var i = 0
+        while i < self.pinned_apps.len():
+            if self.pinned_apps[i].app_id == app_id:
+                removed = true
+            else:
+                kept.push(AppRef(
+                    app_id: self.pinned_apps[i].app_id,
+                    display_name: self.pinned_apps[i].display_name,
+                    icon: self.pinned_apps[i].icon
+                ))
+            i = i + 1
+        if removed:
+            self.pinned_apps = kept
+            self.dirty.add_full_screen(self.width, self.height)
+        removed
+
+    fn taskbar_app_is_pinned(app_id: text) -> bool:
+        var i = 0
+        while i < self.pinned_apps.len():
+            if self.pinned_apps[i].app_id == app_id:
+                return true
+            i = i + 1
+        false
 
     # Receiver-built production evidence JSON for the compositor sub-object.
     # The evidence writer previously received the whole HostCompositor by
@@ -1225,7 +1347,314 @@ class HostCompositor:
             i = i + 1
         "{\"width\":{self.width},\"height\":{self.height},\"render_revision\":{self.render_revision},\"pointer_x\":{self.pointer_x},\"pointer_y\":{self.pointer_y},\"dragging\":{self.dragging},\"resizing\":{self.resizing},\"windows\":[{windows}],\"taskbar\":{\"running\":[{running}],\"tray_count\":{model.tray.len()}}}"
 
+    fn content_target(x: i32, y: i32) -> HostedWebContentTarget?:
+        var hit: HostedWebContentTarget? = nil
+        var i = 0
+        while i < self.windows.len():
+            val window = self.windows[i]
+            val content_x = window.x + 4
+            val content_y = window.y + 32 + shared_wm_browser_content_extra_height(
+                window.app_id
+            )
+            val content_width = window.w - 8
+            val content_height = window.h - 36 - shared_wm_browser_content_extra_height(window.app_id)
+            if (
+                not window.minimized and
+                x >= content_x and x < content_x + content_width and
+                y >= content_y and y < content_y + content_height
+            ):
+                hit = Some(HostedWebContentTarget(
+                    window_id: window.id,
+                    body_html: window.content,
+                    local_x: x - content_x,
+                    local_y: y - content_y,
+                    width: content_width,
+                    height: content_height
+                ))
+            i = i + 1
+        hit
+
+    fn browser_chrome_target(x: i32, y: i32) -> HostedBrowserChromeTarget?:
+        var hit: HostedBrowserChromeTarget? = nil
+        var i = 0
+        while i < self.windows.len():
+            val window = self.windows[i]
+            if not window.minimized and window.app_id == "browser":
+                val control = shared_wm_browser_toolbar_control_at(
+                    x - window.x, y - window.y - 28, window.w
+                )
+                if control != "":
+                    hit = Some(HostedBrowserChromeTarget(
+                        window_id: window.id,
+                        control: control
+                    ))
+            i = i + 1
+        hit
+
+    fn _gui_content_index(window_id: i64) -> i32:
+        var i = 0
+        while i < self.gui_content_window_ids.len():
+            if self.gui_content_window_ids[i] == window_id:
+                return i
+            i = i + 1
+        -1
+
+    fn is_gui_content_window(window_id: i64) -> bool:
+        val index = self._find_window_index(window_id)
+        index >= 0 and (
+            self.windows[index].content_owner == HOST_CONTENT_OWNER_GUI
+        )
+
+    me attach_window_gui_tree(window_id: i64, tree: UITree) -> bool:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index >= 0:
+            self.gui_content_trees[registry_index] = tree
+            self.gui_content_focused_ids[registry_index] = ""
+        else:
+            self.gui_content_window_ids.push(window_id)
+            self.gui_content_trees.push(tree)
+            self.gui_content_focused_ids.push("")
+        var window = self.windows[window_index]
+        window.content_owner = HOST_CONTENT_OWNER_GUI
+        self.windows[window_index] = window
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    fn gui_content_tree(window_id: i64) -> UITree?:
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return nil
+        Some(self.gui_content_trees[registry_index])
+
+    me _release_gui_content(window_id: i64):
+        val drop_index = self._gui_content_index(window_id)
+        if drop_index >= 0:
+            self.gui_content_window_ids.remove(drop_index)
+            self.gui_content_trees.remove(drop_index)
+            self.gui_content_focused_ids.remove(drop_index)
+        if self.gui_pointer_capture_window_id == window_id:
+            self.gui_pointer_capture_window_id = 0
+
+    me dispatch_gui_pointer_event(
+        window_id: i64,
+        desktop_x: i32,
+        desktop_y: i32,
+        button: text,
+        kind: text
+    ) -> bool:
+        var route_window_id = window_id
+        val captured = (
+            self.gui_pointer_capture_window_id > 0 and kind != "down"
+        )
+        if captured:
+            route_window_id = self.gui_pointer_capture_window_id
+        val window_index = self._find_window_index(route_window_id)
+        if window_index < 0:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val window = self.windows[window_index]
+        if not self.is_gui_content_window(route_window_id) or window.minimized:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val extra = shared_wm_browser_content_extra_height(window.app_id)
+        val client_x = desktop_x - window.x - 4
+        val client_y = desktop_y - window.y - 32 - extra
+        val client_w = window.w - 8
+        val client_h = window.h - 36 - extra
+        val inside = (
+            client_x >= 0 and client_y >= 0 and
+            client_x < client_w and client_y < client_h
+        )
+        if not inside and not captured:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val registry_index = self._gui_content_index(route_window_id)
+        if registry_index < 0:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.Resize(client_w, client_h))
+        session.dispatch(UIEvent.MouseEvent(
+            client_x.to_f64(), client_y.to_f64(), button, kind
+        ))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        if kind == "down":
+            self.gui_pointer_capture_window_id = route_window_id
+        elif kind == "up":
+            self.gui_pointer_capture_window_id = 0
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me dispatch_gui_scroll_event(
+        window_id: i64,
+        desktop_x: i32,
+        desktop_y: i32,
+        delta_x_milli: i64,
+        delta_y_milli: i64
+    ) -> bool:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val window = self.windows[window_index]
+        if not self.is_gui_content_window(window_id) or window.minimized:
+            return false
+        val extra = shared_wm_browser_content_extra_height(window.app_id)
+        val client_x = desktop_x - window.x - 4
+        val client_y = desktop_y - window.y - 32 - extra
+        val client_w = window.w - 8
+        val client_h = window.h - 36 - extra
+        if (client_x < 0 or client_y < 0 or
+            client_x >= client_w or client_y >= client_h):
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.Resize(client_w, client_h))
+        # Same milli-delta normalization as HostGuiEventRouter's wheel lane.
+        session.dispatch(UIEvent.ScrollEvent(
+            client_x.to_f64(), client_y.to_f64(),
+            (0 - delta_x_milli).to_f64() / 100.0,
+            (0 - delta_y_milli).to_f64() / 100.0
+        ))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me dispatch_gui_key_event(
+        window_id: i64,
+        key: text,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        super_key: bool
+    ) -> bool:
+        if key == "":
+            return false
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val window = self.windows[window_index]
+        if (not self.is_gui_content_window(window_id) or
+            window.minimized or not window.focused):
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        if key == "tab":
+            session.dispatch(
+                if shift: UIEvent.FocusPrev else: UIEvent.FocusNext
+            )
+        else:
+            session.dispatch_key_with_modifiers(
+                key, ctrl, shift, alt, super_key
+            )
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me dispatch_gui_text_event(window_id: i64, committed_text: text) -> bool:
+        if committed_text == "":
+            return false
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val window = self.windows[window_index]
+        if (not self.is_gui_content_window(window_id) or
+            window.minimized or not window.focused):
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.CompositionCommit(committed_text))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me take_gui_content_action(window_id: i64) -> text:
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return ""
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        val action = session.take_pending_action()
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        action
+
+    me update_window_content(window_id: i64, body_html: text) -> bool:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id == window_id:
+                var window = self.windows[i]
+                if window.content == body_html:
+                    return false
+                window.content = body_html
+                self.windows[i] = window
+                self.dirty.add_rect(window.x, window.y, window.w, window.h)
+                return true
+            i = i + 1
+        false
+
+    me update_window_title(window_id: i64, title: text) -> bool:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id == window_id:
+                var window = self.windows[i]
+                if window.title == title:
+                    return false
+                window.title = title
+                self.windows[i] = window
+                self.dirty.add_rect(window.x, window.y, window.w, window.h)
+                return true
+            i = i + 1
+        false
+
     me resize(width: i32, height: i32):
+        if width <= 0 or height <= 0:
+            return
+        if (width.to_i64() * height.to_i64() >
+            HOST_WM_MAX_FRAMEBUFFER_PIXELS):
+            return
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].maximized:
+                var window = self.windows[i]
+                window.x = 0
+                window.y = WM_WORK_AREA_TOP
+                window.w = width
+                window.h = height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
+                if window.h < 1:
+                    window.h = 1
+                self.windows[i] = window
+            i = i + 1
         self.width = width
         self.height = height
         self.dirty.add_full_screen(width, height)
@@ -1254,13 +1683,11 @@ class HostCompositor:
             var window_due = false
             if not window.minimized:
                 if self.native_pixel_lane:
-                    var cache_index = 0
-                    while cache_index < self.native_cache_window_ids.len():
-                        if self.native_cache_window_ids[cache_index] == window.id:
-                            window_due = self.native_content_caches[
-                                cache_index
-                            ].animation_frame_due(now_ms)
-                        cache_index = cache_index + 1
+                    if self.native_cache_indices.contains_key(window.id):
+                        val cache_index = self.native_cache_indices[window.id]
+                        window_due = self.native_content_caches[
+                            cache_index
+                        ].animation_frame_due(now_ms)
                 else:
                     if self.content_caches.contains_key(window.id):
                         val cache = self.content_caches[window.id]
@@ -1326,7 +1753,11 @@ class HostCompositor:
             self.backend.present_rect(bounds.x, bounds.y, bounds.width, bounds.height)
         true
 
-    me _taskbar_render_input(theme: WmChromeColors, frame_time: i64) -> SharedWmTaskbarRenderInput:
+    # `web_backend_name` is selected by the owning Engine2D compositor before
+    # any Web cache is constructed. It is deliberately an explicit argument:
+    # leaf HTML/WebIR rendering must neither read SIMPLE_GUI_BACKEND nor turn a
+    # hosted GPU selection back into an independent `auto` choice.
+    me _taskbar_render_input(theme: WmChromeColors, frame_time: i64, web_backend_name: text) -> SharedWmTaskbarRenderInput:
         var shared_windows: [SharedMdiRenderWindow] = []
         val window_count = self.windows.len()
         # Identity accessor, not the Option pattern binding: under the
@@ -1336,13 +1767,19 @@ class HostCompositor:
         # (2026-07-26; only reached when a theme is installed, which is why
         # the None path at bootstrap survived the same shape). The accessor
         # keeps the field projection in the owning module by design.
-        val active_theme_id = active_wm_theme_id()
-        val content_theme_id = if active_theme_id != "": active_theme_id else: default_theme_id()
+        val content_theme_id = _host_active_content_theme_id()
         var i = 0
         while i < window_count:
             val win = self.windows[i]
             val scroll = self.scroll_offset_for(win.id) as i32
-            shared_windows.push(host_window_to_shared_mdi_render_window(win, scroll))
+            # Keep HostedWindow field access inside its owning receiver path.
+            # Passing the class by value through a free helper corrupts the
+            # stage3 layout and can surface as a nil receiver.
+            shared_windows.push(shared_mdi_render_window(
+                win.id, win.title, win.app_id, win.content,
+                win.x, win.y, win.w, win.h, win.process_id,
+                win.minimized, win.focused, scroll
+            ))
             i = i + 1
         var scene = shared_mdi_scene_from_render_windows(self.width, self.height, "host-compositor", shared_windows)
         scene.background = if self.background.kind == WM_BACKGROUND_KIND_COLOR: shared_wm_background_color(theme.compositor_bg) else: self.background
@@ -1352,21 +1789,53 @@ class HostCompositor:
             val win = self.windows[i]
             if not win.minimized:
                 val cw = win.w - 8
-                val ch = win.h - 36
+                val ch = win.h - 36 - shared_wm_browser_content_extra_height(win.app_id)
                 val scroll = self.scroll_offset_for(win.id) as i32
-                val full_h = content_paint_full_height(ch, scroll)
-                val cache = self._content_cache_for(win.id, cw, full_h, "auto")
-                val content_revision = simple_web_content_revision_with_theme(content_theme_id, win.title, win.content, cw, ch, scroll)
-                content_frames.push(simple_web_content_frame_cached(cache, win.id.to_text(), self.render_revision, content_revision, content_theme_id, win.title, win.content, cw, ch, scroll))
-                if not self.native_pixel_lane:
-                    self.content_caches.set(win.id, cache)
+                val external_index = self._external_web_frame_index(win.id)
+                if external_index >= 0:
+                    var external = self.external_web_frames[external_index]
+                    external.scene_revision = self.render_revision
+                    # External pixels are owned by the sandbox renderer, while
+                    # `content_revision` above includes parent-owned chrome
+                    # text. Editing the address must not invalidate the last
+                    # trusted page frame.
+                    if (external.width != cw or external.height != ch or
+                        external.pixels.len() != cw * ch):
+                        external.pixels = []
+                        external.checksum = 0u64
+                        self.external_web_frames[external_index] = external
+                    content_frames.push(external)
+                elif self.requires_external_web_frame(win.id):
+                    # Positive-owner and browser content is renderer-owned.
+                    # Missing admission or a crashed child stays blank.
+                    content_frames.push(_host_empty_external_web_frame())
+                else:
+                    val content_revision = simple_web_content_revision_with_theme(content_theme_id, win.title, win.content, cw, ch, scroll)
+                    val full_h = content_paint_full_height(ch, scroll)
+                    val cache = self._content_cache_for(
+                        win.id, cw, full_h, web_backend_name
+                    )
+                    content_frames.push(simple_web_content_frame_cached_at_time(
+                        cache, ui_native_i64_text(win.id), self.render_revision,
+                        content_revision, content_theme_id, win.title, win.content,
+                        cw, ch, scroll, frame_time / 1000
+                    ))
+                    if not self.native_pixel_lane:
+                        self.content_caches[win.id] = cache
+            i = i + 1
+        i = 0
+        while i < self.external_child_frames.len():
+            var child = self.external_child_frames[i]
+            child.scene_revision = self.render_revision
+            content_frames.push(child)
             i = i + 1
         val revision = WmSceneRevision(scene_revision: self.render_revision, input_revision: self.render_revision, taskbar_revision: self.render_revision)
-        val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
+        val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
         val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
         SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
 
     me _reject_engine2d_frame() -> bool:
+        print "[hosted-wm] draw-ir-rejected retry=compatibility"
         self.render_revision = self.render_revision - 1
         false
 
@@ -1394,12 +1863,14 @@ class HostCompositor:
             fi += 1
 
     me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:
-        if not self.native_pixel_lane or host_wm_chrome_force_direct() or self.background.kind != WM_BACKGROUND_KIND_COLOR or executor.w != self.width or executor.h != self.height:
+        # Resolve dimensions through the layout-owning module. Direct
+        # cross-module field reads can shift by the object-header slot.
+        val executor_width = executor.width()
+        val executor_height = executor.height()
+        if not self.native_pixel_lane or host_wm_chrome_force_direct() or self.background.kind != WM_BACKGROUND_KIND_COLOR or executor_width != self.width or executor_height != self.height:
+            print "[hosted-wm] draw-ir-reject-detail reason=entry-gate native_pixel_lane={self.native_pixel_lane} force_direct={host_wm_chrome_force_direct()} background_kind={self.background.kind} executor={executor_width}x{executor_height} compositor={self.width}x{self.height}"
             return false
-        self.render_revision = self.render_revision + 1
-        val had_damage = not self.dirty.is_empty()
-        val taskbar_input = self._taskbar_render_input(wm_chrome_theme(), rt_time_now_unix_micros())
-        if not had_damage:
+        if self.dirty.is_empty():
             self.skipped_frame_count = self.skipped_frame_count + 1
             return true
         self.render_revision = self.render_revision + 1
@@ -1420,6 +1891,7 @@ class HostCompositor:
         val scene = taskbar_input.render.scene
         val frames = taskbar_input.render.content_frames
         var images: [Engine2dResolvedDrawIrImage] = []
+        var top_frames: [WmContentFrame] = []
         var expected_images = 0
         var wi = 0
         while wi < scene.windows.len():
@@ -1430,6 +1902,9 @@ class HostCompositor:
                 val frame_index = shared_wm_top_content_frame_index(frames, self.render_revision, window.window_id, content.width, content.height)
                 if frame_index >= 0:
                     val frame = frames[frame_index]
+                    if not wm_content_frame_web_provenance_valid(frame):
+                        print "[hosted-wm] content-provenance-rejected window_id={window.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+                        return self._reject_engine2d_frame()
                     val image_uri = shared_wm_content_frame_image_uri(frame)
                     var duplicate_uri = image_uri == ""
                     var ii = 0
@@ -1438,12 +1913,15 @@ class HostCompositor:
                             duplicate_uri = true
                         ii = ii + 1
                     if duplicate_uri:
+                        print "[hosted-wm] draw-ir-reject-detail reason=duplicate-or-empty-content-uri window_id={window.window_id} uri={image_uri}"
                         return self._reject_engine2d_frame()
                     images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                    top_frames.push(frame)
                 else:
+                    print "[hosted-wm] draw-ir-reject-detail reason=content-frame-missing window_id={window.window_id} scene_revision={self.render_revision}"
                     return self._reject_engine2d_frame()
             wi = wi + 1
-        if images.len() != expected_images or frames.len() != expected_images:
+        if images.len() != expected_images or top_frames.len() != expected_images:
             print "[hosted-wm] draw-ir-reject-detail reason=content-image-count images={images.len()} frames={frames.len()} expected={expected_images}"
             return self._reject_engine2d_frame()
 
@@ -1518,8 +1996,27 @@ class HostCompositor:
         # must describe the same completed readback device/handle the host is
         # about to present. Never infer success from a Metal plan or a CPU
         # fallback after malformed bounds/metadata/state.
-        if not host_metal_glass_receipts_valid(composition, result):
-            print "[hosted-wm] draw-ir-reject-detail reason=metal-glass-receipt requested={result.metal_device_glass_requested_count} executed={result.metal_device_glass_material_count} receipts={result.metal_device_glass_receipts.len()} unfulfilled={result.metal_device_glass_unfulfilled_count} readback_handle={result.backend_handle} readback_device={result.device_identity} source={result.readback_source}"
+        if (not host_wm_draw_ir_result_valid(
+            accepted_composition, accepted_result, self.width * self.height
+        ) and host_wm_draw_ir_local_recompose_required(selected_backend)):
+            # Preserve the exact validated scene, taskbar, content frames, and
+            # image resources. Only the producer's material target changes.
+            accepted_composition = shared_wm_scene_draw_ir_composition_with_content(
+                scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_CPU,
+                1000, taskbar_input.clock_label, 0
+            )
+            accepted_result = executor.render_draw_ir_composition(
+                accepted_composition, images
+            )
+        if not host_wm_draw_ir_result_valid(
+            accepted_composition, accepted_result, self.width * self.height
+        ):
+            if not host_metal_glass_receipts_valid(
+                accepted_composition, accepted_result
+            ):
+                print "[hosted-wm] draw-ir-reject-detail reason=metal-glass-receipt requested={accepted_result.metal_device_glass_requested_count} executed={accepted_result.metal_device_glass_material_count} receipts={accepted_result.metal_device_glass_receipts.len()} unfulfilled={accepted_result.metal_device_glass_unfulfilled_count} readback_handle={accepted_result.backend_handle} readback_device={accepted_result.device_identity} source={accepted_result.readback_source}"
+            else:
+                print "[hosted-wm] draw-ir-reject-detail reason=render-result fallback_required={accepted_result.fallback_required} fallback_reason={accepted_result.fallback_reason} skipped={accepted_result.skipped_command_count} rendered={accepted_result.rendered_command_count} pixels={accepted_result.pixels.len()} expected_pixels={self.width * self.height}"
             return self._reject_engine2d_frame()
         val retained_full_started_ns = time_now_nanos()
         self.pixel_backend.blit_pixels(0, 0, self.width, self.height, accepted_result.pixels)
@@ -1556,7 +2053,9 @@ class HostCompositor:
         if had_damage and not self.native_pixel_lane:
             shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         val frame_time = rt_time_now_unix_micros()
-        val taskbar_input = self._taskbar_render_input(theme, frame_time)
+        # Direct compatibility rendering has no Engine2D owner; retain its
+        # historical independent auto selection outside the hosted Draw IR lane.
+        val taskbar_input = self._taskbar_render_input(theme, frame_time, "auto")
         if had_damage:
             if self.native_pixel_lane:
                 shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
@@ -1568,19 +2067,30 @@ class HostCompositor:
             self.skipped_frame_count = self.skipped_frame_count + 1
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
+        val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
         if method == COMP_MAXIMIZE.to_i64():
+            val i = self._find_window_index(window_id)
+            if i < 0 or not wm_lifecycle_owner_allows_source(
+                self.windows[i].owner_port, action.src_port
+            ):
+                return
             self.maximize_window(window_id)
             return
         if method == COMP_RESTORE.to_i64():
+            val i = self._find_window_index(window_id)
+            if i < 0 or not wm_lifecycle_owner_allows_source(
+                self.windows[i].owner_port, action.src_port
+            ):
+                return
             self.restore_window(window_id)
             return
-        val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
         self.apply_wm_action(action)
 
     me maximize_window(window_id: i64):
         val i = self._find_window_index(window_id)
         if i < 0:
             return
+        self._cancel_window_interaction(window_id)
         val prior_windows = self.windows
         var win = self.windows[i]
         if not win.maximized:
@@ -1589,9 +2099,9 @@ class HostCompositor:
             win.restore_w = win.w
             win.restore_h = win.h
         win.x = 0
-        win.y = 48
+        win.y = WM_WORK_AREA_TOP
         win.w = self.width
-        win.h = self.height - 96
+        win.h = self.height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
         win.minimized = false
         win.maximized = true
         self.windows[i] = win
@@ -1609,15 +2119,25 @@ class HostCompositor:
             return
         val prior_windows = self.windows
         var win = self.windows[i]
-        if win.maximized and win.restore_w > 0 and win.restore_h > 0:
+        val restoring_minimized = win.minimized
+        if (not restoring_minimized and win.maximized and
+            win.restore_w > 0 and win.restore_h > 0):
             win.x = win.restore_x
             win.y = win.restore_y
             win.w = win.restore_w
             win.h = win.restore_h
         win.minimized = false
-        win.maximized = false
+        if not restoring_minimized:
+            win.maximized = false
         win.focused = true
         self.windows[i] = win
+        var j = 0
+        while j < self.windows.len():
+            if j != i:
+                var other = self.windows[j]
+                other.focused = false
+                self.windows[j] = other
+            j = j + 1
         self._mark_geometry_damage(prior_windows)
 
     me set_window_pointer_passthrough(window_id: i64, x: i32, y: i32, w: i32, h: i32):
@@ -1658,6 +2178,13 @@ class HostCompositor:
                     self.windows[i] = iw
                 j = j + 1
             i = i + 1
+        if action.kind == "minimize":
+            val minimized_index = self._find_window_index(
+                action.window_id.to_i64()
+            )
+            if (minimized_index >= 0 and
+                self.windows[minimized_index].minimized):
+                self._cancel_window_interaction(action.window_id.to_i64())
         self._mark_geometry_damage(prior_windows)
 
     fn _find_window_index(window_id: i64) -> i32:
@@ -1699,6 +2226,7 @@ class HostCompositor:
         while j < prior_windows.len():
             if _host_find_window_by_id(self.windows, prior_windows[j].id) < 0:
                 val gone = prior_windows[j]
+                self._drop_window_render_state(gone.id)
                 self.dirty.add_rect(gone.x, gone.y, gone.w, gone.h)
             j = j + 1
 
@@ -1708,7 +2236,78 @@ class HostCompositor:
     me focus_window(window_id: i64):
         self.apply_wm_action(wm_focus_action(window_id))
 
+    fn _hit_shared_taskbar(x: i32, y: i32) -> i64:
+        val model = self.taskbar_model()
+        val metrics = WmRenderMetrics(
+            scale_milli: 1000,
+            top_lane_height: 44,
+            titlebar_height: 28,
+            taskbar_height: 56,
+            min_hit_target: 56
+        )
+        val slot_width = metrics.min_hit_target
+        val object_limit = self.width - (
+            model.tray.len() as i32 + 1
+        ) * slot_width
+        var object_index = 0
+        var pinned_index = 0
+        while pinned_index < model.pinned.len():
+            val rect = shared_wm_taskbar_object_rect(
+                metrics, self.width, self.height, object_index
+            )
+            if (rect.x + rect.width <= object_limit and
+                x >= rect.x and x < rect.x + rect.width and
+                y >= rect.y and y < rect.y + rect.height):
+                var window_index = self.windows.len() - 1
+                while window_index >= 0:
+                    if (self.windows[window_index].app_id ==
+                        model.pinned[pinned_index].app_id):
+                        return self.windows[window_index].id
+                    window_index = window_index - 1
+                return 0
+            object_index = object_index + 1
+            pinned_index = pinned_index + 1
+        var running_index = 0
+        while running_index < model.running.len():
+            val rect = shared_wm_taskbar_object_rect(
+                metrics, self.width, self.height, object_index
+            )
+            if (rect.x + rect.width <= object_limit and
+                x >= rect.x and x < rect.x + rect.width and
+                y >= rect.y and y < rect.y + rect.height):
+                return model.running[running_index].window_id.to_i64()
+            object_index = object_index + 1
+            running_index = running_index + 1
+        0
+
+    fn _hit_shared_pinned_app(x: i32, y: i32) -> text:
+        val model = self.taskbar_model()
+        val metrics = WmRenderMetrics(
+            scale_milli: 1000,
+            top_lane_height: 44,
+            titlebar_height: 28,
+            taskbar_height: 56,
+            min_hit_target: 56
+        )
+        val slot_width = metrics.min_hit_target
+        val object_limit = self.width - (
+            model.tray.len() as i32 + 1
+        ) * slot_width
+        var pinned_index = 0
+        while pinned_index < model.pinned.len():
+            val rect = shared_wm_taskbar_object_rect(
+                metrics, self.width, self.height, pinned_index as i32
+            )
+            if (rect.x + rect.width <= object_limit and
+                x >= rect.x and x < rect.x + rect.width and
+                y >= rect.y and y < rect.y + rect.height):
+                return model.pinned[pinned_index].app_id
+            pinned_index = pinned_index + 1
+        ""
+
     fn hit_taskbar(x: i32, y: i32) -> i64:
+        if self.native_pixel_lane:
+            return self._hit_shared_taskbar(x, y)
         wm_lifecycle_hit_taskbar(host_windows_to_lifecycle_state(self.windows), self.width, self.height, x, y)
 
     me pointer_move(x: i32, y: i32):
@@ -1741,6 +2340,16 @@ class HostCompositor:
     me handle_mouse_move(x: i32, y: i32):
         self.pointer_move(x, y)
 
+    me cancel_pointer_interaction():
+        self.dragging = false
+        self.drag_window_id = 0
+        self.resizing = false
+        self.resize_window_id = 0
+        self.resize_start_x = 0
+        self.resize_start_y = 0
+        self.resize_start_w = 0
+        self.resize_start_h = 0
+
     me handle_left_button(down: bool):
         val prior_windows = self.windows
         val out = host_compositor_left_button_at(self, down, self.pointer_x, self.pointer_y)
@@ -1758,12 +2367,21 @@ class HostCompositor:
         self.resize_start_h = out.resize_start_h
         self.armed_chrome_target = out.armed_chrome_target
         self.armed_chrome_window_id = out.armed_chrome_window_id
+        self.armed_chrome_app_id = out.armed_chrome_app_id
+        self.pending_taskbar_launch_app_id = (
+            out.pending_taskbar_launch_app_id
+        )
         # host_compositor_left_button_at runs focus/destroy on a byval copy
         # of `self` (see class doc above re: stage3 free-function-by-value
         # codegen), so any damage it marked internally lives on that copy's
         # `dirty` and is never copied back here. Recompute the diff fresh
         # against the true receiver instead of trying to propagate it.
         self._mark_geometry_damage(prior_windows)
+
+    me take_pending_taskbar_launch_app_id() -> text:
+        val app_id = self.pending_taskbar_launch_app_id
+        self.pending_taskbar_launch_app_id = ""
+        app_id
 
     # Generic pointer-button entry point (0=left, 1=middle, 2=right). Left
     # keeps its full chrome semantics (drag/resize/close/taskbar/focus);
@@ -1788,6 +2406,10 @@ class HostCompositor:
             i = i + 1
         if hit_idx >= 0:
             val wid = self.windows[hit_idx].id
+            # Sandboxed external frames own page scrolling. Retaining a
+            # parent offset only dirties and redraws the same pixels.
+            if self.requires_external_web_frame(wid):
+                return
             val current = self.scroll_offsets.get(wid) ?? 0.0
             self.scroll_offsets[wid] = current + dy
             # Scroll changes rendered content without touching self.windows,
@@ -1807,7 +2429,7 @@ class HostCompositor:
         self.app_processes[index] = proc
         val id = self.next_window_id
         self.next_window_id = self.next_window_id + 1
-        self.windows.push(HostedWindow(id: id, owner_port: 0, title: proc.title + " failed", x: 40, y: 80, w: 360, h: 180, content: "failed to create a window for " + proc.app_id, process_id: proc.pid, app_id: proc.app_id, minimized: false, focused: true))
+        self.windows.push(HostedWindow(id: id, owner_port: 0, title: proc.title + " failed", x: 40, y: 80, w: 360, h: 180, content: "failed to create a window for " + proc.app_id, process_id: proc.pid, app_id: proc.app_id, content_owner: HOST_CONTENT_OWNER_LOCAL_WEB, minimized: false, focused: true))
         self.dirty.add_rect(40, 80, 360, 180)
 
 # ============================================================================
@@ -1980,7 +2602,7 @@ class HostWmHandle:
         while self.wm.running:
             self.pump_host_events()
             self.run_once()
-            rt_sleep_ms(HOST_WM_IDLE_SLEEP_MS.to_i64())
+            thread_sleep(HOST_WM_IDLE_SLEEP_MS.to_i64())
 
 # Minimal headless-only WM init (item 5 of the WM hardening plan: "WM core
 # must be VERY SMALL"). Builds a HostWmHandle the same way the Headless arm
@@ -2075,6 +2697,37 @@ fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i3
         i = i + 1
     -1
 
+fn host_compositor_close_release_target(
+    comp: HostCompositor, button: i64, down: bool
+) -> i64:
+    if (button != 0 or down or
+        comp.armed_chrome_target != "close"):
+        return 0
+    val index = host_compositor_find_window_index(
+        comp, comp.armed_chrome_window_id
+    )
+    if index < 0:
+        return 0
+    val win = comp.windows[index]
+    if (not win.minimized and
+        comp.pointer_x >= win.x + win.w - 24 and
+        comp.pointer_x < win.x + win.w and
+        comp.pointer_y >= win.y and comp.pointer_y < win.y + 24):
+        return win.id
+    0
+
+fn host_compositor_update_window_content(comp: HostCompositor, window_id: i64, body_html: text) -> HostCompositor:
+    var out = comp
+    out.update_window_content(window_id, body_html)
+    out
+
+fn host_compositor_update_window_title(
+    comp: HostCompositor, window_id: i64, title: text
+) -> HostCompositor:
+    var out = comp
+    out.update_window_title(window_id, title)
+    out
+
 fn host_window_to_lifecycle_state(win: HostedWindow) -> WmLifecycleWindowState:
     WmLifecycleWindowState(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, content_owner: win.content_owner, minimized: win.minimized, focused: win.focused, maximized: win.maximized, restore_x: win.restore_x, restore_y: win.restore_y, restore_w: win.restore_w, restore_h: win.restore_h)
 
@@ -2164,6 +2817,7 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
         # missed (defensive; the release path below always clears its own arm).
         out.armed_chrome_target = ""
         out.armed_chrome_window_id = 0
+        out.armed_chrome_app_id = ""
         # Taskbar click: a press inside the bottom dock band that lands on a
         # window's taskbar item is a chrome ACTION (focus + restore-if-
         # minimized). Arm it on down; it fires only on a release whose
@@ -2176,6 +2830,12 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
             out.armed_chrome_target = "taskbar"
             out.armed_chrome_window_id = tb_id
             return out
+        if out.native_pixel_lane:
+            val pinned_app_id = out._hit_shared_pinned_app(x, y)
+            if pinned_app_id != "":
+                out.armed_chrome_target = "taskbar-launch"
+                out.armed_chrome_app_id = pinned_app_id
+                return out
         var hit_idx = -1
         var i = 0
         while i < out.windows.len():
@@ -2193,7 +2853,7 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
             # Window-body focus and titlebar drag-arming are unchanged
             # (not converted to release-based semantics).
             out.focus_window(hit.id)
-            if y >= hit.y and y < hit.y + 24:
+            if y >= hit.y and y < hit.y + 28:
                 out.dragging = true
                 out.drag_window_id = hit.id
                 out.drag_offset_x = x - hit.x
@@ -2209,19 +2869,19 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
             val tb_id2 = out.hit_taskbar(x, y)
             if tb_id2 == out.armed_chrome_window_id:
                 out.focus_window(tb_id2)
+        elif out.armed_chrome_target == "taskbar-launch":
+            val launch_app_id = out._hit_shared_pinned_app(x, y)
+            if launch_app_id == out.armed_chrome_app_id:
+                out.pending_taskbar_launch_app_id = launch_app_id
         elif out.armed_chrome_target == "close":
-            var close_target_idx = -1
-            var j = 0
-            while j < out.windows.len():
-                if out.windows[j].id == out.armed_chrome_window_id:
-                    close_target_idx = j
-                j = j + 1
-            if close_target_idx >= 0:
-                val win = out.windows[close_target_idx]
-                if not win.minimized and x >= win.x + win.w - 24 and x < win.x + win.w and y >= win.y and y < win.y + 24:
-                    out.destroy_window(win.id)
+            val close_target = host_compositor_close_release_target(
+                out, 0, false
+            )
+            if close_target > 0:
+                out.destroy_window(close_target)
         out.armed_chrome_target = ""
         out.armed_chrome_window_id = 0
+        out.armed_chrome_app_id = ""
     val interaction = wm_lifecycle_left_button(WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h), down)
     out.dragging = interaction.dragging
     out.drag_window_id = interaction.drag_window_id
@@ -2245,10 +2905,13 @@ fn host_compositor_cycle_focus(comp: HostCompositor) -> HostCompositor:
         if out.windows[i].focused:
             focused_idx = i
         i = i + 1
-    var next_idx = focused_idx + 1
-    if next_idx >= out.windows.len():
-        next_idx = 0
-    out.focus_window(out.windows[next_idx].id)
+    var step = 1
+    while step <= out.windows.len():
+        val next_idx = (focused_idx + step) % out.windows.len()
+        if not out.windows[next_idx].minimized:
+            out.focus_window(out.windows[next_idx].id)
+            return out
+        step = step + 1
     out
 
 fn host_compositor_focused_window_id(comp: HostCompositor) -> i64:
@@ -2257,8 +2920,6 @@ fn host_compositor_focused_window_id(comp: HostCompositor) -> i64:
         if comp.windows[i].focused:
             return comp.windows[i].id
         i = i + 1
-    if comp.windows.len() > 0:
-        return comp.windows[comp.windows.len() - 1].id
     0
 
 fn host_compositor_minimize_focused(comp: HostCompositor) -> HostCompositor:
@@ -2299,8 +2960,8 @@ fn host_compositor_draw_taskbar(backend: CompositorBackend, windows: [HostedWind
     that is how restore works). Geometry mirrors wm_lifecycle_hit_taskbar
     EXACTLY (band at height-62, 44 tall; centered items) so what the user
     clicks is what they see. Item colors come from the shared theme:
-    focused window -> accent, minimized -> window body, else unfocused
-    titlebar color."""
+    focused window -> title_focused, minimized -> window body, else
+    unfocused titlebar color."""
     val count = windows.len() as i32
     if count <= 0:
         return
@@ -2315,7 +2976,7 @@ fn host_compositor_draw_taskbar(backend: CompositorBackend, windows: [HostedWind
         val ix = wm_taskbar_item_x(width, count, i)
         var item_color = theme.title_unfocused
         if win.focused and not win.minimized:
-            item_color = theme.accent
+            item_color = theme.title_focused
         elif win.minimized:
             item_color = theme.host_window_body
         backend.fill_rect(ix + 2, dock_y + 4, item_w - 4, 36, item_color)
@@ -2332,18 +2993,37 @@ fn _argb_to_css_hex(color: u32) -> text:
     val b = (color % 256u32).to_i64()
     "#" + int_to_hex(r) + int_to_hex(g) + int_to_hex(b)
 
+# Aqua titlebar gloss (scout prototype, CSS evidence backend): shift each RGB
+# channel of an opaque ARGB u32 by `delta` (positive lightens, negative
+# darkens), clamped to u8. Mirrors _wm_titlebar_shade in
+# window_scene_draw_ir.spl but kept local (no cross-module private-fn
+# coupling) since this backend renders titlebars as CSS, not fill_rect rows.
+fn _host_argb_shade(color: u32, delta: i64) -> u32:
+    val r = ((color / 65536u32) % 256u32).to_i64()
+    val g = ((color / 256u32) % 256u32).to_i64()
+    val b = (color % 256u32).to_i64()
+    val cr = if r + delta < 0: 0 elif r + delta > 255: 255 else: r + delta
+    val cg = if g + delta < 0: 0 elif g + delta > 255: 255 else: g + delta
+    val cb = if b + delta < 0: 0 elif b + delta > 255: 255 else: b + delta
+    0xFF000000u32 | (cr.to_u32() << 16) | (cg.to_u32() << 8) | cb.to_u32()
+
 # Build the host WM chrome as a single HTML/CSS document. Element geometry and
 # colors mirror the direct-draw chrome in render_frame() exactly (desktop
-# backdrop = compositor_bg, window body = host_window_body, titlebar = accent,
-# close button = close_button, title/close glyph text = text_primary), so the
-# CSS-rasterized chrome is visually identical to the historical direct output
-# for the default theme. Colors flow from wm_chrome_theme() — the single source
-# of truth — so an installed theme reskins the chrome automatically.
+# backdrop = compositor_bg, window body = host_window_body, titlebar =
+# title_focused, close button = close_button, title/close glyph text =
+# text_primary). title_focused (not accent) fills the titlebar so
+# text_primary's dark glyphs stay legible on it — accent is reserved for
+# thin stripes that never carry text directly. Colors flow from
+# wm_chrome_theme() — the single source of truth — so an installed theme
+# reskins the chrome automatically.
 fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> text:
     val theme = wm_chrome_theme()
     val bg_hex = _argb_to_css_hex(theme.compositor_bg)
     val body_hex = _argb_to_css_hex(theme.host_window_body)
-    val accent_hex = _argb_to_css_hex(theme.accent)
+    val title_focused_hex = _argb_to_css_hex(theme.title_focused)
+    val titlebar_gloss_top_hex = _argb_to_css_hex(_host_argb_shade(theme.title_focused, 14))
+    val titlebar_gloss_bottom_hex = _argb_to_css_hex(_host_argb_shade(theme.title_focused, 0 - 14))
+    val titlebar_border_hex = _argb_to_css_hex(_host_argb_shade(theme.title_focused, 0 - 40))
     val close_hex = _argb_to_css_hex(theme.close_button)
     val text_hex = _argb_to_css_hex(theme.text_primary)
     var body = ""
@@ -2355,7 +3035,8 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
             val close_text_x = win.x + win.w - 17
             val title_w = if win.w - 40 > 0: win.w - 40 else: 0
             body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:{win.h}px;background:{body_hex}'></div>"
-            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:24px;background:{accent_hex}'></div>"
+            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y}px;width:{win.w}px;height:23px;background:linear-gradient(to bottom, {titlebar_gloss_top_hex}, {titlebar_gloss_bottom_hex})'></div>"
+            body = body + "<div style='position:absolute;left:{win.x}px;top:{win.y + 23}px;width:{win.w}px;height:1px;background:{titlebar_border_hex}'></div>"
             body = body + "<div style='position:absolute;left:{title_x}px;top:{title_y}px;width:{title_w}px;height:16px;color:{text_hex};font:12px monospace;overflow:hidden;white-space:nowrap'>{win.title}</div>"
             body = body + "<div style='position:absolute;left:{close_x}px;top:{win.y}px;width:24px;height:24px;background:{close_hex}'></div>"
             body = body + "<div style='position:absolute;left:{close_text_x}px;top:{title_y}px;width:16px;height:16px;color:{text_hex};font:12px monospace'>X</div>"
@@ -2378,7 +3059,7 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
             val tix = wm_taskbar_item_x(width, tb_count, ti)
             var item_hex = unfocused_hex
             if twin.focused and not twin.minimized:
-                item_hex = accent_hex
+                item_hex = title_focused_hex
             elif twin.minimized:
                 item_hex = body_hex
             val item_inner_w = item_w - 4
@@ -2395,7 +3076,7 @@ fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> t
 # window's id/geometry/minimized/focused/title.
 fn host_chrome_scene_fingerprint(windows: [HostedWindow], width: i32, height: i32) -> text:
     val theme = wm_chrome_theme()
-    var fp = "{width}x{height}|{theme.compositor_bg}|{theme.host_window_body}|{theme.accent}|{theme.close_button}|{theme.text_primary}|{theme.taskbar}|{theme.title_unfocused}#"
+    var fp = "{width}x{height}|{theme.compositor_bg}|{theme.host_window_body}|{theme.title_focused}|{theme.close_button}|{theme.text_primary}|{theme.taskbar}|{theme.title_unfocused}#"
     for win in windows:
         val minf = if win.minimized: 1 else: 0
         val focf = if win.focused: 1 else: 0

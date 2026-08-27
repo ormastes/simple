@@ -77,7 +77,7 @@ impl HmInferContext:
             case Dict(key, value):
                 self.collect_free_vars(key, vars)
                 self.collect_free_vars(value, vars)
-            case Optional(inner) | Ref(inner, _) | Ptr(inner, _) | FacetRef(inner, _):
+            case Optional(inner) | Ref(inner, _) | Ptr(inner, _):
                 self.collect_free_vars(inner, vars)
             case Result(ok, err):
                 self.collect_free_vars(ok, vars)
@@ -88,16 +88,19 @@ impl HmInferContext:
             case _:
                 pass
 
-    me env_free_var_ids() -> [i64]:
+    me env_free_var_ids() -> Dict<i64, bool>:
         """Collect free type variable IDs in the environment."""
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        var vars: [i64] = []
+        var vars: Dict<i64, bool> = {}
         for name in self.env.keys():
             val scheme: TypeScheme = self.env[name]
+            var bound_vars: Dict<i64, bool> = {}
+            for bound_id in scheme.vars:
+                bound_vars[bound_id] = true
             val ty_vars = self.free_vars_with_levels(scheme.ty)
             for (id, _) in ty_vars:
-                if not scheme.vars.contains(id):
-                    vars = vars.push(id)
+                if not bound_vars.has(id):
+                    vars[id] = true
         vars
 
     # =========================================================================
@@ -113,9 +116,11 @@ impl HmInferContext:
 
         # Variables to quantify: free in ty, not in env, at level > current
         var to_generalize: [i64] = []
+        var seen: Dict<i64, bool> = {}
         for (id, var_level) in free_vars:
-            if not env_vars.contains(id) and var_level > self.level:
-                if not to_generalize.contains(id):
+            if not env_vars.has(id) and var_level > self.level:
+                if not seen.has(id):
+                    seen[id] = true
                     to_generalize = to_generalize.push(id)
 
         TypeScheme(vars: to_generalize, ty: resolved)
@@ -127,9 +132,11 @@ impl HmInferContext:
         val env_vars = self.env_free_var_ids()
 
         var to_generalize: [i64] = []
+        var seen: Dict<i64, bool> = {}
         for (id, _) in free_vars:
-            if not env_vars.contains(id):
-                if not to_generalize.contains(id):
+            if not env_vars.has(id):
+                if not seen.has(id):
+                    seen[id] = true
                     to_generalize = to_generalize.push(id)
 
         TypeScheme(vars: to_generalize, ty: resolved)
@@ -182,8 +189,6 @@ impl HmInferContext:
                 )
             case Optional(inner):
                 HirType(kind: HirTypeKind.Optional(self.instantiate_type(inner, var_map)), span: ty.span)
-            case FacetRef(facet, witness_key):
-                HirType(kind: HirTypeKind.FacetRef(self.instantiate_type(facet, var_map), witness_key), span: ty.span)
             case Result(ok, err):
                 HirType(
                     kind: HirTypeKind.Result(

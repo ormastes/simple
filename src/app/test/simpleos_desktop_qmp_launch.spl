@@ -42,23 +42,34 @@ fn _desktop_qmp_capture_target() -> OsTarget:
 
 fn _wm_simple_web_qmp_capture_target() -> OsTarget:
     val base = get_wm_simple_web_check_target()
+    val use_virgl = (qmp_env_get("SIMPLEOS_DESKTOP_QMP_VIRGL") ?? "") == "1"
+    val qemu_system = qmp_env_get("SIMPLEOS_DESKTOP_QMP_QEMU_SYSTEM") ?? base.qemu_system
+    val extras = if use_virgl:
+        ["-display", "egl-headless,rendernode=/dev/dri/renderD128", "-device", "virtio-vga-gl"]
+    else:
+        ["-vga", "std"]
     OsTarget(
         arch: base.arch,
         entry: base.entry,
         linker_script: _absolute_repo_path(base.linker_script),
         target_triple: base.target_triple,
         output: base.output,
-        qemu_system: base.qemu_system,
+        qemu_system: qemu_system,
         qemu_machine: base.qemu_machine,
         qemu_cpu: base.qemu_cpu,
         qemu_memory: base.qemu_memory,
         qemu_bios: base.qemu_bios,
-        qemu_extra: ["-vga", "std"],
-        gui_mode: false
+        qemu_extra: extras,
+        # Virgl needs the target to omit the generic `-display none`; the
+        # explicit egl-headless display above remains fully headless.
+        gui_mode: use_virgl
     )
 
 fn _timeout_ms() -> i64:
     (qmp_env_get("SIMPLEOS_DESKTOP_QMP_LAUNCH_TIMEOUT_MS") ?? "90000").parse_i64() ?? 90000
+
+fn _keepalive_for_external_probe() -> bool:
+    (qmp_env_get("SIMPLEOS_DESKTOP_QMP_KEEPALIVE") ?? "") == "1"
 
 fn _absolute_repo_path(path: text) -> text:
     if path.starts_with("/"):
@@ -366,11 +377,14 @@ fn main() -> i64:
                 print "simpleos_desktop_qmp_status=pass"
                 print "simpleos_desktop_qmp_reason=pass"
                 print "simpleos_desktop_qmp_target={target_name}"
+                print "simpleos_desktop_qmp_entry={build_target.entry}"
                 print "simpleos_desktop_qmp_pid={handle_pid}"
                 print "simpleos_desktop_qmp_socket={qmp_socket}"
                 print "simpleos_desktop_qmp_serial_log={serial_log}"
                 print "simpleos_desktop_qmp_stderr_log={handle_stderr_log}"
                 print "simpleos_desktop_qmp_marker_state=probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true"
+                if not _keepalive_for_external_probe():
+                    stop_guest(handle)
                 return 0
             val saw_paint = wait_for_serial_marker(handle, "[desktop-e2e] paint-settle:done", 30000)
             if not saw_paint:
@@ -391,6 +405,7 @@ fn main() -> i64:
             print "simpleos_desktop_qmp_status=pass"
             print "simpleos_desktop_qmp_reason=pass"
             print "simpleos_desktop_qmp_target={target_name}"
+            print "simpleos_desktop_qmp_entry={build_target.entry}"
             print "simpleos_desktop_qmp_pid={handle_pid}"
             print "simpleos_desktop_qmp_socket={qmp_socket}"
             print "simpleos_desktop_qmp_serial_log={serial_log}"

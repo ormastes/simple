@@ -5,9 +5,11 @@
 # target), bind advice to it, unbind back to the unadvised target, and ask what
 # a call through that join point currently dispatches to.
 #
-# Everything about executable memory lives in joinpoint_slots.spl. Lifecycle
-# ownership remains in std.common.aspect_pack_lifecycle; this registry consumes
-# its owner lease so it cannot become a competing activation state machine.
+# Everything about executable memory lives in `joinpoint_slots.spl`; this file
+# is routing and refusal policy only. It deliberately does NOT implement the
+# §14.2 state machine or any signature check -- both are out of the scoped
+# BUILD-NOW per
+# `doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md`.
 #
 # REFUSAL POLICY (fail-closed): every lookup of an unregistered join point, and
 # every out-of-range slot id, returns Err. There is no silent no-op path -- a
@@ -16,15 +18,6 @@
 # mistaken for a successful one.
 
 use .joinpoint_slots.{JoinpointSlotTable, joinpoint_key}
-use std.common.aspect_pack_lifecycle.{
-    ApkActivationClaimV1,
-    APK_AS_RELOCATED,
-    APK_AS_BOUND,
-    apk_activation_claim_v1,
-    apk_activation_advance_v1,
-    apk_activation_publish_v1,
-    apk_activation_fail_v1
-}
 
 """One registered join point, as the catalog sees it."""
 struct AdviceBinding:
@@ -71,10 +64,6 @@ impl AdviceBindingRegistry:
     single-cell W^X patch path."""
     me seal() -> Result<i64, text>:
         self.table.seal()
-
-    """Delegate activation ownership to the canonical lifecycle owner."""
-    me claim_activation(ld: i64, facet_key: text, owner_id: text) -> ApkActivationClaimV1:
-        apk_activation_claim_v1(ld, facet_key, owner_id)
 
     """Resolve a stable key to its slot id. Unknown key is refused."""
     me slot_of(key: text) -> Result<i64, text>:
@@ -123,31 +112,6 @@ impl AdviceBindingRegistry:
                 Ok(advice_target)
             case Err(e):
                 Err(e)
-
-    """Stage one slot binding, then publish its generation as Active.
-
-    A stale or joined lease is refused before the live cell changes. If cell
-    patching succeeds but publication is refused, the patch is rolled back to
-    the unadvised target and the attempt fails with a stable diagnostic."""
-    me publish_binding(ld: i64, claim: ApkActivationClaimV1,
-            key: text, advice_target: i64) -> Result<i64, text>:
-        if not claim.ok or not claim.owns:
-            return Err("Activation lease is not the owner for {claim.facet_key}")
-        if not apk_activation_advance_v1(ld, claim, APK_AS_RELOCATED, APK_AS_BOUND):
-            return Err("Activation must be Relocated before advice binding")
-        match self.bind(key, advice_target):
-            case Ok(target):
-                if apk_activation_publish_v1(ld, claim):
-                    return Ok(target)
-                _ = self.unbind(key)
-                _ = apk_activation_fail_v1(ld, claim, "advice publication was refused")
-                Err("Advice publication was refused")
-            case Err(e):
-                _ = apk_activation_fail_v1(ld, claim, e)
-                Err(e)
-
-    me fail_activation(ld: i64, claim: ApkActivationClaimV1, diagnostic: text) -> bool:
-        apk_activation_fail_v1(ld, claim, diagnostic)
 
     """Unbind: restore the unadvised target. Refuses when nothing is bound, so
     an unbalanced unbind cannot be mistaken for a successful one."""

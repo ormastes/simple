@@ -10,14 +10,17 @@ use compiler.core.tokens.{TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_DYN}
 use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR, TOK_KW_FN}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
-use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN}
+use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN, TOK_KW_LOOP}
 use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
 use compiler.core.tokens.{TOK_KW_RETURN, TOK_KW_BREAK, TOK_KW_CONTINUE}
 use compiler.core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
+use compiler.core.tokens.{TOK_NEQ}
 use compiler.core.tokens.{TOK_KW_PASS, TOK_KW_PASS_TODO, TOK_KW_PASS_DO_NOTHING, TOK_KW_PASS_DN, TOK_KW_IS}
+use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
 use compiler.core.tokens.{TOK_ASSIGN}
-use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET}
+use compiler.core.tokens.{TOK_RBRACKET, TOK_RBRACE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE, TOK_FAT_ARROW}
 use compiler.core.tokens.{TOK_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
@@ -31,9 +34,10 @@ use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
 use compiler.core.tokens.{TOK_BACKSLASH}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
-use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
-use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access}
-use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
+use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
+use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
+use compiler.core.ast.{expr_int_lit, expr_float_lit}
+use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_unsafe_block, expr_unsafe_block_with_caps}
@@ -43,36 +47,35 @@ use compiler.core.types.{named_type_name, TYPE_NAMED_BASE}
 use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_source_char_at}
 use compiler.frontend.core.lexer.{lex_source_len}
+use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
-use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_if_chain_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
+use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_if_stmt_with_single_else, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
 use compiler.core.ast.{stmt_match_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop, STMT_LABELED_LOOP}
 use compiler.core.ast.{STMT_STATIC_FOR, stmt_static_for_stmt}
 use compiler.core.ast.{STMT_COMPTIME, stmt_comptime_block, decl_set_comptime}
 use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT}
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES, stmt_contract_clause}
 use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
-use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt}
+use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt, stmt_defer_block_stmt, stmt_errdefer_block_stmt}
+use compiler.core.ast.{decl_extern_fn}
 use compiler.core.ast.{STMT_GPU_LAUNCH, stmt_gpu_launch}
 use compiler.core.ast.{STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT}
 use compiler.core.ast.{STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES}
 use compiler.core.ast.{stmt_contract_clause}
 use compiler.core.ast.{arm_new, arm_new_with_binding, arm_new_with_binding_and_rationale}
 use compiler.core.ast.{elif_new}
-use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION, ARM_VALUE_BIND, ARM_PATTERN_BIND}
-use compiler.frontend.core.if_chain_nodes.{flat_if_stmt_chain_new, flat_if_expr_chain_new}
-use compiler.frontend.core.if_chain_nodes.{flat_if_stmt_arm_append, flat_if_stmt_arm_body_append}
-use compiler.frontend.core.if_chain_nodes.{flat_if_expr_arm_append, flat_if_stmt_else_append, flat_if_expr_else_set}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_rationale_set}
 # Refutable let-else divergence check (see parse_refutable_val_else_stmt):
-use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_PASS_TODO}
+use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE}
 use compiler.core.ast.{STMT_RETURN, STMT_BREAK, STMT_CONTINUE, STMT_EXPR}
 use compiler.core.ast.{stmt_tag, stmt_expr}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
 use compiler.core.types.{TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+use compiler.core.types.{TYPE_NAMED_BASE}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
@@ -88,10 +91,8 @@ use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_sn
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.ast.{expr_assign, expr_compound_assign}
 use compiler.frontend.core._ParserPrimary.primary_expr.{parse_fn_lambda_after_kw}
-extern fn rt_env_get(key: text) -> text
-
 fn parser_stmt_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    frontend_compiler_trace_enabled()
 
 fn parser_stmt_trace_line_enabled() -> bool:
     parser_stmt_trace_enabled() and par_line_get() >= 60
@@ -259,81 +260,30 @@ fn parse_trailing_colon_block_arg(call_expr: i64) -> i64:
     expr_call_args_set(call_expr, cb_args, cb_names)
     call_expr
 
-# Can `kind` legally open a FLAT body — a block body written on the NEXT line at
-# the SAME column as its header (`if c:` / newline / `return v`)? Mirrors the
-# Rust seed's `is_statement_start` in parser_impl/core.rs, which gates the same
-# feature there. Without this gate the pure-Simple parser swallowed ANY following
-# token as the flat body, so a BODYLESS `if c:` followed by a same-column
-# expression (`7`) parsed as `if c: 7` and the enclosing function lost its tail
-# expression — accepted, then miscompiled to garbage (0x80000004 instead of 7).
-# See doc/08_tracking/bug/seed_accepts_bodyless_if_native_build_rejects_2026-08-22.md
-fn parse_block_flat_body_can_start(kind: i64) -> bool:
-    if kind == 6: return true         # Ident (call / assignment statement)
-    if kind == 40: return true        # if
-    if kind == 43: return true        # match
-    if kind == 45: return true        # for
-    if kind == 46: return true        # while
-    if kind == 47: return true        # break
-    if kind == 48: return true        # continue
-    if kind == 49: return true        # return
-    if kind == 51: return true        # loop
-    if kind == 52: return true        # pass
-    if kind == 20: return true        # fn
-    if kind == 21: return true        # val
-    if kind == 22: return true        # var
-    if kind == 25: return true        # extern
-    if kind == 26: return true        # export
-    if kind == 27: return true        # use
-    if kind == 28: return true        # import
-    if kind == 34: return true        # me
-    if kind == 183: return true       # pass_todo
-    if kind == 184: return true       # pass_do_nothing
-    if kind == 185: return true       # pass_dn
-    if kind == 186: return true       # defer
-    if kind == 187: return true       # errdefer
-    if kind == 188: return true       # const
-    if kind == 192: return true       # 'label
-    if kind == 201: return true       # static_for
-    if kind == 202: return true       # comptime
-    if kind == 204: return true       # bind
-    if kind == 206: return true       # receive
-    if kind == 37: return true        # yield
-    if kind == 38: return true        # self
-    if kind == 53: return true        # async
-    if kind == 54: return true        # await
-    if kind == 169: return true       # _ (discard assignment)
-    if kind == 195: return true       # do
-    if kind == 197: return true       # spawn
-    if kind == 203: return true       # mixin
-    if kind == 205: return true       # ce
-    if kind == 211: return true       # new
-    false
-
 fn parse_block() -> [i64]:
     var stmts: [i64] = []
-    val crossed_newline = par_kind_get() == 180
     parser_skip_newlines()
-    if par_kind_get() == 181:
+    var kind = par_kind_get()
+    if kind == 181:
         # Multi-line indented block
         parser_advance()
-        for i in 0..100000:
+        var i: i64 = 0 - 1
+        while true:
+            i = i + 1
             parser_skip_newlines()
-            if par_kind_get() == 182:
+            kind = par_kind_get()
+            if kind == 182:
                 parser_advance()
                 break
-            if par_kind_get() == 190:
+            if kind == 190:
                 break
+            if parser_stmt_trace_line_enabled():
+                val trace_kind = kind
+                val trace_text = par_text_get()
+                eprint("[parser-block] stmt:start i={i} kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
             val s = parse_statement()
             stmts.push(s)
             parser_skip_newlines_and_semicolons()
-        return stmts
-    # Flat body: the block body sits on a LATER line at the same column as its
-    # header. Only real statement-start tokens qualify; anything else (an
-    # expression, a Dedent, Eof) means the header has NO body at all, which is a
-    # parse error — Simple has `pass` for a deliberate no-op. A body on the SAME
-    # line as the `:` never crossed a newline and is always allowed.
-    if crossed_newline and not parse_block_flat_body_can_start(kind):
-        parser_expect(181)
         return stmts
     # Single-line body (no indent): parse one statement
     val s = parse_statement()
@@ -350,20 +300,24 @@ fn parse_use_stmt_inline() -> i64:
     # Skip optional 'lazy' modifier (kind 194)
     if par_kind_get() == 194:
         parser_advance()
-    # Consume dotted path: ident(.ident)*
-    for _ui in 0..200:
+    # Consume relative or dotted path: ...parent, ..parent, .sibling, ident(.ident)*
+    while true:
         val uk = par_kind_get()
         val is_ident_seg: bool = uk == 6
         val is_dot_seg: bool = uk == 164
+        val is_double_dot_seg: bool = uk == 165
+        val is_triple_dot_seg: bool = uk == 173
         val is_star_seg: bool = uk == 62
-        val is_seg: bool = is_ident_seg or is_dot_seg or is_star_seg
+        val is_keyword_seg: bool = keyword_lookup(tok_kind_name(uk)) == uk
+        val is_seg: bool = is_ident_seg or is_dot_seg or is_double_dot_seg or
+            is_triple_dot_seg or is_star_seg or is_keyword_seg
         if not is_seg:
             break
         parser_advance()
     # Consume optional brace import list: .{name, name, ...} or {name, ...}
     if par_kind_get() == 142:
         parser_advance()
-        for _ul in 0..10000:
+        while true:
             val ulk = par_kind_get()
             if ulk == 143 or ulk == 190:
                 break
@@ -373,7 +327,7 @@ fn parse_use_stmt_inline() -> i64:
     # Consume optional paren import list: .(name, name) or (name, ...)
     if par_kind_get() == 140:
         parser_advance()
-        for _up in 0..10000:
+        while true:
             val upk = par_kind_get()
             if upk == 141 or upk == 190:
                 break
@@ -394,7 +348,7 @@ fn parse_extern_fn_stmt_inline() -> i64:
     parser_expect(140)
     var ef_pnames: [text] = []
     var ef_ptypes: [i64] = []
-    for _ei in 0..100:
+    while true:
         if par_kind_get() == 141 or par_kind_get() == 190:
             break
         val ef_pn = par_text_get()
@@ -510,6 +464,91 @@ fn try_parse_contract_stmt() -> i64:
     lex_snapshot_commit(snap)
     stmt_contract_clause(tag, binding, body, 0)
 
+fn parse_unsafe_block_expr_if_present() -> i64:
+    """Parse contextual `unsafe...:` in expression position; return -1 on no match."""
+    if par_kind_get() != TOK_IDENT:
+        return -1
+    val unsafe_name = par_text_get()
+    if unsafe_name != "unsafe" and unsafe_name != "danger":
+        return -1
+
+    val unsafe_snap = lex_snapshot_save()
+    val (unsafe_tok_nums, unsafe_tok_text) = parser_tok_save()
+    parser_advance()
+    if par_kind_get() == TOK_COLON:
+        parser_advance()
+        val unsafe_body = parse_block()
+        lex_snapshot_commit(unsafe_snap)
+        return expr_unsafe_block(unsafe_body, 0)
+
+    if par_kind_get() == TOK_LPAREN:
+        var unsafe_caps: [text] = []
+        var unsafe_ok = true
+        parser_advance()
+        while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_EOF:
+            parser_skip_newlines()
+            if par_kind_get() != TOK_IDENT:
+                unsafe_ok = false
+                break
+            val unsafe_arg = par_text_get()
+            if unsafe_arg != "reason" and unsafe_arg != "capabilities":
+                unsafe_ok = false
+                break
+            parser_advance()
+            if par_kind_get() != TOK_COLON:
+                unsafe_ok = false
+                break
+            parser_advance()
+            if unsafe_arg == "reason" and par_kind_get() == TOK_STRING_LIT:
+                parser_advance()
+            elif unsafe_arg == "capabilities" and par_kind_get() == TOK_LBRACKET:
+                parser_advance()
+                if par_kind_get() != TOK_RBRACKET:
+                    while par_kind_get() != TOK_EOF:
+                        if par_kind_get() != TOK_IDENT:
+                            unsafe_ok = false
+                            break
+                        unsafe_caps.push(par_text_get())
+                        parser_advance()
+                        if par_kind_get() == TOK_RBRACKET:
+                            break
+                        if par_kind_get() != TOK_COMMA:
+                            unsafe_ok = false
+                            break
+                        parser_advance()
+                        if par_kind_get() == TOK_RBRACKET:
+                            break
+                    if not unsafe_ok:
+                        break
+                if par_kind_get() != TOK_RBRACKET:
+                    unsafe_ok = false
+                    break
+                parser_advance()
+            else:
+                unsafe_ok = false
+                break
+            parser_skip_newlines()
+            if par_kind_get() == TOK_RPAREN:
+                break
+            if par_kind_get() != TOK_COMMA:
+                unsafe_ok = false
+                break
+            parser_advance()
+            parser_skip_newlines()
+            if par_kind_get() == TOK_RPAREN:
+                break
+        if unsafe_ok and par_kind_get() == TOK_RPAREN:
+            parser_advance()
+            if par_kind_get() == TOK_COLON:
+                parser_advance()
+                val unsafe_body = parse_block()
+                lex_snapshot_commit(unsafe_snap)
+                return expr_unsafe_block_with_caps(unsafe_body, unsafe_caps, 0)
+
+    lex_snapshot_rollback(unsafe_snap)
+    parser_tok_restore(unsafe_tok_nums, unsafe_tok_text)
+    -1
+
 fn parse_statement() -> i64:
     var kind = par_kind_get()
     val contract_stmt = try_parse_contract_stmt()
@@ -519,19 +558,23 @@ fn parse_statement() -> i64:
     if kind == 21:
         return parse_val_decl_stmt()
 
-    if par_kind_get() == 194:
+    if kind == 194:
         parser_advance()
         return parse_lazy_val_decl_stmt()
 
-    if par_kind_get() == 22:
+    if kind == 22:
         return parse_var_decl_stmt()
 
     # use statement inside function body: consume tokens, return pass (no-op)
     # Avoids circular dep with parser_decls_use.spl (which imports parse_block from here).
-    if par_kind_get() == 27:
+    if kind == 27:
         return parse_use_stmt_inline()
 
-    if par_kind_get() == 49:
+    # extern fn declaration inside a function body
+    if kind == 25:
+        return parse_extern_fn_stmt_inline()
+
+    if kind == 49:
         parser_advance()
         val is_nl = par_kind_get() == 180
         val is_ded = par_kind_get() == 182
@@ -541,34 +584,36 @@ fn parse_statement() -> i64:
         val ret_val = parse_expr()
         return stmt_return_stmt(ret_val, 0)
 
-    if par_kind_get() == 40:
+    if kind == 40:
         return parse_if_stmt()
 
     # Labeled loop: 'label: for/while
-    if par_kind_get() == 192:
+    if kind == 192:
         val loop_label = par_text_get()
         parser_advance()
         # Expect colon after label
         parser_expect(161)
         # Then parse the loop and wrap in labeled_loop stmt
-        if par_kind_get() == 45:
+        kind = par_kind_get()
+        if kind == 45:
             val for_s = parse_for_stmt()
             return stmt_labeled_loop(loop_label, for_s, 0)
-        if par_kind_get() == 46:
+        if kind == 46:
             val while_s = parse_while_stmt()
             return stmt_labeled_loop(loop_label, while_s, 0)
         # Fallthrough: ignore label if not followed by loop
         return parse_statement()
 
-    if par_kind_get() == 45:
+    if kind == 45:
         return parse_for_stmt()
 
-    if par_kind_get() == 201:
+    if kind == 201:
         return parse_static_for_stmt()
 
-    if par_kind_get() == 202:
+    if kind == 202:
         parser_advance()
-        if par_kind_get() == 161:
+        kind = par_kind_get()
+        if kind == 161:
             parser_advance()
             val ct_body = parse_block()
             return stmt_comptime_block(ct_body, 0)
@@ -576,7 +621,7 @@ fn parse_statement() -> i64:
         val ct_expr = parse_expr()
         return stmt_expr_stmt(ct_expr, 0)
 
-    if par_kind_get() == 46:
+    if kind == 46:
         return parse_while_stmt()
 
     # Statement-form `loop:` -- desugar to `while true:` so downstream
@@ -596,41 +641,44 @@ fn parse_statement() -> i64:
         parser_tok_restore(loop_tok_nums, loop_tok_text)
         if is_loop_stmt:
             return parse_loop_stmt()
-        # `loop` is also an established keyword-named parameter. Restore it
-        # and let the ordinary expression-statement path parse `loop.header`,
-        # indexing, assignment, or a bare identifier.
-        lex_snapshot_restore(loop_snap_nums, loop_snap_txts)
-        parser_tok_restore(loop_tok_nums, loop_tok_text)
 
     if kind == 43:
         # G33: `match` may be an identifier (var match = true; match = false).
         # After consuming `match`, a token that cannot start an expression
         # means identifier usage. Tradeoff: scrutinees starting with -, (
         # still route to match-stmt (their kinds can start expressions).
+        val match_line = par_line_get()
+        val match_col = par_col_get()
         parser_advance()
         kind = par_kind_get()
-        if g33_kw_ident_follow(kind):
+        val adjacent_index = kind == TOK_LBRACKET and par_line_get() == match_line and par_col_get() == match_col + 5
+        if g33_kw_ident_follow(kind) or adjacent_index:
             var mleft = parse_postfix_on(expr_ident("match", 0))
             mleft = parse_binary_from(mleft)
-            if par_kind_get() == 100 or par_kind_get() == 106:
+            kind = par_kind_get()
+            if kind == 100 or kind == 106:
                 parser_advance()
                 return stmt_expr_stmt(expr_assign(mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 101:
+            kind = par_kind_get()
+            if kind == 101:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(60, mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 102:
+            kind = par_kind_get()
+            if kind == 102:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(61, mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 103:
+            kind = par_kind_get()
+            if kind == 103:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(62, mleft, parse_expr(), 0), 0)
-            if par_kind_get() == 104:
+            kind = par_kind_get()
+            if kind == 104:
                 parser_advance()
                 return stmt_expr_stmt(expr_compound_assign(63, mleft, parse_expr(), 0), 0)
             return stmt_expr_stmt(mleft, 0)
         return parse_match_stmt_tail()
 
-    if par_kind_get() == 47:
+    if kind == 47:
         parser_advance()
         # Check for labeled break: break 'label
         if par_kind_get() == 192:
@@ -639,7 +687,7 @@ fn parse_statement() -> i64:
             return stmt_break_labeled(lbl, 0)
         return stmt_break_stmt(0)
 
-    if par_kind_get() == 48:
+    if kind == 48:
         parser_advance()
         # Check for labeled continue: continue 'label
         if par_kind_get() == 192:
@@ -648,132 +696,83 @@ fn parse_statement() -> i64:
             return stmt_continue_labeled(lbl, 0)
         return stmt_continue_stmt(0)
 
-    if par_kind_get() == 206:
+    if kind == 206:
         parser_advance()
         return parse_receive_stmt()
 
-    if par_kind_get() == 204:
+    if kind == 204:
         parser_advance()
         return parse_bind_stmt()
 
-    if par_kind_get() == 186:
+    if kind == 186:
         parser_advance()
+        # Block form: `defer:` followed by an indented body (bug #172).
+        # `defer:` has no expression before the colon, so seeing TOK_COLON
+        # (161) immediately after the `defer` keyword unambiguously selects
+        # the block form -- the single-line form always starts an expression.
+        if par_kind_get() == 161:
+            parser_advance()  # consume ':'
+            val defer_body = parse_block()
+            return stmt_defer_block_stmt(defer_body, 0)
         val deferred = parse_expr()
         return stmt_defer_stmt(deferred, 0)
 
-    if par_kind_get() == 187:
+    if kind == 187:
         parser_advance()
+        # Block form: `errdefer:` (see `defer:` above for the disambiguation).
+        if par_kind_get() == 161:
+            parser_advance()  # consume ':'
+            val errdefer_body = parse_block()
+            return stmt_errdefer_block_stmt(errdefer_body, 0)
         val err_deferred = parse_expr()
         return stmt_errdefer_stmt(err_deferred, 0)
 
-    if par_kind_get() == 52:
+    if kind == 52:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             return stmt_expr_stmt(expr_pass(0), 0)
         return stmt_expr_stmt(expr_pass_with_msg(msg, 0), 0)
 
-    if par_kind_get() == 183:
+    if kind == 183:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_todo requires a comment string: pass_todo(\"what remains\", \"hint or issue\")")
-        if rt_is_debug_mode_enabled() and msg != "":
+        if (rt_is_debug_mode_enabled() and msg != "" and
+            not frontend_trace_suppressed() and
+            not parser_diagnostics_suppressed_get()):
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
 
-    if par_kind_get() == 184:
+    if kind == 184:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_do_nothing requires a comment string: pass_do_nothing(\"reason\")")
-        if rt_is_debug_mode_enabled() and msg != "":
+        if (rt_is_debug_mode_enabled() and msg != "" and
+            not frontend_trace_suppressed() and
+            not parser_diagnostics_suppressed_get()):
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_do_nothing(msg, 0), 0)
 
-    if par_kind_get() == 185:
+    if kind == 185:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_dn requires a comment string: pass_dn(\"reason\")")
-        if rt_is_debug_mode_enabled() and msg != "":
+        if (rt_is_debug_mode_enabled() and msg != "" and
+            not frontend_trace_suppressed() and
+            not parser_diagnostics_suppressed_get()):
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_dn(msg, 0), 0)
 
     if kind == TOK_IDENT:
         val ident_text = par_text_get()
-        # `unsafe:` / `danger:` block (contextual keyword, mirrors the seed
-        # parser: compiler_rust/parser/src/parser_impl/core.rs:829-836). Only
-        # treated as a block when the identifier is directly followed by a
-        # colon (char-level lookahead past spaces/tabs).
-        #
-        # NOTE: `lex_peek_at` (module-level, lexer.spl) reads a legacy
-        # `lex_state_get("pos", ...)` slot that CoreLexer.next_token() never
-        # writes back to — it is permanently stale (observed stuck at "0"),
-        # so peeking through it inspected the wrong end of the source and
-        # this rule silently never fired. `lex_token_end_get()` returns the
-        # live CoreLexer struct's `pos` right after the just-scanned token
-        # (set in lexer.spl's `lex_next()`), so anchor the lookahead there
-        # instead via plain source-char access.
         if ident_text == "unsafe" or ident_text == "danger":
-            val uns_snap = lex_snapshot_save()
-            val (uns_tok_nums, uns_tok_text) = parser_tok_save()
-            parser_advance()
-            if par_kind_get() == TOK_COLON:
-                parser_advance()
-                val unsafe_body = parse_block()
-                lex_snapshot_commit(uns_snap)
-                return stmt_expr_stmt(expr_unsafe_block(unsafe_body, 0), 0)
-            if par_kind_get() == TOK_LPAREN:
-                # `unsafe(reason: "...", capabilities: [type_erasure, ...]):`
-                # — the capability-scoped block form (hardening plan §8.1).
-                # Same argument grammar as the declaration-level `@unsafe(...)`
-                # in _ParserDecls/enum_module_body.spl; the reason is accepted
-                # and the capability names are carried on the block node.
-                var uns_caps: [text] = []
-                var uns_ok = true
-                parser_advance()
-                while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_EOF:
-                    parser_skip_newlines()
-                    if par_kind_get() != TOK_IDENT:
-                        uns_ok = false
-                        break
-                    val uns_arg = par_text_get()
-                    parser_advance()
-                    if par_kind_get() != TOK_COLON:
-                        uns_ok = false
-                        break
-                    parser_advance()
-                    if uns_arg == "reason" and par_kind_get() == TOK_STRING_LIT:
-                        parser_advance()
-                    elif uns_arg == "capabilities" and par_kind_get() == TOK_LBRACKET:
-                        parser_advance()
-                        while par_kind_get() != TOK_RBRACKET and par_kind_get() != TOK_EOF:
-                            if par_kind_get() == TOK_IDENT:
-                                uns_caps.push(par_text_get())
-                            elif par_kind_get() != TOK_COMMA:
-                                uns_ok = false
-                                break
-                            parser_advance()
-                        if par_kind_get() != TOK_RBRACKET:
-                            uns_ok = false
-                            break
-                        parser_advance()
-                    else:
-                        uns_ok = false
-                        break
-                    parser_skip_newlines()
-                    if par_kind_get() == TOK_COMMA:
-                        parser_advance()
-                if uns_ok and par_kind_get() == TOK_RPAREN:
-                    parser_advance()
-                    if par_kind_get() == TOK_COLON:
-                        parser_advance()
-                        val caps_body = parse_block()
-                        lex_snapshot_commit(uns_snap)
-                        return stmt_expr_stmt(expr_unsafe_block_with_caps(caps_body, uns_caps, 0), 0)
-            lex_snapshot_rollback(uns_snap)
-            parser_tok_restore(uns_tok_nums, uns_tok_text)
+            val unsafe_expr = parse_unsafe_block_expr_if_present()
+            if unsafe_expr >= 0:
+                return stmt_expr_stmt(unsafe_expr, 0)
         if ident_text == "todo":
             parser_advance()
             val msg = parse_optional_rationale_args()
@@ -781,14 +780,10 @@ fn parse_statement() -> i64:
                 parser_warn("REQC003: todo requires two strings: todo(\"what remains\", \"hint or issue\")")
             return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
 
-    # Handle gpu_launch(grid: (...), block: (...)): body
-    if par_kind_get() == 6:
-        if par_text_get() == "gpu_launch":
+        if ident_text == "gpu_launch":
             return parse_gpu_launch_stmt()
 
-    # Handle bare 'print' keyword (print expr -- no parens)
-    if par_kind_get() == 6:
-        if par_text_get() == "print":
+        if ident_text == "print":
             parser_warn_print_if_needed()
             parser_advance()
             val is_nl = par_kind_get() == 180
@@ -811,10 +806,16 @@ fn parse_statement() -> i64:
         if ident_text == "assert":
             parser_advance()
             val assert_cond = parse_expr()
+            # Desugar to the raising builtin `__assert(cond[, msg])`. Returning
+            # the bare condition here made every `assert` a no-op: the value was
+            # evaluated and discarded, never checked.
+            var assert_args: [i64] = []
+            assert_args.push(assert_cond)
             if par_kind_get() == 160:
                 parser_advance()
-                val _assert_msg = parse_expr()
-            return stmt_expr_stmt(assert_cond, 0)
+                assert_args.push(parse_expr())
+            val assert_call = expr_call(expr_ident("__assert", 0), assert_args, 0)
+            return stmt_expr_stmt(assert_call, 0)
 
         # WP-K (resource ownership, doc/03_plan/language/resource/
         # resource_parallel_agent_plan_2026-08-06.md): `with ACQUIRE as NAME:
@@ -924,9 +925,10 @@ fn parse_statement() -> i64:
     # but self-recursive calls fail seed-wide ("function X not found" — the
     # seed never pre-binds the name before evaluating the body). This
     # desugar matches that: it supports the non-recursive case only.
-    if par_kind_get() == TOK_KW_FN:
+    if kind == TOK_KW_FN:
         parser_advance()  # consume fn
-        if par_kind_get() == TOK_IDENT:
+        kind = par_kind_get()
+        if kind == TOK_IDENT:
             val nested_fn_name = par_text_get()
             parser_advance()  # consume name
             val nested_lambda = parse_fn_lambda_after_kw()
@@ -939,12 +941,25 @@ fn parse_statement() -> i64:
     # Note: Walrus operator handled inline during expression parsing
     # G31: tuple assignment (a, b) = expr is handled naturally:
     #   G29 makes (a, b) a tuple expr; parse_assignment sees = and builds expr_assign.
-    val expression = parse_expr()
-    if par_kind_get() == TOK_IDENT:
+    if parser_stmt_trace_line_enabled():
+        val trace_kind = kind
+        val trace_text = par_text_get()
+        eprint("[parser-block] expr-branch:start kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
+    var expression = 0
+    if kind == TOK_IDENT:
+        val (bc_matched, bc_call) = try_parse_bare_ident_string_call()
+        expression = if bc_matched: bc_call else: parse_expr()
+    else:
+        expression = parse_expr()
+    kind = par_kind_get()
+    if kind == TOK_COLON and (expr_get_tag(expression) == EXPR_CALL or expr_get_tag(expression) == EXPR_METHOD_CALL):
+        return stmt_expr_stmt(parse_trailing_colon_block_arg(expression), 0)
+    if kind == TOK_IDENT:
         val lane_name = par_text_get()
         if lane_name == "gpu" or lane_name == "host":
             parser_advance()
-            if par_kind_get() == TOK_BACKSLASH:
+            kind = par_kind_get()
+            if kind == TOK_BACKSLASH:
                 parser_advance()
             parser_expect(TOK_COLON)
             val lane_body = parse_block()
@@ -961,6 +976,89 @@ fn parse_statement() -> i64:
 
 # ===== Val/Var Declaration Statements =====
 
+# --- Refutable let-else (`val Ctor(x) = e else: <diverging block>`) ---------
+# A refutable pattern (Some/Ok/custom variant) in a plain `val Ctor(x) = e`
+# would be a hidden `.unwrap()` that crashes on the non-matching case. We
+# require an `else:` block that DIVERGES so the bound value is guaranteed;
+# irrefutable bindings (plain name / tuple) keep the bare form.
+
+fn stmt_diverges(s: i64) -> bool:
+    if s < 0:
+        return false
+    val tag = stmt_tag[s]
+    if tag == STMT_RETURN or tag == STMT_BREAK or tag == STMT_CONTINUE:
+        return true
+    if tag == STMT_EXPR:
+        val e = stmt_expr[s]
+        if e >= 0:
+            val et = expr_get_tag(e)
+            if et == EXPR_RETURN or et == EXPR_BREAK or et == EXPR_CONTINUE:
+                return true
+    # ponytail: if/match/infinite-loop divergence is not recognized here, so an
+    # else block built solely from those is conservatively rejected (safe: it
+    # only ever rejects, never wrongly accepts a fall-through). End such blocks
+    # with an explicit return/break/continue. Upgrade path: recurse into
+    # STMT_IF (both branches) / STMT_MATCH (all arms) / `while true` (no break).
+    false
+
+fn refutable_else_block_diverges(stmts: [i64]) -> bool:
+    # A block cannot fall through if any statement in it diverges (reaching that
+    # statement guarantees no fall-off-the-end).
+    for s in stmts:
+        if stmt_diverges(s):
+            return true
+    false
+
+fn parse_refutable_val_else_stmt(ctor_name: text) -> i64:
+    # Cursor is at the '(' following the constructor name in
+    # `val Ctor(a, ...) = e else: <block>`. Desugar to a value-match:
+    #   val a = match e:
+    #       case Ctor(a): a
+    #       case _: <else block>
+    # which binds `a` in the enclosing scope (like any `val a = <expr>`) and
+    # reuses the exact arm machinery as `if val`/`match`.
+    val callee = expr_ident(ctor_name, 0)
+    parser_expect(TOK_LPAREN)   # consume '('
+    var pat_args: [i64] = []
+    if par_kind_get() != TOK_RPAREN:
+        pat_args.push(parse_or())
+        while par_kind_get() == TOK_COMMA:
+            parser_advance()
+            pat_args.push(parse_or())
+    parser_expect(TOK_RPAREN)   # consume ')'
+    val pattern = expr_call(callee, pat_args, 0)
+
+    parser_expect(100)          # consume '='
+    val init = parse_expr()
+
+    # Mandatory diverging else.
+    parser_skip_newlines()
+    if par_kind_get() != TOK_KW_ELSE:
+        parser_error("refutable pattern `{ctor_name}(...)` in a val binding requires an `else:` clause that diverges (return/break/continue). Use `if val {ctor_name}(...) = e:` to bind conditionally instead.")
+        return stmt_expr_stmt(expr_unit(0), 0)
+    parser_advance()            # consume 'else'
+    parser_expect(TOK_COLON)    # consume ':'
+    val else_body = parse_block()
+
+    if not refutable_else_block_diverges(else_body):
+        parser_error("the `else:` block of `val {ctor_name}(...) = ... else:` must diverge — end it with return/break/continue so the bound value is guaranteed. It can currently fall through, which would leave the binding unset.")
+
+    # Single-binding patterns only (covers Some/Ok/Err — 100% of stdlib usage).
+    # ponytail: multi-field via nested match; add a tuple desugar if needed.
+    if pat_args.len() != 1 or expr_get_tag(pat_args[0]) != EXPR_IDENT:
+        parser_error("`val {ctor_name}(...) = ... else:` currently supports a single binding name (e.g. `val Some(x) = opt else:`); use a nested `match` for multi-field patterns.")
+        return stmt_expr_stmt(expr_unit(0), 0)
+    val bind_name = expr_get_str(pat_args[0])
+
+    var arm_indices: [i64] = []
+    var then_body: [i64] = []
+    then_body.push(stmt_expr_stmt(expr_ident(bind_name, 0), 0))
+    arm_indices.push(arm_new_with_binding_and_rationale(pattern, -1, then_body, "", ""))
+    val wildcard = expr_ident("_", 0)
+    arm_indices.push(arm_new_with_binding_and_rationale(wildcard, -1, else_body, "", ""))
+    val match_expr = expr_match_expr(init, arm_indices, 0)
+    stmt_val_decl(bind_name, 0, match_expr, 0)
+
 fn parse_val_decl_stmt() -> i64:
     parser_advance()
 
@@ -968,16 +1066,30 @@ fn parse_val_decl_stmt() -> i64:
     if par_kind_get() == 140:
         return parse_tuple_destructure_val()
 
-    val some_binding = try_parse_some_destructure_binding(false)
-    if some_binding >= 0:
-        return some_binding
-
     # G23: discard binding `val _ = expr` (`_` is kind 169, not Ident)
     # G26: accept keyword tokens as binding names (e.g. val after = ...)
     var name = par_text_get()
-    if par_kind_get() == 169:
+    # `match` is not contextual for immutable bindings: accepting it here
+    # makes `val match = ...` diverge from expression parsing and lets invalid
+    # source survive until a later bootstrap stage. G33 still permits the
+    # mutable `var match` form in parse_var_decl_stmt below.
+    if par_kind_get() == TOK_KW_MATCH or par_kind_get() == TOK_KW_CASE:
+        parser_error("reserved match/case keyword cannot be used as a val binding name")
+        parser_advance()
+    elif par_kind_get() == 169:
         name = "_"
         parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        # Plain identifier: keep the text already captured above and just
+        # consume the token. Falling into the generic "keyword name" branch
+        # below is wrong here: tok_kind_name(TOK_IDENT) == "Ident", and
+        # keyword_lookup("Ident") falls through to its own not-a-real-keyword
+        # fallback, which is TOK_IDENT itself (see keyword_lookup's contract,
+        # locked in by test_core.spl's `keyword_lookup("xyz") == TOK_IDENT`
+        # case) -- so the round-trip check below is trivially true for EVERY
+        # plain identifier, silently replacing the real captured name (e.g.
+        # "inst") with the literal string "Ident".
+        parser_expect(6)
     else:
         val vd_kw_name = tok_kind_name(par_kind_get())
         val vd_is_kw = keyword_lookup(vd_kw_name) == par_kind_get()
@@ -986,6 +1098,12 @@ fn parse_val_decl_stmt() -> i64:
             parser_advance()
         else:
             parser_expect(6)
+
+    # Refutable let-else: `val Ctor(x) = expr else: <diverging block>`.
+    # A '(' right after the binding name can only be a constructor pattern —
+    # plain `val x` is always followed by `:` or `=`, never `(`.
+    if par_kind_get() == TOK_LPAREN:
+        return parse_refutable_val_else_stmt(name)
 
     # Optional type annotation: val x: i64 = ...
     var type_tag = 0
@@ -1027,16 +1145,18 @@ fn parse_var_decl_stmt() -> i64:
     if par_kind_get() == 140:
         return parse_tuple_destructure_var()
 
-    val some_binding = try_parse_some_destructure_binding(true)
-    if some_binding >= 0:
-        return some_binding
-
     # G23: discard binding `var _ = expr` (`_` is kind 169, not Ident)
     # G26: accept keyword tokens as binding names (e.g. var after = ...)
     var name = par_text_get()
     if par_kind_get() == 169:
         name = "_"
         parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        # See the matching comment in parse_val_decl_stmt: this avoids the
+        # keyword_lookup(tok_kind_name(TOK_IDENT)) == TOK_IDENT false
+        # positive that silently renamed every plain-identifier binding to
+        # the literal string "Ident".
+        parser_expect(6)
     else:
         val vr_kw_name = tok_kind_name(par_kind_get())
         val vr_is_kw = keyword_lookup(vr_kw_name) == par_kind_get()
@@ -1047,17 +1167,90 @@ fn parse_var_decl_stmt() -> i64:
             parser_expect(6)
 
     var type_tag = 0
+    var has_type_annotation = false
+    var type_looks_named = false
     if par_kind_get() == 161:
         parser_advance()
+        # Peek the raw type-position token before parser_parse_type() resolves
+        # it: a plain identifier that parser_parse_type_impl's named-type
+        # lookup (named_type_find) fails to resolve decays SILENTLY to
+        # TYPE_VOID (no parser_error of its own -- see parser.spl's ident
+        # branch, which always returns from within itself). That happens for
+        # any struct/class/enum declared in ANOTHER module: a single-file
+        # parse (e.g. `simple check` on one file, or a struct referenced
+        # before its own declaration in the same file) has no cross-module
+        # type registry yet. Capture the raw name/kind now so a var-decl with
+        # no initializer can still tell "unresolved PascalCase named type"
+        # (safe to nil-default, matches this codebase's struct/class naming
+        # convention -- Engine2D, TlsCertificateChain, HttpResponseData, ...)
+        # apart from a genuinely unsupported category (text, Dict, Option,
+        # ...), which always resolves to a *non-void* type tag of its own.
+        val type_start_kind = par_kind_get()
+        val type_start_text = par_text_get()
+        type_looks_named = type_start_kind == TOK_IDENT and type_start_text.len() > 0 and type_start_text[0:1] >= "A" and type_start_text[0:1] <= "Z"
         type_tag = parser_parse_type()
+        has_type_annotation = true
 
     # Type inference for var declarations handled after initialization
+
+    # G-varnoinit: `var name: Type` with no initializer (assigned later, e.g.
+    # in if/elif/else arms). The seed grammar accepts this declare-then-assign
+    # form; this parser used to unconditionally require `=` here, hard-erroring
+    # with "expected =, got Newline" on any such declaration (blocked the
+    # hosted-WM entry closure at draw_ir_adv.spl:586 and several stdlib
+    # files). Only trigger on an actual statement-end token so a genuinely
+    # malformed `=`-less declaration followed by garbage still falls through
+    # to the ordinary parser_expect(100) error below.
+    val at_stmt_end = par_kind_get() == TOK_NEWLINE or par_kind_get() == TOK_SEMICOLON or par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF
+    if has_type_annotation and at_stmt_end:
+        return stmt_var_decl(name, type_tag, var_no_init_default_expr(type_tag, type_looks_named), 0)
 
     parser_expect(100)
     val init = parse_expr()
     stmt_var_decl(name, type_tag, init, 0)
 
+# Synthesizes the default-value initializer for a `var name: Type` declared
+# with no `=`. Chosen to match seed runtime semantics (oracle probes,
+# 2026-07-17): scalar primitives zero-init (seed's `var x: i64` read before
+# any assignment observably reads back 0); named struct/class types nil-init
+# (seed's `var t: SomeStruct` reads as a nil receiver until assigned, and
+# accessing a field before assignment already fails loud at runtime via the
+# existing nil-receiver check -- not a new failure mode, just deferred to
+# first use). Every other category (text, Option, Result, Dict, arrays,
+# tuples, fn types, unions/intersections/refinements, bare struct/any/void)
+# has no safe, well-defined zero value to replicate: the seed's own
+# read-before-assign behavior for those is undefined garbage (e.g. `var s:
+# text` read before assignment observably returned a corrupt length under
+# the seed), so guessing one here would turn a loud gap into a silently
+# wrong answer. Those are rejected with a located parser error instead.
+fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
+    if type_tag == TYPE_BOOL:
+        return expr_bool_lit(0, 0)
+    val is_plain_int = type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16 or type_tag == TYPE_U32
+    val is_wide_int = type_tag == TYPE_U64 or type_tag == TYPE_I8 or type_tag == TYPE_I16 or type_tag == TYPE_I32
+    if is_plain_int or is_wide_int:
+        return expr_int_lit(0, 0)
+    if type_tag == TYPE_F64:
+        return expr_float_lit("0.0", 0)
+    if type_tag >= TYPE_NAMED_BASE:
+        return expr_nil_lit(0)
+    if type_tag == TYPE_VOID and type_looks_named:
+        return expr_nil_lit(0)
+    parser_error("var without initializer not yet supported for this declared type; only bool/i64/f64/fixed-width-int scalars and named struct/class types support declare-without-initializer -- add an explicit initializer")
+    expr_nil_lit(0)
+
 # ===== Control Flow Statements =====
+
+fn parser_owned_stmt_list(values: [i64]) -> [i64]:
+    # Nested arrays are value records whose backing storage may remain shared
+    # across later parser mutations.  Copy scalar indices into a fresh owner
+    # before inserting a body into the collected [[i64]] arm inventory.
+    var owned: [i64] = []
+    var i = 0
+    while i < values.len():
+        owned.push(values[i])
+        i = i + 1
+    owned
 
 fn parse_if_stmt() -> i64:
     # Parse every arm in one forward pass.  The former implementation called
@@ -1070,26 +1263,18 @@ fn parse_if_stmt() -> i64:
     var arm_init: [i64] = []
     var arm_body_offsets: [i64] = []
     var arm_body_counts: [i64] = []
-    var arm_body_flat: [i64] = []
+    var arm_body_stmt_buf: [i64] = []
     var arm_start: [i64] = []
     var arm_line: [i64] = []
     var arm_col: [i64] = []
     var terminal_else: [i64] = []
     var collecting = true
 
-        # Plain identifier binding.
-        # Mark the synthetic binding so the interpreter unwraps Option only.
-        val bind_name = expr_get_str(pattern_idx)
-        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
-        val name_expr = expr_ident(bind_name, 0)
-        val nil_expr = expr_nil_lit(0)
-        val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
-        val elif_idx = elif_new(cond_expr, then_body, else_body)
-        val if_stmt = stmt_if_stmt(cond_expr, then_body, elif_idx, 0)
-        var block_stmts: [i64] = []
-        block_stmts.push(bind_stmt)
-        block_stmts.push(if_stmt)
-        return stmt_block_stmt(block_stmts, 0)
+    while collecting:
+        arm_start.push(lex_token_start_get())
+        arm_line.push(par_line_get())
+        arm_col.push(par_col_get())
+        parser_advance()  # consume if/elif
 
         if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
             parser_advance()
@@ -1110,10 +1295,10 @@ fn parse_if_stmt() -> i64:
                 arm_kind.push(1)
             arm_head.push(pattern_idx)
             arm_init.push(init_expr)
-            arm_body_offsets.push(arm_body_flat.len())
+            arm_body_offsets.push(arm_body_stmt_buf.len())
             arm_body_counts.push(then_body.len())
             for body_stmt in then_body:
-                arm_body_flat.push(body_stmt)
+                arm_body_stmt_buf.push(body_stmt)
         else:
             val cond = parse_expr()
             parser_expect(TOK_COLON)
@@ -1121,10 +1306,10 @@ fn parse_if_stmt() -> i64:
             arm_kind.push(0)
             arm_head.push(cond)
             arm_init.push(-1)
-            arm_body_offsets.push(arm_body_flat.len())
+            arm_body_offsets.push(arm_body_stmt_buf.len())
             arm_body_counts.push(then_body.len())
             for body_stmt in then_body:
-                arm_body_flat.push(body_stmt)
+                arm_body_stmt_buf.push(body_stmt)
 
         parser_skip_newlines()
         if par_kind_get() == TOK_KW_ELIF:
@@ -1142,32 +1327,56 @@ fn parse_if_stmt() -> i64:
         else:
             collecting = false
 
-    # Store the collected arms once, in source order.  Rebuilding a singleton
-    # STMT_IF tail here copied the growing value-semantic aggregate once per
-    # arm and reached geometric RSS on compiler-sized dispatch chains.
+    # Rebuild the historical nested flat-AST representation from the tail.
+    # This keeps every existing consumer compatible while removing parser
+    # recursion.  Each arm retains its own decision start and the original
+    # whole-chain end span used by recursive construction.
     val decision_end = lex_token_start_get()
-    val chain_span = flat_span_new(arm_start[0], decision_end, arm_line[0], arm_col[0])
-    val chain_id = flat_if_stmt_chain_new(chain_span)
-    var ai = 0
-    while ai < arm_kind.len():
+    var tail = terminal_else
+    var ai = arm_kind.len() - 1
+    while ai >= 0:
         val decision_span = flat_span_new(arm_start[ai], decision_end, arm_line[ai], arm_col[ai])
-        var stored_head = arm_head[ai]
-        var rationale = ""
-        if arm_kind[ai] == ARM_PATTERN_BIND:
-            rationale = extract_wildcard_rationale(stored_head)
-            stored_head = normalize_wildcard_pattern(stored_head)
-        val arm_id = flat_if_stmt_arm_append(chain_id, arm_kind[ai], stored_head, arm_init[ai], decision_span)
-        flat_if_arm_rationale_set(arm_id, rationale)
-        var bi = 0
-        while bi < arm_body[ai].len():
-            flat_if_stmt_arm_body_append(arm_id, arm_body[ai][bi])
-            bi = bi + 1
-        ai = ai + 1
-    var ei = 0
-    while ei < terminal_else.len():
-        flat_if_stmt_else_append(chain_id, terminal_else[ei])
-        ei = ei + 1
-    stmt_if_chain_stmt(chain_id, chain_span)
+        var current_body: [i64] = []
+        val body_start = arm_body_offsets[ai]
+        val body_count = arm_body_counts[ai]
+        var body_i = 0
+        while body_i < body_count:
+            current_body.push(arm_body_stmt_buf[body_start + body_i])
+            body_i = body_i + 1
+        var current_stmt = -1
+        if arm_kind[ai] == 0:
+            val cond = arm_head[ai]
+            val elif_idx = elif_new(cond, current_body, tail)
+            if tail.len() == 1:
+                current_stmt = stmt_if_stmt_with_single_else(cond, current_body, elif_idx, tail[0], decision_span)
+            else:
+                current_stmt = stmt_if_stmt(cond, current_body, elif_idx, decision_span)
+        elif arm_kind[ai] == 1:
+            val bind_name = expr_get_str(arm_head[ai])
+            val bind_stmt = stmt_if_val_decl(bind_name, arm_init[ai], 0)
+            val cond_expr = expr_binary(TOK_NEQ, expr_ident(bind_name, 0), expr_nil_lit(0), 0)
+            expr_set_span(cond_expr, decision_span)
+            val elif_idx = elif_new(cond_expr, current_body, tail)
+            val if_stmt = if tail.len() == 1: stmt_if_stmt_with_single_else(cond_expr, current_body, elif_idx, tail[0], decision_span) else: stmt_if_stmt(cond_expr, current_body, elif_idx, decision_span)
+            var block_stmts: [i64] = []
+            block_stmts.push(bind_stmt)
+            block_stmts.push(if_stmt)
+            current_stmt = stmt_block_stmt(block_stmts, 0)
+        else:
+            val pattern_idx = arm_head[ai]
+            val rationale = extract_wildcard_rationale(pattern_idx)
+            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+            var arm_indices: [i64] = []
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, current_body, "", rationale))
+            var wildcard_body = tail
+            if wildcard_body.len() == 0:
+                wildcard_body.push(stmt_expr_stmt(expr_unit(0), 0))
+            arm_indices.push(arm_new_with_binding_and_rationale(expr_ident("_", 0), -1, wildcard_body, "", ""))
+            current_stmt = stmt_match_stmt(arm_init[ai], arm_indices, decision_span)
+        tail = []
+        tail.push(current_stmt)
+        ai = ai - 1
+    tail[0]
 
 fn parse_for_binding_name() -> text:
     # G26/G40: plain identifiers must preserve their token text; keyword and
@@ -1203,60 +1412,25 @@ fn parse_for_stmt() -> i64:
     var iter_name = ""
     if par_kind_get() == 140:
         # Tuple destructuring: for (a, b) in list:
-        # G40: any keyword or _ accepted as tuple-binding name via G26 round-trip.
-        parser_advance()  # consume (
+        parser_advance()
         var names: [text] = []
-        # G26/G40 round-trip bug (see parse_tuple_destructure_val above):
-        # tok_kind_name(TOK_IDENT) == "Ident" and keyword_lookup("Ident") ==
-        # TOK_IDENT (the not-a-keyword fallback), so the keyword round-trip
-        # check below is trivially true for EVERY plain identifier -- without
-        # this explicit TOK_IDENT branch first, every `for (k, v) in ...`
-        # name silently became the literal string "Ident" and the loop
-        # body's real `k`/`v` were never bound ("unresolved name: k"/"v").
-        if par_kind_get() == 169:
-            names.push("_")
-            parser_advance()
-        elif par_kind_get() == TOK_IDENT:
-            names.push(par_text_get())
-            parser_expect(6)
-        else:
-            val ft0_kn = tok_kind_name(par_kind_get())
-            if keyword_lookup(ft0_kn) == par_kind_get():
-                names.push(ft0_kn)
-                parser_advance()
-            else:
-                names.push(par_text_get())
-                parser_expect(6)
+        names.push(parse_for_binding_name())
         while par_kind_get() == 160:
-            parser_advance()  # consume ,
-            if par_kind_get() == 169:
-                names.push("_")
-                parser_advance()
-            elif par_kind_get() == TOK_IDENT:
-                names.push(par_text_get())
-                parser_expect(6)
-            else:
-                val ftN_kn = tok_kind_name(par_kind_get())
-                if keyword_lookup(ftN_kn) == par_kind_get():
-                    names.push(ftN_kn)
-                    parser_advance()
-                else:
-                    names.push(par_text_get())
-                    parser_expect(6)
+            parser_advance()
+            names.push(parse_for_binding_name())
         parser_expect(141)
-        # Encode tuple pattern as "(a,b,c)" in iter_name
-        var joined = "("
-        var ni = 0
-        while ni < names.len():
-            if ni > 0:
-                joined = joined + ","
-            joined = joined + names[ni]
-            ni = ni + 1
-        joined = joined + ")"
-        iter_name = joined
+        iter_name = encode_for_tuple_binding(names)
     else:
-        iter_name = par_text_get()
-        parser_expect(6)
+        iter_name = parse_for_binding_name()
+        # Also accept `for a, b in iterable:`.  Lower it through the same
+        # encoded tuple pattern as the parenthesized spelling.
+        if par_kind_get() == TOK_COMMA:
+            var names: [text] = []
+            names.push(iter_name)
+            while par_kind_get() == TOK_COMMA:
+                parser_advance()
+                names.push(parse_for_binding_name())
+            iter_name = encode_for_tuple_binding(names)
     parser_expect(50)
     val iterable = parse_expr()
     parser_expect(161)
@@ -1289,8 +1463,8 @@ fn parse_while_stmt() -> i64:
         parser_expect(161)  # consume :
         val body = parse_block()
 
-        # Desugar: while true: { val NAME = EXPR; if NAME == nil: break; <body> }
-        val bind_stmt = stmt_val_decl(bind_name, 0, init_expr, 0)
+        # Mark the synthetic binding so the interpreter unwraps Option only.
+        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
         val name_expr = expr_ident(bind_name, 0)
         val nil_expr2 = expr_nil_lit(0)
         # == is kind 80; break if NAME == nil
@@ -1350,30 +1524,78 @@ fn g33_kw_ident_follow(kind: i64) -> bool:
         return true
     false
 
-fn parse_match_stmt() -> i64:
-    parser_advance()
-    return parse_match_stmt_tail()
-
 # Shared arm-parsing core for both `match` in STATEMENT position
 # (parse_match_stmt_tail -> stmt_match_stmt, a side-effecting match with no
 # value) and `match` in EXPRESSION position (parse_match_expr_tail ->
 # expr_match_expr, a value-producing match, e.g. `val r = match n: ...`).
 # Returns (scrutinee_expr_id, arm_indices) so each caller only differs in
 # which AST constructor it wraps the result in.
+# Recognizes `complete <ident>` / `dyn <ident>` in match-pattern position and
+# returns the marker-call expression id, or -1 when the current tokens are not
+# a region arm (in which case NOTHING has been consumed).
+fn parse_match_region_marker() -> i64:
+    val k = par_kind_get()
+    var marker = ""
+    if k == TOK_KW_DYN:
+        marker = "__dyn_region"
+    elif k == TOK_IDENT and par_text_get() == "complete":
+        marker = "__complete_region"
+    else:
+        return 0 - 1
+    if not parser_region_binder_follows():
+        return 0 - 1
+    parser_advance()
+    val binder = par_text_get()
+    parser_advance()
+    expr_call(expr_ident(marker, 0), [expr_ident(binder, 0)], 0)
+
+# True when the token after the current one is an identifier (the region
+# binder). Raw-source lookahead, the same technique the soft-keyword decl
+# probes in _ParserDecls/enum_module_body.spl use, because the parser has no
+# general two-token peek.
+fn parser_region_binder_follows() -> bool:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    val c = lex_source_char_at(pos)
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
 fn parse_match_arms_common() -> (i64, [i64]):
     val scrutinee = parse_expr()
+    # Enable forced indentation BEFORE consuming the ':' so the newline after
+    # it survives. Inside a call's parens the lexer treats the whole
+    # parenthesized expression as one logical line and emits no
+    # NEWLINE/INDENT/DEDENT at all, so a `match` used as an argument or
+    # struct-literal field value never got the INDENT its arm block expects
+    # ("expected Indent, got IntLit"). Mirrors the Rust seed's
+    # parse_match_expr and the block-bodied lambda path in
+    # _ParserPrimary/primary_expr.spl. Disabled again on every exit below.
+    lex_enable_forced_indentation()
     parser_expect(161)
     parser_skip_newlines()
+    val saw_indent = par_kind_get() == 181
     parser_expect(181)
 
     var arm_indices: [i64] = []
     var kind = par_kind_get()
-    for i in 0..1000:
+    var i: i64 = 0 - 1
+    while true:
+        i = i + 1
         parser_skip_newlines()
-        if par_kind_get() == 182:
+        kind = par_kind_get()
+        if kind == 182:
             parser_advance()
             break
-        if par_kind_get() == 190:
+        if kind == 190:
             break
         # `,` at ARM-BOUNDARY position inside a genuinely INDENTED match body
         # separates one arm from the next (`0 => 10, 1 => 20`) or trails the
@@ -1423,11 +1645,29 @@ fn parse_match_arms_common() -> (i64, [i64]):
                 lex_pop_indent()
             break
 
-        if par_kind_get() == 44:
+        if kind == 44:
             parser_advance()
 
             # Support multi-pattern: case X | Y | Z:
             # Parse first pattern
+            #
+            # `_` in PATTERN position is the wildcard pattern, never the
+            # placeholder-lambda shorthand. Patterns are parsed with the
+            # general expression parser (see convert_flat_pattern's docstring),
+            # so without this suppression `case Ok((selected, _)):` had its
+            # `(selected, _)` tuple rewritten by transform_placeholder_lambda
+            # into an EXPR_LAMBDA -- a tag convert_flat_pattern has no case
+            # for, so the whole sub-pattern silently degraded to an
+            # UNCONDITIONAL Wildcard that binds nothing. The arm then matched
+            # everything AND failed HIR lowering with "unresolved name:
+            # selected" -- a name declared in the very same file
+            # (stage4_symbol_closure.spl:831). Suppression is scoped to the
+            # pattern list only: the guard expression and the arm body below
+            # are parsed outside it, so `_`-placeholder lambdas keep working
+            # there. Mirrors string_interpolation_expand.spl's use of the same
+            # suppression API.
+            # bug doc: doc/08_tracking/bug/
+            #   match_arm_underscore_subpattern_becomes_lambda_2026-08-01.md
             var patterns: [i64] = []
             val ph_prev = set_placeholder_transform_suppressed(true)
             # `case complete b:` / `case dyn b:` region arms (§2 of
@@ -1442,15 +1682,23 @@ fn parse_match_arms_common() -> (i64, [i64]):
             # everywhere else); `dyn` is already TOK_KW_DYN. Both require an
             # IDENT binder immediately after, so a plain `case complete:`
             # matching a variant named `complete` is unaffected.
+            # `case i64 v:` / `case Point p:` type-pattern arms (bug doc
+            # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md). Same
+            # mechanism and the same reason as the region arms above: two
+            # juxtaposed identifiers are not an expression, so they are
+            # recognized here and lowered to a `__type_test(T, b)` marker.
             val region_marker = parse_match_region_marker()
+            val type_pattern = if region_marker >= 0: 0 - 1 else: parse_match_type_pattern()
             if region_marker >= 0:
                 patterns.push(region_marker)
+            elif type_pattern >= 0:
+                patterns.push(type_pattern)
             else:
                 patterns.push(parse_expr())
 
             # Check for pipe separator and collect additional patterns
             # Support multi-line patterns by skipping newlines/indents before pipes
-            for skip_idx in 0..100:
+            while true:
                 kind = par_kind_get()
                 val is_nl = kind == 180
                 val is_indent = kind == 181
@@ -1459,10 +1707,11 @@ fn parse_match_arms_common() -> (i64, [i64]):
                     break
                 parser_advance()
 
-            while par_kind_get() == 121:
+            kind = par_kind_get()
+            while kind == TOK_PIPE or kind == TOK_COMMA:
                 parser_advance()
                 # Skip newlines/indents after pipe
-                for skip_idx in 0..100:
+                while true:
                     kind = par_kind_get()
                     val is_nl = kind == 180
                     val is_indent = kind == 181
@@ -1471,8 +1720,9 @@ fn parse_match_arms_common() -> (i64, [i64]):
                         break
                     parser_advance()
                 patterns.push(parse_expr())
+                kind = par_kind_get()
                 # Skip newlines/indents after pattern
-                for skip_idx in 0..100:
+                while true:
                     kind = par_kind_get()
                     val is_nl = kind == 180
                     val is_indent = kind == 181
@@ -1480,6 +1730,7 @@ fn parse_match_arms_common() -> (i64, [i64]):
                     if not should_skip:
                         break
                     parser_advance()
+                kind = par_kind_get()
 
             # Pattern list is complete -- restore the caller's placeholder
             # setting so the guard and the arm body keep normal `_` semantics.
@@ -1500,20 +1751,27 @@ fn parse_match_arms_common() -> (i64, [i64]):
 
             # Expect colon after all patterns
             parser_expect(161)
-            val arm_body = parse_block()
+            val case_arm_body = parse_block()
 
             # Create an arm for each pattern (they share the same body and guard)
             for i in 0..patterns.len():
                 val pattern_idx = patterns[i]
                 val rationale = extract_wildcard_rationale(pattern_idx)
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
         else:
             # Caseless arm: pattern directly followed by ':' (no 'case' keyword required)
             # e.g. `Enum.Variant:`, `Ok(v):`, `_:`, `0:`
+            # Same placeholder-lambda suppression as the `case` arm above --
+            # `_` here is the wildcard pattern, not the lambda shorthand.
             var patterns: [i64] = []
+            val cl_ph_prev = set_placeholder_transform_suppressed(true)
             patterns.push(parse_expr())
+            while par_kind_get() == TOK_PIPE or par_kind_get() == TOK_COMMA:
+                parser_advance()
+                patterns.push(parse_expr())
+            set_placeholder_transform_suppressed(cl_ph_prev)
 
             # Check for guard clause: pattern if guard_expr:
             var guard_expr_idx: i64 = -1
@@ -1530,27 +1788,28 @@ fn parse_match_arms_common() -> (i64, [i64]):
 
             # G28: accept `=>` as either a single-expression separator or the
             # established block-arm spelling used by UI/web renderers.
-            var arm_body: [i64] = []
+            var case_arm_body: [i64] = []
             if par_kind_get() == TOK_FAT_ARROW:
                 parser_advance()
                 if par_kind_get() == TOK_NEWLINE:
-                    arm_body = parse_block()
+                    case_arm_body = parse_block()
                 else:
                     val arrow_expr = parse_expr()
-                    arm_body.push(stmt_expr_stmt(arrow_expr, 0))
+                    case_arm_body.push(stmt_expr_stmt(arrow_expr, 0))
             else:
                 # Expect colon after pattern
                 parser_expect(161)
-                arm_body = parse_block()
+                case_arm_body = parse_block()
 
             # Create arm
             for i in 0..patterns.len():
                 val pattern_idx = patterns[i]
                 val rationale = extract_wildcard_rationale(pattern_idx)
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
 
+    lex_disable_forced_indentation()
     (scrutinee, arm_indices)
 
 fn parse_match_stmt_tail() -> i64:
@@ -1580,15 +1839,44 @@ fn parse_receive_stmt() -> i64:
     var arm_indices: [i64] = []
     var timeout_expr: i64 = -1
     var timeout_body_idx: i64 = -1
+    # True once at least one `case`/`after` arm has been parsed, so a `,` in
+    # arm-boundary position can be told apart from a stray leading comma.
+    var saw_arm = false
 
     var kind = par_kind_get()
-    for i in 0..1000:
+    while true:
         parser_skip_newlines()
-        if par_kind_get() == 182:
+        kind = par_kind_get()
+        if kind == 182:
             parser_advance()
             break
-        if par_kind_get() == 190:
+        if kind == 190:
             break
+
+        # `,` at ARM-BOUNDARY position separates one receive arm from the next
+        # (`case 1: a, case 2: b`) or trails the last one (`case 2: b,`).
+        # `receive` duplicates the arm loop of parse_match_arms_common instead
+        # of sharing it, so it did NOT get that function's arm-separator fix
+        # and every comma-separated receive arm list died on the `else` branch
+        # below with "expected 'case' or 'after' in receive block".
+        #
+        # Comma's two roles never collide here either: BEFORE the arm's `:` it
+        # is the multi-pattern separator (`case 1, 2, 3:`), consumed by the
+        # `while kind == 121` pattern loop further down; AFTER the arm body it
+        # is an arm separator. Unlike `match`, `receive` is always a statement
+        # with a real INDENT (parser_expect(181) above) and can never be an
+        # element of an enclosing call/collection list, so no bracket-depth
+        # gate is needed. bug doc: doc/08_tracking/bug/
+        #   match_arm_comma_separator_rejected_2026-08-02.md
+        if kind == TOK_COMMA and saw_arm:
+            parser_advance()
+            parser_skip_newlines()
+            kind = par_kind_get()
+            if kind == 182:
+                parser_advance()
+                break
+            if kind == 190:
+                break
 
         if kind == 207:
             # after TIMEOUT: body -- timeout arm
@@ -1598,11 +1886,12 @@ fn parse_receive_stmt() -> i64:
             val after_body = parse_block()
             val after_body_stmt_idx = stmt_block_stmt(after_body, 0)
             timeout_body_idx = after_body_stmt_idx
+            saw_arm = true
         elif kind == 44:
             parser_advance()
             var patterns: [i64] = []
             patterns.push(parse_expr())
-            for skip_idx in 0..100:
+            while true:
                 kind = par_kind_get()
                 val is_nl = kind == 180
                 val is_indent = kind == 181
@@ -1610,9 +1899,10 @@ fn parse_receive_stmt() -> i64:
                 if not should_skip:
                     break
                 parser_advance()
-            while par_kind_get() == 121:
+            kind = par_kind_get()
+            while kind == 121:
                 parser_advance()
-                for skip_idx in 0..100:
+                while true:
                     kind = par_kind_get()
                     val is_nl = kind == 180
                     val is_indent = kind == 181
@@ -1620,19 +1910,21 @@ fn parse_receive_stmt() -> i64:
                     if not should_skip:
                         break
                     parser_advance()
+                kind = par_kind_get()
                 patterns.push(parse_expr())
             var guard_expr_idx: i64 = -1
             if par_kind_get() == 40:
                 parser_advance()
                 guard_expr_idx = parse_expr()
             parser_expect(161)
-            val arm_body = parse_block()
+            val case_arm_body = parse_block()
             for j in 0..patterns.len():
                 val pattern_idx = patterns[j]
                 val rationale = extract_wildcard_rationale(pattern_idx)
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, "", rationale)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, "", rationale)
                 arm_indices.push(arm_idx)
+            saw_arm = true
         else:
             parser_error("expected 'case' or 'after' in receive block")
             parser_advance()
@@ -1774,27 +2066,42 @@ fn parse_if_expr() -> i64:
                 parser_advance()
         arm_ends[unwind_i] = lex_token_start_get()
 
-    val chain_span = flat_span_new(arm_starts[0], arm_ends[0], arm_lines[0], arm_cols[0])
-    val chain_id = flat_if_expr_chain_new(chain_span)
-    var ai = 0
-    while ai < arm_conds.len():
-        val span_id = flat_span_new(arm_starts[ai], arm_ends[ai], arm_lines[ai], arm_cols[ai])
-        var arm_kind = ARM_CONDITION
-        var arm_head = arm_conds[ai]
-        if arm_patterns[ai] >= 0:
-            arm_head = arm_patterns[ai]
-            val pattern_tag = expr_get_tag(arm_head)
+    var result = terminal_else
+    var ai = arm_conds.len()
+    while ai > 0:
+        ai = ai - 1
+        val pattern_idx = arm_patterns[ai]
+        if pattern_idx >= 0:
+            val pattern_tag = expr_get_tag(pattern_idx)
             if pattern_tag == EXPR_CALL or pattern_tag == EXPR_METHOD_CALL:
-                arm_kind = ARM_PATTERN_BIND
-                arm_head = normalize_wildcard_pattern(arm_head)
+                val rationale = extract_wildcard_rationale(pattern_idx)
+                val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+                var arm_indices: [i64] = []
+                var then_arm_body: [i64] = []
+                then_arm_body.push(stmt_expr_stmt(arm_thens[ai], 0))
+                arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_arm_body, "", rationale))
+                val wildcard_pattern = expr_ident("_", 0)
+                var wildcard_body: [i64] = []
+                wildcard_body.push(stmt_expr_stmt(result, 0))
+                arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
+                result = expr_match_expr(arm_inits[ai], arm_indices, 0)
             else:
-                arm_kind = ARM_VALUE_BIND
-        val arm_id = flat_if_expr_arm_append(chain_id, arm_kind, arm_head, arm_inits[ai], arm_thens[ai], span_id)
-        if arm_kind == ARM_PATTERN_BIND:
-            flat_if_arm_rationale_set(arm_id, extract_wildcard_rationale(arm_patterns[ai]))
-        ai = ai + 1
-    flat_if_expr_else_set(chain_id, terminal_else)
-    expr_if_chain_expr(chain_id, chain_span)
+                val span_id = flat_span_new(arm_starts[ai], arm_ends[ai], arm_lines[ai], arm_cols[ai])
+                val bind_name = expr_get_str(pattern_idx)
+                val bind_stmt = stmt_if_val_decl(bind_name, arm_inits[ai], 0)
+                val name_expr = expr_ident(bind_name, 0)
+                val nil_expr = expr_nil_lit(0)
+                val bind_cond = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
+                expr_set_span(bind_cond, span_id)
+                val if_val_expr = expr_if_expr(bind_cond, arm_thens[ai], result, span_id)
+                var block_stmts: [i64] = []
+                block_stmts.push(bind_stmt)
+                block_stmts.push(stmt_expr_stmt(if_val_expr, 0))
+                result = expr_block(block_stmts, -1, 0)
+        else:
+            val span_id = flat_span_new(arm_starts[ai], arm_ends[ai], arm_lines[ai], arm_cols[ai])
+            result = expr_if_expr(arm_conds[ai], arm_thens[ai], result, span_id)
+    result
 
 fn parse_for_expr() -> i64:
     parser_advance()
@@ -1827,10 +2134,25 @@ fn parse_tuple_destructure_val() -> i64:
     # The evaluator detects the "(" prefix and destructures
     parser_advance()  # consume (
     var joined = "("
-    # G30: accept _ (kind 169); G40: accept any keyword via G26 round-trip
+    # G30: accept _ (kind 169); G26: plain Ident MUST be captured via
+    # par_text_get() before the keyword round-trip check below -- that check
+    # (tok_kind_name(TOK_IDENT) == "Ident", keyword_lookup("Ident") ==
+    # TOK_IDENT since "Ident" is not a real keyword) is trivially true for
+    # EVERY plain identifier, so without this explicit TOK_IDENT branch first
+    # every destructured name silently became the literal string "Ident"
+    # (same class of bug already fixed for single-name `val` in
+    # parse_val_decl_stmt above -- that fix never propagated to the
+    # parenthesized tuple form). G40: accept any keyword via G26 round-trip.
     if par_kind_get() == 169:
         joined = joined + "_"
         parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        # Plain identifier: capture real text. tok_kind_name(TOK_IDENT)=="Ident"
+        # and keyword_lookup("Ident")==TOK_IDENT, so the keyword round-trip below
+        # is trivially true for every ident and would append the literal "Ident"
+        # (same bug fixed in parse_val_decl_stmt's single-name path).
+        joined = joined + par_text_get()
+        parser_expect(6)
     else:
         val tdv0_kn = tok_kind_name(par_kind_get())
         if keyword_lookup(tdv0_kn) == par_kind_get():
@@ -1844,6 +2166,9 @@ fn parse_tuple_destructure_val() -> i64:
         if par_kind_get() == 169:
             joined = joined + ",_"
             parser_advance()
+        elif par_kind_get() == TOK_IDENT:
+            joined = joined + "," + par_text_get()
+            parser_expect(6)
         else:
             val tdvN_kn = tok_kind_name(par_kind_get())
             if keyword_lookup(tdvN_kn) == par_kind_get():
@@ -1868,6 +2193,9 @@ fn parse_tuple_destructure_var() -> i64:
     if par_kind_get() == 169:
         joined = joined + "_"
         parser_advance()
+    elif par_kind_get() == TOK_IDENT:
+        joined = joined + par_text_get()
+        parser_expect(6)
     else:
         val tdvr0_kn = tok_kind_name(par_kind_get())
         if keyword_lookup(tdvr0_kn) == par_kind_get():
@@ -1881,6 +2209,9 @@ fn parse_tuple_destructure_var() -> i64:
         if par_kind_get() == 169:
             joined = joined + ",_"
             parser_advance()
+        elif par_kind_get() == TOK_IDENT:
+            joined = joined + "," + par_text_get()
+            parser_expect(6)
         else:
             val tdvrN_kn = tok_kind_name(par_kind_get())
             if keyword_lookup(tdvrN_kn) == par_kind_get():
@@ -1907,16 +2238,11 @@ fn parse_gpu_launch_stmt() -> i64:
         gpu_launch(grid: (16, 16), block: (32, 32)):
             matrix_mul(a, b, out, n)
     """
-    val launch_start = lex_token_start_get()
-    val launch_line = par_line_get()
-    val launch_col = par_col_get()
     parser_advance()  # consume 'gpu_launch'
     parser_expect(140)
 
     var grid_exprs: [i64] = []
     var block_exprs: [i64] = []
-    var saw_grid = false
-    var saw_block = false
 
     # Parse named arguments: grid: (...), block: (...)
     for arg_i in 0..2:
@@ -1928,54 +2254,38 @@ fn parse_gpu_launch_stmt() -> i64:
         parser_expect(6)
         parser_expect(161)
 
-        # Parse the complete tuple so an oversized launch is diagnosed here
-        # rather than left as a confusing ')' parse error. The flat arena keeps
-        # source order; the bridge performs the same defensive validation for
-        # restored/cached arenas.
+        # Parse tuple: (expr, expr, ...)
         parser_expect(140)
         var dims: [i64] = []
-        while par_kind_get() != 141 and par_kind_get() != 190:
+        for dim_i in 0..3:
+            if dim_i > 0:
+                if par_kind_get() == 160:
+                    parser_advance()
+                    # Check for trailing comma before )
+                    if par_kind_get() == 141:
+                        break
+                else:
+                    break
             dims.push(parse_expr())
-            if par_kind_get() != 160:
-                break
-            parser_advance()
-            # A trailing comma is valid for the one-dimensional spelling.
-            if par_kind_get() == 141:
-                break
         parser_expect(141)
 
-        if dims.len() < 1 or dims.len() > 3:
-            parser_error("gpu_launch '" + arg_name + "' dimensions must contain 1 to 3 expressions")
-
         if arg_name == "grid":
-            if saw_grid:
-                parser_error("gpu_launch config contains duplicate 'grid' argument")
-            saw_grid = true
             grid_exprs = dims
         elif arg_name == "block":
-            if saw_block:
-                parser_error("gpu_launch config contains duplicate 'block' argument")
-            saw_block = true
             block_exprs = dims
-        else:
-            parser_error("gpu_launch config expects only named 'grid' and 'block' arguments; found '" + arg_name + "'")
-
-    if not saw_grid:
-        parser_error("gpu_launch config requires a 'grid' argument")
-    if not saw_block:
-        parser_error("gpu_launch config requires a 'block' argument")
 
     parser_expect(141)
     parser_expect(161)
 
     val body = parse_block()
-    val launch_span = flat_span_new(launch_start, lex_token_start_get(), launch_line, launch_col)
-    stmt_gpu_launch(grid_exprs, block_exprs, body, launch_span)
+    stmt_gpu_launch(grid_exprs, block_exprs, body, 0)
 
 # ===== Exports =====
-export parse_block, parse_statement
+export parse_block, parse_statement, parse_trailing_colon_block_arg
+export try_parse_bare_ident_string_call
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
-export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
+export parse_unsafe_block_expr_if_present
 export parse_receive_stmt, parse_bind_stmt
 export parse_if_expr, parse_for_expr, parse_while_expr

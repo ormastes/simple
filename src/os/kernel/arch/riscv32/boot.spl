@@ -6,7 +6,8 @@
 #
 # Boot chain: _start → boot_main → noalloc boot services → os_main
 
-use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
 use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
 use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
 use os.kernel.boot.os_main.{os_main}
@@ -25,6 +26,15 @@ fn _start():
     asm volatile:
         "mv      s0, a0"
         "mv      s1, a1"
+        # Every hart atomically checks in (rv32imac has the A extension). The
+        # counter lives outside [_sbss,_ebss] so hart 0's BSS clear cannot wipe it.
+        "la      t2, _smp_online_count"
+        "li      t1, 1"
+        "amoadd.w zero, t1, (t2)"
+        # Only hart 0 runs the primary boot; secondary harts park in WFI so they
+        # do not race the BSS clear / heap init.
+        "csrr    t0, mhartid"
+        "bnez    t0, .Lrv32_secondary_park"
         "la      sp, _stack_top"
         "la      t0, _sbss"
         "la      t1, _ebss"
@@ -34,22 +44,15 @@ fn _start():
         "addi    t0, t0, 4"
         "j       .Lrv32_bss_loop"
         ".Lrv32_bss_done:"
-        # NAND emulation and stack memory are NOLOAD and can power up nonzero
-        # (GARBAGE_FILL=1), so clear them explicitly before calling boot logic.
-        "la      t0, _nandram_start"
-        "la      t1, _stack_top"
-        ".Lrv32_nand_stack_loop:"
-        "bgeu    t0, t1, .Lrv32_nand_stack_done"
-        "sw      zero, 0(t0)"
-        "addi    t0, t0, 4"
-        "j       .Lrv32_nand_stack_loop"
-        ".Lrv32_nand_stack_done:"
         "mv      a0, s0"
         "mv      a1, s1"
         "call    os__kernel__arch__riscv32__boot__boot_main"
         ".Lrv32_boot_halt:"
         "wfi"
         "j       .Lrv32_boot_halt"
+        ".Lrv32_secondary_park:"
+        "wfi"
+        "j       .Lrv32_secondary_park"
 
 fn _uart_put(byte: u32):
     rt_riscv_uart_put(byte as u64)
@@ -244,6 +247,9 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     _line_memory_map()
     _line_ram_base()
     _line_boot_complete()
+    # Hart census early, before subsystem init: each core checked in atomically
+    # in _start, so this proves multi-core boot regardless of later subsystems.
+    _line_smp(_smp_wait_online())
     riscv_noalloc_log_init()
     rt_rv32_boot_optional_nvme_fw_selftest()
     riscv_noalloc_handoff(_hart_id as u64, _dtb_addr as u64)
@@ -251,7 +257,8 @@ fn boot_main(_hart_id: u32, _dtb_addr: u32):
     riscv_noalloc_heap_init(rt_riscv_qemu_heap_start(), rt_riscv_qemu_heap_size())
     riscv_noalloc_services_init(true)
     riscv_noalloc_log_boot_ok()
-    os_main()
+    if os_main():
+        serial_shell_main(0)
     # Fall through to wfi halt if os_main ever returns
     _qemu_exit_success()
     riscv_noalloc_boot_idle()

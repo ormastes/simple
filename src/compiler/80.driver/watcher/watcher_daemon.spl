@@ -13,7 +13,6 @@ use compiler.driver.watcher.watcher_types.{
 use compiler.driver.watcher.watcher_lock.{
     try_acquire_watcher_lock, release_watcher_lock, is_watcher_running
 }
-use compiler.common.config.{McdcPolicy}
 use compiler.driver.cache.cache_types.{
     CacheCheckResult, CACHE_FRESH, CACHE_STALE, CACHE_MISSING, CACHE_ERROR,
     cache_check_result_fresh, cache_check_result_error
@@ -35,13 +34,12 @@ use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_re
 # NOTE: module scope, not function scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution.
 # See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
-use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options_and_mcdc}
+use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
 use compiler.driver.cache.cache_validator.{source_to_cache_path}
 use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry, load_smf_manifest_default, smf_manifest_find}
-use compiler.driver.watcher.source_mutation.{watcher_source_created, watcher_source_edited, watcher_source_deleted}
 
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_mkdir_p(path: text) -> bool
+use std.io_runtime.{mkdir_p}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_hash_text(s: text) -> i64
 
@@ -128,12 +126,6 @@ impl WatcherDaemon:
         while i < changes.len():
             val change = changes[i]
             if change.path.ends_with(".spl"):
-                if change.event_type == "added":
-                    watcher_source_created(change.path)
-                elif change.event_type == "modified":
-                    watcher_source_edited(change.path)
-                elif change.event_type == "deleted":
-                    watcher_source_deleted(change.path)
                 shb_changes.push(ShbChangeEvent(path: change.path, event_type: change.event_type))
                 if change.event_type != "deleted":
                     spl_paths.push(change.path)
@@ -158,12 +150,8 @@ impl WatcherDaemon:
         cache_check_result_fresh(result.interface_hash)
 
     me generate_smf(req: WatcherRequest) -> CacheCheckResult:
-        use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
-        use compiler.driver.cache.cache_validator.{source_to_cache_path}
-        use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
-
         val smf_path = source_to_cache_path(req.source_path, self.config.smf_dir, ".smf")
-        val result = compile_to_smf_with_options_and_mcdc(
+        val result = compile_to_smf_with_options(
             req.source_path,
             smf_path,
             req.backend,
@@ -172,8 +160,7 @@ impl WatcherDaemon:
             req.debug_info,
             req.gc_off,
             req.profile,
-            req.allowed_families,
-            canonical_policy
+            req.allowed_families
         )
         if result.is_err():
             self.state.errors_count = self.state.errors_count + 1
@@ -184,7 +171,7 @@ impl WatcherDaemon:
                     pass
         val source_text = rt_file_read_text(req.source_path) ?? ""
         val source_hash = if source_text == "": 0 else: rt_hash_text(source_text)
-        val _ = update_smf_manifest_entry_with_mcdc(
+        val _ = update_smf_manifest_entry(
             req.source_path,
             smf_path,
             source_hash,
@@ -194,13 +181,11 @@ impl WatcherDaemon:
             req.debug_info,
             req.gc_off,
             req.profile,
-            req.allowed_families,
-            canonical_policy
+            req.allowed_families
         )
         cache_check_result_fresh(0)
 
     fn request_for_changed_file(source_path: text) -> WatcherRequest:
-        use compiler.driver.watcher.smf_manifest.{load_smf_manifest_default, smf_manifest_find}
 
         val manifest = load_smf_manifest_default()
         val existing = smf_manifest_find(manifest, source_path)
@@ -220,7 +205,6 @@ impl WatcherDaemon:
         req.gc_off = entry.gc_off
         req.profile = entry.profile
         req.allowed_families = entry.allowed_families
-        req.mcdc_policy = entry.mcdc_policy
         req
 
     me shutdown():
@@ -233,9 +217,9 @@ impl WatcherDaemon:
 # ============================================================================
 
 fn watcher_daemon_start(config: WatcherConfig) -> WatcherDaemon:
-    rt_mkdir_p(config.shb_dir)
-    rt_mkdir_p(config.smf_dir)
-    rt_mkdir_p(config.request_dir)
+    mkdir_p(config.shb_dir)
+    mkdir_p(config.smf_dir)
+    mkdir_p(config.request_dir)
 
     val daemon_config = watcher_config_to_daemon(config)
     val runner = daemon_runner_start(daemon_config)

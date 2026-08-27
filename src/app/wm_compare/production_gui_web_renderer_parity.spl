@@ -9,6 +9,8 @@ use app.wm_compare_host.html_widgets.{render_html_tree}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_opencl.{OpenClBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend,
@@ -78,6 +80,13 @@ struct BackendExecutedGuiSceneReport:
     metal_gpu_frame_complete: bool
     metal_gpu_readback_pixel_count: i32
     metal_gpu_readback_checksum: i64
+    metal_command_queue_handle: i64
+    software_checksum: i64
+    cpu_simd_checksum: i64
+    metal_checksum: i64
+    backend_checksum_match: bool
+    same_frame_backend_readback: bool
+    backend_readback_source: text
     software_first_pixel: u32
     cpu_simd_first_pixel: u32
     metal_first_pixel: u32
@@ -105,6 +114,7 @@ struct MetalReducedSceneResult:
     pixels: [u32]
     gpu_frame_complete: bool
     gpu_pixels: [u32]
+    command_queue_handle: i64
 
 struct ExactPixelComparison:
     different_pixels: i64
@@ -164,7 +174,9 @@ fn count_distinct_colors(px: [u32]) -> i32:
     while i < px_count:
         val c = px[i]
         val key = c.to_string()
-        if not seen.get(key).?:
+        # NOTE: never infer membership from Dict.get() under native codegen —
+        # see doc/07_guide/language/dict_native_pitfalls.md
+        if not seen.contains_key(key):
             seen[key] = true
             count = count + 1
         i = i + 1
@@ -182,7 +194,7 @@ fn checksum_pixels(px: [u32]) -> i64:
 fn sample_pixel(px: [u32], idx: i32) -> u32:
     if idx >= 0 and idx < px.len():
         return px[idx]
-    0u32
+    0x00000000u32
 
 fn abs_i32(v: i32) -> i32:
     if v < 0: -v else: v
@@ -245,10 +257,33 @@ fn render_reduced_gui_widget_scene_cpu_simd(width: i32, height: i32) -> [u32]:
 
 fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReducedSceneResult:
     if not is_macos():
-        return MetalReducedSceneResult(resolved_backend: "software", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [])
+        var opencl = OpenClBackend.create()
+        if opencl.init(width, height):
+            opencl.clear(0xFF102030u32)
+            opencl.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+            opencl.present()
+            val readback = opencl.read_pixels_with_source()
+            val pixels = readback.pixels
+            val complete = readback.source == "device_readback" and pixels.len() == width * height
+            val handle = readback.backend_handle
+            opencl.shutdown()
+            if complete:
+                return MetalReducedSceneResult(resolved_backend: "opencl", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: pixels, command_queue_handle: handle)
+        var vulkan = VulkanBackend.create()
+        if not vulkan.init(width, height):
+            return MetalReducedSceneResult(resolved_backend: "vulkan-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [], command_queue_handle: 0)
+        vulkan.clear(0xFF102030u32)
+        vulkan.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
+        val vulkan_readback = vulkan.read_pixels_with_source()
+        val vulkan_pixels = vulkan_readback.pixels
+        val vulkan_complete = vulkan_readback.source == "device_readback" and vulkan_pixels.len() == width * height
+        val vulkan_handle = vulkan_readback.backend_handle
+        vulkan.shutdown()
+        return MetalReducedSceneResult(resolved_backend: "vulkan", pixels: vulkan_pixels, gpu_frame_complete: vulkan_complete, gpu_pixels: vulkan_pixels, command_queue_handle: vulkan_handle)
     var metal = MetalBackend.create()
     if not metal.init(width, height):
-        return MetalReducedSceneResult(resolved_backend: "metal-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [])
+        return MetalReducedSceneResult(resolved_backend: "metal-unavailable", pixels: render_reduced_gui_widget_scene_software(width, height), gpu_frame_complete: false, gpu_pixels: [], command_queue_handle: 0)
+    val command_queue_handle = metal.command_queue
     metal.clear(0xFF102030u32)
     metal.draw_rect_filled(4, 4, 4, 4, 0xFF010204u32)
     metal.present()
@@ -256,7 +291,7 @@ fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReduce
     val gpu_pixels = if complete: metal.read_pixels_gpu_only() else: []
     val pixels = metal.read_pixels()
     metal.shutdown()
-    MetalReducedSceneResult(resolved_backend: "metal", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: gpu_pixels)
+    MetalReducedSceneResult(resolved_backend: "metal", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: gpu_pixels, command_queue_handle: command_queue_handle)
 
 fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32, clock: FrameClock? = nil) -> BackendExecutedGuiSceneReport:
     val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
@@ -276,8 +311,16 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32, clock: 
     val metal_pixels = metal_result.pixels
     val metal_complete = metal_result.gpu_frame_complete
     val metal_gpu_pixels = metal_result.gpu_pixels
+    val software_checksum = checksum_pixels(software)
+    val cpu_simd_checksum = checksum_pixels(cpu_simd)
+    val metal_checksum = checksum_pixels(metal_pixels)
+    val metal_gpu_checksum = checksum_pixels(metal_gpu_pixels)
     val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
     val metal_cmp = if metal_backend == "software": exact_pixel_comparison_match() else: compare_exact_pixels(software, metal_pixels, width, height)
+    val device_backend = metal_backend == "metal" or metal_backend == "opencl" or metal_backend == "vulkan"
+    val backend_checksum_match = software_checksum == cpu_simd_checksum and (metal_backend == "software" or software_checksum == metal_checksum) and (not device_backend or software_checksum == metal_gpu_checksum)
+    val same_frame_backend_readback = if device_backend: metal_complete and metal_gpu_pixels.len() == width * height and metal_gpu_checksum == metal_checksum and metal_gpu_checksum == software_checksum else: true
+    val backend_readback_source = if device_backend and same_frame_backend_readback: "device_readback" else: "software_reference"
     val total_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
     val rect_idx = 4 + (4 * width)
     val total_elapsed_us = positive_elapsed_us(total_start_us, ck)
@@ -304,7 +347,14 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32, clock: 
         cpu_simd_total_hits: total_hits,
         metal_gpu_frame_complete: metal_complete,
         metal_gpu_readback_pixel_count: metal_gpu_pixels.len(),
-        metal_gpu_readback_checksum: checksum_pixels(metal_gpu_pixels),
+        metal_gpu_readback_checksum: metal_gpu_checksum,
+        metal_command_queue_handle: metal_result.command_queue_handle,
+        software_checksum: software_checksum,
+        cpu_simd_checksum: cpu_simd_checksum,
+        metal_checksum: metal_checksum,
+        backend_checksum_match: backend_checksum_match,
+        same_frame_backend_readback: same_frame_backend_readback,
+        backend_readback_source: backend_readback_source,
         software_first_pixel: sample_pixel(software, 0),
         cpu_simd_first_pixel: sample_pixel(cpu_simd, 0),
         metal_first_pixel: sample_pixel(metal_pixels, 0),

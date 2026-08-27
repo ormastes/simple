@@ -6,7 +6,7 @@
 # optional live handoff hook.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.loader.cap_exec_gate.{exec_cap_check, exec_cap_check_caps}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 use os.kernel.loader.byte_utils.{byte_len}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
@@ -24,32 +24,17 @@ use os.kernel.scheduler.scheduler_types.{
 use os.kernel.scheduler.green_carrier.{
     green_carrier_execution_state_new, green_carrier_parallelism_new
 }
-use os.kernel.scheduler.green_carrier.{green_carrier_execution_state_new}
-use os.kernel.scheduler.scheduler_arm_bootstrap.{scheduler_create_bootstrap_user_task_pid}
 use os.kernel.loader.spawn_authority.{
-    spawn_authority_check_spawn
+    spawn_authority_check_spawn,
+    spawn_authority_spawn_caps
 }
 use os.kernel.loader.spawn_recipes.{
     spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
 }
-use os.kernel.loader.fs_exec_launch_caps_v1.{
-    fs_exec_launch_caps_with_launch_v1, fs_exec_launch_caps_attenuated_by_v1
-}
-use os.kernel.loader.spawn_recipes.{
-    SPAWN_RECIPE_AUTHENTICATED_SERVER, SPAWN_RECIPE_DEDICATED_DBD,
-    SPAWN_RECIPE_WEB
-}
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology}
-use os.kernel.types.capability_types.{CapabilitySet, capability_set_bind_owner}
+use os.kernel.types.capability_types.{CapabilitySet}
 
 extern fn serial_println(msg: text)
-
-@cfg(x86_64)
-use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn}
-@cfg(arm64)
-use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_ring3}
-@cfg(riscv64)
-use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_spawn_ring3}
 
 # `fs_exec_prepare_spawn_from_bytes` is a shared cross-arch bridge (x86_64,
 # arm64, riscv, ...). Only the arm64 freestanding ABI hands out raw
@@ -100,30 +85,6 @@ fn _fs_exec_active_arch() -> Architecture:
 fn _fs_exec_active_arch() -> Architecture:
     Architecture.Riscv32
 
-@cfg(x86_64)
-fn _fs_exec_spawn_ring3_active(path: text, argv: [text], envp: [text]) -> i64:
-    x86_64_fs_exec_spawn(path, argv, envp)
-
-@cfg(arm64)
-fn _fs_exec_spawn_ring3_active(path: text, argv: [text], envp: [text]) -> i64:
-    arm64_fs_exec_spawn_ring3(path, argv, envp)
-
-@cfg(arm32)
-fn _fs_exec_spawn_ring3_active(path: text, argv: [text], envp: [text]) -> i64:
-    fs_exec_spawn(path, argv, envp)
-
-@cfg(x86)
-fn _fs_exec_spawn_ring3_active(path: text, argv: [text], envp: [text]) -> i64:
-    fs_exec_spawn(path, argv, envp)
-
-@cfg(riscv64)
-fn _fs_exec_spawn_ring3_active(path: text, argv: [text], envp: [text]) -> i64:
-    riscv64_fs_exec_spawn_ring3(path, argv, envp)
-
-@cfg(riscv32)
-fn _fs_exec_spawn_ring3_active(path: text, argv: [text], envp: [text]) -> i64:
-    fs_exec_spawn(path, argv, envp)
-
 @cfg(arm64)
 fn _fs_exec_read_bytes(path: text) -> [u8]:
     arm_fs_exec_read_file_bytes(path)
@@ -153,11 +114,6 @@ pub struct FsExecPrepareResult:
     pid: i64
     entry: i64
 
-pub struct FsExecAuthenticatedRunResultV1:
-    exit_code: i64
-    evidence: SchedulerExecutionEvidenceTokenV1?
-    scheduler: Scheduler
-
 fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
     """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
     # NOTE: module-level `pub val MAX_TASKS`/`PRIORITY_LEVELS` (scheduler_types.spl)
@@ -184,8 +140,8 @@ fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
         current_by_cpu: [TaskId(id: 0)],
         preempt_pending_by_cpu: [nil],
         ready_queues: queues,
-        cpu_runqueues: [CpuRunQueue.new(0u32)],
-        topology: scheduler_flat_topology(1u32),
+        cpu_runqueues: [CpuRunQueue.new(0 as u32)],
+        topology: scheduler_flat_topology(1 as u32),
         rt_runtime_ns_by_cpu: [0],
         rt_period_ns_by_cpu: [0],
         rt_consumed_ns_by_cpu: [0],
@@ -201,7 +157,13 @@ fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
         trace_count: 0,
         tick_count: 0,
         next_task_id: 1,
-        green_execution_state: green_carrier_execution_state_new(1)
+        executable_adoption_state: SchedulerExecutableAdoptionOwnerStateV1.Idle,
+        executable_adoption_pid: 0u64,
+        executable_adoption_token_slot: -1,
+        executable_adoption_token_generation: 0u64,
+        executable_adoption_token_nonce: 0u64,
+        green_execution_state: green_carrier_execution_state_new(1),
+        green_parallelism_state: green_carrier_parallelism_new(1)
     )
 
 pub fn fs_exec_read_executable_bytes(path: text) -> [u8]:
@@ -221,48 +183,21 @@ pub(package) fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: 
     val _envp = envp
     serial_println("[fs-exec] spawn:auth-required path={path}")
     FsExecPrepareResult(
-        scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -13, entry: 0, effective_caps: CapabilitySet.empty())
+        scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -13, entry: 0)
 
-    var scheduler = _fs_exec_new_bootstrap_scheduler()
-    # Ambient authority is now GATED (master plan §5.4): the loader no longer
-    # calls `spawn_full()` directly. `spawn_authority_ambient_caps` returns the
-    # full set only for the root task or while the bootstrap window is still
-    # open; any other caller after `spawn_authority_seal_bootstrap()` gets the
-    # pledged deny-all set and must spawn through a SpawnSpec recipe instead.
-    # The caller id comes from the scalar recorded by `fs_exec_spawn_as` (the
-    # cross-arch bridge signature is shared, so it is not threaded as a param —
-    # see spawn_authority.spl "Caller propagation").
-    # A MIGRATED caller declares a recipe (`spawn_authority_note_recipe`) before
-    # descending, and then never touches ambient authority at all: it presents a
-    # SpawnSpec and gets an attenuated pouch minted from its own parent tokens.
-    # With no recipe declared the scalar is SPAWN_RECIPE_NONE and this is
-    # bit-for-bit the previous ambient call.
-    val spawn_recipe = spawn_authority_current_recipe()
-    val spawn_caller = spawn_authority_current_caller()
-    val spawn_caps = spawn_authority_spawn_caps(
-        spawn_caller, spawn_recipe, _fs_exec_parent_caps(spawn_caller, spawn_recipe))
-    val scheduler_result: SchedulerBootstrapUserTaskResult = scheduler_create_bootstrap_user_task_pid(
-        scheduler, image, TaskPriority.Normal, spawn_caps
-    )
-    scheduler = scheduler_result.scheduler
-    val pid = scheduler_result.pid
-    if pid == 0:
-        serial_println("[fs-exec] spawn:scheduler-fail path={path}")
-        return FsExecPrepareResult(scheduler: scheduler, pid: -12, entry: 0)
-
-    serial_println(
-        "[fs-exec] spawn:prepared path={path} pid={pid} entry={user_process_image_entry(image)} segments={_fs_exec_segment_count_for_log(image)}"
-    )
-    FsExecPrepareResult(scheduler: scheduler, pid: pid as i64, entry: user_process_image_entry(image) as i64)
-
-pub fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
-    """Resolve bytes, build an image, and register a bootstrap user task."""
+pub(package) fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    """Resolve bytes for diagnostics, then reject without loader authority."""
     serial_println("[fs-exec] spawn:resolve path={path}")
     val bytes = _fs_exec_read_bytes(path)
     fs_exec_prepare_spawn_from_bytes(path, bytes, _fs_exec_active_arch(), argv, envp)
 
 pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
-    """Load a filesystem executable, register it, and perform the arch handoff."""
+    """Reject unauthenticated path-only execution.
+
+    Production filesystem execution must enter through
+    `fs_exec_adopt_authenticated_v1`, carrying the loader-owned registry token.
+    A pathname and bytes are never sufficient execution authority.
+    """
     fs_exec_spawn_as(0, path, argv, envp)
 
 pub fn fs_exec_adopt_authenticated_v1(
@@ -276,74 +211,32 @@ pub fn fs_exec_adopt_authenticated_v1(
     path: text,
     recipe: i64
 ) -> FsExecPrepareResult:
-    """Retire the legacy scalar-caller ABI without fabricating parent caps.
+    """Consume one loader-issued authority and publish through Scheduler.
 
-    An authenticated token is not sufficient to establish a child capability
-    ceiling: this ABI carries only a caller number, not that task's real
-    `CapabilitySet` or validated argv/envp.  The launch-aware sibling is the
-    only production route.  Revoke before returning so an old caller cannot
-    turn a fail-closed compatibility rejection into a retained live token.
+    This bridge cannot issue or reconstruct a token. The loader registry owns
+    replay defense, while the returned Scheduler owns the newly published task.
     """
-    val _consumer = consumer
-    val _entry_point = entry_point
-    val _caller = caller
-    val _path = path
-    val _recipe = recipe
-    val retired = executable_loader_revoke(table, authorities, token).is_ok()
-    FsExecPrepareResult(
-        scheduler: scheduler, pid: if retired: -13 else: -5, entry: 0)
-
-pub fn fs_exec_adopt_authenticated_with_launch_v1(
-    scheduler: Scheduler,
-    mut table: MountTable,
-    authorities: ExecutableAuthorityRegistryV1,
-    token: ExecutableAuthorityTokenV1,
-    consumer: ExecutableLoadConsumerV1,
-    entry_point: u64,
-    caller: i64,
-    caller_caps: CapabilitySet,
-    path: text,
-    argv: [text],
-    envp: [text],
-    recipe: i64
-) -> FsExecPrepareResult:
-    """Publish one exact authenticated image with its admitted initial stack.
-
-    Unlike the compatibility adoption seam this never recreates a parent
-    capability set or drops argv/envp.  The scheduler retains the mapped image
-    and the exact launch stack after the registry token is consumed.
-    """
-    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
-    if launch_result.is_err():
-        return FsExecPrepareResult(
-            scheduler: scheduler,
-            pid: executable_launch_arguments_v1_errno(
-                launch_result.unwrap_err()) as i64,
-            entry: 0)
-    val launch = launch_result.unwrap()
-    if not spawn_recipe_launch_contract_valid(
-        recipe, launch.path, launch.argv, launch.envp):
-        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
-    val gate = exec_cap_check_caps(caller_caps, launch.path)
+    val gate = exec_cap_check(caller, path)
     if gate != 0:
         return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
     val allowed = spawn_authority_check_spawn(caller, recipe)
     if allowed != 0:
         return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
-    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
+    val caps = spawn_authority_spawn_caps(
+        caller, recipe, _fs_exec_parent_caps(caller, recipe))
     var owner = scheduler
     val adopted: SchedulerExecutableAdoptionResultV1 =
-        owner.adopt_authenticated_executable_pid_with_launch_v1(
+        owner.adopt_authenticated_executable_pid_v1(
             table, authorities, token, consumer, entry_point,
-            TaskPriority.Normal, caps, launch.path, launch.argv, launch.envp)
+            TaskPriority.Normal, caps)
     if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
         return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
     FsExecPrepareResult(
         scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
 
 pub fn fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
-    """Load a filesystem executable through the active arch's live user-mode handoff."""
-    _fs_exec_spawn_ring3_active(path, argv, envp)
+    """Reject unauthenticated live handoff through the same canonical gate."""
+    fs_exec_spawn(path, argv, envp)
 
 pub fn fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> i64:
     """Capability-gated spawn: checks FileExec + ProcessSpawn before loading.
@@ -362,6 +255,31 @@ pub fn fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> 
     serial_println("[fs-exec] spawn:auth-required caller={caller} path={path}")
     -13
 
+# ============================================================================
+# Recipe-gated entry points (master plan §5.4 — migrated userland callers)
+# ============================================================================
+
+fn _fs_exec_parent_caps(caller: i64, recipe: i64) -> CapabilitySet:
+    """The parent capability set a recipe mint is bounded by.
+
+    The fs-exec bridge builds its own bootstrap scheduler and therefore has no
+    handle on the calling task's `TaskControlBlock.capabilities`. Until boot
+    installs per-task root grants (see `spawn_recipe_seed_parent_caps`), the
+    bound used here is that same seeded grant — i.e. exactly the recipe's own
+    declared authority, which is strictly narrower than the `spawn_full()`
+    god-mode set this path used before, but does NOT yet enforce a real
+    per-caller parent bound.
+
+    TODO(boot-seal): thread the calling task's real `TaskControlBlock.capabilities`
+    into `fs_exec_prepare_spawn_from_bytes` so the `parent ∩` term is a genuine
+    bound rather than the recipe's own declaration. Must land with the boot-side
+    seeder in the arming session; the seal is safe to arm either way (the child is
+    attenuated in both cases), but the parent bound is only real afterwards."""
+    if not spawn_recipe_is_migrated(recipe):
+        return CapabilitySet.full()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
+
 pub fn fs_exec_spawn_with_recipe(caller: i64, recipe: i64, path: text, argv: [text], envp: [text]) -> i64:
     """Capability-gated spawn under a named SpawnSpec recipe.
 
@@ -376,36 +294,12 @@ pub fn fs_exec_spawn_with_recipe(caller: i64, recipe: i64, path: text, argv: [te
     if gate != 0:
         serial_println("[fs-exec] spawn:denied caller={caller} path={path} err={gate}")
         return gate as i64
-    spawn_authority_note_caller(caller)
-    spawn_authority_note_recipe(recipe)
-    val prepared = fs_exec_prepare_spawn(path, argv, envp)
-    spawn_authority_clear_recipe()
-    spawn_authority_clear_caller()
-    if prepared.pid <= 0:
-        return prepared.pid
-    serial_println("[fs-exec] spawn:pid={prepared.pid} recipe={recipe} path={path}")
-    prepared.pid
+    val _argv = argv
+    val _envp = envp
+    serial_println(
+        "[fs-exec] spawn:auth-required caller={caller} recipe={recipe} path={path}")
+    -13
 
 pub fn fs_exec_spawn_ring3_with_recipe(caller: i64, recipe: i64, path: text, argv: [text], envp: [text]) -> i64:
-    """Live user-mode handoff spawn under a named recipe.
-
-    Also fixes the audit hole in the plain `fs_exec_spawn_ring3`: that entry
-    never recorded its caller, so the shared bridge read a STALE
-    `g_spawn_current_caller` scalar and attributed the spawn to whoever spawned
-    last. This entry records caller AND recipe before descending, and clears both
-    after."""
-    val allowed = spawn_authority_check_spawn(caller, recipe)
-    if allowed != 0:
-        serial_println("[fs-exec] ring3:seal-denied caller={caller} recipe={recipe} path={path}")
-        return allowed as i64
-    val gate = exec_cap_check(caller, path)
-    if gate != 0:
-        serial_println("[fs-exec] ring3:denied caller={caller} path={path} err={gate}")
-        return gate as i64
-    spawn_authority_note_caller(caller)
-    spawn_authority_note_recipe(recipe)
-    val pid = _fs_exec_spawn_ring3_active(path, argv, envp)
-    spawn_authority_clear_recipe()
-    spawn_authority_clear_caller()
-    serial_println("[fs-exec] ring3:result caller={caller} recipe={recipe} pid={pid}")
-    pid
+    """Reject unauthenticated recipe handoff through the canonical gate."""
+    fs_exec_spawn_with_recipe(caller, recipe, path, argv, envp)

@@ -21,7 +21,6 @@ use compiler.mir.mir_lowering.MirLowering
 use compiler.mir.mir_serialization.serialize_mir_function
 use compiler.backend.backend.backend_helpers.{get_effective_backend_name}
 use compiler.backend.backend.mir_target_context_provider.{backend_mir_target_context}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # JIT Interpreter Configuration
@@ -168,7 +167,9 @@ impl JitInterpreterBackend:
             print "[jit] Compiling function: {fn_.name}"
 
         # Step 1: Lower HIR to MIR
-        var lowering = MirLowering.new(module.symbols)
+        val backend = get_effective_backend_name(self.config.backend, false)
+        val target_context = backend_mir_target_context(backend)
+        var lowering = MirLowering.new_for_target(module.symbols, target_context)
         val mir_fn = lowering.lower_function(fn_)
 
         if lowering.errors.len() > 0:
@@ -291,7 +292,7 @@ impl JitInterpreterBackend:
             case Err(msg):
                 Some(Err(BackendError.runtime_error("JIT execution failed: {msg}", nil)))
 
-impl Backend for JitInterpreterBackend:
+impl JitInterpreterBackend:
     fn name() -> text:
         "jit-interpreter"
 
@@ -306,20 +307,24 @@ impl Backend for JitInterpreterBackend:
         val ctx = EvalContext(env: env, module: module, backend: self)
 
         # Register functions
-        var main_fn: HirFunction? = nil
+        var has_main = false
+        var main_symbol_id: i64 = 0
         for symbol in module.functions.keys():
             val fn_ = module.functions[symbol]
             ctx.env.define_global(symbol, Value.Function(FunctionValue(symbol: symbol, name: fn_.name)))
             if fn_.name == "main":
-                main_fn = Some(fn_)
+                has_main = true
+                main_symbol_id = symbol.id
 
         # Try to JIT compile main function if configured
-        if main_fn.? and self.should_jit_compile("main"):
-            self.try_jit_compile(main_fn.unwrap(), module)?
+        if has_main and self.should_jit_compile("main"):
+            val main_symbol = SymbolId(id: main_symbol_id)
+            self.try_jit_compile(module.functions[main_symbol], module)?
 
         # Execute main
-        if main_fn.?:
-            val result = self.call_hir_function(main_fn.unwrap(), [], ctx, module)?
+        if has_main:
+            val main_symbol = SymbolId(id: main_symbol_id)
+            val result = self.call_hir_function(module.functions[main_symbol], [], ctx, module)?
             Ok(BackendResult.Value(result))
         else:
             Ok(BackendResult.Unit)

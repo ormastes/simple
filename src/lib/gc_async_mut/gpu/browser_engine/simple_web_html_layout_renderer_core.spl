@@ -6,10 +6,18 @@ use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 class Rules:
     group_parts: [[[text]]]
+    group_specificities: [[i32]]
     decls: [text]
+    important_decls: [text]
 
 # Named transport for the three parallel rule-scan arrays. Returning these as
 # an anonymous [[text]] loses the inner RuntimeArray identity in native code.
+enum CssWrapperKind:
+    Media
+    Supports
+    Layer
+    Unsupported
+
 class CssRuleScan:
     selectors: [text]
     declarations: [text]
@@ -185,7 +193,7 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
             break
         var selector_start = rp
         while selector_start > 0:
-            val previous = css.char_at(selector_start - 1)
+            val previous = css[selector_start - 1:selector_start - 1 + 1]
             if previous == "{" or previous == "}" or previous == ",":
                 break
             selector_start = selector_start - 1
@@ -249,30 +257,16 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         return ""
     text_list_prefix(base_entries, base_entry_i).join("") + text_list_prefix(variant_entries, variant_entry_i).join("")
 
-fn _css_resolve_vars(css: text, props: text) -> text:
-    if props.len() == 0 or css.index_of("var(") < 0:
-        return css
-    var names: [text] = [""; 200]
-    var values: [text] = [""; 200]
-    var prop_count = 0
-    val props_len = props.len()
-    var pp: i64 = 0
-    var pg = 0
-    while pp < props_len and pg < 200:
-        pg = pg + 1
-        val nl = find_from(props, "\n", pp)
-        var line_end = nl
-        if line_end < 0:
-            line_end = props_len
-        val line = props.substring(pp, line_end).trim()
-        val lc = line.index_of(":")
-        if lc > 0 and prop_count < names.len():
-            names[prop_count] = line.substring(0, lc).trim()
-            values[prop_count] = line.substring(lc + 1, line.len()).trim()
-            prop_count = prop_count + 1
-        pp = if nl >= 0: nl + 1 else: props_len
-    if prop_count == 0:
-        return css
+fn _css_resolve_vars(
+    css: text, state: CssVarResolutionState, resolution_depth: i32,
+    active_count: i32, nested: bool
+) -> CssVarResolution:
+    if resolution_depth > 32:
+        return CssVarResolution.DepthExceeded
+    if css.index_of("var(") < 0:
+        return CssVarResolution.Resolved(value: css)
+    if state.remaining <= 0:
+        return CssVarResolution.BudgetExceeded
     var chunks: [text] = [""; 801]
     var chunk_count = 0
     # Unresolved-var accounting for the top-level pass. A `var()` that cannot
@@ -295,6 +289,9 @@ fn _css_resolve_vars(css: text, props: text) -> text:
         val open = find_from(css, "var(", scan)
         if open < 0:
             break
+        if state.remaining <= 0:
+            return CssVarResolution.BudgetExceeded
+        state.remaining = state.remaining - 1
         # Match the closing paren by depth: var() args may nest more var()/
         # calc() parens, so the first ")" is not necessarily the close.
         var depth = 1
@@ -306,10 +303,10 @@ fn _css_resolve_vars(css: text, props: text) -> text:
                 depth = depth - 1
             k = k + 1
         if depth != 0:
-            break
+            return CssVarResolution.Invalid
         val close = k - 1
         if chunk_count + 2 >= chunks.len():
-            break
+            return CssVarResolution.BudgetExceeded
         # Split "--name, fallback" at the first TOP-LEVEL comma; the fallback
         # itself may be another var() and is resolved recursively per spec.
         val inner = css.substring(open + 4, close)
@@ -353,7 +350,8 @@ fn _css_resolve_vars(css: text, props: text) -> text:
                 prop_idx = prop_scan
                 break
             prop_scan = prop_scan - 1
-        chunks[chunk_count] = css.substring(scan, open)
+        val prefix = css.substring(scan, open)
+        chunks[chunk_count] = prefix
         chunk_count = chunk_count + 1
         var replacement = CssVarResolution.Invalid
         if not valid_var_name:
@@ -400,7 +398,11 @@ fn _css_resolve_vars(css: text, props: text) -> text:
                         _:
                             pass
         elif comma >= 0:
-            chunks[chunk_count] = _css_resolve_vars(inner.substring(comma + 1, inner_len).trim(), props)
+            val fallback = inner.substring(comma + 1, inner_len).trim()
+            replacement = _css_resolve_vars(
+                fallback, state, resolution_depth + 1,
+                active_count, true
+            )
         else:
             replacement = CssVarResolution.Invalid
         var should_use_fallback = false
@@ -487,8 +489,13 @@ fn _css_resolve_vars(css: text, props: text) -> text:
         chunks[chunk_count] = replacement_text
         chunk_count = chunk_count + 1
         scan = close + 1
+    if scan < css_len and vg >= 400:
+        return CssVarResolution.BudgetExceeded
     if scan < css_len and chunk_count < chunks.len():
-        chunks[chunk_count] = css.substring(scan, css_len)
+        val suffix = css.substring(scan, css_len)
+        if resolved_len + suffix.len() > SIMPLE_WEB_MAX_HTML_BYTES:
+            return CssVarResolution.Invalid
+        chunks[chunk_count] = suffix
         chunk_count = chunk_count + 1
     # One line, only when something actually failed to resolve, only for the
     # top-level pass. Silent on a healthy sheet.
@@ -580,20 +587,59 @@ fn extract_css(html: text) -> Rules:
 # those small pieces — genuine O(total_css_len). A brace-depth stack tracks
 # @-wrappers so depth-1 rules carry their wrapper prelude, matching the
 # depth-0-rule / depth-1-child-of-@-wrapper emission the layout cascade
-# expects.
-fn _css_scan_rules_simple(css: text) -> CssRuleScan:
-    val cap = 6000
-    var sels: [text] = [""; cap]
-    var decls: [text] = [""; cap]
-    var wraps: [text] = [""; cap]
-    var out = 0
+# expects. Native replacement counts admit normal sheets; hostile delimiter
+# storms keep only a byte-bounded prefix before either split allocates.
+fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
+    val rule_cap = if requested_rule_cap < 0:
+        0
+    elif requested_rule_cap > CSS_SCAN_CANDIDATE_CAP:
+        CSS_SCAN_CANDIDATE_CAP
+    else:
+        requested_rule_cap
+    if rule_cap == 0:
+        return CssRuleScan(
+            selectors: [], declarations: [], wrapper_starts: [],
+            wrapper_counts: [], wrapper_kinds: [], wrapper_preludes: []
+        )
+    val structural_cap = rule_cap * 2 + 64
+    var cutoff = css.len()
+    var excessive_structure = false
+    if css.len() > structural_cap:
+        excessive_structure = (
+            css.len() - css.replace("{", "").len() > structural_cap
+        )
+        if not excessive_structure:
+            excessive_structure = (
+                css.len() - css.replace("}", "").len() > structural_cap
+            )
+    if excessive_structure:
+        # ponytail: hostile sheets keep a byte-bounded prefix; add a native
+        # positional-count primitive only if standards-level recovery matters.
+        cutoff = structural_cap
+    val bounded_css = if cutoff < css.len():
+        css.substring(0, cutoff)
+    else:
+        css
     # Brace-depth stack of opener (selector / @-prelude) strings.
     var stack: [text] = [""; 64]
     var depth = 0
-    val parts = css.split("{")
+    val parts = bounded_css.split("{")
     val np = parts.len()
-    if np == 0:
-        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
+    if np <= 1:
+        return CssRuleScan(
+            selectors: [], declarations: [], wrapper_starts: [],
+            wrapper_counts: [], wrapper_kinds: [], wrapper_preludes: []
+        )
+    var cap = np - 1
+    if cap > rule_cap:
+        cap = rule_cap
+    var sels: [text] = [""; cap]
+    var decls: [text] = [""; cap]
+    var wrapper_starts: [i32] = [0; cap]
+    var wrapper_counts: [i32] = [0; cap]
+    var wrapper_kinds: [CssWrapperKind] = []
+    var wrapper_preludes: [text] = []
+    var out = 0
     var sel_pending: text = parts[0]
     var k = 1
     while k < np:  # cpu-lane-loop-ok: the rule-boundary scan: walks the `{`-split segments of one stylesheet (np-1 segments = candidate rules), deliberately native-split then small-piece sliced; once per style invalidation
@@ -610,7 +656,13 @@ fn _css_scan_rules_simple(css: text) -> CssRuleScan:
         # selector, emit it. Preserve every enclosing @-ancestor so an inner
         # @layer cannot escape a false outer @supports/@media condition.
         val is_wrapper = opener.lower().starts_with("@")
-        if (not is_wrapper) and opener.len() > 0 and out < cap:
+        # Fail-closed on an unterminated rule: a leaf block whose segment
+        # carries no "}" never closed before the next "{" or EOF. The old
+        # character-walk rejected it (`close < 0` -> break); the native-split
+        # rewrite silently auto-closed it at EOF. Pinned by
+        # simple_web_layout_child_index_spec "keeps malformed CSS rule
+        # admission stable with pre-counted rules".
+        if (not is_wrapper) and opener.len() > 0 and out < cap and nsubs > 1:
             wrapper_starts[out] = wrapper_kinds.len()
             var wrapper_count = 0
             var wrapper_depth = 0
@@ -656,7 +708,7 @@ fn _css_scan_rules_simple(css: text) -> CssRuleScan:
                 wrapper_count = wrapper_count + 1
             sels[out] = opener
             decls[out] = subs[0].trim()
-            wraps[out] = wrapper
+            wrapper_counts[out] = wrapper_count
             out = out + 1
         # Each "}" in `seg` closes one open block; pop that many.
         var closes = nsubs - 1
@@ -669,7 +721,10 @@ fn _css_scan_rules_simple(css: text) -> CssRuleScan:
     CssRuleScan(
         selectors: text_list_prefix(sels, out),
         declarations: text_list_prefix(decls, out),
-        wrappers: text_list_prefix(wraps, out)
+        wrapper_starts: wrapper_starts,
+        wrapper_counts: wrapper_counts,
+        wrapper_kinds: wrapper_kinds,
+        wrapper_preludes: wrapper_preludes
     )
 
 fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Rules:
@@ -704,11 +759,11 @@ fn _html_without_inert_template_sources(source: text) -> text:
         # cpu-lane-loop-ok: scans the characters of ONE tag name until whitespace or `/`; bound is that tag name's length, not the document's
         while (
             name_end < raw_name.len() and
-            raw_name.char_at(name_end) != " " and
-            raw_name.char_at(name_end) != "\t" and
-            raw_name.char_at(name_end) != "\n" and
-            raw_name.char_at(name_end) != "\r" and
-            raw_name.char_at(name_end) != "/"
+            raw_name[name_end:name_end + 1] != " " and
+            raw_name[name_end:name_end + 1] != "\t" and
+            raw_name[name_end:name_end + 1] != "\n" and
+            raw_name[name_end:name_end + 1] != "\r" and
+            raw_name[name_end:name_end + 1] != "/"
         ):
             name_end = name_end + 1
         val name = raw_name.substring(0, name_end)
@@ -761,7 +816,7 @@ fn _extract_css_vw_with_rule_limit(
         if after_tag >= html.len():
             html_tag = -1
             break
-        val boundary = html.char_at(after_tag)
+        val boundary = html[after_tag:after_tag + 1]
         if boundary == ">" or boundary == " " or boundary == "\t" or boundary == "\n" or boundary == "\r":
             break
         html_tag = find_from(html, "<html", after_tag)
@@ -808,7 +863,9 @@ fn _extract_css_vw_with_rule_limit(
     if custom_props.len() == 0:
         print "[web-style-producer] css-props-stage2 parts={custom_prop_count} custom_props_len=0"
     var group_parts: [[[text]]] = []
+    var group_specificities: [[i32]] = []
     var decls: [text] = []
+    var important_decls: [text] = []
     var pos = 0
     var guard = 0
     var total_candidates = 0
@@ -849,19 +906,28 @@ fn _extract_css_vw_with_rule_limit(
         # cost seconds-to-minutes on a realistic theme sheet). See
         # `_css_scan_rules_simple`. Selector-group splitting, @media condition
         # evaluation, and CSS-variable substitution stay in Simple below.
-        val bounds: CssRuleScan = _css_scan_rules_simple(css)
+        val remaining_rules = rule_limit - group_parts.len()
+        val bounds: CssRuleScan = _css_scan_rules_simple(
+            css, CSS_SCAN_CANDIDATE_CAP
+        )
         val b_sel_text: [text] = bounds.selectors
         val b_decl_text: [text] = bounds.declarations
-        val b_wrapper: [text] = bounds.wrappers
         val candidate_count = b_sel_text.len()
+        total_candidates = total_candidates + candidate_count
         if trace_stages:
-            print "[layout-trace] css_scan candidates={candidate_count} declarations={b_decl_text.len()} wrappers={b_wrapper.len()}"
+            print "[layout-trace] css_scan candidates={candidate_count} declarations={b_decl_text.len()} wrappers={bounds.wrapper_kinds.len()}"
             var trace_rule_i = 0
             while trace_rule_i < candidate_count:  # cpu-lane-loop-ok: trace-only: the whole loop sits inside `if trace_stages:` and prints one line per scanned rule; costs nothing when tracing is off
                 print "[layout-trace] css_scan rule={trace_rule_i} selector={b_sel_text[trace_rule_i]} decl_len={b_decl_text[trace_rule_i].len()}"
                 trace_rule_i = trace_rule_i + 1
-        var block_group_parts: [[[text]]] = [[[]]; candidate_count]
-        var block_decls: [text] = [""; candidate_count]
+        val block_cap = if candidate_count < remaining_rules:
+            candidate_count
+        else:
+            remaining_rules
+        var block_group_parts: [[[text]]] = [[[]]; block_cap]
+        var block_group_specificities: [[i32]] = [[]; block_cap]
+        var block_decls: [text] = [""; block_cap]
+        var block_important_decls: [text] = [""; block_cap]
         var out_i = 0
         var bi = 0
         while bi < candidate_count and out_i < remaining_rules:  # cpu-lane-loop-ok: walks the candidate rules _css_scan_rules_simple produced for ONE <style> block; bound is that block's rule count, capped by remaining_rules; once per style invalidation
@@ -917,19 +983,49 @@ fn _extract_css_vw_with_rule_limit(
                 block_important_decls[out_i] = priority_decls.important
                 out_i = out_i + 1
             bi = bi + 1
-        group_parts = group_parts + group_parts_list_prefix(block_group_parts, out_i)
+        # INLINED on purpose (was group_parts_list_prefix): same aggregate
+        # cross-function-return hazard as above — append each element
+        # directly instead of returning a [[[text]]] prefix slice.
+        var gi = 0
+        while gi < out_i:
+            group_parts = group_parts + [block_group_parts[gi]]
+            group_specificities = group_specificities + [block_group_specificities[gi]]
+            gi = gi + 1
         decls = decls + text_list_prefix(block_decls, out_i)
+        important_decls = important_decls + text_list_prefix(
+            block_important_decls, out_i
+        )
         pos = close + 1
-    val result = Rules(group_parts: group_parts, decls: decls)
+    val result = Rules(
+        group_parts: group_parts,
+        group_specificities: group_specificities,
+        decls: decls,
+        important_decls: important_decls)
     if trace_stages:
         print "[layout-trace] css_result rules={result.group_parts.len()} decls={result.decls.len()}"
+    # Silent-on-healthy attribution receipt: scanned at least one candidate
+    # rule but the Rules struct came back with zero selector groups. The
+    # split/inline handoffs above are proven-local now; if this still fires,
+    # the remaining suspect is the Rules struct return itself (see
+    # doc/08_tracking/bug/cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
+    if total_candidates > 0 and group_parts.len() == 0:
+        print "[css-extract] degenerate candidates={total_candidates} groups=0"
     result
+
+pub fn simple_web_layout_debug_capped_css_rule_count(
+    html: text, requested_rule_limit: i32
+) -> i32:
+    _extract_css_vw_with_rule_limit(
+        html, -1, false, requested_rule_limit
+    ).group_parts.len()
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
     if v.len() >= 2:
-        val first = v.char_at(0)
-        val last = v.char_at(v.len() - 1)
+        val first = v[0:0 + 1]
+        # Exact last-byte slice: the quote characters being tested are
+        # ASCII; a multi-byte final character simply never matches.
+        val last = v[v.len() - 1:v.len()]
         if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
             return v.substring(1, v.len() - 1)
     v
@@ -969,7 +1065,39 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
         if case_insensitive:
             return attr_value(attrs, name).lower() == want.lower()
         return attr_value(attrs, name) == want
-    attr_value(attrs, raw).len() > 0
+    # Bare [name]: CSS presence semantics. A valueless boolean attribute
+    # (`<div data-tone>`) and an empty-valued one (`data-tone=""`) both
+    # match; attr_value alone cannot see either, so check for the name
+    # token with proper boundaries.
+    attr_value(attrs, raw).len() > 0 or attr_name_present(attrs, raw)
+
+fn attr_name_present(attrs: text, name: text) -> bool:
+    val name_len = name.len()
+    if name_len == 0:
+        return false
+    val attrs_len = attrs.len()
+    var pos = 0
+    var guard = 0
+    while guard < 200:  # cpu-lane-loop-ok: walks occurrences of ONE attribute name inside ONE tag's attribute text via native find_from, capped at 200 probes
+        guard = guard + 1
+        val hit = find_from(attrs, name, pos)
+        if hit < 0:
+            return false
+        val before_ok = if hit == 0:
+            true
+        else:
+            val b = attrs[hit - 1:hit - 1 + 1]
+            b == " " or b == "\t" or b == "\n" or b == "\r"
+        val after = hit + name_len
+        val after_ok = if after >= attrs_len:
+            true
+        else:
+            val a = attrs[after:after + 1]
+            a == " " or a == "\t" or a == "\n" or a == "\r" or a == "=" or a == "/" or a == ">"
+        if before_ok and after_ok:
+            return true
+        pos = hit + 1
+    false
 
 fn class_words_has(words: [text], want: text) -> bool:
     var i = 0
@@ -986,10 +1114,16 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
     # universal selector (e.g. the `*, *::before, *::after` margin/padding reset)
     if base == "*":
         return true
-    if base.char_at(0) == ".":
+    if base[0:0 + 1] == ".":
         val want = base.substring(1, base.len())
         return class_has_all(class_words, want)
     if base[0:0 + 1] == "#":
+        # #id or compound #id.class(.class...)
+        val id_dot = find_from(base, ".", 1)
+        if id_dot >= 0:
+            val want_id = base.substring(1, id_dot)
+            val want_cls = base.substring(id_dot + 1, base.len())
+            return id == want_id and class_has_all(class_words, want_cls)
         return id == base.substring(1, base.len())
     val hash = text_index_of(base, "#")
     if hash > 0:
@@ -1008,38 +1142,15 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
         return t == tag and class_has_all(class_words, want)
     base == tag
 
-# does a single simple selector match this node? (rightmost token only)
-# Extract the pseudo-class name from a selector part (returns "" if none).
-# e.g. "div:not(.x)" -> "not", ".card:first-child" -> "first-child"
-fn _pseudo_name(sel: text) -> text:
-    val colon = text_index_of(sel, ":")
-    if colon < 0:
-        return ""
-    val after = sel.substring(colon + 1, sel.len())
-    val paren = text_index_of(after, "(")
-    if paren >= 0:
-        return after.substring(0, paren)
-    # strip trailing non-identifier chars (e.g. nothing after plain pseudo)
-    after
-
-# Extract the argument inside a functional pseudo (returns "" if not functional).
-# e.g. "div:not(.x, #y)" -> ".x, #y"
-fn _pseudo_arg(sel: text) -> text:
-    val colon = text_index_of(sel, ":")
-    if colon < 0:
-        return ""
-    val after = sel.substring(colon + 1, sel.len())
-    val paren_open = text_index_of(after, "(")
-    if paren_open < 0:
-        return ""
-    val paren_close = text_index_of(after, ")")
-    if paren_close <= paren_open:
-        return ""
-    after.substring(paren_open + 1, paren_close).trim()
-
 # Check :not(), :is(), :where() pseudo-class against this element's base properties.
 # Returns true if the selector pseudo condition is satisfied.
-fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
+fn _pseudo_list_matches(
+    pseudo: text, arg: text, tag: text, cls: text,
+    class_words: [text], id: text, attrs: text,
+    recursion_depth: i32 = 0
+) -> bool:
+    if recursion_depth > 32:
+        return false
     # Split arg on commas (not inside parens) to get individual options
     var options: [text] = [""; 16]
     var opt_count = 0
@@ -1051,17 +1162,30 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
         val ch = arg[i:i + 1]
         if ch == "(":
             depth = depth + 1
+            if depth > 32:
+                return false
         elif ch == ")":
-            if depth > 0:
-                depth = depth - 1
+            depth = depth - 1
+            if depth < 0:
+                return false
         elif ch == "," and depth == 0:
-            if opt_count < 16:
-                options[opt_count] = arg.substring(option_start, i).trim()
-                opt_count = opt_count + 1
+            if opt_count >= 16:
+                return false
+            val option = arg.substring(option_start, i).trim()
+            if option.len() == 0:
+                return false
+            options[opt_count] = option
+            opt_count = opt_count + 1
             option_start = i + 1
         i = i + 1
+    if depth != 0:
+        return false
     val tail = arg.substring(option_start, arg_len).trim()
-    if tail.len() > 0 and opt_count < 16:
+    if tail.len() == 0:
+        return false
+    if tail.len() > 0 and opt_count >= 16:
+        return false
+    if tail.len() > 0:
         options[opt_count] = tail
         opt_count = opt_count + 1
     if pseudo == "not":
@@ -1069,7 +1193,12 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :not() options, returning false at the first option that matches
             val opt = options[j]
-            if opt.len() > 0 and simple_match(opt, tag, cls, class_words, id, attrs):
+            if (
+                opt.len() > 0 and simple_match(
+                    opt, tag, cls, class_words, id, attrs,
+                    recursion_depth
+                )
+            ):
                 return false
             j = j + 1
         return true
@@ -1078,7 +1207,12 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :is()/:where() options, returning true at the first option that matches
             val opt = options[j]
-            if opt.len() > 0 and simple_match(opt, tag, cls, class_words, id, attrs):
+            if (
+                opt.len() > 0 and simple_match(
+                    opt, tag, cls, class_words, id, attrs,
+                    recursion_depth
+                )
+            ):
                 return true
             j = j + 1
         return false
@@ -1086,32 +1220,17 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
     # for unknown structural pseudos (handled in full context).
     false
 
-fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
-    if sel.len() == 0:
+fn simple_match(
+    sel: text, tag: text, cls: text, class_words: [text],
+    id: text, attrs: text, recursion_depth: i32 = 0
+) -> bool:
+    if sel.len() == 0 or recursion_depth > 32:
         return false
     # Pseudo-element selectors (::before, ::after, ::selection, ...) target
     # boxes this engine does not render; they must never match the host
     # element (previously "body::before" applied its decls to <body> itself).
     if text_index_of(sel, "::") >= 0:
         return false
-    # :root matches only the root element; honor its attribute filter so
-    # theme-variant blocks like :root[data-wm-transparency=off] apply only
-    # when the <html> tag actually carries that attribute. Previously the
-    # empty base before ":" matched EVERY element, so every variant applied
-    # at once (dark transparency-off backgrounds leaked into light themes).
-    if sel.starts_with(":root"):
-        if tag != "html":
-            return false
-        val root_rest = sel.substring(5, sel.len())
-        if root_rest.len() == 0:
-            return true
-        if root_rest.starts_with("["):
-            val root_close = text_index_of(root_rest, "]")
-            if root_close > 0:
-                val suffix = root_rest.substring(root_close + 1, root_rest.len()).trim()
-                return suffix.len() == 0 and attr_selector_matches(attrs, root_rest.substring(1, root_close))
-            return false
-        return true
     # Split off the base (before the first colon at depth 0)
     var base = sel
     val colon = text_index_of(base, ":")
@@ -1136,21 +1255,21 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
     var pseudo_count = 0
     while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector; bound is that selector's length with a hard pseudo_count cap of 32
         pseudo_count = pseudo_count + 1
-        if pseudo_count > 32 or sel.char_at(pseudo_pos) != ":":
+        if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
             return false
         val name_start = pseudo_pos + 1
         var name_end = name_start
         # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
         while (
-            name_end < sel.len() and sel.char_at(name_end) != ":" and
-            sel.char_at(name_end) != "(" and sel.char_at(name_end) != "["
+            name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
+            sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
         ):
             name_end = name_end + 1
         val pseudo = sel.substring(name_start, name_end)
         if pseudo.len() == 0:
             return false
         var arg = ""
-        if name_end < sel.len() and sel.char_at(name_end) == "(":
+        if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
             var functional_depth = 1
             var close = name_end + 1
             while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument; bound is the remaining selector length, paren depth capped at 32
@@ -1170,7 +1289,7 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
             pseudo_pos = name_end
             if (
                 pseudo == "root" and pseudo_pos < sel.len() and
-                sel.char_at(pseudo_pos) == "["
+                sel[pseudo_pos:pseudo_pos + 1] == "["
             ):
                 val attr_close = find_from(sel, "]", pseudo_pos + 1)
                 if attr_close < 0 or not attr_selector_matches(
@@ -1341,21 +1460,21 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
     var pseudo_count = 0
     while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector in the positional-pseudo pass; bound is that selector's length, pseudo_count capped at 32
         pseudo_count = pseudo_count + 1
-        if pseudo_count > 32 or sel.char_at(pseudo_pos) != ":":
+        if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
             return false
         val name_start = pseudo_pos + 1
         var name_end = name_start
         # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
         while (
-            name_end < sel.len() and sel.char_at(name_end) != ":" and
-            sel.char_at(name_end) != "(" and sel.char_at(name_end) != "["
+            name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
+            sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
         ):
             name_end = name_end + 1
         val pseudo = sel.substring(name_start, name_end)
         if pseudo.len() == 0:
             return false
         var arg = ""
-        if name_end < sel.len() and sel.char_at(name_end) == "(":
+        if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
             var functional_depth = 1
             var close = name_end + 1
             while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument in the positional pass; paren depth capped at 32
@@ -1375,7 +1494,7 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             pseudo_pos = name_end
             if (
                 pseudo == "root" and pseudo_pos < sel.len() and
-                sel.char_at(pseudo_pos) == "["
+                sel[pseudo_pos:pseudo_pos + 1] == "["
             ):
                 val attr_close = find_from(sel, "]", pseudo_pos + 1)
                 if attr_close < 0:
@@ -1410,9 +1529,15 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
                         return false
                 elif ch == ")":
                     depth = depth - 1
-            elif ch == "," and depth == 0:
-                if opt_count < 8:
-                    opts[opt_count] = arg.substring(option_start, i).trim()
+                    if depth < 0:
+                        return false
+                elif ch == "," and depth == 0:
+                    if opt_count >= opts.len():
+                        return false
+                    val option = arg.substring(option_start, i).trim()
+                    if option.len() == 0:
+                        return false
+                    opts[opt_count] = option
                     opt_count = opt_count + 1
                     option_start = i + 1
                 i = i + 1
@@ -1464,15 +1589,27 @@ fn split_selector_groups(sel: text) -> [text]:
         val ch = sel[i:i + 1]
         if ch == "(":
             depth = depth + 1
+            if depth > 32:
+                return []
         elif ch == ")":
-            if depth > 0:
-                depth = depth - 1
+            depth = depth - 1
+            if depth < 0:
+                return []
         elif ch == "," and depth == 0:
+            if sel.substring(group_start, i).trim().len() == 0:
+                return []
             group_count = group_count + 1
+            if group_count >= CSS_SELECTOR_GROUP_CAP:
+                return []
             group_start = i + 1
         i = i + 1
-    if sel.substring(group_start, sel_len).trim().len() > 0:
-        group_count = group_count + 1
+    if depth != 0:
+        return []
+    if sel.substring(group_start, sel_len).trim().len() == 0:
+        return []
+    group_count = group_count + 1
+    if group_count == 0 or group_count > CSS_SELECTOR_GROUP_CAP:
+        return []
     var groups: [text] = [""; group_count]
     depth = 0
     i = 0
@@ -1490,9 +1627,10 @@ fn split_selector_groups(sel: text) -> [text]:
             group_i = group_i + 1
             group_start = i + 1
         i = i + 1
-    val tail = sel.substring(group_start, sel_len).trim()
-    if tail.len() > 0:
-        groups[group_i] = tail
+    if group_i < groups.len():
+        val tail = sel.substring(group_start, sel_len).trim()
+        if tail.len() > 0:
+            groups[group_i] = tail
     groups
 
 fn normalize_child_combinators(group: text) -> text:
@@ -1510,6 +1648,8 @@ fn normalize_child_combinators(group: text) -> text:
         elif ch == ">" and depth == 0:
             combinator_count = combinator_count + 1
         i = i + 1
+    if combinator_count > CSS_SELECTOR_PART_CAP:
+        return ""
     if combinator_count == 0:
         return group.trim()
     val chunk_count = combinator_count * 2 + 1
@@ -1562,6 +1702,8 @@ fn selector_group_parts(group: text) -> [text]:
                 token_count = token_count + 1
                 in_token = true
         pi = pi + 1
+    if token_count > CSS_SELECTOR_PART_CAP:
+        return []
     if token_count == 0:
         return [""]
     var parts: [text] = [""; token_count]
@@ -1601,15 +1743,6 @@ fn selector_group_parts(group: text) -> [text]:
             parts[part_i] = tail
     parts
 
-fn split_selector_group_parts(groups: [text]) -> [[text]]:
-    val group_count = groups.len()
-    var parts: [[text]] = [[]; group_count]
-    var i = 0
-    while i < group_count:
-        parts[i] = selector_group_parts(groups[i])
-        i = i + 1
-    parts
-
 fn selector_rightmost_part(parts: [text]) -> text:
     var right = parts.len() - 1
     while right >= 0:  # cpu-lane-loop-ok: scans ONE selector group's parts from the right for the rightmost non-empty, non-`>` part; bound is that group's part count (<=256)
@@ -1636,9 +1769,9 @@ fn selector_bucket_kind(part: text) -> text:
 fn selector_bucket_kind_from_base(base: text) -> text:
     if base.len() == 0 or base == "*":
         return "fallback"
-    if base.char_at(0) == "#":
+    if base[0:0 + 1] == "#":
         return "id"
-    if base.char_at(0) == ".":
+    if base[0:0 + 1] == ".":
         return "class"
     # tag#id compound: bucket as "id" so rules fire when node has that id
     val hash = text_index_of(base, "#")
@@ -1655,7 +1788,7 @@ fn selector_bucket_value(part: text) -> text:
 fn selector_bucket_value_from_base(base: text) -> text:
     if base.len() == 0:
         return ""
-    val first = base.char_at(0)
+    val first = base[0:0 + 1]
     if first == "#" or first == ".":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
@@ -1684,14 +1817,6 @@ fn text_key_index_count(keys: [text], key: text, key_count: i32) -> i32:
         i = i + 1
     -1
 
-
-fn group_parts_list_prefix(values: [[[text]]], count: i32) -> [[[text]]]:
-    var out: [[[text]]] = [[[]]; count]
-    var i = 0
-    while i < count:
-        out[i] = values[i]
-        i = i + 1
-    out
 
 fn i32_list_prefix(values: [i32], count: i32) -> [i32]:
     var out: [i32] = [0; count]
@@ -2037,44 +2162,40 @@ fn selector_group_matches_node_parts(nodes: [HNode], ctx: SelectorContext, idx: 
             want = want - 1
     not require_direct
 
-fn selector_matches_node_group_parts(nodes: [HNode], ctx: SelectorContext, idx: i32, group_parts: [[text]]) -> bool:
-    var g = 0
-    val group_count = group_parts.len()
-    while g < group_count:
-        if selector_group_matches_node_parts(nodes, ctx, idx, group_parts[g]):
-            return true
-        g = g + 1
-    false
-
 # ---------------------------------------------------------------------------
 # CSS specificity helpers
 # ---------------------------------------------------------------------------
 
-fn _part_specificity(part: text) -> i32:
+fn _part_specificity(
+    part: text, recursion_depth: i32 = 0
+) -> i32:
+    if recursion_depth > 32:
+        return -1000000
     var base = part
     val colon = text_index_of(base, ":")
+    var pseudo_specificity = 0
     if colon >= 0:
         base = base.substring(0, colon)
         var pseudo_pos = colon
         var pseudo_count = 0
         while pseudo_pos < part.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector part while scoring specificity; pseudo_count capped at 32
             pseudo_count = pseudo_count + 1
-            if pseudo_count > 32 or part.char_at(pseudo_pos) != ":":
+            if pseudo_count > 32 or part[pseudo_pos:pseudo_pos + 1] != ":":
                 return -1000000
             val name_start = pseudo_pos + 1
             var name_end = name_start
             # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
             while (
                 name_end < part.len() and
-                part.char_at(name_end) != ":" and
-                part.char_at(name_end) != "(" and
-                part.char_at(name_end) != "["
+                part[name_end:name_end + 1] != ":" and
+                part[name_end:name_end + 1] != "(" and
+                part[name_end:name_end + 1] != "["
             ):
                 name_end = name_end + 1
             val pseudo_name = part.substring(name_start, name_end)
             if pseudo_name.len() == 0:
                 return -1000000
-            if name_end < part.len() and part.char_at(name_end) == "(":
+            if name_end < part.len() and part[name_end:name_end + 1] == "(":
                 var functional_depth = 1
                 var close = name_end + 1
                 while close < part.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo-class argument while scoring specificity; paren depth capped at 32
@@ -2119,7 +2240,7 @@ fn _part_specificity(part: text) -> i32:
                 pseudo_pos = name_end
                 if (
                     pseudo_name == "root" and pseudo_pos < part.len() and
-                    part.char_at(pseudo_pos) == "["
+                    part[pseudo_pos:pseudo_pos + 1] == "["
                 ):
                     val attr_close = find_from(
                         part, "]", pseudo_pos + 1
@@ -2142,15 +2263,16 @@ fn _part_specificity(part: text) -> i32:
     val attr_bracket = text_index_of(base, "[")
     if attr_bracket >= 0:
         base = base.substring(0, attr_bracket).trim()
+    var base_specificity = attribute_specificity
     if base.len() == 0 or base == "*":
         base_specificity = attribute_specificity
-    elif base.char_at(0) == "#":
+    elif base[0:0 + 1] == "#":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
             base_specificity = 110 + attribute_specificity
         else:
             base_specificity = 100 + attribute_specificity
-    elif base.char_at(0) == ".":
+    elif base[0:0 + 1] == ".":
         var class_count = 1
         var i = 1
         val base_len = base.len()
@@ -2158,15 +2280,16 @@ fn _part_specificity(part: text) -> i32:
             if base[i:i + 1] == ".":
                 class_count = class_count + 1
             i = i + 1
-        return class_count * 10
-    val hash = text_index_of(base, "#")
-    if hash > 0:
+        base_specificity = class_count * 10 + attribute_specificity
+    elif text_index_of(base, "#") > 0:
+        val hash = text_index_of(base, "#")
         val dot = find_from(base, ".", hash + 1)
         if dot >= 0:
-            return 111
-        return 101
-    val dot = text_index_of(base, ".")
-    if dot >= 0:
+            base_specificity = 111 + attribute_specificity
+        else:
+            base_specificity = 101 + attribute_specificity
+    elif text_index_of(base, ".") >= 0:
+        val dot = text_index_of(base, ".")
         var class_count2 = 1
         var j = dot + 1
         val base_len2 = base.len()
@@ -2174,40 +2297,30 @@ fn _part_specificity(part: text) -> i32:
             if base[j:j + 1] == ".":
                 class_count2 = class_count2 + 1
             j = j + 1
-        return 1 + class_count2 * 10
-    1
+        base_specificity = 1 + class_count2 * 10 + attribute_specificity
+    else:
+        base_specificity = 1 + attribute_specificity
+    base_specificity + pseudo_specificity
 
-fn _group_specificity(parts: [text]) -> i32:
+fn _group_specificity(
+    parts: [text], recursion_depth: i32 = 0
+) -> i32:
+    if recursion_depth > 32:
+        return -1000000
     var total = 0
     var i = 0
     val part_count = parts.len()
     while i < part_count:  # cpu-lane-loop-ok: sums per-part specificity over ONE selector group's parts; bound is that group's part count. Computed once at extract time and cached in Rules.group_specificities, never recomputed per node
         val p = parts[i]
         if p.len() > 0 and p != ">":
-            total = total + _part_specificity(p)
+            val part_specificity = _part_specificity(
+                p, recursion_depth
+            )
+            if part_specificity < 0:
+                return -1000000
+            total = total + part_specificity
         i = i + 1
     total
-
-fn _rule_specificity(rules: Rules, r: i32) -> i32:
-    val groups = rules.group_parts[r]
-    var best = 0
-    var g = 0
-    val group_count = groups.len()
-    while g < group_count:
-        val s = _group_specificity(groups[g])
-        if s > best:
-            best = s
-        g = g + 1
-    best
-
-fn build_rule_specificities(rules: Rules) -> [i32]:
-    val rule_count = rules.group_parts.len()
-    var specificities: [i32] = [0; rule_count]
-    var r = 0
-    while r < rule_count:
-        specificities[r] = _rule_specificity(rules, r)
-        r = r + 1
-    specificities
 
 fn _candidate_sort_before(left: i32, right: i32, rule_specificities: [i32]) -> bool:
     val left_spec = rule_specificities[left]
@@ -2385,6 +2498,9 @@ fn presentational_attr_decls(node: HNode) -> text:
     if node.attrs_raw.len() == 0:
         return ""
     var out = ""
+    val hidden_value = attr_value(node.attrs_raw, "hidden").trim().lower()
+    if attr_present(node.attrs_raw, "hidden") and hidden_value != "until-found":
+        out = out + "display:none;"
     var bg = attr_value_by_key(node.attrs_raw, "bgcolor=").trim()
     if bg.len() == 6 and not bg.starts_with("#"):
         bg = "#" + bg
@@ -2585,16 +2701,42 @@ fn _normalize_final_overflow_axes(
     normalized
 
 fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
+    var material_entries_unused: [text] = ["", ""]
+    var material_counts_unused: [i64] = [0, 0]
+    var cpu_material_nodes_unused: [i32] = []
+    var solid_material_nodes_unused: [i32] = []
+    compute_styles_with_material(
+        nodes, rules, child_index, trace_stages, vector_fonts,
+        material_entries_unused, material_counts_unused,
+        cpu_material_nodes_unused, solid_material_nodes_unused)
+
+# Freestanding-safe material provenance channel: the realized solid-material
+# entries are built HERE from the loop-local style (before any aggregate
+# element store, array return, or array param crossing — all of which lose
+# Style field contents on the freestanding lane) and handed out through a
+# mutable text/count slots (the apply_advances idiom). Consumers derive the
+# material digest from these canonical entries instead of re-reading [Style].
+fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text], mut material_counts: [i64], mut cpu_material_nodes: [i32], mut solid_material_nodes: [i32]) -> [Style]:
+    var cpu_material_entry_count: i64 = 0
+    var solid_material_entry_count: i64 = 0
+    val material_channel_ready = (
+        material_entries.len() >= 2 and material_counts.len() >= 2)
+    if material_channel_ready:
+        material_entries[0] = "simple-web-realized-cpu-composited-material-v1"
+        material_entries[1] = "simple-web-realized-solid-material-v1"
+        material_counts[0] = 0
+        material_counts[1] = 0
     val rule_buckets = build_rule_buckets(rules, trace_stages)
     if trace_stages:
         print "[layout-trace] style_stage=rule-buckets-ready"
     val selector_ctx = build_selector_context(nodes, child_index)
     if trace_stages:
         print "[layout-trace] style_stage=selector-context-ready"
-    val rule_specificities = build_rule_specificities(rules)
+    var rule_specificities: [i32] = [-1; rules.group_parts.len()]
     if trace_stages:
         print "[layout-trace] style_stage=rule-specificities-ready"
     val node_count = nodes.len()
+    val details_hidden = _details_content_hidden(nodes)
     var styles: [Style] = [renderer_default_style(); node_count]
     if trace_stages:
         print "[layout-trace] style_stage=defaults-ready nodes={node_count}"
@@ -2643,6 +2785,10 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
             if raw_style_attr_len > 0:
                 print "[font-inherit-trace] index={i} tag={nd.tag} parent={nd.parent} style_attr_len={style_attr_len} style_attr_has_bungee={style_attr_has_bungee} raw_attrs_style_len={raw_style_attr_len}"
         var st = renderer_default_style()
+        val inherited_display = if nd.parent >= 0:
+            styles[nd.parent].display
+        else:
+            "block"
         if nd.parent >= 0:
             val parent_style = styles[nd.parent]
             if trace_stages:
@@ -2662,6 +2808,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
         if trace_stages:
             print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
         st = tag_defaults(st, nd.tag)
+        val ua_display = st.display
         if trace_stages:
             print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
             print "[layout-trace] style_stage=attrs-ready index={i} attrs_len={nd.attrs_raw.len()}"
@@ -2757,11 +2904,16 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
             if r >= WEB_STYLE_RULE_QUOTA:
                 candidate_i = candidate_i + 1
                 continue
-            if selector_matches_node_group_parts(nodes, selector_ctx, i, rules.group_parts[r]):
+            if rule_specificities[r] >= 0:
                 val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
-                if empty_cells_decl.trim().lower() == "hide":
-                    empty_cells_hide = true
-                st = apply_decls(st, rules.decls[r], em_base)
+                if empty_cells_decl != "":
+                    empty_cells_hide = (
+                        empty_cells_decl.trim().lower() == "hide"
+                    )
+                if rules.decls[r] != "":
+                    combined_decls = combined_decls + rules.decls[r] + ";"
+                if rules.important_decls[r] != "":
+                    has_important_candidates = true
             candidate_i = candidate_i + 1
         combined_decls = _merged_decls_within_quota(combined_decls)
         if trace_stages:
@@ -2777,6 +2929,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
         # Author-important declarations outrank every author-normal declaration,
         # including inline style. Within the important origin, retain the same
         # specificity/source order as the normal author cascade.
+        var combined_important_decls = ""
         if has_important_candidates:
             candidate_i = 0
             while candidate_i < candidate_count:  # cpu-lane-loop-ok: second pass over the SAME node's candidate rules collecting author-!important decls; entered only when the first pass set has_important_candidates
@@ -2790,13 +2943,6 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
                     rule_specificities[r] >= 0 and
                     rules.important_decls[r] != ""
                 ):
-                    val important_empty_cells_decl = decl_get(
-                        rules.important_decls[r], "empty-cells"
-                    )
-                    if important_empty_cells_decl != "":
-                        empty_cells_hide = (
-                            important_empty_cells_decl.trim().lower() == "hide"
-                        )
                     combined_important_decls = (
                         combined_important_decls + rules.important_decls[r] + ";"
                     )
@@ -2822,8 +2968,13 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
             logical_writing_mode, inline_important
         )
 
+        val final_display = _final_authored_display(
+            ua_display, inherited_display, combined_decls, inline_normal,
+            combined_important_decls, inline_important
+        )
+
         if combined_decls != "":
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, combined_decls, em_base, logical_writing_mode
             )
         if inline_normal != "":
@@ -2834,7 +2985,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
                 empty_cells_hide = (
                     inline_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, inline_normal, em_base, logical_writing_mode
             )
             if _font_style_trace_on:
@@ -2847,7 +2998,7 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
                 empty_cells_hide = (
                     important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, combined_important_decls, em_base, logical_writing_mode
             )
         if inline_important != "":
@@ -2858,9 +3009,18 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
                 empty_cells_hide = (
                     inline_important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, inline_important, em_base, logical_writing_mode
             )
+        if final_display != "":
+            if final_display == "contents":
+                st = apply_decls(st, "display:" + final_display, em_base)
+            else:
+                st.display = final_display
+        st = _normalize_final_overflow_axes(
+            st, combined_decls, inline_normal, combined_important_decls,
+            inline_important
+        )
         # Disclosure state is structural and author CSS cannot reveal closed
         # content. Apply it after the author cascade and before layout/paint.
         if details_hidden[i]:
@@ -2917,6 +3077,20 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
             if wm_fg.len() > 0:
                 wm_fallback_decls = wm_fallback_decls + "color:" + wm_fg + ";"
             st = apply_decls(st, wm_fallback_decls, em_base)
+            # Producer-side provenance attribution (silent on healthy): the
+            # material witness downstream reads these same fields through the
+            # returned [Style] array. Keep this diagnostic inside the legacy
+            # fallback branch; exact CPU mode is intentionally translucent.
+            val wm_realized_bg: u32 = st.bg
+            val wm_realized_gf: u32 = st.background_gradient_from
+            val wm_realized_gt: u32 = st.background_gradient_to
+            val wm_realized_layers: i64 = st.bg_layers_raw.len()
+            if (
+                ((wm_realized_bg >> 24) & 255u32) != 255u32 or
+                wm_realized_gf != 0u32 or wm_realized_gt != 0u32 or
+                wm_realized_layers != 0
+            ):
+                print "[web-style-producer] wm-contract-unrealized index={i} bg={wm_realized_bg} gradient_from={wm_realized_gf} gradient_to={wm_realized_gt} layers_len={wm_realized_layers} wm_bg_len={wm_bg.len()}"
         if trace_stages:
             print "[layout-trace] style_stage=inline-ready index={i}"
         if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
@@ -3029,6 +3203,24 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
         if details_hidden[i]:
             styles[i] = apply_decls(styles[i], "display:none", 16)
         i = i + 1
+    # ::marker visibility (bug browser_engine_no_list_marker_boxes_2026-08-19):
+    # a marker is suppressed when list-style(-type) resolves to none on its
+    # <li> or on the list element itself. Shortcut for full inheritance:
+    # list-style-type inherits, but only the li and its list parent are
+    # consulted here — enough for author sheets that set it on ul/ol or li.
+    var marker_i = 0
+    while marker_i < node_count:  # cpu-lane-loop-ok: one pass over the document per style recompute
+        if nodes[marker_i].tag == "::marker":
+            val marker_li = nodes[marker_i].parent as i32
+            if marker_li >= 0:
+                val marker_list = nodes[marker_li].parent as i32
+                if styles[marker_li].list_style_none or (
+                    marker_list >= 0 and styles[marker_list].list_style_none
+                ):
+                    var marker_st = styles[marker_i]
+                    marker_st.display = "none"
+                    styles[marker_i] = marker_st
+        marker_i = marker_i + 1
     if material_channel_ready:
         material_counts[0] = cpu_material_entry_count
         material_counts[1] = solid_material_entry_count
@@ -3065,6 +3257,17 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return parse_int(decl_get(style_attr, "height")).to_string()
             if field == "display":
                 return st.display
+            if field == "caption-side":
+                return st.caption_side
+            if field == "border-collapse":
+                return st.border_collapse
+            if field == "border-spacing":
+                if st.border_spacing_x_px == st.border_spacing_y_px:
+                    return "{st.border_spacing_x_px}px"
+                return (
+                    "{st.border_spacing_x_px}px " +
+                    "{st.border_spacing_y_px}px"
+                )
             if field == "position":
                 if st.position_sticky:
                     return "sticky"
@@ -3133,6 +3336,8 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return st.background_gradient_from.to_string()
             if field == "background_gradient_to":
                 return st.background_gradient_to.to_string()
+            if field == "background_image_uri":
+                return st.background_image_uri
             if field == "background_layers_raw":
                 return st.bg_layers_raw
             if field == "backdrop_filter_raw":

@@ -9,6 +9,9 @@ use os.apps.shell.shell_tools.*
 # MDSOC: feature dimension, shell layer
 
 use os.apps.terminal.terminal.{Terminal}
+use os.tools.shell.process.process_artifact_contract.{process_tool_canonical_path_v1}
+use os.tools.shell.checksum.checksum_artifact_contract.{checksum_tool_canonical_path_v1}
+use os.tools.shell.grep.grep_artifact_contract.{text_tool_canonical_path_v1}
 use os.kernel.types.fs_types.{FsNode, FsNodeKind}
 use os.services.vfs.vfs.{VfsManager}
 use os.tools.tool_registry.{ToolRegistry}
@@ -71,7 +74,7 @@ fn tool_which(vfs: VfsManager?, cwd: text, path_env: text, args: [text], tool_re
         return 1
 
     val builtins = ["cd", "ls", "list", "pwd", "echo", "cat", "mkdir", "rm", "cp",
-        "mv", "grep", "find", "ps", "kill", "run", "mount", "clear", "help",
+        "mv", "find", "kill", "run", "mount", "clear", "help",
         "exit", "env", "export", "history", "hostname", "uptime", "dmesg",
         "mem", "reboot",
         "jobs", "fg", "bg", "readf", "touch", "head", "tail", "wc",
@@ -79,14 +82,25 @@ fn tool_which(vfs: VfsManager?, cwd: text, path_env: text, args: [text], tool_re
         "chmod", "stat", "cut", "tr", "sed", "basename", "dirname",
         "sleep", "seq", "expr", "test", "[", "xargs", "yes", "printenv",
         "readlink", "mktemp", "diff", "patch", "file", "strings",
-        "hexdump", "base64", "md5sum", "sha256sum", "git", "jj",
-        "uname", "ninja"]
+        "hexdump", "base64", "git", "jj",
+        "uname"]
 
     var exit_code = 0
     for cmd in args:
         var found = false
+        val checksum_path = checksum_tool_canonical_path_v1(cmd)
+        val text_path = text_tool_canonical_path_v1(cmd)
+        val process_path = process_tool_canonical_path_v1(cmd)
+        var artifact_path = checksum_path
+        if artifact_path == "":
+            artifact_path = text_path
+        if artifact_path == "":
+            artifact_path = process_path
+        if artifact_path != "":
+            _write_line(terminal, "{cmd}: {artifact_path} (artifact-gated)")
+            found = true
         for b in builtins:
-            if b == cmd:
+            if not found and b == cmd:
                 _write_line(terminal, "{cmd}: shell built-in command")
                 found = true
         if found:
@@ -141,20 +155,22 @@ fn tool_uname(args: [text], terminal: Terminal) -> i32:
     0
 
 fn tool_cmake(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
-    """Guest-facing cmake wrapper bound to the stable /usr/bin/cmake path."""
+    """Legacy in-process entrypoint; shell execution uses /usr/bin/cmake."""
     val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
-    if not _tool_path_exists(vfs, cwd, path_env, "cmake"):
-        _write_error(terminal, "cmake: native wrapper not found on PATH")
-        return 127
-    tool_try_staged_toolchain(vfs, cwd, path_env, "cmake", args, terminal) ?? 127
+    val diagnostic = tool_try_staged_toolchain(vfs, cwd, path_env, "cmake", args, terminal)
+    if diagnostic != nil:
+        return diagnostic.unwrap()
+    _write_error(terminal, "cmake: in-process execution disabled; launch /usr/bin/cmake")
+    126
 
 fn tool_ninja(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
-    """Guest-facing ninja wrapper bound to the stable /usr/bin/ninja path."""
+    """Legacy in-process entrypoint; shell execution uses /usr/bin/ninja."""
     val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
-    if not _tool_path_exists(vfs, cwd, path_env, "ninja"):
-        _write_error(terminal, "ninja: native wrapper not found on PATH")
-        return 127
-    tool_try_staged_toolchain(vfs, cwd, path_env, "ninja", args, terminal) ?? 127
+    val diagnostic = tool_try_staged_toolchain(vfs, cwd, path_env, "ninja", args, terminal)
+    if diagnostic != nil:
+        return diagnostic.unwrap()
+    _write_error(terminal, "ninja: in-process execution disabled; launch /usr/bin/ninja")
+    126
 
 # =========================================================================
 # true / false — Exit with known code

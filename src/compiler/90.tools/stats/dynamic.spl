@@ -114,47 +114,6 @@ fn get_pass_count() -> i64:
     val output = run_cmd(cmd)
     parse_count(output)
 
-# Extract a `| <Metric> | <n> |` row from test_result.md. One reader for
-# every summary metric so a new category cannot be added to the report and
-# silently missed here.
-fn _test_result_metric(metric: text) -> i64:
-    if not file_exists("doc/08_tracking/test/test_result.md"):
-        return 0
-    val cmd = "grep -m1 -E '^\\| {metric} \\|' doc/08_tracking/test/test_result.md | grep -oE '[0-9]+' | head -1"
-    parse_count(run_cmd(cmd))
-
-fn get_fail_count() -> i64:
-    _test_result_metric("Failed")
-
-# A GENUINE skip: the host could not run it (no GPU, no QEMU, wrong
-# platform). Both the plain and the disambiguated row spellings are read, so
-# renaming the row in the report cannot silently zero this count — that
-# exact drift produced a phantom `Other:` remainder once already.
-fn get_skip_count() -> i64:
-    val plain = _test_result_metric("Skipped")
-    if plain > 0:
-        return plain
-    _test_result_metric("Skipped \\(host-unavailable\\)")
-
-# In-development tests are EXPECTED to fail and are skipped by whole-suite
-# runs. They are their own category: never folded into "passed", never
-# dropped from the total. A backlog you cannot see is a backlog nobody
-# burns down.
-fn get_in_development_count() -> i64:
-    _test_result_metric("In Development")
-
-# Tagged, ran, and PASSED — ready to promote by deleting the tag. Separate
-# from the neutralised count so good news cannot hide inside "not working
-# yet".
-fn get_in_development_unexpected_count() -> i64:
-    _test_result_metric("In Development \\(unexpected pass\\)")
-
-# Tagged but could not LOAD. A spec DEFECT, not unfinished work: it FAILS
-# the run and must never be absorbed into the in-development count, or the
-# tag becomes a place broken files go to stop being counted.
-fn get_in_development_broken_count() -> i64:
-    _test_result_metric("In Development \\(broken\\)")
-
 fn get_bug_total() -> i64:
     if not file_exists("doc/08_tracking/bug/bug_db.sdn"):
         return 0
@@ -275,8 +234,19 @@ fn compute_doc_coverage() -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, 
     val lib_doc_cmd = "grep -rn -B1 '^fn ' src/lib --include='*.spl' 2>/dev/null | grep -cE -- '-[0-9]+-#' 2>/dev/null || echo 0"
     val lib_documented = parse_count(run_cmd(lib_doc_cmd))
 
-    (total_public, documented, with_sdoctest, with_inline, with_docstring,
-     std_total, std_documented, core_total, core_documented, lib_total, lib_documented)
+    (
+        total_public,
+        documented,
+        with_sdoctest,
+        with_inline,
+        with_docstring,
+        std_total,
+        std_documented,
+        core_total,
+        core_documented,
+        lib_total,
+        lib_documented
+    )
 
 # Main entry point
 fn run_stats(args: [text]):
@@ -370,11 +340,6 @@ fn run_stats(args: [text]):
     # Test statistics
     val test_count = get_test_count()
     val pass_count = get_pass_count()
-    val fail_count = get_fail_count()
-    val skip_count = get_skip_count()
-    val indev_count = get_in_development_count()
-    val indev_unexpected = get_in_development_unexpected_count()
-    val indev_broken = get_in_development_broken_count()
 
     # Test spec file counts (always shown, fast)
     val unit_specs = count_spec_files("test/unit")
@@ -388,44 +353,18 @@ fn run_stats(args: [text]):
     val sdoctest_md = get_sdoctest_md_count()
 
     if not is_json:
-        # The three states — passed, failed, in-development — print
-        # UNCONDITIONALLY, including at zero and including when there is no
-        # recorded run at all. A surface that omits a category when it is
-        # empty leaves the reader unable to tell "zero in-development" from
-        # "this surface does not track in-development", and those two mean
-        # opposite things.
-        print "Tests:"
-        print "  Total:   {test_count} tests"
         if test_count > 0:
             val pass_rate = (pass_count * 100) / test_count
+            print "Tests:"
+            print "  Total:   {test_count} tests"
             print "  Passed:  {pass_count} ({pass_rate}%)"
+            if pass_count == test_count:
+                print "  Status:  ALL PASSING"
+            print ""
         else:
-            print "  Passed:  {pass_count}"
-        print "  Failed:  {fail_count}"
-        print "  In development: {indev_count}"
-        # Tagged specs that PASSED. Loud, because the action is concrete.
-        if indev_unexpected > 0:
-            print "    unexpected pass: {indev_unexpected} (ready to promote — delete the tag)"
-        # Tagged specs that could not LOAD. A spec defect that FAILS the
-        # run; named separately so it can never be read as WIP.
-        if indev_broken > 0:
-            print "    BROKEN: {indev_broken} (failed to load — a spec DEFECT, fails the run)"
-        # A GENUINE skip is a different thing entirely: the host could not
-        # run it. Kept as its own count and never merged with, or used as a
-        # word for, in-development.
-        print "  Skipped (host-unavailable): {skip_count}"
-        if test_count == 0:
-            print "  (no recorded run — counts above are zeroes, not measurements)"
-        if test_count > 0 and pass_count == test_count:
-            print "  Status:  ALL PASSING"
-        # Totals must reconcile. An unaccounted remainder means a category
-        # exists in the report that this summary does not know about — say
-        # so rather than publishing a partial view. `broken` is already
-        # inside `failed`, so it is not added again.
-        val accounted = pass_count + fail_count + skip_count + indev_count + indev_unexpected
-        if accounted != test_count:
-            print "  Other:   {test_count - accounted} (unclassified)"
-        print ""
+            print "Tests:"
+            print "  (No test data available)"
+            print ""
 
         print "Test Files by Tier:"
         print "  Unit:         {unit_specs} spec files  (test/01_unit/)"
@@ -493,18 +432,7 @@ fn run_stats(args: [text]):
     var lib_documented = 0
 
     if not is_quick:
-        val doc_stats = compute_doc_coverage()
-        total_public = doc_stats.0
-        documented = doc_stats.1
-        with_sdoctest = doc_stats.2
-        with_inline = doc_stats.3
-        with_docstring = doc_stats.4
-        std_total = doc_stats.5
-        std_documented = doc_stats.6
-        core_total = doc_stats.7
-        core_documented = doc_stats.8
-        lib_total = doc_stats.9
-        lib_documented = doc_stats.10
+        (total_public, documented, with_sdoctest, with_inline, with_docstring, std_total, std_documented, core_total, core_documented, lib_total, lib_documented) = compute_doc_coverage()
 
     if not is_brief and not is_json:
         print "Documentation:"
@@ -566,18 +494,7 @@ fn run_stats(args: [text]):
         # JSON output - compute doc coverage if not already done
         if is_quick:
             if total_public == 0:
-                val doc_stats = compute_doc_coverage()
-                total_public = doc_stats.0
-                documented = doc_stats.1
-                with_sdoctest = doc_stats.2
-                with_inline = doc_stats.3
-                with_docstring = doc_stats.4
-                std_total = doc_stats.5
-                std_documented = doc_stats.6
-                core_total = doc_stats.7
-                core_documented = doc_stats.8
-                lib_total = doc_stats.9
-                lib_documented = doc_stats.10
+                (total_public, documented, with_sdoctest, with_inline, with_docstring, std_total, std_documented, core_total, core_documented, lib_total, lib_documented) = compute_doc_coverage()
 
         val json = format_json(
             total_src, app_files, lib_files, std_files, core_files, compiler_files,

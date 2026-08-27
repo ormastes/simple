@@ -1,14 +1,5 @@
-use std.common.string_core.{bytes_to_text}
-use compiler.backend.linker.smf_reader_memory.{
-    SmfReaderMemory,
-    bytes_to_u32,
-    bytes_to_u64
-}
-use compiler.loader.segment_mapper.{SegmentMapper}
-use compiler.loader.smf_mmap_native.{
-    native_reloc_write_i32,
-    native_reloc_write_i64
-}
+use std.common.string_core.{char_code}
+use os.smf.smf_file_sffi.{smf_file_exists, smf_file_read_bytes}
 
 class LibraryRole:
     role_name: text
@@ -99,61 +90,9 @@ class DynLoadResult:
     static fn fail(name: text, err: text) -> DynLoadResult:
         return DynLoadResult(library_name: name, success: false, handle_id: 0, error_msg: err)
 
-class DynSmfLoadReceipt:
-    requested_policy: text
-    provider: text
-    mechanism: text
-    fallback_reason: text
-    selected_bytes: i64
-    mapping_calls: i64
-
-class DynLoadAdmittedResult:
-    load: DynLoadResult
-    receipt: DynSmfLoadReceipt
-
-fn _dynsmf_empty_load_receipt(policy: text, reason: text) -> DynSmfLoadReceipt:
-    DynSmfLoadReceipt(
-        requested_policy: policy,
-        provider: "segment-mapper/anonymous-wx",
-        mechanism: "none",
-        fallback_reason: reason,
-        selected_bytes: 0,
-        mapping_calls: 0)
-
-fn _dynsmf_load_intent(policy: text) -> RetainedSegmentLoadIntent?:
-    if policy == "normal":
-        return Some(RetainedSegmentLoadIntent.Normal)
-    if policy == "map_selected_segments":
-        return Some(RetainedSegmentLoadIntent.MapSelectedSegments)
-    if policy == "read_ahead_selected":
-        return Some(RetainedSegmentLoadIntent.ReadAheadSelected)
-    nil
-
-fn _dynsmf_admitted_failure(
-        load: DynLoadResult,
-        policy: text,
-        provider: text,
-        mechanism: text,
-        reason: text,
-        selected_bytes: i64,
-        mapping_calls: i64) -> DynLoadAdmittedResult:
-    DynLoadAdmittedResult(
-        load: load,
-        receipt: DynSmfLoadReceipt(
-            requested_policy: policy,
-            provider: provider,
-            mechanism: mechanism,
-            fallback_reason: reason,
-            selected_bytes: selected_bytes,
-            mapping_calls: mapping_calls))
-
 
 class DynSymResult:
-    """Result of a symbol lookup in a loaded dynamic library.
-
-    `offset` is retained for source compatibility. On success it contains
-    the real mapped symbol address, never a manifest-derived offset.
-    """
+    """Result of a symbol lookup in a loaded dynamic library."""
     symbol_name: text
     found: bool
     offset: int
@@ -164,7 +103,7 @@ class DynSymResult:
 
     me to_text() -> text:
         if me.found:
-            return "sym:" + me.symbol_name + " address=" + me.offset.to_text()
+            return "sym:" + me.symbol_name + " offset=" + me.offset.to_text()
         return "sym-error:" + me.symbol_name + " " + me.error_msg
 
     static fn ok(name: text, off: int) -> DynSymResult:
@@ -196,450 +135,39 @@ class DynCloseResult:
 
 
 # ============================================================================
-# Admitted-byte SMF loader
+# Dynamic library API — smf_dlopen / smf_dlsym / smf_dlclose
 #
-# The caller owns identity/digest/ABI admission. This module owns executable
-# loading. It never opens `search_path`: every parsed and mapped byte comes
-# from the exact `admitted_bytes` value.
-#
-# SegmentMapper is the canonical loader W^X owner. A candidate remains RW
-# through copy and relocation, is sealed RX once, and is published only after
-# every seal succeeds.
+# These operate over DynLoadRequest/DynSymResult/DynCloseResult and are
+# intentionally decoupled from the kernel address-space mapper (Phase 5
+# dependency). The registry parameter is an opaque handle table represented
+# as a text-keyed association list encoded as "handle:name;handle:name;...".
+# Full integration with LinkNamespace and the kernel dylib_registry is a
+# follow-on step once user-space isolation (Phase 5 dep) is stable.
 # ============================================================================
 
-val SMF_DYNLIB_HEADER_SIZE: i64 = 128
-val SMF_DYNLIB_SECTION_SIZE: i64 = 64
-val SMF_DYNLIB_SYMBOL_SIZE: i64 = 56
-val SMF_DYNLIB_RELOC_SIZE: i64 = 24
-val SMF_DYNLIB_MAX_SECTIONS: i64 = 4096
-val SMF_DYNLIB_MAX_SYMBOLS: i64 = 65536
-val SMF_DYNLIB_I64_MAX: i64 = 9223372036854775807
-val SMF_DYNLIB_I64_MIN: i64 = -9223372036854775807 - 1
-val SMF_DYNLIB_I32_MIN: i64 = -2147483648
-val SMF_DYNLIB_I32_MAX: i64 = 2147483647
-
-struct DynSmfSection:
-    index: i32
-    wire_type: i32
-    flags: i64
-    file_offset: i64
-    size: i64
-    alignment: i64
-
-struct DynSmfWireSymbol:
-    name: text
-    section_index: i32
-    offset: i64
-    size: i64
-    exported: bool
-
-struct DynSmfRelocation:
-    offset: i64
-    symbol_index: i64
-    reloc_type: i32
-    addend: i64
-
-struct DynSmfValidatedArtifact:
-    sections: [DynSmfSection]
-    symbols: [DynSmfWireSymbol]
-    relocations: [DynSmfRelocation]
-    code_sections: [i32]
-
-struct DynSmfLoadedLibrary:
-    library_name: text
-    owner_id: text
-    exports: Dict<text, i64>
-    remaining_segments: i32
-    close_pending: bool
-
-var DYNSMF_MAPPER: SegmentMapper = SegmentMapper.new()
-var DYNSMF_LIBRARIES: Dict<int, DynSmfLoadedLibrary> = {}
-
-fn smf_dynlib_request_error(req: DynLoadRequest, next_handle: int) -> text:
-    if req.library_name == "":
-        return "empty library name"
-    if req.search_path == "":
-        return "empty search path"
-    if not req.search_path.ends_with(".smf"):
-        return "not an smf artifact"
-    if next_handle <= 0:
-        return "invalid handle seed"
-    if DYNSMF_LIBRARIES.has(next_handle):
-        return "handle already loaded"
-    ""
-
-fn smf_dynlib_range_valid(start: i64, size: i64, total: i64) -> bool:
-    start >= 0 and size >= 0 and start <= total and size <= total - start
-
-fn smf_dynlib_ranges_overlap(a_start: i64, a_size: i64, b_start: i64, b_size: i64) -> bool:
-    a_size > 0 and b_size > 0 and a_start < b_start + b_size and b_start < a_start + a_size
-
-fn smf_dynlib_magic_at(data: [u8], offset: i64) -> bool:
-    smf_dynlib_range_valid(offset, 4, data.len()) and
-        data[offset] == 83 and data[offset + 1] == 77 and
-        data[offset + 2] == 70 and data[offset + 3] == 0
-
-fn smf_dynlib_header_offset(data: [u8]) -> i64:
-    if data.len() < SMF_DYNLIB_HEADER_SIZE:
-        return -1
-    val trailer = data.len() - SMF_DYNLIB_HEADER_SIZE
-    val leading_magic = smf_dynlib_magic_at(data, 0)
-    val trailer_magic = smf_dynlib_magic_at(data, trailer)
-    if leading_magic and trailer_magic and trailer != 0:
-        return -2
-    if leading_magic:
-        return 0
-    if trailer_magic:
-        return trailer
-    -1
-
-fn smf_dynlib_nonnegative_u64(data: [u8], offset: i64, field: text) -> Result<i64, text>:
-    if not smf_dynlib_range_valid(offset, 8, data.len()):
-        return Err("{field} is truncated")
-    if ((data[offset + 7] as i64) & 0x80) != 0:
-        return Err("{field} exceeds signed loader range")
-    Ok(bytes_to_u64(data, offset) as i64)
-
-fn smf_dynlib_signed_i64(data: [u8], offset: i64, field: text) -> Result<i64, text>:
-    if not smf_dynlib_range_valid(offset, 8, data.len()):
-        return Err("{field} is truncated")
-    Ok(bytes_to_u64(data, offset) as i64)
-
-fn smf_dynlib_checked_add(left: i64, right: i64) -> i64?:
-    if right > 0 and left > SMF_DYNLIB_I64_MAX - right:
-        return nil
-    if right < 0 and left < SMF_DYNLIB_I64_MIN - right:
-        return nil
-    Some(left + right)
-
-fn smf_dynlib_checked_sub(left: i64, right: i64) -> i64?:
-    if right > 0 and left < SMF_DYNLIB_I64_MIN + right:
-        return nil
-    if right < 0 and left > SMF_DYNLIB_I64_MAX + right:
-        return nil
-    Some(left - right)
-
-fn smf_dynlib_relocation_width(reloc_type: i32) -> i64:
-    if reloc_type == 1: 8 else: 4
-
-fn smf_dynlib_preflight_reader(data: [u8]) -> Result<SmfReaderMemory, text>:
-    """Bound all outer-header/table work before the shared reader sees it."""
-    val header_offset = smf_dynlib_header_offset(data)
-    if header_offset == -2:
-        return Err("ambiguous smf header")
-    if header_offset < 0:
-        return Err("invalid smf header")
-    if data[header_offset + 4] != 1 or data[header_offset + 5] != 1:
-        return Err("unsupported smf version")
-
-    val section_count = bytes_to_u32(data, header_offset + 16) as i64
-    val symbol_count = bytes_to_u32(data, header_offset + 36) as i64
-    if section_count <= 0 or section_count > SMF_DYNLIB_MAX_SECTIONS:
-        return Err("invalid section count")
-    if symbol_count <= 0 or symbol_count > SMF_DYNLIB_MAX_SYMBOLS:
-        return Err("invalid symbol count")
-
-    val data_offset = bytes_to_u32(data, header_offset + 56) as i64
-    val raw_sections = smf_dynlib_nonnegative_u64(data, header_offset + 20, "section table offset")?
-    val raw_symbols = smf_dynlib_nonnegative_u64(data, header_offset + 28, "symbol table offset")?
-    val sections_offset = smf_dynlib_checked_add(data_offset, raw_sections) ?? return Err("section table offset overflows")
-    val symbols_offset = smf_dynlib_checked_add(data_offset, raw_symbols) ?? return Err("symbol table offset overflows")
-    val sections_size = section_count * SMF_DYNLIB_SECTION_SIZE
-    val symbols_size = symbol_count * SMF_DYNLIB_SYMBOL_SIZE
-    if not smf_dynlib_range_valid(sections_offset, sections_size, data.len()):
-        return Err("section table escapes admitted bytes")
-    if not smf_dynlib_range_valid(symbols_offset, symbols_size, data.len()):
-        return Err("symbol table escapes admitted bytes")
-    if smf_dynlib_ranges_overlap(sections_offset, sections_size, header_offset, SMF_DYNLIB_HEADER_SIZE):
-        return Err("section table overlaps smf header")
-    if smf_dynlib_ranges_overlap(symbols_offset, symbols_size, header_offset, SMF_DYNLIB_HEADER_SIZE):
-        return Err("symbol table overlaps smf header")
-    if smf_dynlib_ranges_overlap(sections_offset, sections_size, symbols_offset, symbols_size):
-        return Err("section and symbol tables overlap")
-    SmfReaderMemory.from_data(data)
-
-fn smf_dynlib_known_section_type(wire_type: i32) -> bool:
-    (wire_type >= 1 and wire_type <= 9) or (wire_type >= 14 and wire_type <= 16)
-
-fn smf_dynlib_find_section(sections: [DynSmfSection], index: i32) -> DynSmfSection?:
-    for section in sections:
-        if section.index == index:
-            return Some(section)
-    nil
-
-fn smf_dynlib_name_from_table(data: [u8], start: i64, end: i64) -> Result<text, text>:
-    if start < 0 or start >= end or end > data.len():
-        return Err("symbol name offset escapes string table")
-    var bytes: [u8] = []
-    var index = start
-    while index < end:
-        val byte = data[index]
-        if byte == 0:
-            if bytes.len() == 0:
-                return Err("empty symbol name")
-            return Ok(bytes_to_text(bytes))
-        bytes.push(byte)
-        index = index + 1
-    Err("unterminated symbol name")
-
-fn smf_dynlib_validate_sections(reader: SmfReaderMemory) -> Result<[DynSmfSection], text>:
-    val total = reader.data.len() as i64
-    val count = reader.header.section_count as i64
-    if count <= 0 or count > SMF_DYNLIB_MAX_SECTIONS:
-        return Err("invalid section count")
-    val table_size = count * SMF_DYNLIB_SECTION_SIZE
-    if not smf_dynlib_range_valid(reader.sections_offset, table_size, total):
-        return Err("section table escapes admitted bytes")
-    if smf_dynlib_ranges_overlap(reader.sections_offset, table_size, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
-        return Err("section table overlaps smf header")
-    val symbol_table_size = (reader.header.symbol_count as i64) * SMF_DYNLIB_SYMBOL_SIZE
-
-    var sections: [DynSmfSection] = []
-    var index = 0i64
-    while index < count:
-        val entry = reader.sections_offset + index * SMF_DYNLIB_SECTION_SIZE
-        val wire_type = reader.data[entry] as i32
-        if not smf_dynlib_known_section_type(wire_type):
-            return Err("unknown section type {wire_type}")
-        val flags = bytes_to_u32(reader.data, entry + 4) as i64
-        val raw_offset = smf_dynlib_nonnegative_u64(reader.data, entry + 8, "section {index} offset")?
-        val file_offset = if reader.header.smf_data_offset > 0:
-            smf_dynlib_checked_add(reader.header.smf_data_offset, raw_offset) ?? return Err("section {index} offset overflows")
-        else:
-            raw_offset
-        val size = smf_dynlib_nonnegative_u64(reader.data, entry + 16, "section {index} size")?
-        val alignment = smf_dynlib_nonnegative_u64(reader.data, entry + 32, "section {index} alignment")?
-        if size <= 0 or not smf_dynlib_range_valid(file_offset, size, total):
-            return Err("section {index} escapes admitted bytes")
-        if alignment <= 0 or (alignment & (alignment - 1)) != 0:
-            return Err("section {index} has invalid alignment")
-        if smf_dynlib_ranges_overlap(file_offset, size, reader.sections_offset, table_size):
-            return Err("section {index} overlaps section table")
-        if smf_dynlib_ranges_overlap(file_offset, size, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
-            return Err("section {index} overlaps smf header")
-        if smf_dynlib_ranges_overlap(file_offset, size, reader.symbols_offset, symbol_table_size):
-            return Err("section {index} overlaps symbol table")
-        if wire_type == 6:
-            if file_offset != reader.string_table_offset or size != reader.string_table_end - reader.string_table_offset:
-                return Err("string-table section disagrees with reader bounds")
-        elif smf_dynlib_ranges_overlap(file_offset, size, reader.string_table_offset, reader.string_table_end - reader.string_table_offset):
-            return Err("section {index} overlaps string table")
-        val section = DynSmfSection(
-            index: index as i32,
-            wire_type: wire_type,
-            flags: flags,
-            file_offset: file_offset,
-            size: size,
-            alignment: alignment
-        )
-        for previous in sections:
-            if smf_dynlib_ranges_overlap(section.file_offset, section.size, previous.file_offset, previous.size):
-                return Err("section {index} overlaps section {previous.index}")
-        sections.push(section)
-        index = index + 1
-    Ok(sections)
-
-fn smf_dynlib_validate_symbols(reader: SmfReaderMemory, sections: [DynSmfSection]) -> Result<[DynSmfWireSymbol], text>:
-    val total = reader.data.len() as i64
-    val count = reader.header.symbol_count as i64
-    if count <= 0 or count > SMF_DYNLIB_MAX_SYMBOLS:
-        return Err("invalid symbol count")
-    val table_size = count * SMF_DYNLIB_SYMBOL_SIZE
-    if not smf_dynlib_range_valid(reader.symbols_offset, table_size, total):
-        return Err("symbol table escapes admitted bytes")
-    if smf_dynlib_ranges_overlap(reader.symbols_offset, table_size, reader.sections_offset, (reader.header.section_count as i64) * SMF_DYNLIB_SECTION_SIZE):
-        return Err("symbol table overlaps section table")
-    if smf_dynlib_ranges_overlap(reader.symbols_offset, table_size, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
-        return Err("symbol table overlaps smf header")
-    if reader.string_table_offset < reader.symbols_offset + table_size:
-        return Err("string table overlaps symbol table")
-    if reader.string_table_end <= reader.string_table_offset or reader.string_table_end > total:
-        return Err("invalid string table range")
-    if smf_dynlib_ranges_overlap(reader.string_table_offset, reader.string_table_end - reader.string_table_offset, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
-        return Err("string table overlaps smf header")
-
-    var symbols: [DynSmfWireSymbol] = []
-    var exported_count = 0i64
-    var index = 0i64
-    while index < count:
-        val entry = reader.symbols_offset + index * SMF_DYNLIB_SYMBOL_SIZE
-        val name_offset = bytes_to_u32(reader.data, entry) as i64
-        val string_table_size = reader.string_table_end - reader.string_table_offset
-        if name_offset <= 0 or name_offset >= string_table_size:
-            return Err("symbol name offset escapes string table")
-        val name = smf_dynlib_name_from_table(
-            reader.data,
-            reader.string_table_offset + name_offset,
-            reader.string_table_end
-        )?
-        for previous in symbols:
-            if previous.name == name:
-                return Err("duplicate symbol name {name}")
-        val symbol_type = reader.data[entry + 8] as i32
-        if symbol_type != 0:
-            return Err("unsupported dynamic symbol type {symbol_type}")
-        val binding = reader.data[entry + 9] as i32
-        if binding > 2:
-            return Err("invalid symbol binding {binding}")
-        val section_index = (reader.data[entry + 41] as i32) | ((reader.data[entry + 42] as i32) << 8)
-        val section = match smf_dynlib_find_section(sections, section_index):
-            case Some(value): value
-            case nil: return Err("symbol {name} references missing section {section_index}")
-        if section.wire_type != 1:
-            return Err("symbol {name} does not reference a code section")
-        if (section.flags & 0x1) == 0 or (section.flags & 0x4) == 0 or (section.flags & 0x2) != 0:
-            return Err("code section {section_index} violates read-execute policy")
-        val offset = smf_dynlib_nonnegative_u64(reader.data, entry + 16, "symbol {name} offset")?
-        val size = smf_dynlib_nonnegative_u64(reader.data, entry + 24, "symbol {name} size")?
-        if size <= 0 or offset >= section.size or size > section.size - offset:
-            return Err("symbol {name} escapes code section")
-        val exported = binding == 1 or binding == 2
-        if exported:
-            exported_count = exported_count + 1
-        symbols.push(DynSmfWireSymbol(
-            name: name,
-            section_index: section_index,
-            offset: offset,
-            size: size,
-            exported: exported
-        ))
-        index = index + 1
-
-    val declared_exports = bytes_to_u32(reader.data, reader.header.header_offset + 40) as i64
-    if exported_count <= 0:
-        return Err("smf has no exported symbols")
-    if declared_exports != exported_count:
-        return Err("export count mismatch")
-    Ok(symbols)
-
-fn smf_dynlib_validate_relocations(reader: SmfReaderMemory, sections: [DynSmfSection], symbols: [DynSmfWireSymbol], code_sections: [i32]) -> Result<[DynSmfRelocation], text>:
-    var reloc_section: DynSmfSection? = nil
-    for section in sections:
-        if section.wire_type == 5:
-            if reloc_section != nil:
-                return Err("multiple relocation sections are ambiguous")
-            reloc_section = Some(section)
-    if reloc_section == nil:
-        return Ok([])
-    if code_sections.len() != 1:
-        return Err("relocations require exactly one code section")
-    val section = reloc_section!
-    if section.size % SMF_DYNLIB_RELOC_SIZE != 0:
-        return Err("relocation section has trailing bytes")
-    val code = smf_dynlib_find_section(sections, code_sections[0])!
-    var relocations: [DynSmfRelocation] = []
-    var cursor = section.file_offset
-    val end = section.file_offset + section.size
-    while cursor < end:
-        val offset = smf_dynlib_nonnegative_u64(reader.data, cursor, "relocation offset")?
-        val symbol_index = bytes_to_u32(reader.data, cursor + 8) as i64
-        val reloc_type = reader.data[cursor + 12] as i32
-        val addend = smf_dynlib_signed_i64(reader.data, cursor + 16, "relocation addend")?
-        if reloc_type < 1 or reloc_type > 5:
-            return Err("unknown relocation type {reloc_type}")
-        val patch_width = smf_dynlib_relocation_width(reloc_type)
-        if offset >= code.size or patch_width > code.size - offset:
-            return Err("relocation offset {offset} escapes code section")
-        if symbol_index < 0 or symbol_index >= symbols.len():
-            return Err("relocation symbol index {symbol_index} out of range")
-        for previous in relocations:
-            val previous_width = smf_dynlib_relocation_width(previous.reloc_type)
-            if smf_dynlib_ranges_overlap(offset, patch_width, previous.offset, previous_width):
-                return Err("overlapping relocation patches at {previous.offset} and {offset}")
-        relocations.push(DynSmfRelocation(
-            offset: offset,
-            symbol_index: symbol_index,
-            reloc_type: reloc_type,
-            addend: addend
-        ))
-        cursor = cursor + SMF_DYNLIB_RELOC_SIZE
-    Ok(relocations)
-
-fn smf_dynlib_validate(data: [u8]) -> Result<DynSmfValidatedArtifact, text>:
-    val reader = smf_dynlib_preflight_reader(data)?
-    val header_offset = reader.header.header_offset
-    if not reader.header.flags.executable:
-        return Err("smf is not executable")
-    if reader.data[header_offset + 12] != 0:
-        return Err("compressed smf is unsupported")
-    val sections = smf_dynlib_validate_sections(reader)?
-    var code_sections: [i32] = []
-    for section in sections:
-        if section.wire_type == 1:
-            if section.alignment > 4096:
-                return Err("code section alignment exceeds mapper guarantee")
-            code_sections.push(section.index)
-    if code_sections.len() == 0:
-        return Err("smf has no code section")
-    val symbols = smf_dynlib_validate_symbols(reader, sections)?
-    val relocations = smf_dynlib_validate_relocations(reader, sections, symbols, code_sections)?
-    Ok(DynSmfValidatedArtifact(
-        sections: sections,
-        symbols: symbols,
-        relocations: relocations,
-        code_sections: code_sections
-    ))
-
-fn smf_dynlib_copy_section(data: [u8], section: DynSmfSection) -> [u8]:
-    var bytes: [u8] = []
-    var index = section.file_offset
-    val end = section.file_offset + section.size
-    while index < end:
-        bytes.push(data[index])
-        index = index + 1
-    bytes
-
-fn smf_dynlib_snapshot_bytes(data: [u8]) -> [u8]:
-    var snapshot: [u8] = []
-    for byte in data:
-        snapshot.push(byte)
-    snapshot
-
-fn smf_dynlib_rollback(req: DynLoadRequest, owner_id: text, expected_segments: i32, error_message: text) -> DynLoadResult:
-    val remaining_before = DYNSMF_MAPPER.owner_segment_count(owner_id)
-    if remaining_before < 0 or remaining_before > expected_segments:
-        return DynLoadResult.fail(req.library_name, error_message + "; rollback owner count {remaining_before} exceeds expected {expected_segments}")
-    val already_removed = expected_segments - remaining_before
-    val removed = DYNSMF_MAPPER.unmap_owner(owner_id)
-    val total_removed = already_removed + removed
-    if total_removed != expected_segments:
-        return DynLoadResult.fail(req.library_name, error_message + "; rollback removed {total_removed} of {expected_segments} segments ({already_removed} already removed, {removed} removed now)")
-    DynLoadResult.fail(req.library_name, error_message)
-
-fn smf_dynlib_apply_relocation(code_base: i64, relocation: DynSmfRelocation, target: i64) -> Result<(), text>:
-    val patch_address = smf_dynlib_checked_add(code_base, relocation.offset) ?? return Err("relocation patch address overflows")
-    if relocation.reloc_type == 1:
-        val value = smf_dynlib_checked_add(target, relocation.addend) ?? return Err("absolute 64-bit relocation overflows")
-        native_reloc_write_i64(code_base, relocation.offset, value)
-        return Ok(())
-    if relocation.reloc_type >= 2 and relocation.reloc_type <= 4:
-        val delta = smf_dynlib_checked_sub(target, patch_address) ?? return Err("relative relocation delta overflows")
-        val value = smf_dynlib_checked_add(delta, relocation.addend) ?? return Err("relative relocation addend overflows")
-        if value < SMF_DYNLIB_I32_MIN or value > SMF_DYNLIB_I32_MAX:
-            return Err("relative relocation does not fit i32")
-        native_reloc_write_i32(code_base, relocation.offset, value as i32)
-        return Ok(())
-    if relocation.reloc_type == 5:
-        val value = smf_dynlib_checked_add(target, relocation.addend) ?? return Err("absolute 32-bit relocation overflows")
-        if value < SMF_DYNLIB_I32_MIN or value > SMF_DYNLIB_I32_MAX:
-            return Err("absolute relocation does not fit i32")
-        native_reloc_write_i32(code_base, relocation.offset, value as i32)
-        return Ok(())
-    Err("unknown relocation type")
-
 pub fn smf_dlopen(req: DynLoadRequest, next_handle: int) -> DynLoadResult:
-    """Fail-closed compatibility facade. Executable loads require admitted bytes."""
-    val request_error = smf_dynlib_request_error(req, next_handle)
-    if request_error != "":
-        return DynLoadResult.fail(req.library_name, request_error)
-    DynLoadResult.fail(req.library_name, "admitted smf bytes required")
+    """Open an SMF library package from the given search path.
+
+    Validates that the library name is non-empty and the search path is set.
+    Returns a handle on success; the caller is responsible for tracking the
+    handle-to-name mapping in a registry.
+    """
+    if req.library_name == "":
+        return DynLoadResult.fail("", "empty library name")
+    if req.search_path == "":
+        return DynLoadResult.fail(req.library_name, "empty search path")
+    if next_handle <= 0:
+        return DynLoadResult.fail(req.library_name, "invalid handle seed")
+    return DynLoadResult.ok(req.library_name, next_handle)
+
+fn smf_artifact_has_magic(data: [u8]) -> bool:
+    data.len() >= 4 and data[0] == 83 and data[1] == 77 and data[2] == 70 and data[3] == 0
 
 pub fn smf_dlopen_checked(req: DynLoadRequest, next_handle: int) -> DynLoadResult:
-    """Compatibility facade with no executable success path.
+    """Open an SMF library package after validating the artifact path.
 
-    A checked path is still only a path. It cannot prove that bytes mapped
-    later are the bytes previously checked, so only `smf_dlopen_admitted` may
-    publish a handle.
+    This keeps the compatibility `smf_dlopen` facade stable while giving
+    startup and release gates a fail-closed path for generated `.smf` files.
     """
     val base = smf_dlopen(req, next_handle)
     if not base.success:
@@ -648,65 +176,104 @@ pub fn smf_dlopen_checked(req: DynLoadRequest, next_handle: int) -> DynLoadResul
         return DynLoadResult.fail(req.library_name, "not an smf artifact")
     if not smf_file_exists(req.search_path):
         return DynLoadResult.fail(req.library_name, "artifact missing")
-    val data = rt_file_read_bytes(req.search_path) ?? []
+    val data = smf_file_read_bytes(req.search_path)
     smf_dlopen_bytes(req, next_handle, data)
 
-pub fn smf_dlopen_admitted(req: DynLoadRequest, next_handle: int, admitted_bytes: [u8]) -> DynLoadResult:
-    """Load exactly the admitted SMF byte image through the canonical W^X mapper."""
-    val request_error = smf_dynlib_request_error(req, next_handle)
-    if request_error != "":
-        return DynLoadResult.fail(req.library_name, request_error)
-    # Freeze one local image before parsing. Validation, section copy, and
-    # relocation then consume the same bytes even if the caller retains a
-    # mutable reference to its input array.
-    val exact_bytes = smf_dynlib_snapshot_bytes(admitted_bytes)
-    val validated = match smf_dynlib_validate(exact_bytes):
-        case Ok(value): value
-        case Err(err): return DynLoadResult.fail(req.library_name, err)
-    val owner_id = "dynsmf-handle-" + next_handle.to_text()
-    var mapped_count = 0i32
-    for section_index in validated.code_sections:
-        val section = smf_dynlib_find_section(validated.sections, section_index)!
-        val bytes = smf_dynlib_copy_section(exact_bytes, section)
-        match DYNSMF_MAPPER.map_segment(owner_id, section.index, bytes, section.alignment):
-            case Ok(_):
-                mapped_count = mapped_count + 1
-            case Err(err):
-                return smf_dynlib_rollback(req, owner_id, mapped_count, err)
+pub fn smf_dlopen_bytes(req: DynLoadRequest, next_handle: int, data: [u8]) -> DynLoadResult:
+    """Open and validate the caller-captured SMF bytes without reopening a path."""
+    val base = smf_dlopen(req, next_handle)
+    if not base.success:
+        return base
+    if not req.search_path.ends_with(".smf"):
+        return DynLoadResult.fail(req.library_name, "not an smf artifact")
+    if not smf_artifact_has_magic(data):
+        return DynLoadResult.fail(req.library_name, "invalid smf magic")
+    base
+
+# ============================================================================
+# Export-witness symbol enumeration (stub-artifact honesty check)
+#
+# smf_dlsym above resolves symbols entirely from the caller-supplied
+# `registry` text, which dynSMF sessions synthesize from the MANIFEST's
+# `exports` list (see dynsmf_symbol_registry in dynsmf_session.spl) — it
+# never reads exports out of the artifact's own bytes, so there was no
+# existing symbol-table reader in this loader to reuse.
+#
+# The real SMF string table (src/compiler/70.backend/linker/smf_reader.spl,
+# read_string_from_table) stores symbol names as plain null-terminated ASCII
+# — the same convention the hollow stub's own `main\0`/`code\0` literals use
+# (doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md). Rather
+# than re-deriving the exact section/symbol-table offsets (that full reader —
+# src/compiler/70.backend/linker/smf_reader.spl, smf_header.spl,
+# _SmfReaderMemory/symbol_parser.spl — is a heavier, section/relocation-
+# oriented parser meant for the compiler's own module loader), this witness
+# scans the artifact bytes directly for `name` followed by a NUL byte
+# anywhere in the payload. That is a real name check (it recognizes the
+# actual encoding a genuine artifact would use), not a fabricated format —
+# but it is only a witness, not a full parse: dynsmf_artifact_witnesses_exports
+# in dynsmf_session.spl pairs it with an unconditional minimum-size floor,
+# because the stub itself already contains "main" (a bare name match on a
+# generic symbol like "main" is not sufficient — see that function).
+# ============================================================================
+
+pub fn smf_artifact_has_export(data: [u8], name: text) -> bool:
+    """True if `name` appears in the artifact's bytes as a null-terminated
+    ASCII run (the real SMF string-table convention). Returns false for an
+    empty name, a name that cannot fit, or any artifact without the magic.
+    """
+    val name_len = name.len()
+    if name_len == 0:
+        return false
+    if not smf_artifact_has_magic(data):
+        return false
+    if data.len() < name_len + 1:
+        return false
+    var start = 0
+    while start + name_len + 1 <= data.len():
+        if data[start + name_len] == 0 and smf_bytes_match_ascii_at(data, start, name):
+            return true
+        start = start + 1
+    false
+
+fn smf_bytes_match_ascii_at(data: [u8], start: int, name: text) -> bool:
+    var i = 0
+    val n = name.len()
+    while i < n:
+        if data[start + i] != (char_code(name.char_at(i)) as u8):
+            return false
+        i = i + 1
+    true
 
 pub fn smf_dlsym(handle_id: int, symbol_name: text, registry: text) -> DynSymResult:
-    """Resolve only addresses published from the admitted SMF symbol table.
+    """Look up a symbol by name in a loaded SMF library handle.
 
-    `registry` remains in the signature for compatibility and is deliberately
-    ignored; caller-supplied text can never create a symbol.
+    `registry` is a semicolon-separated list of "handle:sym_name:offset" entries.
+    Returns the offset on a match; returns failure if handle or symbol is absent.
     """
-    val _ignored_registry = registry
     if handle_id <= 0:
         return DynSymResult.fail(symbol_name, "invalid handle")
     if symbol_name == "":
         return DynSymResult.fail("", "empty symbol name")
-    if not DYNSMF_LIBRARIES.has(handle_id):
-        return DynSymResult.fail(symbol_name, "unknown handle")
-    val loaded = DYNSMF_LIBRARIES[handle_id]
-    if loaded.close_pending:
-        return DynSymResult.fail(symbol_name, "handle close pending")
-    if not loaded.exports.has(symbol_name):
-        return DynSymResult.fail(symbol_name, "symbol not exported by admitted smf")
-    DynSymResult.ok(symbol_name, loaded.exports[symbol_name])
+    val handle_str = handle_id.to_text()
+    val entries = registry.split(";")
+    var idx = 0
+    while idx < entries.len():
+        val entry = entries[idx]
+        val parts = entry.split(":")
+        if parts.len() == 3:
+            if parts[0] == handle_str and parts[1] == symbol_name:
+                val off = parts[2].to_int()
+                return DynSymResult.ok(symbol_name, off)
+        idx = idx + 1
+    return DynSymResult.fail(symbol_name, "symbol not found in handle " + handle_str)
 
 pub fn smf_dlclose(handle_id: int) -> DynCloseResult:
-    """Deterministically unmap every segment owned by a real loaded handle."""
+    """Release a loaded SMF library handle.
+
+    At this stage the function validates the handle and returns success.
+    Actual mapping teardown is deferred until the kernel address-space
+    isolation layer (Phase 5 dependency) is stable.
+    """
     if handle_id <= 0:
         return DynCloseResult.fail(handle_id, "invalid handle")
-    if not DYNSMF_LIBRARIES.has(handle_id):
-        return DynCloseResult.fail(handle_id, "unknown handle")
-    var loaded = DYNSMF_LIBRARIES[handle_id]
-    val expected = loaded.remaining_segments
-    val removed = DYNSMF_MAPPER.unmap_owner(loaded.owner_id)
-    if removed != expected:
-        loaded.remaining_segments = expected - removed
-        loaded.close_pending = true
-        DYNSMF_LIBRARIES[handle_id] = loaded
-        return DynCloseResult.fail(handle_id, "unmapped {removed} of {expected} segments")
-    DYNSMF_LIBRARIES = DYNSMF_LIBRARIES.remove(handle_id)
-    DynCloseResult.ok(handle_id)
+    return DynCloseResult.ok(handle_id)

@@ -2,6 +2,7 @@
 
 use app.io.mod (file_exists, file_read, file_copy, file_size, dir_create, dir_walk)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.scv.alloc_bounds.{scv_bound_object_bytes, scv_bound_tree_entries}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.common.string_core.{char_from_code}
@@ -21,11 +22,11 @@ fn scv_pack_manifest_for_kind(root: text, kind: text) -> text:
     val dir = "{scv_objects_dir(root)}/{kind}"
     if not file_exists(dir):
         return ""
-    var out = ""
+    var rows: [text] = []
     for path in dir_walk(dir):
         val id = scv_object_id_from_path(path)
-        out = out + "{kind}|{id}|{file_size(path)}|{scv_pack_manifest_path_for_entry(kind, id)}\n"
-    out
+        rows.push("{kind}|{id}|{file_size(path)}|{scv_pack_manifest_path_for_entry(kind, id)}\n")
+    rows.join("")
 
 fn scv_append_bytes(target: [u8], source: [u8]) -> [u8]:
     var out = target
@@ -61,7 +62,7 @@ fn scv_pack_payload_for_kind(root: text, kind: text, payload: [u8]) -> [u8]:
     var out = payload
     for path in dir_walk(dir):
         val id = scv_object_id_from_path(path)
-        val raw = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val raw = file_read_bytes(path) ?? []
         out = scv_append_text_bytes(out, "entry {kind} {id} {raw.len()}\n")
         out = scv_append_bytes(out, raw)
         out = scv_append_text_bytes(out, "\nendentry\n")
@@ -79,9 +80,10 @@ fn scv_pack_write(root: text) -> text:
         return "ERROR repository not initialized\n"
     val pack_dir = "{scv_objects_dir(root)}/packs"
     dir_create(pack_dir, true)
-    var manifest = "format: scv-pack-v1\n"
+    var manifest_rows: [text] = ["format: scv-pack-v1\n"]
     for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax"]:
-        manifest = manifest + scv_pack_manifest_for_kind(root, kind)
+        manifest_rows.push(scv_pack_manifest_for_kind(root, kind))
+    val manifest = manifest_rows.join("")
     val pack_id = scv_hash_text("pack", manifest)
     val manifest_path = "{pack_dir}/{pack_id}.manifest"
     val gzip_path = "{pack_dir}/{pack_id}.pack.gz"
@@ -144,10 +146,10 @@ fn scv_pack_payload_object_hash_ok(kind: text, id: text, raw: [u8]) -> bool:
         return true
     false
 
-fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -> (bool, i64, text):
+fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -> (bool, i64):
     val header = "format: scv-pack-payload-v1\n".bytes()
     if payload.len() < header.len() or payload[0:header.len()] != header:
-        return (false, 0, "")
+        return (false, 0)
     var pos = header.len()
     var entries = 0
     var seen = ""
@@ -158,34 +160,34 @@ fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -
             pos = line_end + 1
             continue
         if not trimmed.starts_with("entry "):
-            return (false, entries, "")
+            return (false, entries)
         val parts = trimmed.split(" ")
         if parts.len() < 4:
-            return (false, entries, "")
+            return (false, entries)
         if not scv_pack_kind_valid(parts[1]):
-            return (false, entries, "")
+            return (false, entries)
         if not scv_pack_id_prefix_valid(parts[1], parts[2]):
-            return (false, entries, "ERROR unsafe pack object id: {parts[2]}")
+            return (false, entries)
         val size = parts[3].to_i64() ?? -1
         if size < 0:
-            return (false, entries, "")
+            return (false, entries)
         val data_start = line_end + 1
         val data_end = data_start + size
         if data_end > payload.len():
-            return (false, entries, "")
+            return (false, entries)
         if not scv_pack_marker_at(payload, data_end):
-            return (false, entries, "")
+            return (false, entries)
         val object_key = "{parts[1]}|{parts[2]}"
         if scv_line_set_contains(seen, object_key):
-            return (false, entries, "")
+            return (false, entries)
         seen = seen + object_key + "\n"
         if not scv_pack_manifest_has_entry(manifest_text, parts[1], parts[2], parts[3]):
-            return (false, entries, "")
+            return (false, entries)
         if not scv_pack_payload_object_hash_ok(parts[1], parts[2], payload[data_start:data_end]):
-            return (false, entries, "ERROR pack object hash mismatch: {parts[2]}")
+            return (false, entries)
         entries = entries + 1
         pos = data_end + "\nendentry\n".bytes().len()
-    (true, entries, "")
+    (true, entries)
 
 fn scv_pack_label_prefix(label: text) -> text:
     if label == "":
@@ -215,19 +217,14 @@ fn scv_pack_verify_dir(pack_dir: text, requested_pack: text, label: text) -> (te
             return ("ERROR unsupported {prefix}pack manifest: {pack_id}\n", 0, 0, 0, 0)
         if scv_hash_text("pack", manifest_text) != pack_id:
             return ("ERROR {prefix}pack manifest id mismatch: {pack_id}\n", 0, 0, 0, 0)
-        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val compressed = file_read_bytes(path) ?? []
         val payload = gzip_decompress(compressed)
         if payload.len() == 0:
             return ("ERROR corrupt {prefix}pack payload: {pack_id}\n", 0, 0, 0, 0)
         val header = "format: scv-pack-payload-v1\n".bytes()
         if payload.len() < header.len() or payload[0:header.len()] != header:
             return ("ERROR unsupported {prefix}pack payload: {pack_id}\n", 0, 0, 0, 0)
-        val (payload_ok, payload_entries, payload_reason) = scv_pack_payload_matches_manifest_bytes(payload, manifest_text)
-        # Object-level diagnostics must win over the generic pack-level message:
-        # a rejected object also short-counts entries, so checking the count
-        # first would flatten every specific reason away.
-        if not payload_ok and payload_reason != "":
-            return (payload_reason + "\n", 0, 0, 0, 0)
+        val (payload_ok, payload_entries) = scv_pack_payload_matches_manifest_bytes(payload, manifest_text)
         if scv_pack_manifest_entry_count(manifest_text) != payload_entries:
             return ("ERROR pack manifest payload mismatch: {pack_id}\n", 0, 0, 0, 0)
         if not payload_ok:
@@ -293,6 +290,9 @@ fn scv_pack_marker_at(payload: [u8], start: i64) -> bool:
     payload[start:start + marker.len()] == marker
 
 fn scv_pack_import_entry(root: text, kind: text, id: text, raw: [u8]) -> text:
+    val object_bound = scv_bound_object_bytes(raw.len())
+    if object_bound != "":
+        return object_bound
     if not scv_pack_kind_valid(kind):
         return "ERROR unsupported pack object kind: {kind}\n"
     if not scv_pack_id_prefix_valid(kind, id):
@@ -302,6 +302,10 @@ fn scv_pack_import_entry(root: text, kind: text, id: text, raw: [u8]) -> text:
     val raw_text = if kind == "chunks": "" else: scv_pack_bytes_to_text(raw)
     if kind == "files" and scv_hash_text("file", raw_text) != id:
         return "ERROR pack object hash mismatch: {id}\n"
+    if kind == "trees":
+        val tree_bound = scv_bound_tree_entries(raw_text.split("\n").len())
+        if tree_bound != "":
+            return tree_bound
     if kind == "trees" and scv_hash_text("tree", raw_text) != id:
         return "ERROR pack object hash mismatch: {id}\n"
     if kind == "commits" and scv_hash_text("commit", raw_text) != id:
@@ -363,7 +367,7 @@ fn scv_pack_import_from_dir(root: text, pack_dir: text, requested_pack: text, la
         val pack_id = scv_pack_id_from_gzip_path(path)
         if requested_pack != "" and requested_pack != pack_id:
             continue
-        val compressed = scv_i64_bytes_to_u8(file_read_bytes(path) ?? [])
+        val compressed = file_read_bytes(path) ?? []
         val payload = gzip_decompress(compressed)
         val (error, count) = scv_pack_import_payload(root, payload)
         if error != "":

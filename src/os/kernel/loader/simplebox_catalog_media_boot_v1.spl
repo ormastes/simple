@@ -13,20 +13,13 @@ use os.installer.simplebox_signed_catalog_provisioner_v1.{
 use os.kernel.loader.authenticated_media_parser.{authenticated_media_hex_bytes_v1}
 use os.kernel.loader.executable_manifest_signature_verifier.{ExecutableManifestTrustedSignerV1}
 use os.kernel.loader.simplebox_pinned_catalog_image_v1.{
-    SimpleboxPinnedCatalogImageV1, SimpleboxPinnedCatalogImageErrorV1,
+    SimpleboxPinnedCatalogImageErrorV1,
     simplebox_pinned_catalog_image_attach_clang_v1,
     simplebox_pinned_catalog_image_create_v1,
     simplebox_pinned_catalog_image_ingest_v1
 }
 use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{ClangSysrootCatalogBundleV1}
-use os.kernel.loader.signed_catalog_snapshot_reader_v1.{
-    SignedCatalogSnapshotReadV1, signed_catalog_snapshot_read_opened_v1}
-use os.services.vfs.vfs_boot_state.{
-    vfs_state_mount_table_owner_handle_v1,
-    vfs_state_mount_table_lease_begin_v1,
-    vfs_state_mount_table_lease_restore_v1}
-use std.fs_driver.mount_table.{MountTable, StableFileSnapshotInfoV1}
-use std.fs_driver.error.{FsError}
+use os.services.vfs.vfs_init.{g_vfs_file_size, g_vfs_read_file_bytes}
 
 val SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1: i64 = 16384
 val SIMPLEBOX_CATALOG_MEDIA_MAX_LAYOUTS_V1: i64 = 4
@@ -51,8 +44,6 @@ pub enum SimpleboxCatalogMediaBootErrorV1:
     MediaAmbiguous
     MediaBoundsRejected
     MediaReadRejected
-    CleanupIndeterminate
-    MediaEpochRejected
     TrustConfigRejected
     TrustPinRejected
     ImageRejected
@@ -136,107 +127,12 @@ fn _layout_in_policy_v1(
             return true
     false
 
-struct SimpleboxCatalogSnapshotOpenV1:
-    present: bool
-    bounds_rejected: bool
-    read_rejected: bool
-    snapshot: StableFileSnapshotInfoV1?
-
-struct SimpleboxCatalogLayoutSnapshotsV1:
-    artifact: StableFileSnapshotInfoV1
-    scr1: StableFileSnapshotInfoV1
-    trust: StableFileSnapshotInfoV1
-
-fn _snapshot_open_v1(
-    table: MountTable, path: text, max_bytes: i64,
-) -> SimpleboxCatalogSnapshotOpenV1:
-    val opened = table.open_stable_snapshot(path, max_bytes.to_u64())
-    match opened:
-        case Ok(snapshot):
-            SimpleboxCatalogSnapshotOpenV1(
-                present: true, bounds_rejected: false, read_rejected: false,
-                snapshot: Some(snapshot))
-        case Err(FsError.NotFound):
-            SimpleboxCatalogSnapshotOpenV1(
-                present: false, bounds_rejected: false, read_rejected: false,
-                snapshot: nil)
-        case Err(FsError.TooLarge):
-            SimpleboxCatalogSnapshotOpenV1(
-                present: true, bounds_rejected: true, read_rejected: false,
-                snapshot: nil)
-        case Err(_):
-            SimpleboxCatalogSnapshotOpenV1(
-                present: true, bounds_rejected: false, read_rejected: true,
-                snapshot: nil)
-
-fn _close_snapshot_if_open_v1(
-    table: MountTable, snapshot: StableFileSnapshotInfoV1?,
-) -> bool:
-    if not snapshot.?: return true
-    table.close_stable_snapshot(snapshot.unwrap().lease).is_ok()
-
-fn _close_layout_snapshots_v1(
-    table: MountTable, snapshots: SimpleboxCatalogLayoutSnapshotsV1,
-) -> bool:
-    # Attempt every close even when an earlier release is indeterminate.
-    val artifact_closed = table.close_stable_snapshot(snapshots.artifact.lease).is_ok()
-    val scr1_closed = table.close_stable_snapshot(snapshots.scr1.lease).is_ok()
-    val trust_closed = table.close_stable_snapshot(snapshots.trust.lease).is_ok()
-    artifact_closed and scr1_closed and trust_closed
-
-fn _close_open_results_v1(
-    table: MountTable,
-    artifact: SimpleboxCatalogSnapshotOpenV1,
-    scr1: SimpleboxCatalogSnapshotOpenV1,
-    trust: SimpleboxCatalogSnapshotOpenV1,
-    selected: SimpleboxCatalogLayoutSnapshotsV1?,
-) -> bool:
-    val artifact_closed = _close_snapshot_if_open_v1(table, artifact.snapshot)
-    val scr1_closed = _close_snapshot_if_open_v1(table, scr1.snapshot)
-    val trust_closed = _close_snapshot_if_open_v1(table, trust.snapshot)
-    val selected_closed = if selected.?:
-        _close_layout_snapshots_v1(table, selected.unwrap())
-    else:
-        true
-    artifact_closed and scr1_closed and trust_closed and selected_closed
-
-pub(package) fn simplebox_catalog_media_same_bundle_epoch_v1(
-    layout: SimpleboxCatalogMediaLayoutV1,
-    artifact: SignedCatalogSnapshotReadV1,
-    scr1: SignedCatalogSnapshotReadV1,
-    trust: SignedCatalogSnapshotReadV1,
-) -> bool:
-    val left = artifact.seal
-    val middle = scr1.seal
-    val right = trust.seal
-    left.canonical_source_path == layout.artifact_path and
-        middle.canonical_source_path == layout.scr1_path and
-        right.canonical_source_path == layout.trust_config_path and
-        left.mount_id == middle.mount_id and middle.mount_id == right.mount_id and
-        left.backend_name == middle.backend_name and
-        middle.backend_name == right.backend_name and
-        left.backend_kind == middle.backend_kind and
-        middle.backend_kind == right.backend_kind and
-        left.mount_generation == middle.mount_generation and
-        middle.mount_generation == right.mount_generation and
-        left.namespace_generation == middle.namespace_generation and
-        middle.namespace_generation == right.namespace_generation and
-        left.content_generation == middle.content_generation and
-        middle.content_generation == right.content_generation
-
-pub(package) fn simplebox_catalog_media_cleanup_error_v1(
-    cleanup_complete: bool,
-    intended: SimpleboxCatalogMediaBootErrorV1,
-) -> SimpleboxCatalogMediaBootErrorV1:
-    if cleanup_complete: return intended
-    SimpleboxCatalogMediaBootErrorV1.CleanupIndeterminate
-
-fn _fail_after_cleanup_v1(
-    intended: SimpleboxCatalogMediaBootErrorV1,
-    cleanup_complete: bool,
-) -> SimpleboxCatalogMediaBootResultV1:
-    _fail_v1(simplebox_catalog_media_cleanup_error_v1(
-        cleanup_complete, intended))
+fn _file_size_v1(path: text) -> i64:
+    var size: i64 = -1
+    match g_vfs_file_size(path):
+        case Some(value): size = value.to_i64()
+        case None: size = -1
+    size
 
 fn _config_field_v1(document: text, name: text) -> text:
     val prefix = name + "="
@@ -272,50 +168,6 @@ fn _trust_config_bytes_valid_v1(bytes: [u8]) -> bool:
         index = index + 1
     true
 
-pub(package) fn simplebox_catalog_media_boot_prepare_bytes_v1(
-    policy: SimpleboxCatalogMediaBootPolicyV1,
-    layout: SimpleboxCatalogMediaLayoutV1,
-    artifact: [u8],
-    scr1: [u8],
-    trust_config: [u8],
-    clang_bundle: ClangSysrootCatalogBundleV1? = nil,
-) -> Result<SimpleboxPinnedCatalogImageV1, SimpleboxCatalogMediaBootResultV1>:
-    """Bind and pin already-read media without catalog mutation."""
-    if not _policy_valid_v1(policy) or not _layout_in_policy_v1(policy, layout):
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.PolicyRejected))
-    if artifact.len() == 0 or artifact.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
-        scr1.len() == 0 or scr1.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
-        trust_config.len() == 0 or trust_config.len() >
-            SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected))
-    if not _trust_config_bytes_valid_v1(trust_config):
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustConfigRejected))
-    val trust = bytes_to_text(trust_config)
-    if not _trust_config_shape_valid_v1(trust):
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustConfigRejected))
-    val key_id = _config_field_v1(trust, "key_id")
-    val public_key_hex = _config_field_v1(trust, "public_key_ed25519_hex")
-    val public_key = authenticated_media_hex_bytes_v1(public_key_hex)
-    if key_id != policy.pinned_key_id or
-        public_key_hex != policy.pinned_public_key_hex or
-        public_key.len() != 32 or
-        sha256_u8_hex(public_key) != policy.pinned_public_key_sha256:
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustPinRejected))
-    val image = simplebox_pinned_catalog_image_create_v1(
-        layout.artifact_path, layout.scr1_path, policy.target,
-        artifact, scr1, [ExecutableManifestTrustedSignerV1(
-            key_id: key_id, public_key: public_key)])
-    if not image.?:
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.ImageRejected))
-    var selected_image = image.unwrap()
-    if clang_bundle.?:
-        val attached = simplebox_pinned_catalog_image_attach_clang_v1(
-            selected_image, clang_bundle.unwrap())
-        if not attached.?:
-            return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.ImageRejected))
-        selected_image = attached.unwrap()
-    Ok(selected_image)
-
 pub(package) fn simplebox_catalog_media_boot_ingest_bytes_v1(
     policy: SimpleboxCatalogMediaBootPolicyV1,
     layout: SimpleboxCatalogMediaLayoutV1,
@@ -324,11 +176,40 @@ pub(package) fn simplebox_catalog_media_boot_ingest_bytes_v1(
     trust_config: [u8],
     clang_bundle: ClangSysrootCatalogBundleV1? = nil,
 ) -> SimpleboxCatalogMediaBootResultV1:
-    """Compatibility path: prepare bytes, then consume the pinned image."""
-    val prepared = simplebox_catalog_media_boot_prepare_bytes_v1(
-        policy, layout, artifact, scr1, trust_config, clang_bundle)
-    if prepared.is_err(): return prepared.unwrap_err()
-    val selected_image = prepared.unwrap()
+    """Bind already-read media bytes to paths, target, and compiled root pin."""
+    if not _policy_valid_v1(policy) or not _layout_in_policy_v1(policy, layout):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.PolicyRejected)
+    if artifact.len() == 0 or artifact.len() > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        scr1.len() == 0 or scr1.len() > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        trust_config.len() == 0 or trust_config.len() >
+            SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected)
+    if not _trust_config_bytes_valid_v1(trust_config):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustConfigRejected)
+    val trust = bytes_to_text(trust_config)
+    if not _trust_config_shape_valid_v1(trust):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustConfigRejected)
+    val key_id = _config_field_v1(trust, "key_id")
+    val public_key_hex = _config_field_v1(trust, "public_key_ed25519_hex")
+    val public_key = authenticated_media_hex_bytes_v1(public_key_hex)
+    if key_id != policy.pinned_key_id or
+        public_key_hex != policy.pinned_public_key_hex or
+        public_key.len() != 32 or
+        sha256_u8_hex(public_key) != policy.pinned_public_key_sha256:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.TrustPinRejected)
+    val image = simplebox_pinned_catalog_image_create_v1(
+        layout.artifact_path, layout.scr1_path, policy.target,
+        artifact, scr1, [ExecutableManifestTrustedSignerV1(
+            key_id: key_id, public_key: public_key)])
+    if not image.?:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.ImageRejected)
+    var selected_image = image.unwrap()
+    if clang_bundle.?:
+        val attached = simplebox_pinned_catalog_image_attach_clang_v1(
+            selected_image, clang_bundle.unwrap())
+        if not attached.?:
+            return _fail_v1(SimpleboxCatalogMediaBootErrorV1.ImageRejected)
+        selected_image = attached.unwrap()
     val ingested = simplebox_pinned_catalog_image_ingest_v1(selected_image)
     if not ingested.ok:
         return _fail_v1(SimpleboxCatalogMediaBootErrorV1.IngestionRejected, ingested.error)
@@ -338,136 +219,51 @@ pub(package) fn simplebox_catalog_media_boot_ingest_bytes_v1(
         artifact_path: layout.artifact_path, scr1_path: layout.scr1_path,
         accepted_records: 1)
 
-pub(package) fn simplebox_catalog_media_boot_prepare_from_table_v1(
-    table: MountTable,
-    policy: SimpleboxCatalogMediaBootPolicyV1,
-    clang_bundle: ClangSysrootCatalogBundleV1? = nil,
-) -> Result<SimpleboxPinnedCatalogImageV1, SimpleboxCatalogMediaBootResultV1>:
-    """Read and pin one layout without catalog mutation."""
-    if not _policy_valid_v1(policy):
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.PolicyRejected))
-    var selected_index: i64 = -1
-    var selected: SimpleboxCatalogLayoutSnapshotsV1? = nil
-    var index: i64 = 0
-    while index < policy.layouts.len():
-        val layout = policy.layouts[index]
-        val artifact = _snapshot_open_v1(
-            table, layout.artifact_path, HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1)
-        val scr1 = _snapshot_open_v1(
-            table, layout.scr1_path, SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1)
-        val trust = _snapshot_open_v1(
-            table, layout.trust_config_path,
-            SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1)
-        val present = (if artifact.present: 1 else: 0) +
-            (if scr1.present: 1 else: 0) + (if trust.present: 1 else: 0)
-        if present > 0 and present < 3:
-            return Err(_fail_after_cleanup_v1(
-                SimpleboxCatalogMediaBootErrorV1.MediaPartial,
-                _close_open_results_v1(table, artifact, scr1, trust, selected)))
-        if artifact.bounds_rejected or scr1.bounds_rejected or trust.bounds_rejected:
-            return Err(_fail_after_cleanup_v1(
-                SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected,
-                _close_open_results_v1(table, artifact, scr1, trust, selected)))
-        if artifact.read_rejected or scr1.read_rejected or trust.read_rejected:
-            return Err(_fail_after_cleanup_v1(
-                SimpleboxCatalogMediaBootErrorV1.MediaReadRejected,
-                _close_open_results_v1(table, artifact, scr1, trust, selected)))
-        if present == 3:
-            val candidate = SimpleboxCatalogLayoutSnapshotsV1(
-                artifact: artifact.snapshot.unwrap(), scr1: scr1.snapshot.unwrap(),
-                trust: trust.snapshot.unwrap())
-            if selected.?:
-                val candidate_closed = _close_layout_snapshots_v1(table, candidate)
-                val selected_closed = _close_layout_snapshots_v1(
-                    table, selected.unwrap())
-                return Err(_fail_after_cleanup_v1(
-                    SimpleboxCatalogMediaBootErrorV1.MediaAmbiguous,
-                    candidate_closed and selected_closed))
-            selected_index = index
-            selected = Some(candidate)
-        index = index + 1
-    if not selected.?:
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaMissing))
-    val snapshots = selected.unwrap()
-    if snapshots.artifact.size == 0u64 or snapshots.scr1.size == 0u64 or
-        snapshots.trust.size == 0u64:
-        return Err(_fail_after_cleanup_v1(
-            SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected,
-            _close_layout_snapshots_v1(table, snapshots)))
-    val artifact = signed_catalog_snapshot_read_opened_v1(
-        table, snapshots.artifact, HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1.to_u64())
-    if artifact.is_err():
-        val scr1_closed = table.close_stable_snapshot(snapshots.scr1.lease).is_ok()
-        val trust_closed = table.close_stable_snapshot(snapshots.trust.lease).is_ok()
-        if artifact.unwrap_err() ==
-            "signed-catalog-snapshot-cleanup-indeterminate" or
-            not scr1_closed or not trust_closed:
-            return Err(_fail_v1(
-                SimpleboxCatalogMediaBootErrorV1.CleanupIndeterminate))
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaReadRejected))
-    val scr1 = signed_catalog_snapshot_read_opened_v1(
-        table, snapshots.scr1, SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1.to_u64())
-    if scr1.is_err():
-        val trust_closed = table.close_stable_snapshot(snapshots.trust.lease).is_ok()
-        if scr1.unwrap_err() ==
-            "signed-catalog-snapshot-cleanup-indeterminate" or not trust_closed:
-            return Err(_fail_v1(
-                SimpleboxCatalogMediaBootErrorV1.CleanupIndeterminate))
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaReadRejected))
-    val trust = signed_catalog_snapshot_read_opened_v1(
-        table, snapshots.trust,
-        SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1.to_u64())
-    if trust.is_err():
-        if trust.unwrap_err() ==
-            "signed-catalog-snapshot-cleanup-indeterminate":
-            return Err(_fail_v1(
-                SimpleboxCatalogMediaBootErrorV1.CleanupIndeterminate))
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaReadRejected))
-    val layout = policy.layouts[selected_index]
-    if not simplebox_catalog_media_same_bundle_epoch_v1(
-        layout, artifact.unwrap(), scr1.unwrap(), trust.unwrap()):
-        return Err(_fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaEpochRejected))
-    simplebox_catalog_media_boot_prepare_bytes_v1(
-        policy, layout, artifact.unwrap().bytes, scr1.unwrap().bytes,
-        trust.unwrap().bytes, clang_bundle)
-
-pub(package) fn simplebox_catalog_media_boot_ingest_from_table_v1(
-    table: MountTable,
-    policy: SimpleboxCatalogMediaBootPolicyV1,
-    clang_bundle: ClangSysrootCatalogBundleV1? = nil,
-) -> SimpleboxCatalogMediaBootResultV1:
-    """Compatibility path: prepare table media, then consume the pinned image."""
-    val prepared = simplebox_catalog_media_boot_prepare_from_table_v1(
-        table, policy, clang_bundle)
-    if prepared.is_err(): return prepared.unwrap_err()
-    val image = prepared.unwrap()
-    val artifact_path = image.artifact_path
-    val scr1_path = image.scr1_path
-    val ingested = simplebox_pinned_catalog_image_ingest_v1(image)
-    if not ingested.ok:
-        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.IngestionRejected, ingested.error)
-    SimpleboxCatalogMediaBootResultV1(
-        ok: true, error: SimpleboxCatalogMediaBootErrorV1.None,
-        image_error: SimpleboxPinnedCatalogImageErrorV1.None,
-        artifact_path: artifact_path, scr1_path: scr1_path, accepted_records: 1)
-
 pub(package) fn simplebox_catalog_media_boot_ingest_v1(
     policy: SimpleboxCatalogMediaBootPolicyV1,
     clang_bundle: ClangSysrootCatalogBundleV1? = nil,
 ) -> SimpleboxCatalogMediaBootResultV1:
-    """Compatibility owner entrypoint; always restores the MountTable lease."""
-    val owner = vfs_state_mount_table_owner_handle_v1()
-    if not owner.?:
+    """Discover exactly one complete policy layout and ingest its VFS bytes."""
+    if not _policy_valid_v1(policy):
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.PolicyRejected)
+    var selected: i64 = -1
+    var artifact_size: i64 = -1
+    var scr1_size: i64 = -1
+    var trust_size: i64 = -1
+    var index: i64 = 0
+    while index < policy.layouts.len():
+        val layout = policy.layouts[index]
+        val candidate_artifact_size = _file_size_v1(layout.artifact_path)
+        val candidate_scr1_size = _file_size_v1(layout.scr1_path)
+        val candidate_trust_size = _file_size_v1(layout.trust_config_path)
+        val present = (if candidate_artifact_size >= 0: 1 else: 0) +
+            (if candidate_scr1_size >= 0: 1 else: 0) +
+            (if candidate_trust_size >= 0: 1 else: 0)
+        if present > 0 and present < 3:
+            return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaPartial)
+        if present == 3:
+            if selected >= 0:
+                return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaAmbiguous)
+            selected = index
+            artifact_size = candidate_artifact_size
+            scr1_size = candidate_scr1_size
+            trust_size = candidate_trust_size
+        index = index + 1
+    if selected < 0:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaMissing)
+    if artifact_size <= 0 or artifact_size > HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1 or
+        scr1_size <= 0 or scr1_size > SIMPLEBOX_SIGNED_RECORD_MAX_BYTES_V1 or
+        trust_size <= 0 or trust_size > SIMPLEBOX_CATALOG_TRUST_CONFIG_MAX_BYTES_V1:
+        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaBoundsRejected)
+    val layout = policy.layouts[selected]
+    val artifact = g_vfs_read_file_bytes(layout.artifact_path)
+    val scr1 = g_vfs_read_file_bytes(layout.scr1_path)
+    val trust = g_vfs_read_file_bytes(layout.trust_config_path)
+    if artifact.len() != artifact_size or scr1.len() != scr1_size or
+        trust.len() != trust_size:
         return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaReadRejected)
-    val leased = vfs_state_mount_table_lease_begin_v1(owner.unwrap())
-    if not leased.?:
-        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.MediaReadRejected)
-    val lease = leased.unwrap()
-    val result = simplebox_catalog_media_boot_ingest_from_table_v1(
-        lease.table, policy, clang_bundle)
-    if not vfs_state_mount_table_lease_restore_v1(lease):
-        return _fail_v1(SimpleboxCatalogMediaBootErrorV1.CleanupIndeterminate)
-    result
+    simplebox_catalog_media_boot_ingest_bytes_v1(
+        policy, layout, artifact, scr1, trust, clang_bundle)
 
 pub fn simplebox_catalog_media_canonical_layout_v1() -> SimpleboxCatalogMediaLayoutV1:
     SimpleboxCatalogMediaLayoutV1(

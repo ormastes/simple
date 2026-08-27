@@ -5,8 +5,17 @@ use std.common.web.browser_renderer_protocol.{
     BrowserTextInputOverlay, browser_text_input_overlay_empty
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+# For the level-gated SIMPLE_TRACE_FONT_STYLE consumption trace below;
+# same import the sibling SIMPLE_TRACE_FONT_STYLE traces use in
+# simple_web_html_layout_renderer_core.spl:3.
+use std.gc_async_mut.io.mod_stub.{env_get}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
+    TILE_MARGIN_PX, TileOp, tile_bin_ops, tile_count, tile_grid_make,
+    tile_live_set, tile_occluder_slot, tile_op, tile_stats_record,
+    tile_survivors
+}
 use common.ui.draw_ir.{
-    DRAW_IR_COMMAND_RECT, DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
+    DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
     draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_paint}
@@ -15,9 +24,10 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_l
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
     var i = 0
     val style_count = styles.len()
+    # cpu-lane-loop-ok: existence scan over the style list for any overflow clip; bound is style_count and it returns on the first hit; runs once per paint to decide whether a per-node clip array is needed at all
     while i < style_count:
         val st = styles[i]
-        if st.overflow_hidden and st.display != "none":
+        if (st.overflow_hidden or st.overflow_auto_y) and st.display != "none":
             return true
         i = i + 1
     false
@@ -29,13 +39,14 @@ fn build_ancestor_clip_cache(nodes: [HNode], styles: [Style], bx: [i32], by: [i3
     val node_count = nodes.len()
     var clips: [ClipRect] = [default_clip; node_count]
     var i = 0
+    # cpu-lane-loop-ok: single forward pass over the node list building each node's clip from its already-computed parent clip; this loop IS the bulk idiom that replaces a per-node ancestor walk, bound is node_count
     while i < node_count:
         var clip = default_clip
         val p = nodes[i].parent
         if p >= 0:
             clip = clips[p]
             val pst = styles[p]
-            if pst.overflow_hidden and pst.display != "none":
+            if (pst.overflow_hidden or pst.overflow_auto_y) and pst.display != "none":
                 val cx0 = bx[p] + pst.border_l
                 val cy0 = by[p] + pst.border_t
                 val cx1 = bx[p] + bw[p] - pst.border_r
@@ -52,6 +63,7 @@ fn paint_clip_at(cache: PaintClipCache, i: i32) -> ClipRect:
 
 fn has_relative_paint_root(nodes: [HNode], styles: [Style], i: i32) -> bool:
     var cur = i
+    # cpu-lane-loop-ok: depth-bounded ancestor walk up nodes[].parent for position:relative; bound is DOM depth, not an element or pixel count, so this is a detector false positive under the bound-based rule of design section 6
     while cur >= 0:
         if styles[cur].position_relative:
             return true
@@ -60,6 +72,7 @@ fn has_relative_paint_root(nodes: [HNode], styles: [Style], i: i32) -> bool:
 
 fn content_hidden_by_ancestor(nodes: [HNode], styles: [Style], i: i32) -> bool:
     var cur = nodes[i].parent as i32
+    # cpu-lane-loop-ok: depth-bounded ancestor walk up nodes[].parent for display:none / content-visibility:hidden / iframe; bound is DOM depth, not an element count, so this is a detector false positive under the bound-based rule
     while cur >= 0:
         # An <iframe> is a replaced element: its DOM subtree (fallback content or
         # any inline children) is NOT laid out or painted in the parent document.
@@ -79,6 +92,7 @@ fn content_paint_hidden_by_ancestor(
     if content_hidden_by_ancestor(nodes, styles, i) or styles[i].opacity_pct <= 0:
         return true
     var cur = nodes[i].parent as i32
+    # cpu-lane-loop-ok: second depth-bounded ancestor walk, opacity_pct <= 0 only; bound is DOM depth, not an element count, so this is a detector false positive under the bound-based rule
     while cur >= 0:
         if styles[cur].opacity_pct <= 0:
             return true
@@ -93,12 +107,14 @@ fn fb_vertical_scrollbar_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, h: 
     val mid_x = x + 7
     val up_y = y + 3
     var row = 0
+    # cpu-lane-loop-ok: fixed 4-row up-arrow glyph of the scrollbar button; bound is the literal constant 4, not a pixel or element count, so this is a detector false positive
     while row < 4:
         val half = row
         out = fb_rect_clip(out, fbw, fbh, mid_x - half, up_y + row, half * 2 + 1, 1, thumb, clip)
         row = row + 1
     val down_y = y + h - 7
     row = 0
+    # cpu-lane-loop-ok: fixed 4-row down-arrow glyph of the scrollbar button; bound is the literal constant 4, not a pixel or element count, so this is a detector false positive
     while row < 4:
         val half = 3 - row
         out = fb_rect_clip(out, fbw, fbh, mid_x - half, down_y + row, half * 2 + 1, 1, thumb_dark, clip)
@@ -145,6 +161,9 @@ fn input_uses_accent_color(nd: HNode) -> bool:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     input_type == "checkbox" or input_type == "radio"
 
+fn input_is_checked(nd: HNode) -> bool:
+    attr_present(nd.attrs_raw, "checked")
+
 fn input_paints_text(nd: HNode) -> bool:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     val declared_value = attr_value(nd.attrs_raw, "value")
@@ -185,6 +204,7 @@ fn input_text_prefix(value: text, max_glyphs: i32) -> text:
     val bytes = value.bytes()
     var byte_index: i64 = 0
     var glyph_index: i32 = 0
+    # cpu-lane-loop-ok: UTF-8 sequence walk to find the byte offset of the max_glyphs-th glyph so the value can be sliced on a codepoint boundary; bound is min(value bytes, max_glyphs) where max_glyphs is the glyph count that fits the input's content box
     while byte_index < bytes.len() and glyph_index < max_glyphs:
         val sequence_length = utf8_seq_len(bytes[byte_index])
         if sequence_length > 0:
@@ -260,6 +280,7 @@ fn _input_text_source_boundaries(value: text) -> [i64]:
     var boundaries: [i64] = [0]
     val bytes = value.bytes()
     var cursor: i64 = 0
+    # cpu-lane-loop-ok: one UTF-8 decode pass over a single input element's declared value building its codepoint boundary table; bound is that value's byte length, not page content
     while cursor < bytes.len():
         var count = utf8_seq_len(bytes[cursor])
         if count <= 0 or cursor + count > bytes.len():
@@ -400,6 +421,7 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         )
     val visual_map = input_text_visual_map(nd, st)
     var absolute_boundaries: [i32] = []
+    # cpu-lane-loop-ok: maps one input's glyph-boundary x offsets to absolute x; bound is the boundary count of that input's own value, a single linear map with no nesting
     for boundary_x in visual_map.boundary_x_px:
         absolute_boundaries.push(baseline_x + boundary_x)
     # There is no computed ::placeholder color in Style yet. st.fg is the
@@ -470,6 +492,7 @@ pub fn input_text_paint_plan_with_overlay(
     )
     if focus_distance < 0:
         focus_distance = 0 - focus_distance
+    # cpu-lane-loop-ok: advances the horizontal scroll window start until the focused caret fits content_w; bound is focus_index inside one input's boundary table, and view_index only ever moves forward
     while view_index < focus_index and focus_distance >= content_w:
         view_index = view_index + 1
         focus_distance = (
@@ -480,6 +503,7 @@ pub fn input_text_paint_plan_with_overlay(
             focus_distance = 0 - focus_distance
     val resolved_view_start = visual_map.source_boundary_bytes[view_index]
     var window_end_index = view_index
+    # cpu-lane-loop-ok: extends the visible window end while it still fits content_w; bound is one input's boundary count, single monotone forward scan
     while window_end_index + 1 < visual_map.source_boundary_bytes.len():
         var window_width = (
             visual_map.boundary_x_px[window_end_index + 1] -
@@ -517,6 +541,7 @@ pub fn input_text_paint_plan_with_overlay(
     else:
         0
     var absolute_boundaries: [i32] = []
+    # cpu-lane-loop-ok: same absolute-x boundary mapping as input_text_paint_plan, overlay variant; bound is the boundary count of that one input's value
     for boundary_x in visual_map.boundary_x_px:
         absolute_boundaries.push(baseline_x + boundary_x)
     var anchor_x = baseline_x + input_text_x_at_source_byte(
@@ -562,19 +587,44 @@ pub fn input_text_paint_plan_with_overlay(
         resolved_view_start_byte: resolved_view_start
     )
 
-fn fb_input_accent_control_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, accent_color: u32, clip: ClipRect) -> [u32]:
+fn fb_input_accent_control_clip(
+    fb: [u32], fbw: i32, fbh: i32,
+    x: i32, y: i32, w: i32, h: i32,
+    input_type: text, checked: bool, accent_color: u32, clip: ClipRect
+) -> [u32]:
     val accent = if accent_color != 0u32: accent_color else: argb(37, 99, 235)
     val control_w = if w < 14: w else: 14
     val control_h = if h < 14: h else: 14
     if control_w <= 0 or control_h <= 0:
         return fb
-    var out = fb_rect_clip(fb, fbw, fbh, x, y, control_w, control_h, argb(248, 250, 252), clip)
-    out = fb_rect_clip(out, fbw, fbh, x, y, control_w, 1, accent, clip)
-    out = fb_rect_clip(out, fbw, fbh, x, y + control_h - 1, control_w, 1, accent, clip)
-    out = fb_rect_clip(out, fbw, fbh, x, y, 1, control_h, accent, clip)
-    out = fb_rect_clip(out, fbw, fbh, x + control_w - 1, y, 1, control_h, accent, clip)
-    if control_w > 4 and control_h > 4:
-        out = fb_rect_clip(out, fbw, fbh, x + 3, y + 3, control_w - 6, control_h - 6, accent, clip)
+    val radio = input_type == "radio"
+    var out = fb
+    if radio:
+        out = fb_rounded_rect_opacity_clip(
+            out, fbw, fbh, x, y, control_w, control_h,
+            control_w / 2, accent, 100, clip
+        )
+        if control_w > 2 and control_h > 2:
+            out = fb_rounded_rect_opacity_clip(
+                out, fbw, fbh, x + 1, y + 1,
+                control_w - 2, control_h - 2,
+                (control_w - 2) / 2, argb(248, 250, 252), 100, clip
+            )
+    else:
+        out = fb_rect_clip(fb, fbw, fbh, x, y, control_w, control_h, argb(248, 250, 252), clip)
+        out = fb_rect_clip(out, fbw, fbh, x, y, control_w, 1, accent, clip)
+        out = fb_rect_clip(out, fbw, fbh, x, y + control_h - 1, control_w, 1, accent, clip)
+        out = fb_rect_clip(out, fbw, fbh, x, y, 1, control_h, accent, clip)
+        out = fb_rect_clip(out, fbw, fbh, x + control_w - 1, y, 1, control_h, accent, clip)
+    if checked and control_w > 6 and control_h > 6:
+        if radio:
+            out = fb_rounded_rect_opacity_clip(
+                out, fbw, fbh, x + 3, y + 3,
+                control_w - 6, control_h - 6,
+                (control_w - 6) / 2, accent, 100, clip
+            )
+        else:
+            out = fb_rect_clip(out, fbw, fbh, x + 3, y + 3, control_w - 6, control_h - 6, accent, clip)
     out
 
 # ---------------------------------------------------------------------------
@@ -588,6 +638,7 @@ fn ancestor_bottom_inset(nodes: [HNode], styles: [Style], i: i32) -> i32:
     var inset = 0
     var p = nodes[i].parent
     var guard = 0
+    # cpu-lane-loop-ok: ancestor chain walk with an explicit guard < 64 cap; the bound is a literal constant, not an element count, so this is a detector false positive
     while p >= 0 and guard < 64:
         guard = guard + 1
         val ps = styles[p]
@@ -637,7 +688,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
         val relative_paint_root = has_relative_paint_root(nodes, styles, i)
         val normal_flow = not st.position_absolute and not relative_paint_root
-        val visible_node = st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i)
+        val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
         val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
         val non_widget_mode = not widget_mode
         if visible_box:
@@ -674,6 +725,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 out = fb_rect(out, fbw, fbh, x, y, w, h, argb(203, 213, 225))
         i = i + 1
     i = 0
+    # cpu-lane-loop-ok: fn paint pass 2 of 6: the relative-paint-root boxes pass 1 deliberately skipped, painted after normal flow so position:relative subtrees land above it. Disjoint node set from pass 1, so it cannot be fused without breaking paint order. Bound is node_count, budget-guarded
     while i < node_count:
         # Budget guard: stop scanning for relative-paint-root nodes on expiry.
         # This pass was completely unguarded — unlike every other O(node_count)
@@ -692,7 +744,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val h = bh[i]
             val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
             val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-            val visible_node = st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i)
+            val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
             val visible_box = visible_node and nd.tag != "#text" and y < fbh
             val non_widget_mode = not widget_mode
             if visible_box:
@@ -726,6 +778,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     var last_positive_z = 0
     if has_absolute_node:
         i = 0
+        # cpu-lane-loop-ok: fn paint pass 3 of 6: position:absolute boxes with z-index <= 0, plus collection of the positive-z indices consumed by pass 4. Bound is node_count, entered only when pass 1 saw an absolute node, budget-guarded
         while i < node_count:
             # Budget guard: stop scanning for absolute/z-index nodes on expiry.
             # This loop was unbounded — unlike the normal-flow background loop
@@ -743,7 +796,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 val h = bh[i]
                 val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
                 val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-                val visible_node = st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i)
+                val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
                 val visible_box = visible_node and nd.tag != "#text" and y < fbh
                 val non_widget_mode = not widget_mode
                 if visible_box:
@@ -784,6 +837,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         if not positive_z_sorted:
             positive_z_indices = _sort_positive_z_indices(positive_z_indices, positive_z_count, styles)
         var positive_z_pos = 0
+        # cpu-lane-loop-ok: fn paint pass 4 of 6: the positive-z absolute boxes gathered by pass 3, walked in z-sorted order. Bound is positive_z_count (absolute nodes with z-index > 0), not node_count
         while positive_z_pos < positive_z_count:
             # Budget guard: stop painting positive-z absolute boxes on expiry.
             # positive_z_count bounds this pass below node_count, so it is not
@@ -805,7 +859,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val h = bh[i]
             val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
             val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-            val visible_node = st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i)
+            val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
             val visible_box = visible_node and nd.tag != "#text" and y < fbh
             val non_widget_mode = not widget_mode
             if visible_box:
@@ -851,6 +905,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             out = fb_rect(out, fbw, fbh, fbw - 5, fbh - 1, 4, 1, argb(245, 245, 245))
     if not widget_mode:
         i = 0
+        # cpu-lane-loop-ok: fn paint pass 5 of 6: vertical scrollbar chrome for overflow-auto-y scrollports, painted above box content and below text. Bound is node_count, non-widget mode only, budget-guarded
         while i < node_count:
             # Budget guard: stop drawing scrollbars on expiry. This loop sits
             # between two already-guarded passes (backgrounds above, text below)
@@ -861,7 +916,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 break
             val nd = nodes[i]
             val st = styles[i]
-            if st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i) and nd.tag != "#text" and st.overflow_auto_y and st.overflow_hidden:
+            if st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i) and nd.tag != "#text" and st.overflow_auto_y and st.overflow_hidden:
                 val x = bx[i]
                 val y = by[i]
                 val w = bw[i]
@@ -876,6 +931,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     _web_budget_rearm(paint_deadline_us)
     # text on top
     i = 0
+    # cpu-lane-loop-ok: fn paint pass 6 of 6: the content-on-top pass - #text runs, input accent controls, input text, widget image placeholders and icon chips. Bound is node_count; text must paint after every box pass, so this cannot be fused into them
     while i < node_count:
         # Budget guard: stop drawing text on expiry; painted pixels are kept.
         if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_TEXT):
@@ -886,11 +942,15 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val y = by[i]
         val w = bw[i]
         val h = bh[i]
-        val visible_node = st.display != "none" and not st.visibility_hidden and not content_hidden_by_ancestor(nodes, styles, i)
+        val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
         val non_widget_mode = not widget_mode
         if non_widget_mode and visible_node and nd.tag == "input" and input_uses_accent_color(nd):
             val clip = paint_clip_at(clip_cache, i)
-            out = fb_input_accent_control_clip(out, fbw, fbh, x, y, w, h, st.caret_color, clip)
+            out = fb_input_accent_control_clip(
+                out, fbw, fbh, x, y, w, h,
+                attr_value(nd.attrs_raw, "type").trim().lower(),
+                input_is_checked(nd), st.accent_color, clip
+            )
         if non_widget_mode and visible_node and nd.tag == "img" and nd.has_widget_image_class:
             val clip = paint_clip_at(clip_cache, i)
             out = fb_widget_image_placeholder_clip(out, fbw, fbh, x, y, w, h, st.object_fit, st.object_position, clip)
@@ -898,6 +958,36 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val clip = paint_clip_at(clip_cache, i)
             val icon_color = if st.bg != 0u32: st.bg else: argb(37, 99, 235)
             out = fb_rect_clip(out, fbw, fbh, x, y, 6, 6, icon_color, clip)
+        if (
+            non_widget_mode and visible_node and nd.tag == "input" and
+            not input_uses_accent_color(nd) and input_paints_text(nd)
+        ):
+            val scale = glyph_scale(st.font_size)
+            val adv = style_text_advance(st)
+            val space_adv = style_space_advance(st)
+            val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+            if content_w > 0:
+                val glyph_advance = if adv > 0: adv else: 1
+                val max_glyphs = content_w / glyph_advance + 1
+                val plan = input_text_paint_plan(
+                    nd, st, x, y, w, h, paint_clip_at(clip_cache, i),
+                    max_glyphs
+                )
+                if plan.text_value != "" and plan.baseline_y < fbh:
+                    if st.text_shadow_color != 0u32:
+                        out = fb_text_thin_scaled_clip_range(
+                            out, fbw, fbh,
+                            plan.baseline_x + st.text_shadow_x_px,
+                            plan.baseline_y + st.text_shadow_y_px,
+                            plan.text_value, 0, plan.text_value.len(),
+                            st.text_shadow_color, scale, adv, space_adv,
+                            st.font_style_italic, plan.clip
+                        )
+                    out = fb_text_thin_scaled_clip_range(
+                        out, fbw, fbh, plan.baseline_x, plan.baseline_y,
+                        plan.text_value, 0, plan.text_value.len(), plan.color,
+                        scale, adv, space_adv, st.font_style_italic, plan.clip
+                    )
         if visible_node and nd.tag == "#text":
             # Match the layout measure: white-space:pre/nowrap preserves raw text
             # (leading indentation), normal flow uses trimmed text.
@@ -914,6 +1004,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                         val text_x = x + 8
                         var ly = y + 7
                         var line_i = 0
+                        # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the widget-chrome path; bound is line_count from the wrap cache and it stops early at ly >= fbh, so it is bounded by the visible lines of one node. The four sparse_* advance values at the top of the body are st-invariant and hoistable - recorded as a perf finding, not a shape defect
                         while line_i < line_count and ly < fbh:
                             val sparse_advance = 6 + st.letter_spacing_px
                             val sparse_stride = if sparse_advance > 0: sparse_advance else: 1
@@ -929,10 +1020,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                             if st.text_shadow_color != 0u32:
                                 out = fb_text_sparse_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, sparse_stride, sparse_space_stride, st.font_style_italic)
                             out = fb_text_sparse_range(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, sparse_stride, sparse_space_stride, st.font_style_italic)
-                            if st.text_decoration_underline:
+                            if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                 val underline_w = line_w
                                 val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
-                                out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 8 + st.text_underline_offset_px, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                                # One rule primitive, three y positions. Each is
+                                # independent so combinations paint together.
+                                if st.text_decoration_underline:
+                                    out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 8 + st.text_underline_offset_px, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                                if st.text_decoration_overline:
+                                    out = fb_text_underline(out, fbw, fbh, line_text_x, ly, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                                if st.text_decoration_line_through:
+                                    out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 4, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
                             line_i = line_i + 1
                             ly = ly + lh
                     else:
@@ -944,6 +1042,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                         if line_count > 0:
                             val clip = paint_clip_at(clip_cache, i)
                             var line_i = 0
+                            # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the normal path; bound is line_count from the wrap cache and it stops early at ly >= fbh; scale/adv/space_adv are already hoisted above the loop
                             while line_i < line_count and ly < fbh:
                                 val draw_txt = if st.text_overflow_ellipsis and line_i == 0: ellipsize_text_for_width(txt, node_starts[line_i], node_ends[line_i], w - st.text_indent_px, st, adv, space_adv) else: txt
                                 val draw_start = if st.text_overflow_ellipsis and line_i == 0: 0 else: node_starts[line_i]
@@ -955,11 +1054,16 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                 if st.text_shadow_color != 0u32:
                                     out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip)
                                 out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, clip)
-                                if st.text_decoration_underline:
+                                if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                     val underline_w = line_w
                                     val underline_y = ly + 7 * scale + st.text_underline_offset_px
                                     val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
-                                    out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_underline:
+                                        out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_overline:
+                                        out = fb_text_underline_clip(out, fbw, fbh, line_text_x, ly, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_line_through:
+                                        out = fb_text_underline_clip(out, fbw, fbh, line_text_x, ly + 4 * scale, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
                                 line_i = line_i + 1
                                 ly = ly + lh
         i = i + 1
@@ -1466,57 +1570,10 @@ fn _html_draw_ir_non_negative(value: i32) -> i32:
         return 0
     value
 
-fn _html_draw_ir_i32_list(values: [i32]) -> text:
-    var out = ""
-    var i = 0
-    while i < values.len():
-        if i > 0:
-            out = out + ","
-        out = out + values[i].to_string()
-        i = i + 1
-    out
-
 fn _html_draw_ir_shadow_layer_count(value: text) -> i32:
     if value == "":
         return 0
     split_top_level_commas(value).len() as i32
-
-# Keep this parser aligned with the Engine2D material consumer: backdrop CSS is
-# intentionally carried as text, while this producer emits bounded witnesses.
-fn _html_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
-    var count = 0
-    var idx: i64 = 0
-    val length = value.len()
-    while idx < length:
-        val ch0: i64 = value.char_code_at(idx)
-        val is_digit = ch0 >= 48 and ch0 <= 57
-        var sign_ok = false
-        if (ch0 == 45 or ch0 == 43) and idx + 1 < length:
-            val next: i64 = value.char_code_at(idx + 1)
-            sign_ok = next >= 48 and next <= 57
-        if is_digit or sign_ok:
-            val negative = ch0 == 45
-            if ch0 == 45 or ch0 == 43:
-                idx = idx + 1
-            var acc: i64 = 0
-            while idx < length:
-                val ch: i64 = value.char_code_at(idx)
-                if ch >= 48 and ch <= 57:
-                    if acc < 1000000:
-                        acc = acc * 10 + (ch - 48)
-                        if acc > 1000000:
-                            acc = 1000000
-                    idx = idx + 1
-                else:
-                    break
-            if negative:
-                acc = 0 - acc
-            if count == n:
-                return acc
-            count = count + 1
-        else:
-            idx = idx + 1
-    fallback
 
 fn _html_draw_ir_clamp_i64(value: i64, low: i64, high: i64) -> i64:
     if value < low:
@@ -1539,10 +1596,48 @@ fn _html_draw_ir_wm_fallback_color(node: HNode, st: Style) -> u32:
     # not receive a material capability or any realized witness.
     0xFF000000u32 | (st.bg & 0x00FFFFFFu32)
 
+# CSS `text-decoration-line` serialization: space-separated in canonical order,
+# or "none". Keeps the DrawIR metadata in lock-step with what the raster path
+# actually paints - the two disagreeing was the original defect here.
+fn _text_decoration_line_text(st: Style) -> text:
+    var out = ""
+    if st.text_decoration_underline:
+        out = "underline"
+    if st.text_decoration_overline:
+        out = if out == "": "overline" else: "{out} overline"
+    if st.text_decoration_line_through:
+        out = if out == "": "line-through" else: "{out} line-through"
+    if out == "":
+        return "none"
+    out
+
+
 fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
+    # Level-gated consumption-site trace (default off), joining the
+    # SIMPLE_TRACE_FONT_STYLE family already landed in
+    # simple_web_html_layout_renderer_core.spl. This is the CONSUMER named in
+    # doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md 16.5: the
+    # sole style source (renderer.spl:1482) is proven correct, so the
+    # divergence must be between computation and consumption. Printing the
+    # node's identity next to the Style it was PAIRED WITH answers whether the
+    # marker node receives a wrong Style, or a different node's Style entry
+    # (an index/ordering mismatch in the paint-order/visible-node filters).
+    if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+        val trace_id: text = attr_value(node.attrs_raw, "id")
+        val trace_class: text = attr_value(node.attrs_raw, "class")
+        val trace_is_marker: bool = trace_id.contains("vector-font-evidence")
+        if trace_is_marker or st.font_family.contains("Bungee") or st.resolved_font_identity.contains("Bungee"):
+            print "draw_ir_style_props_pairing tag={node.tag} id={trace_id} class={trace_class} marker={trace_is_marker} font_family={st.font_family} font_size={st.font_size} identity={st.resolved_font_identity}"
     val wm_fallback = attr_value(node.attrs_raw, "data-wm-theme-fallback")
     val wm_solid_fallback = wm_fallback == "solid-material"
-    val backdrop_requested = st.backdrop_filter_raw != "" or wm_solid_fallback
+    val material_mode_attr = attr_value(node.attrs_raw, "data-wm-theme-material-mode")
+    val material_mode = material_mode_attr == "engine2d-cpu-composited-material-v1"
+    val declared_fallback_attr = attr_value(node.attrs_raw, "data-wm-theme-bg")
+    val declared_fallback_color = parse_color_any(declared_fallback_attr)
+    val declared_fallback_opaque = (
+        declared_fallback_attr != "" and
+        ((declared_fallback_color >> 24) & 255u32) == 255u32
+    )
     val bg_alpha = (st.bg >> 24) & 255u32
     val backdrop_requested = st.backdrop_filter_raw != ""
     val has_gradient = (
@@ -1600,25 +1695,6 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     val shadow_parse = parse_box_shadow_layers(
         st.box_shadow_raw, st.fg
     )
-    # GAP-2: encode the N-stop/angle/radial gradient model as flat text style
-    # props (colors then positions, both decimal-int lists) so draw_ir_adv.spl
-    # can rebuild the stop arrays with the same `_engine2d_draw_ir_nth_int`
-    # helper it already uses for the legacy 2-stop from/to pair. Built with
-    # plain string concatenation, not array push/join (that pattern triggers a
-    # known compile hang in this module tree, see
-    # doc/08_tracking/bug/compiler_cross_tier_diamond_import_hang_2026-07-31.md).
-    val gradient_stop_count = st.background_gradient_stop_colors.len()
-    var gradient_stops_encoded = ""
-    var gse_i = 0
-    while gse_i < gradient_stop_count:
-        if gse_i > 0:
-            gradient_stops_encoded = gradient_stops_encoded + ","
-        gradient_stops_encoded = gradient_stops_encoded + "{st.background_gradient_stop_colors[gse_i]}"
-        gse_i = gse_i + 1
-    gse_i = 0
-    while gse_i < gradient_stop_count:
-        gradient_stops_encoded = gradient_stops_encoded + "," + "{st.background_gradient_stop_positions[gse_i]}"
-        gse_i = gse_i + 1
     var props = [
         draw_ir_style_prop("background-gradient-stop-count", "{gradient_stop_count}"),
         draw_ir_style_prop("background-gradient-stops", gradient_stops_raw),
@@ -1628,6 +1704,12 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("id", node.id_attr),
         draw_ir_style_prop("class", node.class_attr),
         draw_ir_style_prop("display", st.display),
+        draw_ir_style_prop(
+            "grid-template-columns", st.grid_template_columns
+        ),
+        draw_ir_style_prop("grid-template-rows", st.grid_template_rows),
+        draw_ir_style_prop("grid-column", st.grid_column),
+        draw_ir_style_prop("grid-row", st.grid_row),
         draw_ir_style_prop("flex-direction", st.flex_direction),
         draw_ir_style_prop("flex-wrap", st.flex_wrap),
         draw_ir_style_prop("justify-content", st.justify_content),
@@ -1635,33 +1717,30 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("align-self", st.align_self),
         draw_ir_style_prop("background-clip", st.background_clip),
         draw_ir_style_prop("background-attachment", st.background_attachment),
+        draw_ir_style_prop("background-repeat", st.background_repeat),
+        draw_ir_style_prop("background-size-width", "{st.background_size_w_px}"),
+        draw_ir_style_prop("background-size-height", "{st.background_size_h_px}"),
+        draw_ir_style_prop("background-position-x", "{st.background_position_x_px}"),
+        draw_ir_style_prop("background-position-y", "{st.background_position_y_px}"),
         draw_ir_style_prop("background-color", "{st.bg}"),
         draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
-        draw_ir_style_prop("background-gradient-stop-count", "{gradient_stop_count}"),
-        draw_ir_style_prop("background-gradient-stops", gradient_stops_encoded),
-        draw_ir_style_prop("background-gradient-angle-deg", "{st.background_gradient_angle_deg}"),
-        draw_ir_style_prop("background-gradient-is-radial", if st.background_gradient_is_radial: "1" else: "0"),
         draw_ir_style_prop("background-layers-raw", st.bg_layers_raw),
         draw_ir_style_prop("background-origin", st.background_origin),
-        # Engine2D consumes a typed first-layer projection. Keep the full
-        # authored CSS in box-shadow-raw for future multi-layer backends.
+        # Preserve the legacy aggregate projection and authored CSS for
+        # consumers that do not admit the ordered typed layer schema below.
         draw_ir_style_prop("box-shadow", if st.box_shadow_color != 0u32: "{st.box_shadow_x_px}px {st.box_shadow_y_px}px {st.box_shadow_color}" else: "none"),
         draw_ir_style_prop("box-shadow-raw", st.box_shadow_raw),
         draw_ir_style_prop("box-shadow-layer-count", "{_html_draw_ir_shadow_layer_count(st.box_shadow_raw)}"),
         draw_ir_style_prop("box-shadow-blur-radius", "{st.box_shadow_blur_px}"),
-        draw_ir_style_prop("backdrop-filter", if st.backdrop_filter_raw != "": st.backdrop_filter_raw elif wm_solid_fallback: "realized-as-solid-material" else: "none"),
-        # The CPU bitmap/Engine2D executor does not yet own a backdrop sampling
-        # pass. Preserve the effect instead of silently dropping it, and expose
-        # the exact capability fallback to downstream renderers and inspectors.
-        draw_ir_style_prop("backdrop-filter-capability", if backdrop_requested: "unavailable" else: "not-requested"),
-        draw_ir_style_prop("backdrop-filter-fallback", if solid_fallback_realized: "solid-material" else: "none"),
-        draw_ir_style_prop("backdrop-filter-fallback-reason", if solid_fallback_realized: "cpu-raster-backdrop-sampling-unavailable" elif backdrop_requested: "solid-material-not-realized" else: "none"),
+        draw_ir_style_prop("backdrop-filter", if backdrop_requested: st.backdrop_filter_raw else: "none"),
+        draw_ir_style_prop("backdrop-filter-capability", if material_ready: "engine2d-cpu-composited-material-v1" elif wm_solid_fallback or backdrop_requested: "unavailable" else: "not-requested"),
+        draw_ir_style_prop("backdrop-filter-fallback", if material_ready: "cpu-composited-material" elif wm_solid_fallback and material_mode_attr == "": "solid-material" else: "none"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", if material_ready: "native-device-backdrop-path-pending" elif material_mode_attr != "": "incomplete-wm-material-contract" elif wm_solid_fallback: "cpu-raster-backdrop-sampling-unavailable" elif backdrop_requested: "incomplete-wm-material-contract" else: "none"),
         draw_ir_style_prop("color", "{st.fg}"),
         draw_ir_style_prop("direction", if st.direction_rtl: "rtl" else: "ltr"),
         draw_ir_style_prop("font-size", "{st.font_size}"),
         draw_ir_style_prop("font-family", st.font_family),
         draw_ir_style_prop("font-identity", st.resolved_font_identity),
-        draw_ir_style_prop("font-advance-widths", _html_draw_ir_i32_list(st.resolved_font_advances)),
         draw_ir_style_prop("font-size-adjust", st.font_size_adjust),
         draw_ir_style_prop("font-palette", st.font_palette),
         draw_ir_style_prop("font-feature-settings", st.font_feature_settings),
@@ -1692,19 +1771,52 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("max-width", "{st.max_width_px}"),
         draw_ir_style_prop("min-height", "{st.min_height_px}"),
         draw_ir_style_prop("max-height", "{st.max_height_px}"),
+        draw_ir_style_prop(
+            "position",
+            if st.position_sticky:
+                "sticky"
+            elif st.position_absolute:
+                "absolute"
+            elif st.position_relative:
+                "relative"
+            else:
+                "static"
+        ),
         draw_ir_style_prop("left", "{st.left_px}"),
-        draw_ir_style_prop("top", "{st.top_px}"),
+        draw_ir_style_prop(
+            "top",
+            if (
+                st.position_sticky and
+                st.top_px == SIMPLE_WEB_STICKY_TOP_AUTO
+            ):
+                "auto"
+            else:
+                "{st.top_px}"
+        ),
         draw_ir_style_prop("right", "{st.right_px}"),
         draw_ir_style_prop("bottom", "{st.bottom_px}"),
         draw_ir_style_prop("line-height", "{style_line_h(st)}"),
         draw_ir_style_prop("letter-spacing", "{st.letter_spacing_px}"),
         draw_ir_style_prop("caret-color", if st.caret_color != 0u32: "{st.caret_color}" else: "auto"),
+        draw_ir_style_prop("accent-color", if st.accent_color != 0u32: "{st.accent_color}" else: "auto"),
         draw_ir_style_prop("cursor", st.cursor),
         draw_ir_style_prop("hyphens", st.hyphens),
         draw_ir_style_prop("line-break", st.line_break),
         draw_ir_style_prop("overflow-wrap", st.overflow_wrap),
         draw_ir_style_prop("resize", st.resize),
         draw_ir_style_prop("table-layout", st.table_layout),
+        draw_ir_style_prop("border-collapse", st.border_collapse),
+        draw_ir_style_prop(
+            "border-spacing",
+            if st.border_spacing_x_px == st.border_spacing_y_px:
+                "{st.border_spacing_x_px}px"
+            else:
+                (
+                    "{st.border_spacing_x_px}px " +
+                    "{st.border_spacing_y_px}px"
+                )
+        ),
+        draw_ir_style_prop("caption-side", st.caption_side),
         draw_ir_style_prop("vertical-align", st.vertical_align),
         draw_ir_style_prop("tab-size", "{st.tab_size}"),
         draw_ir_style_prop("unicode-bidi", st.unicode_bidi),
@@ -1715,7 +1827,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("text-combine-upright", st.text_combine_upright),
         draw_ir_style_prop("word-spacing", "{st.word_spacing_px}"),
         draw_ir_style_prop("text-decoration-color", if st.text_decoration_color != 0u32: "{st.text_decoration_color}" else: "currentColor"),
-        draw_ir_style_prop("text-decoration-line", if st.text_decoration_underline: "underline" else: "none"),
+        draw_ir_style_prop("text-decoration-line", _text_decoration_line_text(st)),
         draw_ir_style_prop("text-indent", "{st.text_indent_px}"),
         draw_ir_style_prop("text-overflow", if st.text_overflow_ellipsis: "ellipsis" else: "clip"),
         draw_ir_style_prop("text-shadow", if st.text_shadow_color != 0u32: "{st.text_shadow_x_px}px {st.text_shadow_y_px}px {st.text_shadow_color}" else: "none"),
@@ -1755,6 +1867,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("margin-top", "{st.margin_t}"),
         draw_ir_style_prop("margin-bottom", "{st.margin_b}"),
         draw_ir_style_prop("border-left-width", "{st.border_l}"),
+        draw_ir_style_prop("border-left-style", st.border_style_l),
         draw_ir_style_prop("border-radius", "{st.border_radius_px}"),
         draw_ir_style_prop("border-top-left-radius", "{st.border_radius_tl_px}"),
         draw_ir_style_prop("border-top-right-radius", "{st.border_radius_tr_px}"),
@@ -1762,6 +1875,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("border-bottom-left-radius", "{st.border_radius_bl_px}"),
         draw_ir_style_prop("border-top-width", "{st.border_t}"),
         draw_ir_style_prop("border-right-width", "{st.border_r}"),
+        draw_ir_style_prop("border-right-style", st.border_style_r),
         draw_ir_style_prop("border-bottom-width", "{st.border_b}"),
         draw_ir_style_prop("border-top-color", "{st.border_color_t}"),
         draw_ir_style_prop("border-right-color", "{st.border_color_r}"),
@@ -1780,6 +1894,40 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("orphans", "{st.orphans}"),
         draw_ir_style_prop("widows", "{st.widows}")
     ]
+    # A malformed or unsupported declaration omits the schema completely so
+    # Engine2D cannot mistake a partial typed projection for authoritative
+    # paint data. The parser preserves CSS source order; consumers paint the
+    # admitted layers in the order required by their box-paint phases.
+    if shadow_parse.valid and shadow_parse.layers.len() <= 24:
+        props.push(draw_ir_style_prop(
+            "box-shadow-layer-schema", "web-box-shadow-layers-v1"
+        ))
+        var shadow_index = 0
+        # cpu-lane-loop-ok: emits the typed box-shadow layer props; the enclosing if caps shadow_parse.layers.len() at 24, so the bound is a literal constant, not an element count - detector false positive
+        while shadow_index < shadow_parse.layers.len():
+            val shadow_layer = shadow_parse.layers[shadow_index]
+            val shadow_prefix = "box-shadow-layer-{shadow_index}"
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-kind", shadow_layer.kind
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-offset-x", "{shadow_layer.offset_x_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-offset-y", "{shadow_layer.offset_y_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-blur-radius",
+                "{shadow_layer.blur_radius_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-spread-radius",
+                "{shadow_layer.spread_radius_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-color", "{shadow_layer.color_rgba}"
+            ))
+            shadow_index = shadow_index + 1
     if backdrop_requested:
         props.push(draw_ir_style_prop(
             "backdrop-filter-fallback-material-hash", ""
@@ -1802,7 +1950,10 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
             ))
     props
 
-fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, width: i32, height: i32, vector_fonts: bool) -> DrawIrCommand:
+fn _html_draw_ir_command(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect, vector_fonts: bool
+) -> DrawIrCommand:
     val node = nodes[i]
     val st = styles[i]
     val x = boxes.bx[i]
@@ -1816,7 +1967,9 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     val border_rect = draw_ir_rect_bounds(x, y, w, h)
     val content_rect = draw_ir_rect_bounds(content_x, content_y, content_w, content_h)
     val hit_rect = draw_ir_rect_bounds(x, y, w, h)
-    val clip_rect = draw_ir_rect_bounds(0, 0, width, height)
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
     val computed_style = _html_draw_ir_style_props(node, st)
     # Text-run nodes carry no background of their own; emitting them as a
     # (transparent) box makes the Draw IR executor paint an opaque zero-color
@@ -1885,38 +2038,44 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
                 clip_rect
             )
         if not vector_fonts:
-            return draw_ir_text_styled(
+            return draw_ir_text_styled_clipped(
                 _html_draw_ir_component_id(node, i),
                 content_x,
                 content_y,
-                node.text_trimmed,
+                visual_text,
                 st.fg,
-                computed_style
+                computed_style,
+                clip_rect
             )
-        val metrics = resolve_font_metrics_with_language(st.font_family, node.text_trimmed, st.font_size, _html_text_language(nodes, i, st))
+        val metrics = resolve_font_metrics_with_language(
+            st.font_family, visual_text, st.font_size,
+            _html_text_language(nodes, i, st)
+        )
         var resolved = if metrics.shaping_required:
             draw_ir_text_shaped_font(
-                _html_draw_ir_component_id(node, i), content_x, content_y, node.text_trimmed, st.fg,
+                _html_draw_ir_component_id(node, i), content_x, content_y, visual_text, st.fg,
                 metrics.family, metrics.identity, metrics.advances, metrics.width,
                 metrics.line_height, st.font_size, metrics.glyph_run
             )
         else:
             draw_ir_text_resolved_font(
-                _html_draw_ir_component_id(node, i), content_x, content_y, node.text_trimmed, st.fg,
+                _html_draw_ir_component_id(node, i), content_x, content_y, visual_text, st.fg,
                 metrics.family, metrics.identity, metrics.advances, metrics.width,
                 metrics.line_height, st.font_size
             )
         if resolved.computed_style.len() == 0:
             return draw_ir_text_styled_clipped(
                 _html_draw_ir_component_id(node, i), content_x, content_y,
-                node.text_trimmed, st.fg, computed_style, clip_rect
+                visual_text, st.fg, computed_style, clip_rect
             )
         var merged: [DrawIrStyleProp] = []
+        # cpu-lane-loop-ok: per-node style-prop merge that drops the five font-* keys the resolved font metrics supersede; bound is this node's own declared prop list, not a cascade re-run (the cascade is gated on dirty_stage == css in simple_web_layout_rerender_retained)
         for prop in computed_style:
             if (prop.key != "font-family" and prop.key != "font-identity" and
                 prop.key != "font-size" and prop.key != "line-height" and
                 prop.key != "font-shaping"):
                 merged.push(prop)
+        # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / draw_ir_text_resolved_font
         for prop in resolved.computed_style:
             merged.push(prop)
         resolved.computed_style = merged
@@ -1928,7 +2087,7 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         y,
         w,
         h,
-        st.bg,
+        _html_draw_ir_wm_fallback_color(node, st),
         border_rect,
         content_rect,
         hit_rect,
@@ -2045,9 +2204,10 @@ fn _html_draw_ir_image_command(
     ancestor_clip: ClipRect
 ) -> DrawIrCommand?:
     val node = nodes[i]
-    if node.tag != "img":
+    if node.tag != "img" and node.tag != "video":
         return nil
-    val image_uri = attr_value(node.attrs_raw, "src").trim()
+    val image_attr = if node.tag == "video": "poster" else: "src"
+    val image_uri = attr_value(node.attrs_raw, image_attr).trim()
     val image_index = _html_draw_ir_image_index(images, image_uri)
     if image_index < 0:
         return nil
@@ -2133,6 +2293,7 @@ fn _html_draw_ir_two_url_background_layers(st: Style) -> [HtmlDrawIrBackgroundLa
         return []
     var layers: [HtmlDrawIrBackgroundLayer] = []
     var index = 0
+    # cpu-lane-loop-ok: iterates the two layers of the two-url-v1 background encoding; bound is the literal constant 2, so this is a detector false positive
     while index < 2:
         val repeat = fields[3]
         val origin = fields[8]
@@ -2314,6 +2475,7 @@ fn _html_draw_ir_background_border_overlay(
     var props: [DrawIrStyleProp] = [
         draw_ir_style_prop("image-role", "css-background-border-overlay")
     ]
+    # cpu-lane-loop-ok: filters one node's computed style down to the border-* / outline-* keys for the background border overlay; bound is that one node's prop list
     for prop in command.computed_style:
         if prop.key.starts_with("border-") or prop.key.starts_with("outline-"):
             props.push(prop)
@@ -2368,6 +2530,109 @@ fn _html_draw_ir_overlay_rect(
         )
     )
 
+fn _html_draw_ir_checkable_commands(
+    node: HNode, st: Style, i: i32,
+    x: i32, y: i32, width: i32, height: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    var commands: [DrawIrCommand] = []
+    val control_w = if width < 14: width else: 14
+    val control_h = if height < 14: height else: 14
+    if control_w <= 0 or control_h <= 0:
+        return commands
+    val component_id = _html_draw_ir_component_id(node, i)
+    val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+    val checked = input_is_checked(node)
+    val accent = if st.accent_color != 0u32:
+        st.accent_color
+    else:
+        argb(37, 99, 235)
+    val surface = argb(248, 250, 252)
+    val radio = input_type == "radio"
+
+    var frame = _html_draw_ir_overlay_rect(
+        component_id + "_checkable_frame",
+        ClipRect(x0: x, y0: y, x1: x + control_w, y1: y + control_h),
+        surface, clip
+    )
+    frame.parent_id = component_id
+    frame.computed_style = [
+        draw_ir_style_prop("form-control-part", "frame"),
+        draw_ir_style_prop("input-type", input_type),
+        draw_ir_style_prop("checked", if checked: "true" else: "false"),
+        draw_ir_style_prop("accent-color", "{accent}"),
+        draw_ir_style_prop("border-top-width", "1"),
+        draw_ir_style_prop("border-right-width", "1"),
+        draw_ir_style_prop("border-bottom-width", "1"),
+        draw_ir_style_prop("border-left-width", "1"),
+        draw_ir_style_prop("border-top-color", "{accent}"),
+        draw_ir_style_prop("border-right-color", "{accent}"),
+        draw_ir_style_prop("border-bottom-color", "{accent}"),
+        draw_ir_style_prop("border-left-color", "{accent}")
+    ]
+    if radio:
+        frame.computed_style.push(draw_ir_style_prop(
+            "border-radius", "{control_w / 2}"
+        ))
+    commands.push(frame)
+
+    if checked and control_w > 6 and control_h > 6:
+        var indicator = _html_draw_ir_overlay_rect(
+            component_id + "_checked_indicator",
+            ClipRect(
+                x0: x + 3, y0: y + 3,
+                x1: x + control_w - 3, y1: y + control_h - 3
+            ),
+            accent, clip
+        )
+        indicator.parent_id = component_id
+        indicator.computed_style = [
+            draw_ir_style_prop("form-control-part", "checked-indicator"),
+            draw_ir_style_prop("input-type", input_type),
+            draw_ir_style_prop("checked", "true"),
+            draw_ir_style_prop("accent-color", "{accent}")
+        ]
+        if radio:
+            indicator.computed_style.push(draw_ir_style_prop(
+                "border-radius", "{(control_w - 6) / 2}"
+            ))
+        commands.push(indicator)
+    commands
+
+fn _html_draw_ir_summary_marker_command(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    i: i32, clip: ClipRect
+) -> DrawIrCommand?:
+    val node = nodes[i]
+    val st = styles[i]
+    val parent = node.parent
+    if (
+        not node.is_details_summary or st.display != "list-item" or
+        parent < 0 or nodes[parent].tag != "details"
+    ):
+        return nil
+    val marker_state = if attr_present(nodes[parent].attrs_raw, "open"):
+        "open"
+    else:
+        "closed"
+    val marker_text = if marker_state == "open": "▼" else: "▶"
+    var computed_style = _html_draw_ir_style_props(node, st)
+    computed_style.push(draw_ir_style_prop(
+        "summary-marker", "disclosure"
+    ))
+    computed_style.push(draw_ir_style_prop(
+        "summary-marker-state", marker_state
+    ))
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    var marker = draw_ir_text_styled_clipped(
+        _html_draw_ir_component_id(node, i) + "::marker",
+        boxes.bx[i], boxes.by[i], marker_text, st.fg,
+        computed_style, clip_rect
+    )
+    marker.parent_id = _html_draw_ir_component_id(node, i)
+    marker
+
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
     if value < 0: 0 - value.to_i64() else: value.to_i64()
 
@@ -2389,18 +2654,79 @@ fn _html_draw_ir_visible(
         return false
     if styles[i].visibility_hidden:
         return false
-    val ancestor_hidden = content_hidden_by_ancestor(nodes, styles, i)
+    val ancestor_hidden = content_paint_hidden_by_ancestor(nodes, styles, i)
     if ancestor_hidden:
         return false
     if box_w <= 0:
         return false
     if box_h <= 0:
         return false
+    if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
+        return false
+    val st = styles[i]
+    val effect_x = (
+        st.outline_w.to_i64() + _html_draw_ir_abs_i32(st.outline_offset_px) +
+        _html_draw_ir_abs_i32(st.box_shadow_x_px) +
+        st.box_shadow_blur_px.to_i64() +
+        _html_draw_ir_abs_i32(st.text_shadow_x_px)
+    )
+    val effect_y = (
+        st.outline_w.to_i64() + _html_draw_ir_abs_i32(st.outline_offset_px) +
+        _html_draw_ir_abs_i32(st.box_shadow_y_px) +
+        st.box_shadow_blur_px.to_i64() +
+        _html_draw_ir_abs_i32(st.text_shadow_y_px) +
+        _html_draw_ir_abs_i32(st.text_underline_offset_px) +
+        st.text_decoration_thickness_px.to_i64()
+    )
+    var x0 = boxes.bx[i].to_i64() - effect_x
+    var y0 = boxes.by[i].to_i64() - effect_y
+    var x1 = boxes.bx[i].to_i64() + box_w.to_i64() + effect_x
+    var y1 = boxes.by[i].to_i64() + box_h.to_i64() + effect_y
+    if st.box_shadow_raw != "":
+        val layers = split_top_level_commas(st.box_shadow_raw)
+        for layer in layers:
+            if not layer.contains("inset"):
+                val prefix = shadow_length_prefix(layer)
+                val ox = parse_signed_nth_int(prefix, 0)
+                val oy = parse_signed_nth_int(prefix, 1)
+                if ox != -1000000 and oy != -1000000:
+                    var blur = parse_signed_nth_int(prefix, 2)
+                    if blur == -1000000 or blur <= 0:
+                        blur = 1
+                    val shadow_x0 = (
+                        boxes.bx[i].to_i64() + ox.to_i64() - blur.to_i64()
+                    )
+                    val shadow_y0 = (
+                        boxes.by[i].to_i64() + oy.to_i64() - blur.to_i64()
+                    )
+                    val shadow_x1 = (
+                        boxes.bx[i].to_i64() + ox.to_i64() +
+                        box_w.to_i64() + blur.to_i64()
+                    )
+                    val shadow_y1 = (
+                        boxes.by[i].to_i64() + oy.to_i64() +
+                        box_h.to_i64() + blur.to_i64()
+                    )
+                    if shadow_x0 < x0: x0 = shadow_x0
+                    if shadow_y0 < y0: y0 = shadow_y0
+                    if shadow_x1 > x1: x1 = shadow_x1
+                    if shadow_y1 > y1: y1 = shadow_y1
+    if (x1 <= clip.x0.to_i64() or y1 <= clip.y0.to_i64() or
+        x0 >= clip.x1.to_i64() or y0 >= clip.y1.to_i64()):
+        return false
     true
 
-fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32, vector_fonts: bool) -> [DrawIrCommand]:
-    var command_count: i32 = 0
+fn _html_draw_ir_visible_nodes(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    width: i32, height: i32
+) -> [bool]:
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height
+    )
+    var visible: [bool] = [false; nodes.len()]
     var i: i32 = 0
+    # cpu-lane-loop-ok: one visibility decision per node into a reusable [bool] mask so downstream Draw IR emission does not recompute visibility; bound is nodes.len()
     while i < nodes.len():
         visible[i] = _html_draw_ir_visible(
             nodes, styles, boxes, i, paint_clip_at(clip_cache, i)
@@ -2413,6 +2739,7 @@ fn _html_draw_ir_append_context_paint_order(
     context_id: i32, order: [i32]
 ) -> [i32]:
     var result = order
+    # cpu-lane-loop-ok: appends the members of one stacking context in document order; summed over the whole recursion each node is appended exactly once, so the total is O(node_count)
     for member in members[context_id]:
         result.push(member)
     val children = _sort_positive_z_indices(
@@ -2420,6 +2747,7 @@ fn _html_draw_ir_append_context_paint_order(
         child_contexts[context_id].len(),
         styles
     )
+    # cpu-lane-loop-ok: recurses into the z-sorted child stacking contexts of one context; bound is that context's child count and each context is visited exactly once
     for child in children:
         result = _html_draw_ir_append_context_paint_order(
             styles, members, child_contexts, child + 1, result
@@ -2437,81 +2765,38 @@ fn _html_draw_ir_node_paint_order(
     var members: [[i32]] = [[]; node_count + 1]
     var child_contexts: [[i32]] = [[]; node_count + 1]
     var i: i32 = 0
+    # cpu-lane-loop-ok: assigns each node to its nearest supported stacking context and registers it as a member; single forward O(node_count) pass, parents precede children
     while i < node_count:
-        if _html_draw_ir_visible(nodes, styles, boxes, i):
-            if first_visible < 0:
-                first_visible = i
-            command_count = command_count + 1
+        val parent = nodes[i].parent
+        val parent_context = if parent >= 0 and parent < i:
+            node_context[parent]
+        else:
+            0
+        if styles[i].position_absolute and styles[i].z_index > 0:
+            child_contexts[parent_context].push(i)
+            node_context[i] = i + 1
+            members[i + 1].push(i)
+        else:
+            node_context[i] = parent_context
+            members[parent_context].push(i)
         i = i + 1
     _html_draw_ir_append_context_paint_order(
         styles, members, child_contexts, 0, []
     )
-
-fn _html_draw_ir_producer_opaque_proof(
-    command: DrawIrCommand, nodes: [HNode], styles: [Style], owner: i32,
-    clip: ClipRect, viewport_width: i32, viewport_height: i32,
-    is_primary_node_rect: bool
-) -> u32:
-    if (
-        owner < 0 or owner >= nodes.len() or owner >= styles.len() or
-        not is_primary_node_rect or command.kind != DRAW_IR_COMMAND_RECT or command.width <= 0 or
-        command.height <= 0 or viewport_width <= 0 or viewport_height <= 0
-    ):
-        return CHUNK_OPAQUE_UNKNOWN
-    val node = nodes[owner]
-    val st = styles[owner]
-    if (
-        node.tag == "#text" or node.tag == "iframe" or node.tag == "img" or
-        node.tag == "input" or st.opacity_pct != 100 or
-        command.color != st.bg or ((command.color >> 24) & 255u32) != 255u32 or
-        st.background_gradient_from != 0u32 or st.background_gradient_to != 0u32 or
-        st.background_image_uri != "" or st.bg_layers_raw != "" or
-        st.backdrop_filter_raw != "" or st.box_shadow_raw != "" or
-        st.box_shadow_color != 0u32 or st.outline_w != 0 or
-        st.border_w != 0 or st.border_l != 0 or st.border_t != 0 or
-        st.border_r != 0 or st.border_b != 0 or
-        st.border_radius_px != 0 or st.border_radius_tl_px != 0 or
-        st.border_radius_tr_px != 0 or st.border_radius_br_px != 0 or
-        st.border_radius_bl_px != 0
-    ):
-        return CHUNK_OPAQUE_UNKNOWN
-    val x0 = command.x.to_i64()
-    val y0 = command.y.to_i64()
-    val x1 = x0 + command.width.to_i64()
-    val y1 = y0 + command.height.to_i64()
-    if (
-        x0 < 0 or y0 < 0 or x1 > viewport_width.to_i64() or
-        y1 > viewport_height.to_i64() or x0 < clip.x0.to_i64() or
-        y0 < clip.y0.to_i64() or x1 > clip.x1.to_i64() or y1 > clip.y1.to_i64()
-    ):
-        return CHUNK_OPAQUE_UNKNOWN
-    var ancestor = owner
-    var ancestor_steps: i32 = 0
-    while ancestor >= 0 and ancestor < styles.len():
-        if ancestor_steps >= nodes.len():
-            return CHUNK_OPAQUE_UNKNOWN
-        if (
-            styles[ancestor].opacity_pct != 100 or
-            styles[ancestor].backdrop_filter_raw != ""
-        ):
-            return CHUNK_OPAQUE_UNKNOWN
-        ancestor = nodes[ancestor].parent
-        ancestor_steps = ancestor_steps + 1
-    CHUNK_OPAQUE_EXACT_RECT
 
 fn _html_draw_ir_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
     target_keys: [text], overlay: BrowserTextInputOverlay,
     visible_nodes: [bool], images: [SimpleOsHostGpuImageResource]
-) -> ([DrawIrCommand], [i32], [u32]):
+) -> ([DrawIrCommand], [i32]):
     val clip_cache = build_ancestor_clip_cache(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
     )
     var commands: [DrawIrCommand] = []
     var owner_nodes: [i32] = []
-    var primary_node_rects: [bool] = []
     var scrollbar_lowering = false
+    # cpu-lane-loop-ok: existence scan over the style list to decide whether scrollbar lowering is needed at all; bound is style count, one pass, result is a single bool
     for st in styles:
         if st.overflow_auto_y:
             scrollbar_lowering = true
@@ -2525,6 +2810,7 @@ fn _html_draw_ir_commands(
     if scrollbar_lowering:
         descendant_bottom = [0i64; nodes.len()]
         var extent_init = 0
+        # cpu-lane-loop-ok: initialises descendant_bottom to each node's own bottom edge; single O(node_count) init of the scroll-extent accumulator
         while extent_init < nodes.len():
             descendant_bottom[extent_init] = (
                 boxes.by[extent_init].to_i64() +
@@ -2532,6 +2818,7 @@ fn _html_draw_ir_commands(
             )
             extent_init = extent_init + 1
         var extent_index = nodes.len() - 1
+        # cpu-lane-loop-ok: reverse sweep propagating each node's scroll extent into its parent; this IS the bulk idiom - it replaces a per-node subtree walk with one O(node_count) backward pass
         while extent_index >= 0:
             val own_bottom = (
                 boxes.by[extent_index].to_i64() +
@@ -2554,10 +2841,12 @@ fn _html_draw_ir_commands(
         # contexts/glass, and contiguous with its opacity subtree.
         subtree_last_paint = [0; nodes.len()]
         var order_index = 0
+        # cpu-lane-loop-ok: records each node's own position within paint_order; single O(paint_order) pass
         while order_index < paint_order.len():
             subtree_last_paint[paint_order[order_index]] = order_index
             order_index = order_index + 1
         var subtree_index = nodes.len() - 1
+        # cpu-lane-loop-ok: reverse sweep lifting each node's last-painted descendant index into its parent so scrollbar chrome can flush right after the owner's subtree; one O(node_count) backward pass
         while subtree_index >= 0:
             val subtree_parent = nodes[subtree_index].parent
             if (
@@ -2572,13 +2861,14 @@ fn _html_draw_ir_commands(
         scrollbar_commands_at = [[]; paint_order.len()]
         scrollbar_owners_at = [[]; paint_order.len()]
         var scrollbar_index = nodes.len() - 1
+        # cpu-lane-loop-ok: builds the scrollbar track/thumb Draw IR commands for overflow-auto-y scrollports and buckets them at their owner's flush point; bound is node_count, one pass
         while scrollbar_index >= 0:
             val st = styles[scrollbar_index]
             if (
                 scrollbar_index < visible_nodes.len() and
                 visible_nodes[scrollbar_index] and
                 nodes[scrollbar_index].tag != "#text" and
-                st.overflow_auto_y
+                st.overflow_auto_y and not st.scrollbar_width_none
             ):
                 val raw_track_h = (
                     boxes.bh[scrollbar_index].to_i64() -
@@ -2715,6 +3005,7 @@ fn _html_draw_ir_commands(
                         scrollbar_owners_at[flush_at].push(scrollbar_index)
             scrollbar_index = scrollbar_index - 1
     var paint_index: i32 = 0
+    # cpu-lane-loop-ok: the Draw IR emission pass: one command group per node in stacking-context paint order. Bound is paint_order.len() == node_count; emitting per node is the whole purpose of this producer
     while paint_index < paint_order.len():
         val i = paint_order[paint_index]
         if i < visible_nodes.len() and visible_nodes[i]:
@@ -2748,7 +3039,6 @@ fn _html_draw_ir_commands(
             ):
                 commands.push(summary_marker)
                 owner_nodes.push(i)
-                primary_node_rects.push(false)
             if styles[i].background_image_uri != "" or styles[i].bg_layers_raw != "":
                 val background_layers = _html_draw_ir_background_layers(styles[i])
                 var backgrounds_ready = background_layers.len() > 0
@@ -2757,6 +3047,7 @@ fn _html_draw_ir_commands(
                         backgrounds_ready = false
                 var background_index = background_layers.len() - 1
                 var lowered_backgrounds: [DrawIrCommand] = []
+                # cpu-lane-loop-ok: lowers the declared background layers back-to-front; bound is background_layers.len(), which _html_draw_ir_two_url_background_layers caps at 2 (or 1 for the single-image form)
                 while backgrounds_ready and background_index >= 0:
                     if val background_command = _html_draw_ir_background_image_command(
                         nodes, styles, boxes, i, images, node_clip, width, height,
@@ -2771,17 +3062,16 @@ fn _html_draw_ir_commands(
                         backgrounds_ready = false
                     background_index = background_index - 1
                 if backgrounds_ready and lowered_backgrounds.len() > 0:
+                    # cpu-lane-loop-ok: pushes the already-lowered background commands in declared order; bound is the same background layer count of at most 2
                     for background in lowered_backgrounds:
                         commands.push(background)
                         owner_nodes.push(i)
-                        primary_node_rects.push(false)
                     var border_overlay = _html_draw_ir_background_border_overlay(
                         nodes, styles, boxes, i, node_clip, vector_fonts
                     )
                     border_overlay.parent_id = component_id
                     commands.push(border_overlay)
                     owner_nodes.push(i)
-                    primary_node_rects.push(false)
             if val image_command = _html_draw_ir_image_command(
                 nodes, styles, boxes, i, images, node_clip
             ):
@@ -2789,6 +3079,15 @@ fn _html_draw_ir_commands(
                 image.parent_id = component_id
                 commands.push(image)
                 owner_nodes.push(i)
+            if nodes[i].tag == "input" and input_uses_accent_color(nodes[i]):
+                # cpu-lane-loop-ok: pushes the checkbox/radio sub-part commands (frame, border edges, checked indicator) for one input; bound is the fixed small command set _html_draw_ir_checkable_commands builds
+                for control_command in _html_draw_ir_checkable_commands(
+                    nodes[i], styles[i], i,
+                    boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
+                    node_clip
+                ):
+                    commands.push(control_command)
+                    owner_nodes.push(i)
             val overlay_target = (
                 i < target_keys.len() and
                 target_keys[i] != "" and
@@ -2819,7 +3118,6 @@ fn _html_draw_ir_commands(
                     selection.parent_id = component_id
                     commands.push(selection)
                     owner_nodes.push(i)
-                    primary_node_rects.push(false)
                 if plan.text_value != "":
                     var input_text = _html_draw_ir_input_text_command_from_plan(
                         nodes[i], styles[i], i, plan
@@ -2827,7 +3125,6 @@ fn _html_draw_ir_commands(
                     input_text.parent_id = component_id
                     commands.push(input_text)
                     owner_nodes.push(i)
-                    primary_node_rects.push(false)
                 if plan.caret_present:
                     var caret = _html_draw_ir_overlay_rect(
                         component_id + "_caret",
@@ -2838,33 +3135,15 @@ fn _html_draw_ir_commands(
                     caret.parent_id = component_id
                     commands.push(caret)
                     owner_nodes.push(i)
-                    primary_node_rects.push(false)
         if scrollbar_lowering:
+            # cpu-lane-loop-ok: flushes the scrollbar commands bucketed at this paint index; bound is the commands queued for this index, a track+thumb pair per owning scrollport
             for scrollbar_command in scrollbar_commands_at[paint_index]:
                 commands.push(scrollbar_command)
+            # cpu-lane-loop-ok: flushes the owner node indices paired with the scrollbar commands above; same small per-index bound
             for scrollbar_owner in scrollbar_owners_at[paint_index]:
                 owner_nodes.push(scrollbar_owner)
         paint_index = paint_index + 1
-    var opaque_proofs: [u32] = []
-    var proof_index: i32 = 0
-    while proof_index < commands.len():
-        val owner = if proof_index < owner_nodes.len():
-            owner_nodes[proof_index]
-        else:
-            -1
-        val clip = if owner >= 0 and owner < nodes.len():
-            paint_clip_at(clip_cache, owner)
-        else:
-            ClipRect(x0: 0, y0: 0, x1: 0, y1: 0)
-        val primary = if proof_index < primary_node_rects.len():
-            primary_node_rects[proof_index]
-        else:
-            false
-        opaque_proofs.push(_html_draw_ir_producer_opaque_proof(
-            commands[proof_index], nodes, styles, owner, clip, width, height,
-            primary))
-        proof_index = proof_index + 1
-    (commands, owner_nodes, opaque_proofs)
+    (commands, owner_nodes)
 
 fn _html_draw_ir_canvas_command(width: i32, height: i32, color: u32) -> DrawIrCommand:
     val rect = draw_ir_rect_bounds(0, 0, width, height)
@@ -2880,6 +3159,7 @@ fn _web_canvas_background(nodes: [HNode], styles: [Style], fallback: u32) -> u32
     var html_bg = 0u32
     var body_bg = 0u32
     var i = 0
+    # cpu-lane-loop-ok: single scan for the html and body background colors used for CSS canvas background propagation; bound is node_count, one pass, no nesting
     while i < n:
         val nd = nodes[i]
         if nd.tag == "html" and html_bg == 0u32:
@@ -2905,8 +3185,13 @@ fn _web_canvas_background(nodes: [HNode], styles: [Style], fallback: u32) -> u32
 
 fn _web_empty_rules() -> Rules:
     var gp: [[[text]]] = []
+    var gs: [[i32]] = []
     var dc: [text] = []
-    Rules(group_parts: gp, decls: dc)
+    var important_dc: [text] = []
+    Rules(
+        group_parts: gp, group_specificities: gs, decls: dc,
+        important_decls: important_dc
+    )
 
 fn _web_iframe_child_html(nd: HNode) -> text:
     # srcdoc is the primary (and only supported) content source. attr_value
@@ -2947,7 +3232,13 @@ fn _web_render_child_pixels(child_html: text, cw: i32, ch: i32, extra_rules: Rul
     # Explicit trailing args: omitted defaults are not reliable on the
     # freestanding SimpleOS build (see simple_web_html_layout_renderer).
     val own_rules = extract_css_vw(child_html, cw, false)
-    val rules = Rules(group_parts: extra_rules.group_parts + own_rules.group_parts, decls: extra_rules.decls + own_rules.decls)
+    val rules = Rules(
+        group_parts: extra_rules.group_parts + own_rules.group_parts,
+        group_specificities: extra_rules.group_specificities + own_rules.group_specificities,
+        decls: extra_rules.decls + own_rules.decls,
+        important_decls: (
+            extra_rules.important_decls + own_rules.important_decls
+        ))
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index, false, true)
     val node_count = nodes.len() as i32
@@ -2970,11 +3261,12 @@ fn _web_paint_iframes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw:
     var out = fb
     val node_count = nodes.len() as i32
     var i = 0
+    # cpu-lane-loop-ok: one pass over the node list blitting each iframe's separately-rendered child framebuffer; bound is node_count and only iframe-tagged nodes do work
     while i < node_count:
         val nd = nodes[i]
         if nd.tag == "iframe":
             val st = styles[i]
-            val hidden = st.display == "none" or st.visibility_hidden or content_hidden_by_ancestor(nodes, styles, i)
+            val hidden = st.display == "none" or st.visibility_hidden or content_paint_hidden_by_ancestor(nodes, styles, i)
             if not hidden:
                 val cx = bx[i] + st.border_l + st.pad_l
                 val cy = by[i] + st.border_t + st.pad_t

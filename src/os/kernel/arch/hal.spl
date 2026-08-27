@@ -10,17 +10,33 @@
 # Compile-time arch selection: @cfg(x86_64), @cfg(arm64), etc.
 # Only the active arch's function body is compiled into the final binary.
 #
-# NOTE: @cfg does NOT gate `use` statements — the import closure walker
-# pulls all imported modules regardless of @cfg guards. To avoid leaking
-# foreign-arch inline-asm into simple_asm_blocks.c, all non-x86_64 use
-# lines have been removed. Non-x86_64 @cfg function bodies are also removed
-# since their symbols are no longer imported. Other arch owners must add
-# their imports back when building for their target.
+# NOTE: root-caused 2026-07-02 (see doc/03_plan/compiler/backend/
+# arm32_x86_32_native_backend_plan.md risks section). The per-declaration
+# @cfg preprocessor (parser_preprocessor.spl _pp_preprocess_conditionals) only
+# blanked a single following line when a condition was false, so a multi-line
+# `use module.{ a, b, c }` import (opening brace on the @cfg'd line, closing
+# brace on a later line) left its continuation lines as dangling unconditional
+# source. That is now fixed: the preprocessor tracks brace depth through the
+# matching close, so `@cfg(arm64)` above a multi-line `use {...}` block is
+# correctly stripped/kept per-arch. This was independent of, and not caused or
+# fixed by, the 2026-07-02 @cfg-activation fix (frontend.spl bare-name
+# collision) — that commit only affects function-body stripping via the
+# interpreter path.
+#
+# Remaining, separate risk: native-project "full-scan" discovery
+# (compiler_rust/.../native_project/discovery.rs discover_files_full_scan)
+# compiles every .spl file under the given --source dirs regardless of
+# reachability or @cfg, and inline-asm collection
+# (native_project/inline_asm_emit.rs collected_inline_asm_blocks) is a global
+# list with no per-arch filtering — so once per-arch `use` lines are re-added
+# below, a whole-tree native kernel build could still pull in another arch's
+# inline-asm blocks into simple_asm_blocks.c for a single-target compile.
+# Prefer --entry-closure discovery (discover_reachable_files) for native
+# kernel builds, and re-add per-arch imports incrementally, verifying with a
+# QEMU boot per arch, rather than reinstating all of them at once.
 
 use os.kernel.boot.ports.{BootOutputPort}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
-use os.kernel.types.task_types.{TaskContext}
-use os.drivers.virtio.virtio_input_ops.{VirtioInputEvent}
 use os.kernel.arch.arch_context.{ArchContext, JmpBuf, ExtendedCtx, BootArgs}
 use os.kernel.arch.reset.{
     hal_reset_set_test_mode as reset_set_test_mode,
@@ -53,7 +69,6 @@ use os.kernel.arch_adapt.hal_current.{
     hal_interrupt_disable_irq as current_hal_interrupt_disable_irq,
     hal_interrupt_acknowledge as current_hal_interrupt_acknowledge,
     hal_interrupt_set_handler as current_hal_interrupt_set_handler,
-    hal_interrupt_clear_handler as current_hal_interrupt_clear_handler,
     hal_interrupt_set_priority as current_hal_interrupt_set_priority,
     hal_timer_init as current_hal_timer_init,
     hal_timer_set_deadline as current_hal_timer_set_deadline,
@@ -61,8 +76,7 @@ use os.kernel.arch_adapt.hal_current.{
     hal_timer_ticks_per_second as current_hal_timer_ticks_per_second,
     hal_context_save as current_hal_context_save,
     hal_context_restore as current_hal_context_restore,
-    hal_context_init as current_hal_context_init,
-    hal_context_enter_user_task as current_hal_context_enter_user_task
+    hal_context_init as current_hal_context_init
 }
 
 # ============================================================================
@@ -112,7 +126,6 @@ trait HalInterrupt:
     fn interrupt_disable_irq(irq: u32)
     fn interrupt_acknowledge(irq: u32)
     fn interrupt_set_handler(irq: u32, handler: u64)
-    fn interrupt_clear_handler(vector: u32)
     fn interrupt_set_priority(irq: u32, priority: u32)
 
 trait HalTimer:
@@ -375,11 +388,6 @@ fn hal_interrupt_set_handler(irq: u32, handler: u64):
     current_hal_interrupt_set_handler(irq, handler)
 
 @cfg(x86_64)
-fn hal_interrupt_clear_handler(vector: u32):
-    """Restore the default handler for one interrupt vector."""
-    current_hal_interrupt_clear_handler(vector)
-
-@cfg(x86_64)
 fn hal_interrupt_set_priority(irq: u32, priority: u32):
     """Set IRQ priority — x86_64 IOAPIC redirection / LAPIC TPR."""
     current_hal_interrupt_set_priority(irq, priority)
@@ -438,27 +446,3 @@ fn hal_context_restore(ctx: ArchContext):
 fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
     """Create new task context — x86_64 set rip=entry, rsp=stack, rdi=arg."""
     current_hal_context_init(entry, stack, arg)
-
-@cfg(x86_64)
-fn hal_context_enter_user_task(ctx: TaskContext, root_phys: u64):
-    """Transfer to an admitted user task through the active HAL adapter."""
-    current_hal_context_enter_user_task(ctx, root_phys)
-
-# ============================================================================
-# Architecture-owned input producer
-# ============================================================================
-
-fn hal_virtio_input_ready(mask: u32) -> bool:
-    """Require both keyboard and pointer producer readiness bits."""
-    (mask & 3u32) == 3u32
-
-@cfg(arm64)
-fn hal_virtio_input_poll() -> VirtioInputEvent?:
-    """Poll the active ARM64 VirtIO input producer through the HAL boundary."""
-    use os.kernel.arch.arm64.virtio_input.{arm64_virtio_input_poll}
-    arm64_virtio_input_poll()
-
-@cfg(x86_64)
-fn hal_virtio_input_poll() -> VirtioInputEvent?:
-    """No freestanding ARM64 input producer exists on the hosted x86 target."""
-    nil

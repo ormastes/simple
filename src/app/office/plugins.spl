@@ -5,14 +5,37 @@
 # (`std.common.render_scene.office_style_resolver` + `common.markdown`). Each
 # plugin declares the functions it contributes, using the project's existing
 # plugin registry manifest format (the same path the IDE plugin adapter uses).
+#
+# TRANSITIONAL (IDE extension kernel campaign, lane L7): Office apps do not
+# register through the extension-kernel builtin index yet (see
+# `src/lib/editor/extensions/builtin/index.spl` -- only markdown/spl/graph
+# register there today). `_office_plugin_functions_for` already looks up a
+# matching builtin manifest by name and would take over the function list the
+# moment an "office-word"/"office-ppt"/"office-excel" builtin manifest lands;
+# until then it falls back to the hand-declared lists below. Do not delete
+# the fallback lists -- they are the only source of truth right now.
 
 use app.plugin.registry.{PluginEntry, plugin_entry_new, plugin_manifest_to_text, parse_plugin_manifest_text}
+use std.editor.extensions.builtin.index.{builtin_manifest_providers}
 
 # A snapshot of the office plugin manifest for verification / display.
 struct OfficePluginProbe:
     plugin_count: i32
     round_trip_ok: bool
     manifest_text: text
+
+# Look up a builtin extension manifest by name and return its contributed
+# command ids. Falls back to `fallback` when no such builtin is registered
+# (true today for all three Office plugins) or it contributes no commands.
+fn _office_plugin_functions_for(builtin_name: text, fallback: [text]) -> [text]:
+    for m in builtin_manifest_providers():
+        if m.name == builtin_name:
+            var out: [text] = []
+            for cmd in m.contributes_commands:
+                out.push(cmd.id)
+            if out.len() > 0:
+                return out
+    fallback
 
 fn office_plugin_entries() -> [PluginEntry]:
     """The three office apps as separate plugins on the shared md/CSS module.
@@ -23,13 +46,13 @@ fn office_plugin_entries() -> [PluginEntry]:
     var entries: [PluginEntry] = []
     entries.push(plugin_entry_new(
         "office-word", "app.office.word.html_render", "0.1.0",
-        ["render_block_html", "render_document_html"]))
+        _office_plugin_functions_for("office-word", ["render_block_html", "render_document_html"])))
     entries.push(plugin_entry_new(
         "office-ppt", "app.office.slides.html_render", "0.1.0",
-        ["render_slide_html"]))
+        _office_plugin_functions_for("office-ppt", ["render_slide_html"])))
     entries.push(plugin_entry_new(
         "office-excel", "app.office.sheets.formula", "0.1.0",
-        ["evaluate_formula", "evaluate_formula_display_text"]))
+        _office_plugin_functions_for("office-excel", ["evaluate_formula", "evaluate_formula_display_text"])))
     entries
 
 fn office_plugin_names() -> [text]:

@@ -7,6 +7,7 @@ use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{CompileResult, compileoptions_effective_mir_opt_level}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_source_loading.{_driver_entry_import_dirname}
+use compiler.driver.aot_output_aggregation.{aot_join_text_fragments, aot_join_wat_fragments}
 use compiler.common.config.{Logger}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -42,7 +43,7 @@ impl CompilerDriver:
         val opt_level = output_mir_opt_level(ctx)
         output_log_debug(log, "AOT C: generating C++20 to {output}")
 
-        var all_c_source = ""
+        var c_fragments: [text] = []
         for name in ctx.mir_modules.keys():
             output_log_trace(log, "translating module: {name}")
             val compiled = compile_module_with_backend(
@@ -51,8 +52,9 @@ impl CompilerDriver:
                 return CompileResult.CodegenError(
                     "C codegen error in {name}: {compiled.unwrap_err()}")
             val module: CompiledModule = compiled.unwrap()
-            all_c_source = all_c_source + module.assembly
+            c_fragments.push(module.assembly)
 
+        val all_c_source = aot_join_text_fragments(c_fragments)
         if not rt_file_write_text(output, all_c_source):
             return CompileResult.CodegenError("Failed to write C++ source to {output}")
         output_log_info(log, "C++20 source written to {output}")
@@ -112,7 +114,7 @@ impl CompilerDriver:
         val opt_level = output_mir_opt_level(ctx)
         output_log_debug(log, "AOT CUDA: generating PTX to {output}")
 
-        var all_ptx = ""
+        var ptx_fragments: [text] = []
         for name in ctx.mir_modules.keys():
             output_log_trace(log, "translating module to PTX: {name}")
             val compiled = compile_module_with_backend(
@@ -121,8 +123,9 @@ impl CompilerDriver:
                 return CompileResult.CodegenError(
                     "CUDA compile error in {name}: {compiled.unwrap_err()}")
             val module: CompiledModule = compiled.unwrap()
-            all_ptx = all_ptx + (module.assembly ?? "")
+            ptx_fragments.push(module.assembly ?? "")
 
+        val all_ptx = aot_join_text_fragments(ptx_fragments)
         if not rt_file_write_text(output, all_ptx):
             return CompileResult.CodegenError("Failed to write PTX to {output}")
         output_log_info(log, "PTX assembly written to {output}")
@@ -135,7 +138,7 @@ impl CompilerDriver:
         val opt_level = output_mir_opt_level(ctx)
         output_log_debug(log, "AOT OpenCL: generating OpenCL C to {output}")
 
-        var all_source = ""
+        var source_fragments: [text] = []
         for name in ctx.mir_modules.keys():
             output_log_trace(log, "translating module to OpenCL C: {name}")
             val compiled = compile_module_with_backend(
@@ -144,12 +147,47 @@ impl CompilerDriver:
                 return CompileResult.CodegenError(
                     "OpenCL compile error in {name}: {compiled.unwrap_err()}")
             val module: CompiledModule = compiled.unwrap()
-            all_source = all_source + (module.assembly ?? "")
+            source_fragments.push(module.assembly ?? "")
 
+        val all_source = aot_join_text_fragments(source_fragments)
         if not rt_file_write_text(output, all_source):
             return CompileResult.CodegenError(
                 "Failed to write OpenCL source to {output}")
         output_log_info(log, "OpenCL C source written to {output}")
+        CompileResult.Success(output)
+
+    me compile_to_vulkan(output: text) -> CompileResult:
+        val ctx = self.ctx
+        val log = ctx.logger
+        val is_release = ctx.options.release
+        val opt_level = output_mir_opt_level(ctx)
+        output_log_debug(log, "AOT Vulkan: generating SPIR-V assembly to {output}")
+
+        var all_spirv = ""
+        var entry_modules = 0
+        for name in ctx.mir_modules.keys():
+            output_log_trace(log, "translating module to Vulkan SPIR-V: {name}")
+            val compiled = compile_module_with_backend(
+                "vulkan", ctx.mir_modules[name], is_release, opt_level)
+            if compiled.is_err():
+                return CompileResult.CodegenError(
+                    "Vulkan compile error in {name}: {compiled.unwrap_err()}")
+            val module: CompiledModule = compiled.unwrap()
+            val assembly = module.assembly ?? ""
+            if assembly.contains("OpEntryPoint GLCompute"):
+                if entry_modules > 0:
+                    return CompileResult.CodegenError(
+                        "Vulkan output requires exactly one compute module")
+                entry_modules = entry_modules + 1
+                all_spirv = assembly
+
+        if entry_modules == 0 or all_spirv == "":
+            return CompileResult.CodegenError(
+                "Vulkan backend produced no compute entry point")
+        if not rt_file_write_text(output, all_spirv):
+            return CompileResult.CodegenError(
+                "Failed to write Vulkan SPIR-V assembly to {output}")
+        output_log_info(log, "Vulkan SPIR-V assembly written to {output}")
         CompileResult.Success(output)
 
     me compile_to_wasm(output: text) -> CompileResult:
@@ -159,7 +197,7 @@ impl CompilerDriver:
         val opt_level = output_mir_opt_level(ctx)
         output_log_debug(log, "AOT WASM: generating WAT to {output}")
 
-        var all_wat = ""
+        var wat_fragments: [text] = []
         for name in ctx.mir_modules.keys():
             output_log_trace(log, "translating module to WAT: {name}")
             val compiled = compile_module_with_backend(
@@ -168,12 +206,11 @@ impl CompilerDriver:
                 return CompileResult.CodegenError(
                     "WASM compile error in {name}: {compiled.unwrap_err()}")
             val module: CompiledModule = compiled.unwrap()
-            val wat = module.assembly ?? ""
-            if all_wat != "" and wat != "":
-                all_wat = all_wat + "\n\n"
-            all_wat = all_wat + wat
+            wat_fragments.push(module.assembly ?? "")
 
+        val all_wat = aot_join_wat_fragments(wat_fragments)
         if not rt_file_write_text(output, all_wat):
             return CompileResult.CodegenError("Failed to write WAT to {output}")
         output_log_info(log, "WAT written to {output}")
         CompileResult.Success(output)
+use compiler.common.diagnostics.span.{Span}

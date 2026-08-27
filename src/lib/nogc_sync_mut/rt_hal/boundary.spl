@@ -4,7 +4,7 @@
 use std.common.rt_hal.model.*
 use std.common.hash.djb2.{djb2_hash_text}
 use std.nogc_sync_mut.rt_hal.parallel_executor.{RtHalProviderRegistry}
-use std.nogc_sync_mut.rt_hal.exact_boundary.{RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactArenaPort,RtHalExactArenaPortV2, rt_hal_compare_observed_pure_exact}
+use std.nogc_sync_mut.rt_hal.exact_boundary.{RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactArenaPort, rt_hal_compare_observed_pure_exact}
 use std.nogc_sync_mut.runtime.thread_local.{rt_thread_local_new, rt_thread_local_get, rt_thread_local_set}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
@@ -35,7 +35,7 @@ var rtrace2: [i64] = []
 var rtrace3: [i64] = []
 var rhas_trace: [bool] = []
 var registry: RtHalProviderRegistry? = nil
-var arena: RtHalExactArenaPortV2? = nil
+var arena: RtHalExactArenaPort? = nil
 var owner_tls = rt_thread_local_new()
 var owner_install_lock: Mutex = mutex_new(0)
 var global_failure: AtomicI64 = atomic_i64_new(0)
@@ -159,11 +159,7 @@ pub fn rt_hal_boundary_worker_complete_hook():
         active_workers.store(0, MemoryOrdering.Release)
         global_failure.store(1, MemoryOrdering.Release)
 
-pub fn rt_hal_boundary_install_exact(next_registry: RtHalProviderRegistry,
-        next_arena: RtHalExactArenaPort) ->text:
-    "RTHAL-W-LEGACY-ORACLE-UNSAFE"
-
-pub fn rt_hal_boundary_install_exact_v2(next_registry: RtHalProviderRegistry, next_arena: RtHalExactArenaPortV2) -> text:
+pub fn rt_hal_boundary_install_exact(next_registry: RtHalProviderRegistry, next_arena: RtHalExactArenaPort) -> text:
     if not initialized: rt_hal_boundary_reset()
     val owner_error = rt_hal_boundary_register_owner(current_owner())
     if owner_error != "": return owner_error
@@ -235,24 +231,6 @@ pub fn rt_hal_boundary_dispatch(operation_id: text, compare_c: bool, compare_rus
     active_pins[owner].fetch_sub(1, MemoryOrdering.Release)
     0
 
-# Compiler fail-closed handoff for exits that have not passed through the
-# bounded v2 encoder. This is O(1), allocation-free, and deliberately retains
-# neither an exceptional payload nor an ephemeral operation buffer.
-pub fn rt_hal_boundary_reject_unencoded_exit(operation_id: text, compare_c: bool, compare_rust: bool, exit_kind: i64) -> i64:
-    if not compare_c and not compare_rust: return 0
-    if operation_id == "" or exit_kind < 1 or exit_kind > 4:
-        global_failure.store(1, MemoryOrdering.Release)
-        return 1
-    if not initialized: return 1
-    val encoded = rt_thread_local_get(owner_tls)
-    if encoded <= 0:
-        global_failure.store(1, MemoryOrdering.Release)
-        return 1
-    val owner = encoded - 1
-    statuses[owner] = 4
-    global_failure.store(1, MemoryOrdering.Release)
-    1
-
 fn operation_digest(operation_id: text) -> RtHalDigest256:
     RtHalDigest256(word0: djb2_hash_text("0|" + operation_id), word1: djb2_hash_text("1|" + operation_id), word2: djb2_hash_text("2|" + operation_id), word3: djb2_hash_text("3|" + operation_id))
 
@@ -261,9 +239,7 @@ pub fn rt_hal_boundary_drain_owner(owner_id: i64) -> text:
     if not initialized: return "RTHAL-E-NOT-INITIALIZED"
     val owner = owner_slot(owner_id)
     if owner_ids[owner] != owner_id: return "RTHAL-E-OWNER"
-    if statuses[owner] == 2: return "RTHAL-E-QUEUE-CAPACITY"
-    if statuses[owner] == 4: return "RTHAL-E-IO-UNENCODED"
-    if statuses[owner] != 0: return "RTHAL-E-RUN-FAILED"
+    if statuses[owner] != 0: return "RTHAL-E-QUEUE-CAPACITY"
     if registry == nil or arena == nil: return "RTHAL-W-PARALLEL-UNSUPPORTED"
     while tails[owner] < heads[owner]:
         val tail = tails[owner]
@@ -338,7 +314,6 @@ export rt_hal_boundary_worker_spawn_hook, rt_hal_boundary_registered_owner_ids
 export rt_hal_boundary_worker_complete_hook
 export rt_hal_boundary_global_failure_status
 export rt_hal_boundary_install_exact
-export rt_hal_boundary_install_exact_v2
 export rt_hal_boundary_observe_effect, rt_hal_boundary_observe_effect4
 export rt_hal_boundary_dispatch, rt_hal_boundary_drain_owner
 export rt_hal_boundary_status, rt_hal_boundary_error

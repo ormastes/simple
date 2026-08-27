@@ -7,12 +7,6 @@ can supervise this process or compose the same server capsule.
 use std.database.postgres_mimic.{PgResponseKind, postgres_mimic_open,
     postgres_mimic_startup, postgres_mimic_simple_query, postgres_mimic_close,
     postgres_mimic_join_text, postgres_mimic_row_tsv}
-use std.database.postgres_mimic.database_owner.{PgDatabaseOwner}
-use std.database.postgres_mimic.linux_limits.{pgwire_linux_limits}
-use std.database.postgres_mimic.connection.{PgWireSslPolicy}
-use std.database.postgres_mimic.parallel_linux_server.{
-    PgServeBoundary, PgWireParallelLinuxServer
-}
 
 extern fn sys_get_args() -> [text]
 
@@ -32,93 +26,14 @@ fn pg_flag_value(args: [text], flag: text, fallback: text) -> text:
 
 fn print_help():
     print "Usage: postgres-mimic-server --db <path> --query <sql>"
-    print "   or: postgres-mimic-server --serve --db <path> --listen ADDR"
-    print "       --allow-user USER --allow-database DATABASE [--workers N]"
-    print "       [--max-connections N] [--scalar-parallel]"
     print "Run this entrypoint from its cached SMF or native artifact."
-
-fn pg_positive_arg(args: [text], flag: text, fallback: i64,
-        maximum: i64) -> i64?:
-    val raw = pg_flag_value(args, flag, "")
-    if raw == "": return Some(fallback)
-    val value = raw.to_i64() ?? 0
-    if value <= 0 or value > maximum: return nil
-    Some(value)
-
-fn pg_launch_id_valid(value: text) -> bool:
-    if value.trim() == "" or value.len() > 128: return false
-    for c in value:
-        if not (c.is_alphanumeric() or c == '-' or c == '_'):
-            return false
-    true
-
-fn pg_serve(args: [text], path: text) -> i64:
-    val simpleos = pg_has_flag(args, "--simpleos")
-    val launch_id = pg_flag_value(args, "--launch-id", "")
-    if simpleos and not pg_launch_id_valid(launch_id):
-        print "error: --simpleos requires a non-whitespace --launch-id"
-        return 2
-    val address = pg_flag_value(args, "--listen", if simpleos:
-        "0.0.0.0:5432"
-    else:
-        "127.0.0.1:5432")
-    val allowed_user = pg_flag_value(args, "--allow-user", "")
-    val allowed_database = pg_flag_value(args, "--allow-database", "")
-    if address.trim() == "" or allowed_user.trim() == "" or
-            allowed_database.trim() == "":
-        print "error: --serve requires --listen, --allow-user, and --allow-database"
-        return 2
-    val workers = match pg_positive_arg(args, "--workers", 1, 64):
-        Some(value): value
-        nil:
-            print "error: --workers must be between 1 and 64"
-            return 2
-    if simpleos and workers != 1:
-        print "error: --simpleos requires --workers 1"
-        return 2
-    val max_connections = match pg_positive_arg(args, "--max-connections", 64,
-            1000000):
-        Some(value): value
-        nil:
-            print "error: --max-connections must be positive"
-            return 2
-    val database = match postgres_mimic_open(path):
-        Ok(value): value
-        Err(_):
-            print "error: database open failed"
-            return 1
-    val owner = PgDatabaseOwner.create(database, max_connections)
-    var server = PgWireParallelLinuxServer(address: address, owner: owner,
-        limits: pgwire_linux_limits(), ssl_policy: PgWireSslPolicy.Disabled,
-        allowed_user: allowed_user, allowed_database: allowed_database,
-        worker_count: workers, serve_boundary: PgServeBoundary.create())
-    if simpleos:
-        print "SIMPLEOS_SERVER_LAUNCH artifact=simple_db_server path=/SYS/APPS/DBSRV.SMF launch_id={launch_id}"
-    val status = if simpleos:
-        server.serve_inline_bounded_status(max_connections)
-    elif pg_has_flag(args, "--scalar-parallel"):
-        server.serve_scalar_parallel_bounded_status(max_connections)
-    else:
-        server.serve_bounded_status(max_connections)
-    if status != 0:
-        print "error: postgres-mimic serve failed: {server.serve_error_text()}"
-        return 1
-    if server.owner.checkpoint().is_err() or server.owner.close().is_err():
-        print "error: postgres-mimic shutdown persistence failed"
-        return 1
-    0
 
 fn main() -> i64:
     val args = sys_get_args()
     if pg_has_flag(args, "--help") or pg_has_flag(args, "-h"):
         print_help()
         return 0
-    val path = if pg_has_flag(args, "--simpleos"):
-        pg_flag_value(args, "--db", "/var/db/simpleos/postgres-mimic.pdb")
-    else:
-        pg_flag_value(args, "--db", "build/database/default.pdb")
-    if pg_has_flag(args, "--serve"):
-        return pg_serve(args, path)
+    val path = pg_flag_value(args, "--db", "build/database/default.pdb")
     val sql = pg_flag_value(args, "--query", "")
     if sql == "":
         print "error: --query is required"

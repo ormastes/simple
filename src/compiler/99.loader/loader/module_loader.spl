@@ -10,6 +10,11 @@
 # - Type inference (compiler_ctx.infer_types)
 # - Template instantiation (compiler_ctx.instantiate)
 # Benefits: No circular dependency, clean separation
+#
+# Cohesion split (2026-08-18): lazy service machinery (ensure_*/created/exec
+# allocation) lives in .module_loader_services; semantic-cache bookkeeping in
+# .module_loader_semantic. Both are re-exported here so this file remains the
+# public surface — zero consumer import changes.
 
 use ..loader.compiler_sffi.*
 use ..linker.obj_taker.*
@@ -17,7 +22,7 @@ use ..linker.smf_reader.*
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory, SmfRelocEntry}
 use .object_mapper.{LoaderMapper, LoaderMapperConfig, ResolvedSymbol, apply_smf_relocations}
-use .smf_mmap_native.{native_alloc_rw_memory, native_make_executable, native_make_rw, native_flush_icache, native_write_exec_memory, native_call_function_0}
+use .smf_mmap_native.{native_make_executable, native_make_rw, native_flush_icache, native_call_function_0}
 use .jit_instantiator.*
 use ..metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use ..unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
@@ -29,20 +34,8 @@ use .resource_lifecycle.{
     lifecycle_unload_module, lifecycle_mark_used, lifecycle_destroy
 }
 use .smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
-use .smf_cache.{CacheStats, validated_smf_load}
-use compiler.loader.aspect_acquisition.{
-    loader_aspect_state_new, loader_aspect_register_smf,
-    loader_aspect_acquire, loader_aspect_try_resident,
-    loader_aspect_result_ok, loader_aspect_result_found,
-    loader_aspect_result_error_code, loader_aspect_result_error_message,
-    loader_aspect_result_facet_key, loader_aspect_result_pack_path,
-    loader_aspect_result_module_id, loader_aspect_result_aspect_id,
-    loader_aspect_result_activation, loader_aspect_result_from_cache,
-    loader_aspect_result_generation, loader_aspect_result_payload_len,
-    loader_aspect_result_payload_byte, loader_aspect_invalidate,
-    loader_aspect_unload, loader_aspect_replace_smf, loader_aspect_destroy
-}
-use std.common.aspect_pack.{ApkFacetLoadV1}
+use .smf_cache.{validated_smf_load}
+use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, LifecycleManager}
 
 export use .module_loader_services.{
     moduleloader_ensure_compiler_ctx, moduleloader_ensure_obj_taker,
@@ -86,27 +79,10 @@ struct LoadedSymbol:
     # Offset within the SMF (for possible reload/relocs)
     file_offset: i64
 
-type LoaderSymbolType = SymbolType
-
 
 # ============================================================================
 # LoadedModule Methods (was: impl LoadedModule:)
 # ============================================================================
-
-impl LoadedModule:
-    fn has_symbol(name: text) -> bool:
-        self.symbols.has(name)
-
-    fn get_symbol(name: text):
-        if self.symbols.has(name):
-            return Some(self.symbols[name])
-        nil
-
-    fn exported_symbols() -> [LoadedSymbol]:
-        var out: [LoadedSymbol] = []
-        for name in self.symbols.keys():
-            out.push(self.symbols[name])
-        out
 
 # ============================================================================
 # Load Result
@@ -127,7 +103,7 @@ enum SymbolResult:
 # Module Loader Configuration
 # ============================================================================
 
-struct ModuleLoaderConfig:
+struct LazyModuleLoaderConfig:
     """Configuration for module loading."""
     enable_jit: bool
     enable_cache: bool
@@ -135,16 +111,10 @@ struct ModuleLoaderConfig:
     verbose: bool
     hot_reload: bool
 
-type ModuleLoaderConfig = LazyModuleLoaderConfig
-
 
 # ============================================================================
-# ModuleLoaderConfig Methods (was: impl ModuleLoaderConfig:)
+# LazyModuleLoaderConfig Methods (was: impl LazyModuleLoaderConfig:)
 # ============================================================================
-
-impl LazyModuleLoaderConfig:
-    static fn default() -> LazyModuleLoaderConfig:
-        lazymoduleloaderconfig_default()
 
 fn lazymoduleloaderconfig_default() -> LazyModuleLoaderConfig:
         LazyModuleLoaderConfig(
@@ -160,18 +130,27 @@ fn lazymoduleloaderconfig_default() -> LazyModuleLoaderConfig:
 # Module Loader
 # ============================================================================
 
-struct ModuleLoader:
+struct LazyModuleLoader:
     """Runtime module loader with JIT instantiation support."""
+    # Lazy service cells (startup perf plan Phase D, 2026-08-17): heavy
+    # services are NOT created at construction. Each lives at slot 0 of a
+    # single-entry Dict cell, created on first use by its ensure_* helper
+    # (see .module_loader_services). Dict cells are used (not Option fields)
+    # because dict-element writes through a `self` parameter alias correctly
+    # in the interpreter, while scalar/Option field writes on a struct
+    # parameter are lost.
     # Shared compiler context (SFFI handle)
-    compiler_ctx: CompilerContext
+    compiler_ctx_cell: Dict<i64, CompilerContext>
     # ObjTaker for extraction and instantiation
-    obj_taker: ObjTaker
+    obj_taker_cell: Dict<i64, ObjTaker>
     # Shared object provider (finder + instantiator)
     provider_cell: Dict<i64, ObjectProvider>
     # JIT instantiator (also hosts the shared exec mapper)
-    jit_cell: Dict<i64, LdrJitInstantiator>
+    jit_cell: Dict<i64, JitInstantiator>
     # Loader policy wrapper over shared exec mapper
-    loader_mapper: LoaderMapper
+    loader_mapper_cell: Dict<i64, LoaderMapper>
+    # Resource lifecycle manager cell (owns the SMF cache manager)
+    lifecycle_cell: Dict<i64, ResourceLifecycleManager>
     # Loaded modules cache: path -> module
     modules: Dict<text, LoadedModule>
     # Semantic/public-ABI/accessor fingerprint for each loaded artifact.
@@ -180,493 +159,47 @@ struct ModuleLoader:
     dependency_semantic_fingerprints: Dict<text, Dict<text, text>>
     # Global symbol table: name -> (module_path, symbol)
     global_symbols: Dict<text, (text, LoadedSymbol)>
-    # Resource lifecycle manager — tracks per-module ownership for deallocation
-    lifecycle: ResourceLifecycleManager
     # Configuration
-    config: ModuleLoaderConfig
+    config: LazyModuleLoaderConfig
     # Public ABI/accessor semantic keys exported by each loaded module.
     semantic_exports: Dict<text, [text]>
     # Public ABI/accessor semantic keys each module compiled against.
     semantic_dependencies: Dict<text, [text]>
-    # Opaque loader-owned aspect state. The bridge owns provider aggregates,
-    # windowed index entries, invalidation, and unload rebuilding.
-    aspect_loader: i64
-    last_load_aspect_pack_modules: i64
-
-type ModuleLoader = LazyModuleLoader
 
 
 # ============================================================================
-# ModuleLoader Methods (was: impl ModuleLoader:)
+# LazyModuleLoader Methods (was: impl LazyModuleLoader:)
 # ============================================================================
 
-fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
-        """Create a new module loader."""
-        val compiler_ctx = CompilerContext.create()  # SFFI handle
-        val obj_taker_config = ObjTakerConfig(
-            enable_caching: config.enable_cache,
-            max_cache_size: config.max_cache_size,
-            verbose: config.verbose,
-            allow_deferred: true
-        )
-        val provider = ObjectProvider.new(ObjectProviderConfig(
-            search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
-            libraries: [],
-            enable_cache: config.enable_cache,
-            verbose: config.verbose,
-            prefer_backend: ""
-        ))
-        val jit_config = JitInstantiatorConfig(
-            update_smf: false,
-            max_depth: 50,
-            enabled: config.enable_jit,
-            verbose: config.verbose
-        )
+fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
+        """Create a new module loader.
 
-        val smf_cache_mgr = smfcachemanager_with_new_cache()
-        val lifecycle_config = LifecycleConfig(verbose: config.verbose)
-
-        ModuleLoader(
-            compiler_ctx: compiler_ctx,
-            obj_taker: ObjTaker.with_compiler_context(compiler_ctx, obj_taker_config),
-            provider: provider,
-            jit: JitInstantiator.new(jit_config),
-            loader_mapper: LoaderMapper.new(LoaderMapperConfig(
-                allow_replace_on_reload: config.hot_reload
-            )),
+        Heavy services (compiler context, ObjTaker, object provider, JIT
+        instantiator, loader mapper, lifecycle/cache manager) are created
+        lazily on first use — construction only records configuration.
+        The enable_jit/enable_cache flags decide whether a service is
+        ALLOWED, not when it is built.
+        """
+        LazyModuleLoader(
+            compiler_ctx_cell: {},
+            obj_taker_cell: {},
+            provider_cell: {},
+            jit_cell: {},
+            loader_mapper_cell: {},
+            lifecycle_cell: {},
             modules: {},
             semantic_fingerprints: {},
             dependency_semantic_fingerprints: {},
             global_symbols: {},
-            lifecycle: lifecycle_new(lifecycle_config, smf_cache_mgr),
             config: config,
             semantic_exports: {},
-            semantic_dependencies: {},
-            aspect_loader: loader_aspect_state_new(),
-            last_load_aspect_pack_modules: -1
+            semantic_dependencies: {}
         )
 
-fn moduleloader_bind_mcdc_aspect(self: LazyModuleLoader, path: text,
-                                 symbol_name: text,
-                                 generation: i64) -> Result<(), text>:
-    if symbol_name != "rt_mcdc_aspect_vector_v1":
-        return Err("MCDC-ASPECT-E-ABI: expected rt_mcdc_aspect_vector_v1")
-    if not self.modules.has(path):
-        return Err("MCDC-ASPECT-E-MODULE: module is not loaded: {path}")
-    val module = self.modules[path]
-    val abi_marker = "rt_mcdc_aspect_vector_v1__abi_u64_u32_u64_u64_u64_u8_i32_v1"
-    if not module.symbols.has(symbol_name):
-        return Err("MCDC-ASPECT-E-SYMBOL: symbol is not loaded: {symbol_name}")
-    if not module.symbols.has(abi_marker):
-        return Err("MCDC-ASPECT-E-ABI: exact callable ABI marker is absent")
-    val symbol = module.symbols[symbol_name]
-    val marker = module.symbols[abi_marker]
-    match symbol.ty:
-        case SymbolType.Function: ()
-        case _:
-            return Err("MCDC-ASPECT-E-ABI: vector target is not a function symbol")
-    match marker.ty:
-        case SymbolType.Constant | SymbolType.Data: ()
-        case _:
-            return Err("MCDC-ASPECT-E-ABI: callable ABI marker has the wrong symbol kind")
-    if symbol.address == 0:
-        return Err("MCDC-ASPECT-E-SYMBOL: symbol has a null address")
-    if marker.address == 0 or marker.size <= 0:
-        return Err("MCDC-ASPECT-E-ABI: callable ABI marker has no mapped payload")
-    val target_handle = rt_mcdc_dynamic_register_target_v1(
-        symbol.address as u64, generation as u64)
-    if target_handle == 0u64:
-        return Err("MCDC-ASPECT-E-REGISTRY: target registry is full or rejected the address")
-    var binding = self.mcdc_aspect_bindings[path] ?? McdcAspectBinding.dormant()
-    val bound = binding.bind(target_handle, generation)
-    if bound.is_ok():
-        self.mcdc_aspect_bindings[path] = binding
-    else:
-        _ = rt_mcdc_dynamic_unregister_target_v1(target_handle, generation as u64)
-    bound
 
-
-fn moduleloader_with_defaults() -> ModuleLoader:
+fn lazymoduleloader_with_defaults() -> LazyModuleLoader:
         """Create loader with default configuration."""
         lazymoduleloader_new(lazymoduleloaderconfig_default())
-
-# Stable compatibility spellings. Both names construct the same canonical
-# loader; the root facade only re-exports these functions.
-fn moduleloaderconfig_default() -> ModuleLoaderConfig:
-    lazymoduleloaderconfig_default()
-
-fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
-    lazymoduleloader_new(config)
-
-fn moduleloader_with_defaults() -> ModuleLoader:
-    lazymoduleloader_with_defaults()
-
-# Stable compatibility spellings. Both names construct the same canonical
-# loader; the root facade only re-exports these functions.
-fn moduleloaderconfig_default() -> ModuleLoaderConfig:
-    lazymoduleloaderconfig_default()
-
-fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
-    lazymoduleloader_new(config)
-
-fn moduleloader_with_defaults() -> ModuleLoader:
-    lazymoduleloader_with_defaults()
-
-
-fn _moduleloader_aspect_result(result: i64) -> ApkFacetLoadV1:
-    var payload: [u8] = []
-    var i = 0
-    val n = loader_aspect_result_payload_len(result)
-    while i < n:
-        val byte = loader_aspect_result_payload_byte(result, i)
-        if byte < 0:
-            break
-        payload.push(byte as u8)
-        i = i + 1
-    ApkFacetLoadV1(
-        ok: loader_aspect_result_ok(result),
-        found: loader_aspect_result_found(result),
-        error_code: loader_aspect_result_error_code(result),
-        error_message: loader_aspect_result_error_message(result),
-        facet_key: loader_aspect_result_facet_key(result),
-        pack_path: loader_aspect_result_pack_path(result),
-        module_id: loader_aspect_result_module_id(result),
-        aspect_id: loader_aspect_result_aspect_id(result),
-        activation: loader_aspect_result_activation(result),
-        from_cache: loader_aspect_result_from_cache(result),
-        payload: payload,
-        generation: loader_aspect_result_generation(result))
-
-fn moduleloader_map_static_smf_segments(
-        self: LazyModuleLoader,
-        owner_id: text,
-        memory_reader: SmfReaderMemory) -> Result<[SegmentSymbol], text>:
-    var mapper = if self.segment_mapper_cell.has(0):
-        self.segment_mapper_cell[0]
-    else:
-        SegmentMapper.new()
-    val mapped = mapper.map_smf_exports(owner_id, memory_reader)
-    self.segment_mapper_cell[0] = mapper
-    mapped
-
-fn moduleloader_map_memory_exports(
-        self: LazyModuleLoader,
-        owner_id: text,
-        memory_reader: SmfReaderMemory,
-        lifecycle: ResourceLifecycleManager) -> Result<(Dict<text, LoadedSymbol>, bool), text>:
-    val exports = memory_reader.exported_symbols()
-    val segment_result = moduleloader_map_static_smf_segments(
-        self, owner_id, memory_reader)
-    if segment_result.is_ok():
-        val mapped = segment_result.unwrap()
-        var placement_matches = mapped.len() == exports.len()
-        var i = 0
-        while placement_matches and i < mapped.len():
-            if mapped[i].name != exports[i].name:
-                placement_matches = false
-            i = i + 1
-        if placement_matches and mapped.len() > 0:
-            var loaded: Dict<text, LoadedSymbol> = {}
-            i = 0
-            while i < mapped.len():
-                val placement = mapped[i]
-                val smf_sym = exports[i]
-                val loaded_sym = LoadedSymbol(
-                    name: smf_sym.name,
-                    address: placement.address,
-                    size: smf_sym.size,
-                    ty: smf_sym.ty,
-                    is_jit: false,
-                    file_offset: smf_sym.offset as i64
-                )
-                loaded[smf_sym.name] = loaded_sym
-                self.global_symbols[smf_sym.name] = (owner_id, loaded_sym)
-                lifecycle_on_symbol_mapped(lifecycle, owner_id, smf_sym.name)
-                i = i + 1
-            return Ok((loaded, true))
-        if mapped.len() > 0:
-            _ = moduleloader_unmap_static_segments(self, owner_id)
-
-    # Compatibility fallback: malformed/legacy section metadata must not turn
-    # an artifact that previously loaded per symbol into a new hard failure.
-    # This path remains distinct from the normal static-SMF owner and from JIT.
-    var loaded: Dict<text, LoadedSymbol> = {}
-    for smf_sym in exports:
-        val code_result = memory_reader.read_code(smf_sym)
-        if code_result.is_err():
-            return Err(code_result.unwrap_err())
-        val exec_addr = moduleloader_allocate_exec_module(
-            self, owner_id: owner_id, symbol: smf_sym.name,
-            code: code_result.unwrap(), allow_replace: false)
-        if exec_addr == 0:
-            return Err("Failed to allocate executable memory for {smf_sym.name}")
-        val loaded_sym = LoadedSymbol(
-            name: smf_sym.name,
-            address: exec_addr,
-            size: smf_sym.size,
-            ty: smf_sym.ty,
-            is_jit: false,
-            file_offset: smf_sym.offset as i64
-        )
-        loaded[smf_sym.name] = loaded_sym
-        self.global_symbols[smf_sym.name] = (owner_id, loaded_sym)
-        lifecycle_on_symbol_mapped(lifecycle, owner_id, smf_sym.name)
-    Ok((loaded, false))
-
-fn moduleloader_unmap_static_segments(self: LazyModuleLoader, owner_id: text) -> i32:
-    if not self.segment_mapper_cell.has(0):
-        return 0
-    var mapper = self.segment_mapper_cell[0]
-    val removed = mapper.unmap_owner(owner_id)
-    self.segment_mapper_cell[0] = mapper
-    removed
-
-fn moduleloader_apply_segment_relocations(
-        self: LazyModuleLoader,
-        owner_id: text,
-        relocs: [SmfRelocEntry],
-        resolved: [ResolvedSymbol],
-        global_addrs: Dict<text, i64>) -> Result<(), text>:
-    if not self.segment_mapper_cell.has(0):
-        return Err("Static segment mapper is unavailable for {owner_id}")
-
-    var mapper = self.segment_mapper_cell[0]
-    if mapper.owner_segment_count(owner_id) <= 0:
-        return Err("Static SMF owner has no mapped segments: {owner_id}")
-
-    # The v1 relocation table has no target-section field.  Its offsets are
-    # defined against the canonical Code section (index 0), while symbol
-    # addresses may resolve into any mapped section.
-    if relocs.len() > 0:
-        val code_base = mapper.segment_base(owner_id, 0)
-        val code_size = mapper.segment_size(owner_id, 0)
-        if code_base <= 0 or code_size <= 0:
-            return Err("Relocation-bearing SMF has no mapped Code section: {owner_id}")
-        val writable = mapper.begin_relocation(owner_id, 0)
-        if writable.is_err():
-            self.segment_mapper_cell[0] = mapper
-            return Err(writable.unwrap_err())
-        val applied = apply_smf_relocations(
-            code_base, code_size, relocs, resolved, global_addrs)
-        if applied.is_err():
-            self.segment_mapper_cell[0] = mapper
-            return Err(applied.unwrap_err())
-
-    # Seal every mapped section exactly once after all relocation writes.  The
-    # mapper unmaps the whole candidate if publication of any section fails.
-    val sealed = mapper.seal_owner(owner_id)
-    self.segment_mapper_cell[0] = mapper
-    sealed
-
-
-impl LazyModuleLoader:
-    static fn new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
-        lazymoduleloader_new(config)
-
-    static fn with_defaults() -> LazyModuleLoader:
-        lazymoduleloader_with_defaults()
-
-    me load(path: text) -> LoadResult:
-        val result = moduleloader_load(self, path)
-        if self.last_load_aspect_pack_modules_cell.has(0):
-            self.last_load_aspect_pack_modules = self.last_load_aspect_pack_modules_cell[0]
-        result
-
-    me reload(path: text) -> LoadResult:
-        val result = moduleloader_reload(self, path)
-        if self.last_load_aspect_pack_modules_cell.has(0):
-            self.last_load_aspect_pack_modules = self.last_load_aspect_pack_modules_cell[0]
-        result
-
-    me replace_live(path: text) -> LoadResult:
-        val result = moduleloader_replace_live(self, path)
-        if self.last_load_aspect_pack_modules_cell.has(0):
-            self.last_load_aspect_pack_modules = self.last_load_aspect_pack_modules_cell[0]
-        result
-
-    me unload(path: text):
-        moduleloader_unload(self, path)
-
-    me resolve_symbol(name: text) -> SymbolResult:
-        moduleloader_resolve_symbol(self, name)
-
-    fn resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
-        moduleloader_resolve_generic(self, name, type_args)
-
-    fn is_loaded(path: text) -> bool:
-        self.modules.has(path)
-
-    fn loaded_modules() -> [text]:
-        self.modules.keys()
-
-    fn stats() -> LoaderStats:
-        moduleloader_stats(self)
-
-    fn get_module(path: text):
-        if self.modules.has(path):
-            return Some(self.modules[path])
-        nil
-
-    me record_semantic_export(path: text, key: text):
-        moduleloader_record_semantic_export(self, path, key)
-
-    me record_semantic_dependency(path: text, key: text):
-        moduleloader_record_semantic_dependency(self, path, key)
-
-    me record_semantic_fingerprint(path: text, fingerprint: text):
-        moduleloader_record_semantic_fingerprint(self, path, fingerprint)
-
-    me record_dependency_semantic_fingerprint(dependent_path: text, dependency_path: text, fingerprint: text):
-        moduleloader_record_dependency_semantic_fingerprint(
-            self, dependent_path, dependency_path, fingerprint)
-
-    fn semantic_cache_is_fresh(path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
-        moduleloader_semantic_cache_is_fresh(
-            self, path, current_fingerprint, current_dependencies)
-
-    fn semantic_dependents(changed_key: text) -> [text]:
-        moduleloader_semantic_dependents(self, changed_key)
-
-    fn semantic_dependents_of(changed_path: text) -> [text]:
-        moduleloader_semantic_dependents_of(self, changed_path)
-
-    me invalidate_semantic_change(changed_key: text) -> [text]:
-        moduleloader_invalidate_semantic_change(self, changed_key)
-
-    fn aspect_facet(catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
-        _moduleloader_aspect_result(
-            loader_aspect_acquire(self.aspect_loader, catalog, facet_key))
-
-    fn resident_aspect_facet(facet_key: text) -> ApkFacetLoadV1:
-        _moduleloader_aspect_result(
-            loader_aspect_try_resident(self.aspect_loader, facet_key))
-
-    me invalidate_aspect_pack(path: text) -> bool:
-        loader_aspect_invalidate(self.aspect_loader, path)
-
-    me unload_aspect_pack(path: text) -> i64:
-        loader_aspect_unload(self.aspect_loader, path)
-
-    me destroy():
-        if moduleloader_lifecycle_created(self) and moduleloader_jit_service_created(self):
-            lifecycle_destroy(
-                moduleloader_ensure_lifecycle(self), moduleloader_ensure_jit(self).exec_mapper)
-        if self.segment_mapper_cell.has(0):
-            var segment_mapper = self.segment_mapper_cell[0]
-            segment_mapper.clear()
-            self.segment_mapper_cell[0] = segment_mapper
-        _ = loader_aspect_destroy(self.aspect_loader)
-
-
-fn _moduleloader_aspect_result(result: i64) -> ApkFacetLoadV1:
-    var payload: [u8] = []
-    var i = 0
-    val n = loader_aspect_result_payload_len(result)
-    while i < n:
-        val byte = loader_aspect_result_payload_byte(result, i)
-        if byte < 0:
-            break
-        payload.push(byte as u8)
-        i = i + 1
-    ApkFacetLoadV1(
-        ok: loader_aspect_result_ok(result),
-        found: loader_aspect_result_found(result),
-        error_code: loader_aspect_result_error_code(result),
-        error_message: loader_aspect_result_error_message(result),
-        facet_key: loader_aspect_result_facet_key(result),
-        pack_path: loader_aspect_result_pack_path(result),
-        module_id: loader_aspect_result_module_id(result),
-        aspect_id: loader_aspect_result_aspect_id(result),
-        activation: loader_aspect_result_activation(result),
-        from_cache: loader_aspect_result_from_cache(result),
-        payload: payload,
-        generation: loader_aspect_result_generation(result))
-
-
-impl LazyModuleLoader:
-    static fn new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
-        lazymoduleloader_new(config)
-
-    static fn with_defaults() -> LazyModuleLoader:
-        lazymoduleloader_with_defaults()
-
-    me load(path: text) -> LoadResult:
-        moduleloader_load(self, path)
-
-    me reload(path: text) -> LoadResult:
-        moduleloader_reload(self, path)
-
-    me replace_live(path: text) -> LoadResult:
-        moduleloader_replace_live(self, path)
-
-    me unload(path: text):
-        moduleloader_unload(self, path)
-
-    me resolve_symbol(name: text) -> SymbolResult:
-        moduleloader_resolve_symbol(self, name)
-
-    fn resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
-        moduleloader_resolve_generic(self, name, type_args)
-
-    fn is_loaded(path: text) -> bool:
-        self.modules.has(path)
-
-    fn loaded_modules() -> [text]:
-        self.modules.keys()
-
-    fn stats() -> LoaderStats:
-        moduleloader_stats(self)
-
-    fn get_module(path: text):
-        if self.modules.has(path):
-            return Some(self.modules[path])
-        nil
-
-    me record_semantic_export(path: text, key: text):
-        moduleloader_record_semantic_export(self, path, key)
-
-    me record_semantic_dependency(path: text, key: text):
-        moduleloader_record_semantic_dependency(self, path, key)
-
-    me record_semantic_fingerprint(path: text, fingerprint: text):
-        moduleloader_record_semantic_fingerprint(self, path, fingerprint)
-
-    me record_dependency_semantic_fingerprint(dependent_path: text, dependency_path: text, fingerprint: text):
-        moduleloader_record_dependency_semantic_fingerprint(
-            self, dependent_path, dependency_path, fingerprint)
-
-    fn semantic_cache_is_fresh(path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
-        moduleloader_semantic_cache_is_fresh(
-            self, path, current_fingerprint, current_dependencies)
-
-    fn semantic_dependents(changed_key: text) -> [text]:
-        moduleloader_semantic_dependents(self, changed_key)
-
-    fn semantic_dependents_of(changed_path: text) -> [text]:
-        moduleloader_semantic_dependents_of(self, changed_path)
-
-    me invalidate_semantic_change(changed_key: text) -> [text]:
-        moduleloader_invalidate_semantic_change(self, changed_key)
-
-    fn aspect_facet(catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
-        _moduleloader_aspect_result(
-            loader_aspect_acquire(self.aspect_loader, catalog, facet_key))
-
-    fn resident_aspect_facet(facet_key: text) -> ApkFacetLoadV1:
-        _moduleloader_aspect_result(
-            loader_aspect_try_resident(self.aspect_loader, facet_key))
-
-    me invalidate_aspect_pack(path: text) -> bool:
-        loader_aspect_invalidate(self.aspect_loader, path)
-
-    me unload_aspect_pack(path: text) -> i64:
-        loader_aspect_unload(self.aspect_loader, path)
-
-    me destroy():
-        if moduleloader_lifecycle_created(self) and moduleloader_jit_service_created(self):
-            lifecycle_destroy(
-                moduleloader_ensure_lifecycle(self), moduleloader_ensure_jit(self).exec_mapper)
-        _ = loader_aspect_destroy(self.aspect_loader)
 
 
 fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
@@ -675,11 +208,10 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
         If already loaded and hot_reload is disabled, returns existing module.
         If hot_reload is enabled, reloads the module.
         """
-        self.last_load_aspect_pack_modules = -1
         # Check if already loaded
         if self.modules.has(path):
             if not self.config.hot_reload:
-                return loadresult_AlreadyLoaded(module: self.modules[path])
+                return LoadResult.AlreadyLoaded(module: self.modules[path])
             else:
                 return moduleloader_replace_live(self, path)
 
@@ -687,38 +219,38 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
             print "[loader] Loading: {path}"
 
         # Register with lifecycle manager for resource tracking.
-        lifecycle_on_module_load(self.lifecycle, path, self.jit.exec_mapper.generation, current_time())
+        val lifecycle = moduleloader_ensure_lifecycle(self)
+        val jit = moduleloader_ensure_jit(self)
+        lifecycle_on_module_load(lifecycle, path, jit.exec_mapper.generation, current_time())
 
         # Prefer shared object provider so we work for .smf and .lsm inputs.
-        var reader_result = self.provider.get_reader(path)
+        val provider = moduleloader_ensure_provider(self)
+        var reader_result = provider.get_reader(path)
         if reader_result.is_err():
             # Fallback to direct file reader (legacy path)
             reader_result = SmfReaderImpl.open(path)
-            if reader_result_is_err(reader_result):
-                return loadresult_Error(message: reader_result.unwrap_err())
+            if reader_result.is_err():
+                return LoadResult.Error(message: reader_result.unwrap_err())
 
-        val reader = reader_result_value
+        val reader = reader_result.unwrap()
 
         # Build loaded module. Prefer the regular reader, but fall back to the
         # pure Simple in-memory reader when the seed-backed reader cannot expose
         # symbols from a Simple-written SMF.
         var symbols: Dict<text, LoadedSymbol> = {}
-        val memory_load_bytes_result = self.provider.get_module_bytes(path)
+        val memory_load_bytes_result = provider.get_module_bytes(path)
         if memory_load_bytes_result.is_ok():
-            val memory_load_bytes = memory_load_bytes_result.unwrap()
-            self.last_load_aspect_pack_modules = loader_aspect_register_smf(
-                self.aspect_loader, path, memory_load_bytes)
-            val memory_reader_result = SmfReaderMemory.from_data(memory_load_bytes)
+            val memory_reader_result = SmfReaderMemory.from_data(memory_load_bytes_result.unwrap())
             if memory_reader_result.is_ok():
                 val memory_reader = memory_reader_result.unwrap()
                 for smf_sym in memory_reader.exported_symbols():
                     val code_result = memory_reader.read_code(smf_sym)
                     if code_result.is_err():
-                        return loadresult_Error(message: code_result.unwrap_err())
+                        return LoadResult.Error(message: code_result.unwrap_err())
                     val code = code_result.unwrap()
                     val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
                     if exec_addr == 0:
-                        return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
                     val loaded_sym = LoadedSymbol(
                         name: smf_sym.name,
                         address: exec_addr,
@@ -729,17 +261,19 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                     )
                     symbols[smf_sym.name] = loaded_sym
                     self.global_symbols[smf_sym.name] = (path, loaded_sym)
-                    lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+                    lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
         val reader_exports = reader.exported_symbols()
-        if symbols.keys().len() == 0 and reader_exports.len() > 0:
+        # Dict.len() reads the stored count directly.  Do not materialize a
+        # transient key array on this startup-path fallback decision.
+        if symbols.len() == 0 and reader_exports.len() > 0:
             for smf_sym in reader_exports:
                 val code_result = reader.read_code(smf_sym)
-                if code_result_is_err(code_result):
-                    return loadresult_Error(message: code_result.unwrap_err())
-                val code = code_result_value
+                if code_result.is_err():
+                    return LoadResult.Error(message: code_result.unwrap_err())
+                val code = code_result.unwrap()
                 val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
                 if exec_addr == 0:
-                    return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
                 val loaded_sym = LoadedSymbol(
                     name: smf_sym.name,
                     address: exec_addr,
@@ -751,22 +285,22 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                 symbols[smf_sym.name] = loaded_sym
                 self.global_symbols[smf_sym.name] = (path, loaded_sym)
                 lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
-        if symbols.keys().len() == 0:
+        if symbols.len() == 0:
             val load_bytes_result = provider.get_module_bytes(path)
             if load_bytes_result.is_err():
-                return loadresult_Error(message: load_bytes_result.unwrap_err())
+                return LoadResult.Error(message: load_bytes_result.unwrap_err())
             val memory_reader_result = SmfReaderMemory.from_data(load_bytes_result.unwrap())
             if memory_reader_result.is_err():
-                return loadresult_Error(message: memory_reader_result.unwrap_err())
+                return LoadResult.Error(message: memory_reader_result.unwrap_err())
             val memory_reader = memory_reader_result.unwrap()
             for smf_sym in memory_reader.exported_symbols():
                 val code_result = memory_reader.read_code(smf_sym)
                 if code_result.is_err():
-                    return loadresult_Error(message: code_result.unwrap_err())
+                    return LoadResult.Error(message: code_result.unwrap_err())
                 val code = code_result.unwrap()
                 val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
                 if exec_addr == 0:
-                    return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
                 val loaded_sym = LoadedSymbol(
                     name: smf_sym.name,
                     address: exec_addr,
@@ -777,7 +311,7 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
                 )
                 symbols[smf_sym.name] = loaded_sym
                 self.global_symbols[smf_sym.name] = (path, loaded_sym)
-                lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+                lifecycle_on_symbol_mapped(lifecycle, path, smf_sym.name)
 
         val module = LoadedModule(
             path: path,
@@ -793,33 +327,25 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
         # sees the final module/global symbol table. Use provider-backed bytes
         # so library-resolved module loads relocate against the same SMF data
         # that produced the reader.
-        var smf_data_result = self.provider.get_module_bytes(path)
+        var smf_data_result = provider.get_module_bytes(path)
         if smf_data_result.is_err():
-            return loadresult_Error(message: smf_data_result.unwrap_err())
+            return LoadResult.Error(message: smf_data_result.unwrap_err())
         val smf_data = smf_data_result.unwrap()
-        val reloc_result = moduleloader_apply_relocations(
-            self, path, smf_data, static_segments_mapped)
+        val reloc_result = moduleloader_apply_relocations(self, path, smf_data)
         if reloc_result.is_err():
             val reloc_error = reloc_result.unwrap_err()
             if self.config.verbose:
                 print "[loader] relocation failed for {path}: {reloc_error}"
             moduleloader_unload(self, path)
-            return loadresult_Error(message: reloc_error)
-
-        if symbols.has("rt_mcdc_aspect_vector_v1"):
-            val mcdc_bound = moduleloader_bind_mcdc_aspect(
-                self, path, "rt_mcdc_aspect_vector_v1", module.version as i64)
-            if mcdc_bound.is_err():
-                moduleloader_unload(self, path)
-                return LoadResult.Error(message: mcdc_bound.unwrap_err())
+            return LoadResult.Error(message: reloc_error)
 
         if self.config.verbose:
-            print "[loader] Loaded {symbols.keys().len()} symbols from {path}"
+            print "[loader] Loaded {symbols.len()} symbols from {path}"
 
-        loadresult_Success(module: module)
+        LoadResult.Success(module: module)
 
 
-fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]) -> Result<(), text>:
+fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: [u8]) -> Result<(), text>:
         """Apply SMF relocations for a loaded module.
 
         Reads the Reloc section from SMF data. If relocations exist, temporarily
@@ -837,9 +363,6 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
 
         val relocs = relocs_result.unwrap()
         if relocs.len() == 0:
-            if use_segment_mapper:
-                return moduleloader_apply_segment_relocations(
-                    self, path, [], [], {})
             return Ok(())
 
         if self.config.verbose:
@@ -870,10 +393,6 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
             val loaded_sym = entry[1]
             global_addrs[sym_name] = loaded_sym.address
 
-        if use_segment_mapper:
-            return moduleloader_apply_segment_relocations(
-                self, path, relocs, resolved, global_addrs)
-
         # For each symbol in the loaded module, apply relocations
         if not self.modules.has(path):
             return Err("Module not loaded: {path}")
@@ -888,7 +407,8 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
             if addr == 0 or size == 0:
                 continue
             # mprotect to RW for patching
-            val rw_ok = native_make_rw(addr, size)
+            val rw_ok = unsafe(capabilities: [raw_ptr]):
+                native_make_rw(addr, size)
             if not rw_ok:
                 return Err("Failed to make memory writable for relocation at {sym_name}")
 
@@ -898,21 +418,22 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
                 return Err("Relocation failed for {sym_name}: {apply_result.unwrap_err()}")
 
             # Restore RX protection
-            val rx_ok = native_make_executable(addr, size)
+            val rx_ok = unsafe(capabilities: [raw_ptr]):
+                native_make_executable(addr, size)
             if not rx_ok:
                 return Err("Failed to restore RX protection for {sym_name}")
             native_flush_icache(addr, size)
 
         Ok(())
 
-fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+fn moduleloader_reload(self: LazyModuleLoader, path: text) -> LoadResult:
         """Reload a module (hot reload)."""
         if self.modules.has(path):
             return moduleloader_replace_live(self, path)
         moduleloader_load(self, path)
 
 
-fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
+fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
         """Replace a loaded module without removing public symbols first.
 
         Candidate code is mapped under generation-scoped internal symbol names.
@@ -920,8 +441,6 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         mapped and relocations have succeeded. This avoids the old unload/load
         window where symbols are absent during a hot reload.
         """
-        self.last_load_aspect_pack_modules = -1
-        self.last_load_aspect_pack_modules_cell[0] = -1
         if not self.modules.has(path):
             return moduleloader_load(self, path)
 
@@ -929,28 +448,33 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         val next_version = old_module.version + 1
         val candidate_prefix = "{path}#gen{next_version}:"
 
+        # Phase-2 wiring: track this replacement as a generation candidate.
+        val gen_candidate = GenerationState.candidate(path, next_version)
+        var gen_lm = LifecycleManager.new_manager().register_candidate(path, next_version)
+        var candidate_map = CandidateMapping.create(candidate_prefix)
+
         val provider = moduleloader_ensure_provider(self)
         var reader_result = provider.get_reader(path)
         if reader_result.is_err():
             reader_result = SmfReaderImpl.open(path)
-            if reader_result_is_err(reader_result):
-                return loadresult_Error(message: reader_result.unwrap_err())
+            if reader_result.is_err():
+                return LoadResult.Error(message: reader_result.unwrap_err())
 
-        val reader = reader_result_value
+        val reader = reader_result.unwrap()
         var candidate_symbols: Dict<text, LoadedSymbol> = {}
         var internal_symbols: [text] = []
 
         for smf_sym in reader.exported_symbols():
             val code_result = reader.read_code(smf_sym)
-            if code_result_is_err(code_result):
-                return loadresult_Error(message: code_result.unwrap_err())
+            if code_result.is_err():
+                return LoadResult.Error(message: code_result.unwrap_err())
 
-            val code = code_result_value
+            val code = code_result.unwrap()
             val internal_name = candidate_prefix + smf_sym.name
             val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: internal_name, code: code, allow_replace: false)
             if exec_addr == 0:
                 moduleloader_unmap_internal_symbols(self, internal_symbols)
-                return loadresult_Error(message: "Failed to allocate replacement memory for {smf_sym.name}")
+                return LoadResult.Error(message: "Failed to allocate replacement memory for {smf_sym.name}")
 
             internal_symbols = internal_symbols.push(internal_name)
             candidate_symbols[smf_sym.name] = LoadedSymbol(
@@ -972,53 +496,57 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
 
         self.modules[path] = candidate
 
-        var smf_data_result = self.provider.get_module_bytes(path)
+        var smf_data_result = provider.get_module_bytes(path)
         if smf_data_result.is_err():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return loadresult_Error(message: smf_data_result.unwrap_err())
+            return LoadResult.Error(message: smf_data_result.unwrap_err())
 
-        val replacement_smf_data = smf_data_result.unwrap()
-        val reloc_result = moduleloader_apply_relocations(self, path, replacement_smf_data)
+        val reloc_result = moduleloader_apply_relocations(self, path, smf_data_result.unwrap())
         if reloc_result.is_err():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return loadresult_Error(message: reloc_result.unwrap_err())
+            return LoadResult.Error(message: reloc_result.unwrap_err())
 
-        # Replace the embedded aspect registration while the executable
-        # candidate is still private. A malformed/conflicting pack leaves the
-        # old provider and epoch untouched, so the code candidate can be
-        # discarded without publishing a mixed generation.
-        val aspect_modules = loader_aspect_replace_smf(
-            self.aspect_loader, path, replacement_smf_data)
-        if aspect_modules == -2:
+        # Phase-2: mark relocation done, validate imports, then check readiness.
+        candidate_map = candidate_map.complete_relocation().validate_imports()
+        if not candidate_map.is_ready():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return LoadResult.Error(message: "Aspect-pack replacement rejected for {path}")
-        self.last_load_aspect_pack_modules = aspect_modules
+            return LoadResult.Error(message: "Candidate not ready after relocation for {path}")
+
+        # Promote candidate generation state.
+        val gen_active = gen_candidate.promote()
+        gen_lm = gen_lm.promote_candidate()
 
         # Publish candidate symbols before retiring old executable records so
         # lookups never observe a missing symbol during successful replacement.
+        val lifecycle = moduleloader_ensure_lifecycle(self)
+        val jit = moduleloader_ensure_jit(self)
         for sym_name in candidate_symbols.keys():
             val loaded_sym = candidate_symbols[sym_name]
             self.global_symbols[sym_name] = (path, loaded_sym)
-            lifecycle_on_symbol_mapped(self.lifecycle, path, sym_name)
+            lifecycle_on_symbol_mapped(lifecycle, path, sym_name)
 
         for old_sym in old_module.symbols.keys():
             if not candidate_symbols.has(old_sym):
                 self.global_symbols = self.global_symbols.remove(old_sym)
             _ = jit.exec_mapper.unmap_symbol(old_sym)
 
+        # Phase-2: retire the old generation in the lifecycle manager.
+        gen_lm = gen_lm.retire(path)
+        val _old_gen_retired = GenerationState.loaded(path, old_module.version).retire()
+
         if self.config.verbose:
-            print "[loader] Replaced {path} with generation {next_version}"
+            print "[loader] Replaced {path} with generation {next_version} (gen_active={gen_active.to_text()})"
 
-        loadresult_Success(module: candidate)
+        LoadResult.Success(module: candidate)
 
 
-fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+fn moduleloader_resolve_symbol(self: LazyModuleLoader, name: text) -> SymbolResult:
         """Resolve a symbol, JIT-compiling if necessary."""
         # Mark symbol as used for generation sweep (LRU tracking).
-        lifecycle_mark_used(self.lifecycle, name)
+        lifecycle_mark_used(moduleloader_ensure_lifecycle(self), name)
 
         # Check global symbol table
         if self.global_symbols.has(name):
@@ -1026,15 +554,17 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
             val symbol = _destruct_0[1]
 
             # Return already-installed executable symbol
-            return symbolresult_Found(symbol: symbol, code: [])
+            return SymbolResult.Found(symbol: symbol, code: [])
 
-        # Try JIT instantiation
+        # Try JIT instantiation. The enable_jit flag gates whether the JIT
+        # service may be created at all — disabled config never builds it here.
         if self.config.enable_jit:
-            val jit_result = self.jit.try_jit_instantiate(name)
+            val jit = moduleloader_ensure_jit(self)
+            val jit_result = jit.try_jit_instantiate(name)
             match jit_result:
                 case Success(code, sym_name, address):
                     var owner_id = "__jit__"
-                    val mapped_rec = self.jit.exec_mapper.get_record(sym_name)
+                    val mapped_rec = jit.exec_mapper.get_record(sym_name)
                     if val mapped_value = mapped_rec:
                         if mapped_value != nil:
                             owner_id = mapped_value.owner_id
@@ -1044,7 +574,7 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
                     else:
                         moduleloader_allocate_exec_jit(self, owner_id: owner_id, symbol: sym_name, code: code)
                     if exec_addr == 0:
-                        return symbolresult_Error(message: "Failed to allocate executable memory for {sym_name}")
+                        return SymbolResult.Error(message: "Failed to allocate executable memory for {sym_name}")
                     val loaded_sym = LoadedSymbol(
                         name: sym_name,
                         address: exec_addr,
@@ -1055,24 +585,23 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
                     )
                     self.global_symbols[sym_name] = (owner_id, loaded_sym)
                     # Track JIT symbol origin for lifecycle-aware unload.
-                    lifecycle_on_jit_triggered(self.lifecycle, owner_id, sym_name)
+                    lifecycle_on_jit_triggered(moduleloader_ensure_lifecycle(self), owner_id, sym_name)
                     return SymbolResult.JitCompiled(symbol: loaded_sym, code: code)
 
                 case NotFound(n):
-                    return symbolresult_NotFound(name: n)
+                    return SymbolResult.NotFound(name: n)
 
                 case CompilationError(msg):
-                    return symbolresult_Error(message: msg)
+                    return SymbolResult.Error(message: msg)
 
                 case _("loader returned unknown SymbolResult variant -> fall through to NotFound"):
-                    pass
 
-        symbolresult_NotFound(name: name)
+        SymbolResult.NotFound(name: name)
 
 
 fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
         """Load an SMF and invoke its exported no-argument main function."""
-        val loader = moduleloader_with_defaults()
+        val loader = lazymoduleloader_with_defaults()
         match moduleloader_load(loader, path):
             case Success(_):
                 moduleloader_execute_loaded_main(loader, path)
@@ -1082,19 +611,21 @@ fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
                 Err("SMF load failed for {path}: {message}")
 
 
-fn moduleloader_execute_loaded_main(loader: ModuleLoader, path: text) -> Result<i64, text>:
+fn moduleloader_execute_loaded_main(loader: LazyModuleLoader, path: text) -> Result<i64, text>:
         match moduleloader_resolve_symbol(loader, "main"):
             case Found(symbol, _):
-                Ok(native_call_function_0(symbol.address))
+                unsafe(capabilities: [raw_ptr]):
+                    native_call_function_0(symbol.address)
             case JitCompiled(symbol, _):
-                Ok(native_call_function_0(symbol.address))
+                unsafe(capabilities: [raw_ptr]):
+                    native_call_function_0(symbol.address)
             case NotFound(_):
                 Err("SMF entry point 'main' not found in {path}")
             case Error(message):
                 Err("SMF entry point 'main' resolution failed: {message}")
 
 
-fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+fn moduleloader_resolve_generic(self: LazyModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
         """Resolve a generic symbol with explicit type arguments."""
         val mangled = mangle_name(name, type_args)
 
@@ -1111,7 +642,7 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                 val symbol = _item_2[1]
                 if sym_name == name:
                     # Found template - instantiate with ObjTaker
-                    val result = self.obj_taker.take_with_types(
+                    val result = moduleloader_ensure_obj_taker(self).take_with_types(
                         module.reader,
                         name,
                         type_args
@@ -1120,7 +651,7 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                         case Code(bytes, sym, _):
                             val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: mangled, code: bytes, allow_replace: false)
                             if exec_addr == 0:
-                                return symbolresult_Error(message: "Failed to allocate executable memory for {mangled}")
+                                return SymbolResult.Error(message: "Failed to allocate executable memory for {mangled}")
                             val loaded_sym = LoadedSymbol(
                                 name: mangled,
                                 address: exec_addr,
@@ -1131,24 +662,24 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                             )
                             self.global_symbols[mangled] = (path, loaded_sym)
                             # Track generic instantiation for lifecycle-aware unload.
-                            lifecycle_on_symbol_mapped(self.lifecycle, path, mangled)
-                            lifecycle_on_jit_triggered(self.lifecycle, path, mangled)
+                            val lifecycle = moduleloader_ensure_lifecycle(self)
+                            lifecycle_on_symbol_mapped(lifecycle, path, mangled)
+                            lifecycle_on_jit_triggered(lifecycle, path, mangled)
                             return SymbolResult.JitCompiled(symbol: loaded_sym, code: bytes)
 
                         case Error(msg):
-                            return symbolresult_Error(message: msg)
+                            return SymbolResult.Error(message: msg)
 
                         case _("instantiate returned unknown ObjTaker variant -> fall through to NotFound"):
-                            pass
 
-        symbolresult_NotFound(name: mangled)
+        SymbolResult.NotFound(name: mangled)
 
 
 struct LoaderStats:
     """Loader statistics."""
-    module_count: i64
-    symbol_count: i64
-    jit_stats: LdrJitStats
+    module_count: i32
+    symbol_count: i32
+    jit_stats: JitStats
     cache_stats: CacheStats
 
 # ============================================================================
@@ -1169,82 +700,11 @@ fn current_time() -> i64:
     """Get current timestamp in microseconds."""
     rt_time_now_unix_micros()
 
-fn _moduleloader_empty_jit_stats() -> LdrJitStats:
-    LdrJitStats(cached_count: 0, compile_count: 0, loaded_smf_count: 0,
-        smf_cache_hits: 0, smf_cache_misses: 0, smf_files_mapped: 0,
-        smf_memory_mapped: 0)
-
-fn _moduleloader_empty_cache_stats() -> CacheStats:
-    CacheStats(total_files: 0, total_memory: 0, cache_hits: 0, cache_misses: 0)
-
-fn moduleloader_stats(self: LazyModuleLoader) -> LoaderStats:
-    var jit_stats = _moduleloader_empty_jit_stats()
-    var cache_stats = _moduleloader_empty_cache_stats()
-    if moduleloader_jit_service_created(self):
-        val jit = moduleloader_ensure_jit(self)
-        jit_stats = jit.stats()
-        cache_stats = jit.smf_cache.get_stats()
-    LoaderStats(
-        module_count: self.modules.len(), symbol_count: self.global_symbols.len(),
-        jit_stats: jit_stats, cache_stats: cache_stats)
-
 # ============================================================================
-# Internal helpers
+# Semantic invalidation + unload lifecycle
 # ============================================================================
 
-fn text_array_contains(items: [text], needle: text) -> bool:
-    for item in items:
-        if item == needle:
-            return true
-    false
-
-fn text_array_push_unique(items: [text], value: text) -> [text]:
-    if text_array_contains(items, value):
-        return items
-    items.push(value)
-
-fn text_array_intersects(left: [text], right: [text]) -> bool:
-    for item in left:
-        if text_array_contains(right, item):
-            return true
-    false
-
-fn moduleloader_record_semantic_export(self: ModuleLoader, path: text, key: text):
-    if not self.semantic_exports.has(path):
-        self.semantic_exports[path] = []
-    self.semantic_exports[path] = text_array_push_unique(self.semantic_exports[path], key)
-
-fn moduleloader_record_semantic_dependency(self: ModuleLoader, path: text, key: text):
-    if not self.semantic_dependencies.has(path):
-        self.semantic_dependencies[path] = []
-    self.semantic_dependencies[path] = text_array_push_unique(self.semantic_dependencies[path], key)
-
-fn moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
-    var changed_keys: [text] = [changed_key]
-    var affected: [text] = []
-    var progressed = true
-    while progressed:
-        progressed = false
-        for path in self.modules.keys():
-            if text_array_contains(affected, path):
-                continue
-            val exports = if self.semantic_exports.has(path):
-                self.semantic_exports[path]
-            else:
-                []
-            val deps = if self.semantic_dependencies.has(path):
-                self.semantic_dependencies[path]
-            else:
-                []
-            if text_array_intersects(exports, changed_keys) or text_array_intersects(deps, changed_keys):
-                affected = text_array_push_unique(affected, path)
-                changed_keys = text_array_push_unique(changed_keys, path)
-                for exported_key in exports:
-                    changed_keys = text_array_push_unique(changed_keys, exported_key)
-                progressed = true
-    affected
-
-fn moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text) -> [text]:
+fn moduleloader_invalidate_semantic_change(self: LazyModuleLoader, changed_key: text) -> [text]:
     """Unload a changed semantic artifact and every transitive dependent.
 
     `changed_key` may be a loaded module path or an exported semantic key such
@@ -1261,17 +721,19 @@ fn moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text
     for path in moduleloader_semantic_dependents_of(self, changed_key):
         affected = text_array_push_unique(affected, path)
 
-    _ = self.jit.invalidate_by_semantic_key(changed_key)
+    # Only touch the JIT service if it was ever created — invalidating an
+    # empty cache is a no-op, and creating a JIT just to invalidate it would
+    # defeat lazy construction.
+    if moduleloader_jit_service_created(self):
+        _ = moduleloader_ensure_jit(self).invalidate_by_semantic_key(changed_key)
     for path in affected:
         if self.modules.has(path):
-            if moduleloader_unload(self, path):
-                completed = text_array_push_unique(completed, path)
+            moduleloader_unload(self, path)
         else:
             moduleloader_drop_semantic_cache_record(self, path)
-            completed = text_array_push_unique(completed, path)
-    completed
+    affected
 
-fn moduleloader_unload(self: ModuleLoader, path: text):
+fn moduleloader_unload(self: LazyModuleLoader, path: text):
     """Unload module and free all associated resources.
 
     Delegates exec page and SMF cache cleanup to ResourceLifecycleManager,
@@ -1285,10 +747,7 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
     7. Module cache entry
     """
     if not self.modules.has(path):
-        _ = loader_aspect_invalidate(self.aspect_loader, path)
         return
-
-    _ = loader_aspect_unload(self.aspect_loader, path)
 
     # A loaded module implies the lifecycle and JIT (exec-mapper host)
     # services already exist; ensure_* here is a cheap fetch.
@@ -1297,131 +756,42 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
 
     # 1. Delegate exec page and SMF cache cleanup to lifecycle manager.
     #    Frees JIT-triggered symbols, loader-mapped pages, SMF ref counts.
-    lifecycle_unload_module(self.lifecycle, self.jit.exec_mapper, path)
+    lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
 
     # 2. Collect symbols owned by this module in the global table.
     val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
 
     # 3. Collect JIT symbols triggered by this module but mapped under "__jit__".
     var jit_symbols_to_free: [text] = []
-    for mangled in loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path):
-        if self.jit.jit_cache.has(mangled):
+    for mangled in loaded_metadata_instantiation_symbol_names(jit.loaded_metadata, path):
+        if jit.jit_cache.has(mangled):
             jit_symbols_to_free = jit_symbols_to_free.push(mangled)
 
     # 4. Remove global table entries and JIT bookkeeping for owned symbols.
     #    Exec pages already freed by lifecycle — drop_cached_symbol's unmap is idempotent.
     self.global_symbols = global_symbols_without_names(self.global_symbols, owned_symbols)
     for sym_name in owned_symbols:
-        self.jit.drop_cached_symbol(sym_name)
+        jit.drop_cached_symbol(sym_name)
 
     # 5. Free JIT symbols triggered by this module but owned by "__jit__".
     self.global_symbols = global_symbols_without_names(self.global_symbols, jit_symbols_to_free)
     for jit_sym in jit_symbols_to_free:
-        self.jit.drop_cached_symbol(jit_sym)
+        jit.drop_cached_symbol(jit_sym)
 
     # 6. Clear template metadata for this module.
-    self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+    jit.loaded_metadata = loaded_metadata_remove_path(jit.loaded_metadata, path)
     self.semantic_exports = self.semantic_exports.remove(path)
     self.semantic_dependencies = self.semantic_dependencies.remove(path)
 
     # 7. Remove module from cache.
     moduleloader_drop_semantic_cache_record(self, path)
     self.modules = self.modules.remove(path)
-    true
-
-fn moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
-    """Record the semantic/public-ABI/accessor fingerprint for a loaded artifact."""
-    self.semantic_fingerprints[path] = fingerprint
-
-fn moduleloader_record_dependency_semantic_fingerprint(self: ModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
-    """Record the dependency fingerprint that made a dependent artifact valid."""
-    var deps: Dict<text, text> = {}
-    if self.dependency_semantic_fingerprints.has(dependent_path):
-        deps = self.dependency_semantic_fingerprints[dependent_path]
-    deps[dependency_path] = fingerprint
-    self.dependency_semantic_fingerprints[dependent_path] = deps
-
-fn moduleloader_semantic_cache_is_fresh(self: ModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
-    """Fail-closed semantic cache validation for loader/JIT artifacts."""
-    if not self.semantic_fingerprints.has(path):
-        return false
-    if self.semantic_fingerprints[path] != current_fingerprint:
-        return false
-
-    if not self.dependency_semantic_fingerprints.has(path):
-        return current_dependencies.keys().len() == 0
-
-    val stored_deps = self.dependency_semantic_fingerprints[path]
-    if stored_deps.keys().len() != current_dependencies.keys().len():
-        return false
-
-    for dep_path in current_dependencies.keys():
-        if not stored_deps.has(dep_path):
-            return false
-        if stored_deps[dep_path] != current_dependencies[dep_path]:
-            return false
-    true
-
-fn moduleloader_semantic_dependents_of(self: ModuleLoader, changed_path: text) -> [text]:
-    """Return transitive semantic dependents, including dependency cycles."""
-    var affected: [text] = []
-    var changed_keys: [text] = [changed_path]
-    var progressed = true
-    while progressed:
-        progressed = false
-        for module_path in self.dependency_semantic_fingerprints.keys():
-            if affected.contains(module_path):
-                continue
-            val deps = self.dependency_semantic_fingerprints[module_path]
-            var depends_on_changed = false
-            for candidate in changed_keys:
-                if deps.has(candidate):
-                    depends_on_changed = true
-            if depends_on_changed:
-                affected = affected.push(module_path)
-                changed_keys = changed_keys.push(module_path)
-                progressed = true
-    affected
-
-fn moduleloader_drop_semantic_cache_record(self: ModuleLoader, path: text):
-    """Drop semantic cache metadata for one artifact."""
-    if self.semantic_fingerprints.has(path):
-        self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
-    if self.dependency_semantic_fingerprints.has(path):
-        self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
-
-fn moduleloader_allocate_exec_module(self: ModuleLoader, owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> i64:
-    """Allocate executable memory and copy code."""
-    val mapped = self.loader_mapper.map(self.jit.exec_mapper, owner_id, symbol, code, allow_replace)
-    match mapped:
-        case Ok(address):
-            address
-        case Err(map_error):
-            if self.config.verbose:
-                print "[loader] map_symbol failed for {symbol}: {map_error}"
-            0
-
-fn moduleloader_allocate_exec_jit(self: ModuleLoader, owner_id: text, symbol: text, code: [u8]) -> i64:
-    """Allocate executable memory for JIT fallback path via JIT mapper policy."""
-    val mapped = self.jit.jit_mapper.map(self.jit.exec_mapper, owner_id, symbol, code)
-    match mapped:
-        case Ok(address):
-            address
-        case Err(map_error):
-            if self.config.verbose:
-                print "[loader] jit map failed for {symbol}: {map_error}"
-            0
-
-fn moduleloader_unmap_internal_symbols(self: ModuleLoader, symbols: [text]):
-    """Best-effort cleanup for staged replacement symbols."""
-    for symbol in symbols:
-        _ = self.jit.exec_mapper.unmap_symbol(symbol)
 
 # ============================================================================
 # Validated Loading (checks backend/options match)
 # ============================================================================
 
-fn moduleloader_load_validated(self: ModuleLoader, path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> LoadResult:
+fn moduleloader_load_validated(self: LazyModuleLoader, path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> LoadResult:
     """Load an SMF module with compile options validation.
 
     Checks that the cached SMF was compiled with matching backend/options.
@@ -1446,7 +816,7 @@ fn moduleloader_load_validated(self: ModuleLoader, path: text, backend: text, op
 
     val regen_result = get_or_generate_smf(path, path, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
     if regen_result.is_err():
-        return loadresult_Error(message: "Failed to regenerate SMF: {regen_result.unwrap_err()}")
+        return LoadResult.Error(message: "Failed to regenerate SMF: {regen_result.unwrap_err()}")
 
     # Load the freshly generated SMF
     moduleloader_load(self, regen_result.unwrap())

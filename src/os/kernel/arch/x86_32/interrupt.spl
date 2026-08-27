@@ -15,7 +15,7 @@
 #   Byte  5:   Type/attributes (present, DPL, gate type)
 #   Bytes 6-7: Handler offset (high 16 bits)
 
-use os.kernel.arch.x86_32.cpu.{port_outb, port_outb_wait, port_inb, cli, sti}
+use os.kernel.arch.x86_32.cpu.{port_outb, port_outb_wait, port_inb, cli, sti, lidt}
 use os.kernel.arch.x86_32.cpu.{GDT_KERNEL_CODE}
 use os.kernel.arch.x86_32.trap_model.{x86_32_syscall_args_from_context, x86_32_apply_syscall_result}
 use os.kernel.arch.x86_32.trap_runtime.{X86_32TrapRuntime}
@@ -24,6 +24,7 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
+use os.kernel.ipc.syscall_server_startup_evidence.{_handle_server_startup_evidence_consume}
 
 # ============================================================================
 # PIC 8259 Port Addresses
@@ -179,13 +180,11 @@ fn _idt_set_entry(vector: u32, handler_addr: u32, selector: u16, type_attr: u8):
 
 fn _idt_load():
     """Load the IDT via LIDT instruction."""
-    extern fn rt_lidt(idtr_addr: u32)
-
     g_idtr = IdtPointer32(
         limit: ((IDT_ENTRIES * IDT_ENTRY_SIZE) - 1) as u16,
         base: &g_idt as u32
     )
-    rt_lidt(&g_idtr as u32)
+    lidt(&g_idtr as u32)
 
 # ============================================================================
 # X86_32Interrupt
@@ -333,6 +332,8 @@ fn x86_32_dispatch_early_syscall(args: SyscallArgs) -> SyscallResult:
         return SyscallResult(value: current.id.to_i64())
     if args.id == 15:
         return x86_32_handle_brk(args)
+    if args.id == 116:
+        return _handle_server_startup_evidence_consume(g_x86_32_scheduler)
     SyscallResult(value: -38)
 
 fn x86_32_handle_brk(args: SyscallArgs) -> SyscallResult:

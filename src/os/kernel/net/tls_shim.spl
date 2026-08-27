@@ -28,8 +28,10 @@ use os.kernel.net.embedded_certs.{
     get_embedded_cert_der, get_embedded_key_der, has_embedded_certs
 }
 
-@cfg(riscv64)
-use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_boot_elapsed_us, riscv64_csr_entropy_seed}
+# NOTE(cross-arch import leak): riscv64 entropy/time imports live INSIDE
+# the @cfg(riscv64) fn bodies below — the seed's cfg strip does not strip
+# @cfg-gated top-level `use` lines, and this chain reaches RV64-only
+# inline asm (csrr) that breaks x86_64 kernel builds at clang.
 
 # ============================================================================
 # File I/O Stub
@@ -54,6 +56,7 @@ var g_fake_time_us: i64 = 1_000_000_000  # Start at ~1000 seconds in micros
 @export("C")
 fn rt_time_now_unix_micros() -> i64:
     """Return RISC-V boot-relative microseconds from the hardware timer."""
+    use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_boot_elapsed_us}
     riscv64_boot_elapsed_us().to_i64()
 
 @cfg(riscv64)
@@ -68,11 +71,19 @@ fn rt_time_now_unix_micros() -> i64:
     """Return current time in microseconds since epoch.
 
     Non-RISC-V baremetal stub: returns a monotonically increasing fake clock.
-    Each call advances by 1000us (1ms).
-    TODO: wire to real RTC + hardware timer.
+    Each call advances by 1us. The previous 1000us-per-call advance made
+    reading the clock cost 1ms of fake time, so any wall-clock budget
+    (e.g. the web render budget, which samples the clock in its inner
+    loops) burned ~1000x too fast and expired before doing any work —
+    proven by [web-style-producer] budget-break at=0 in the SimpleOS WM
+    guest lane. 1us per call keeps monotonicity for receipts while making
+    budgets effectively inert on the fake clock.
+    TODO: wire to the calibrated TSC clock (arch/x86_64/timer.spl exports
+    rt_time_now_ns with HPET/PMTMR/PIT calibration, but the desktop kernel
+    never runs timer_init) — see the tracking bug.
     """
     val result = g_fake_time_us
-    g_fake_time_us = g_fake_time_us + 1000
+    g_fake_time_us = g_fake_time_us + 1
     result
 
 @cfg(not(riscv64))
@@ -145,6 +156,7 @@ fn rt_riscv_seed() -> u64:
     This is stronger than the old deterministic LCG placeholder, but it is not
     a production entropy source. Replace with SBI/hardware RNG once available.
     """
+    use os.kernel.arch_adapt.riscv64_entropy_time.{riscv64_csr_entropy_seed}
     riscv64_csr_entropy_seed(rt_time_now_unix_micros().to_u64())
 
 @cfg(baremetal)
@@ -492,6 +504,11 @@ fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i
     -1
 
 @export("C")
+fn rt_tls_client_connect_address_with_sni_timeout(address: text, port: i64, server_name: text, timeout_ms: i64) -> i64:
+    """Checked baremetal address/SNI connect is unavailable without a netstack."""
+    -1
+
+@export("C")
 fn rt_tls_client_write(conn: i64, data: text) -> i64:
     """Write data to a TLS client connection.
 
@@ -500,12 +517,19 @@ fn rt_tls_client_write(conn: i64, data: text) -> i64:
     -1
 
 @export("C")
-fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text:
-    """Read up to max_bytes from a TLS client connection.
+fn rt_tls_client_write_timeout(conn: i64, data: text, timeout_ms: i64) -> i64:
+    """Checked baremetal timed write is unavailable without a live connection."""
+    -1
 
-    Baremetal stub: no live connection. Returns empty string.
-    """
-    ""
+@export("C")
+fn rt_tls_client_read_timeout_checked(conn: i64, max_bytes: i64, timeout_ms: i64) -> text?:
+    """Checked baremetal timed read reports unavailable rather than EOF."""
+    nil
+
+@export("C")
+fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?:
+    """Checked baremetal read reports unavailable rather than clean EOF."""
+    nil
 
 @export("C")
 fn rt_tls_client_close(conn: i64) -> bool:
@@ -543,12 +567,9 @@ fn rt_tls_server_write(conn: i64, data: text) -> i64:
     -1
 
 @export("C")
-fn rt_tls_server_read(conn: i64, max_bytes: i64) -> text:
-    """Read from a TLS server-side client connection.
-
-    Baremetal stub: no live connection. Returns empty string.
-    """
-    ""
+fn rt_tls_server_read_checked(conn: i64, max_bytes: i64) -> text?:
+    """Checked baremetal read. Nil reports the unavailable live netstack."""
+    nil
 
 @export("C")
 fn rt_tls_server_close_connection(conn: i64) -> bool:
@@ -566,208 +587,36 @@ fn rt_tls_server_shutdown(server: i64) -> bool:
     """
     false
 
-# --- Certificate Management ---
-
-@export("C")
-fn rt_tls_load_cert(cert_path: text) -> i64:
-    """Load a PEM certificate from path.
-
-    Baremetal stub: no filesystem. Use get_baremetal_tls_info() for embedded
-    DER material. Returns -1.
-    """
-    -1
-
-@export("C")
-fn rt_tls_load_key(key_path: text) -> i64:
-    """Load a PEM private key from path.
-
-    Baremetal stub: no filesystem. Returns -1.
-    """
-    -1
-
-@export("C")
-fn rt_tls_verify_cert(cert: i64) -> bool:
-    """Verify certificate validity.
-
-    Baremetal stub: no crypto stack. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_get_cert_subject(cert: i64) -> text:
-    """Return the certificate subject distinguished name.
-
-    Baremetal stub: returns empty string.
-    """
-    ""
-
-@export("C")
-fn rt_tls_get_cert_issuer(cert: i64) -> text:
-    """Return the certificate issuer distinguished name.
-
-    Baremetal stub: returns empty string.
-    """
-    ""
-
-@export("C")
-fn rt_tls_get_cert_expiry(cert: i64) -> text:
-    """Return the certificate expiry as ISO 8601 timestamp.
-
-    Baremetal stub: returns empty string.
-    """
-    ""
-
-@export("C")
-fn rt_tls_free_cert(cert: i64) -> bool:
-    """Free certificate resources.
-
-    Baremetal stub: no resources allocated. Returns false.
-    """
-    false
-
-# --- Client Configuration ---
-
-@export("C")
-fn rt_tls_client_config_new() -> i64:
-    """Allocate a new TLS client configuration object.
-
-    Baremetal stub: no config store. Returns -1.
-    """
-    -1
-
-@export("C")
-fn rt_tls_client_config_add_root_cert(config: i64, cert_path: text) -> bool:
-    """Add a root CA certificate to a client configuration.
-
-    Baremetal stub: no config store. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_client_config_set_alpn(config: i64, protocols: [text]) -> bool:
-    """Set ALPN protocol list on a client configuration.
-
-    Baremetal stub: no config store. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_client_config_enable_sni(config: i64, enabled: bool) -> bool:
-    """Enable or disable SNI on a client configuration.
-
-    Baremetal stub: no config store. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_client_config_set_verify_mode(config: i64, verify: bool) -> bool:
-    """Set certificate verification mode on a client configuration.
-
-    Baremetal stub: no config store. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_client_config_free(config: i64) -> bool:
-    """Free a TLS client configuration object.
-
-    Baremetal stub: nothing to free. Returns false.
-    """
-    false
-
-# --- Server Configuration ---
-
-@export("C")
-fn rt_tls_server_config_new(cert_path: text, key_path: text) -> i64:
-    """Allocate a new TLS server configuration object.
-
-    Baremetal stub: no config store. Use get_baremetal_tls_info() to obtain
-    embedded DER material for use when a live stack is wired. Returns -1.
-    """
-    -1
-
-@export("C")
-fn rt_tls_server_config_set_alpn(config: i64, protocols: [text]) -> bool:
-    """Set ALPN protocol list on a server configuration.
-
-    Baremetal stub: no config store. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_server_config_require_client_cert(config: i64, require: bool) -> bool:
-    """Require mutual TLS on a server configuration.
-
-    Baremetal stub: no config store. Returns false.
-    """
-    false
-
-@export("C")
-fn rt_tls_server_config_free(config: i64) -> bool:
-    """Free a TLS server configuration object.
-
-    Baremetal stub: nothing to free. Returns false.
-    """
-    false
-
 # --- Connection Info ---
 
 @export("C")
-fn rt_tls_get_peer_cert(conn: i64) -> i64:
-    """Return the peer certificate handle for a connection.
-
-    Baremetal stub: no live connection. Returns -1.
-    """
-    -1
-
-@export("C")
-fn rt_tls_get_protocol_version(conn: i64) -> text:
+fn rt_tls_get_protocol_version(conn: i64) -> text?:
     """Return the negotiated TLS protocol version string.
 
     Baremetal stub: no live connection. Returns empty string.
     """
-    ""
+    nil
 
 @export("C")
-fn rt_tls_get_cipher_suite(conn: i64) -> text:
+fn rt_tls_get_cipher_suite(conn: i64) -> text?:
     """Return the negotiated cipher suite name for a connection.
 
-    Baremetal stub: no live connection. Returns placeholder sentinel.
-    Callers may use tls_cipher_suite_is_valid() to detect the stub case.
+    Baremetal has no live connection, so metadata is absent.
     """
-    TLS_CIPHER_PLACEHOLDER
+    nil
 
 @export("C")
-fn rt_tls_get_negotiated_alpn(conn: i64) -> text:
+fn rt_tls_get_negotiated_alpn(conn: i64) -> text?:
     """Return the negotiated ALPN protocol string for a connection.
 
     Baremetal stub: no live connection. Returns empty string.
     """
-    ""
+    nil
 
 @export("C")
-fn rt_tls_is_handshake_complete(conn: i64) -> bool:
+fn rt_tls_is_handshake_complete(conn: i64) -> bool?:
     """Return true when the TLS handshake is complete on a connection.
 
     Baremetal stub: no live connection. Returns false.
     """
-    false
-
-# --- Utilities ---
-
-@export("C")
-fn rt_tls_generate_self_signed_cert(common_name: text, days_valid: i64, cert_out: text, key_out: text) -> bool:
-    """Generate a self-signed certificate and write PEM files.
-
-    Baremetal stub: no filesystem or crypto stack. Returns false.
-    Use get_baremetal_tls_info() to obtain offline-embedded DER material instead.
-    """
-    false
-
-@export("C")
-fn rt_tls_hash_cert(cert_path: text) -> text:
-    """Return the SHA-256 fingerprint of a certificate file.
-
-    Baremetal stub: no filesystem. Returns empty string.
-    """
-    ""
+    nil

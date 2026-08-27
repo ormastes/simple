@@ -15,7 +15,11 @@ use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use std.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text
+# Keep the nullable façade at this decision boundary: unset and explicit-empty
+# are equivalent for the current flags, but callers retain the option shape so
+# a future value-bearing gate cannot silently conflate them.
+fn driver_env_get_opt(key: text) -> text?:
+    env_get_opt(key)
 
 pub fn driver_explicit_source_entry(ctx: CompileContext) -> text:
     """Compiler-owned source-entry request, independent of process environment."""
@@ -36,27 +40,23 @@ pub fn driver_source_matches_entry(
     path: text,
     module_name: text
 ) -> bool:
-    # Stage 3 seeds one explicit entry with ENTRY_CLOSURE=0 and discovers its
-    # closure inside phase 1. Requiring the late closure latch here made the
-    # gate false at compile entry, silently selecting the legacy retain-all
-    # ParserModule path. The explicit entry is equally authoritative before
-    # discovery; after discovery the latch becomes 1, so this predicate is
-    # stable across the phase boundary.
-    val entry_ready = native_entry_closure == "1" or native_entry != ""
-    is_aot and not has_coverage and mcdc_mode == "off" and
-        bootstrap == "1" and entry_ready and
-        (stage3_streaming == "1" or
-         (bootstrap_stage4 == "1" and stage4_streaming == "1")) and
-        backend != "vhdl"
+    val requested_entry = driver_source_entry_request(ctx)
+    if requested_entry != "":
+        return path == requested_entry or path.ends_with("/" + requested_entry)
+    path.ends_with("/app/cli/bootstrap_main.spl") or
+        path == "./src/app/cli/bootstrap_main.spl" or
+        module_name == "app.cli.bootstrap_main"
 
 fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
     (ctx.options.mode == CompileMode.Aot or ctx.options.cli_mode_text == "aot") and
         not ctx.config.contains_key("coverage") and
-        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
-        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
-        ((rt_env_get("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" or
-         ((rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
-          (rt_env_get("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1")) and
+        driver_explicit_source_entry(ctx) == "" and
+        (ctx.config["mcdc_mode"] ?? "off") == "off" and
+        (driver_env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+        (driver_env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
+        ((driver_env_get_opt("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" or
+         ((driver_env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+          (driver_env_get_opt("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1")) and
         ctx.options.backend != "vhdl"
 
 
@@ -71,9 +71,9 @@ fn bootstrap_last_fixed_input(options: CompileOptions) -> text:
         case _: ""
 
 fn bootstrap_entry_source_index(ctx: CompileContext) -> i64:
-    # Entry precedence is explicit environment, positional fixed input,
-    # historical bootstrap_main default, then deterministic first source.
-    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    # Entry precedence is compiler-owned request, native-build environment,
+    # positional fixed input, historical default, then first source.
+    val native_entry = driver_source_entry_request(ctx)
     val positional_entry = bootstrap_last_fixed_input(ctx.options)
     val requested_entry = if native_entry != "": native_entry else: positional_entry
     if requested_entry != "":

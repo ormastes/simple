@@ -9,65 +9,76 @@ use common.ui.widget.{UIEvent}
 use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiEvent, GUI_EVT_NONE}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
-use std.io_runtime.{file_exists, get_args, read_file}
+use std.io_runtime.{file_exists, get_args, read_file, time_now_unix_micros}
+use std.diag.{dbg_stage}
+use lazy common.window_protocol.geometry.{Size}
+use lazy os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
 
-extern fn rt_winit_event_loop_new() -> i64
-extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
-extern fn rt_winit_event_get_type(ev: i64) -> i64
-extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
-extern fn rt_winit_event_mouse_moved(ev: i64) -> (f64, f64)
-extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
-extern fn rt_winit_event_free(ev: i64)
-extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
-extern fn rt_winit_window_free(win: i64)
-extern fn rt_winit_event_loop_free(el: i64)
-extern fn rt_time_now_unix_micros() -> i64
+# Host window state — backed by the GuiRenderer facade (backend-isolation
+# Gap A: no raw winit extern declarations in the app layer; the facade dlopens the
+# spl_winit sibling cdylib instead). The browser_winit_* wrappers keep their
+# original handle-style signatures so the main loop below is unchanged.
+var _host_gui: GuiRenderer = GuiRenderer.empty()
+var _host_gui_event: GuiEvent = GuiEvent.none()
 
 fn browser_winit_event_loop_new() -> i64:
-    rt_winit_event_loop_new()
+    # The facade creates the native event loop together with the window in
+    # browser_winit_window_new; report readiness with a placeholder token.
+    1
 
 fn browser_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64:
-    rt_winit_window_new(el, w, h, title)
+    val created = GuiRenderer.create("auto", w.to_i32(), h.to_i32(), title)
+    match created:
+        case Some(g):
+            _host_gui = g
+            1
+        case None:
+            0
 
 fn browser_winit_event_loop_poll_events(el: i64, max: i64) -> i64:
-    rt_winit_event_loop_poll_events(el, max)
+    val e = _host_gui.poll_event()
+    _host_gui_event = e
+    if e.kind == GUI_EVT_NONE:
+        return 0
+    1
 
 fn browser_winit_event_get_type(ev: i64) -> i64:
-    rt_winit_event_get_type(ev)
+    _host_gui_event.kind
 
 fn browser_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool):
-    rt_winit_event_keyboard_input(ev)
+    (_host_gui_event.scancode, _host_gui_event.keycode, _host_gui_event.pressed)
 
 fn browser_winit_event_mouse_moved(ev: i64) -> (f64, f64):
-    rt_winit_event_mouse_moved(ev)
+    (_host_gui_event.x, _host_gui_event.y)
 
 fn browser_winit_event_mouse_button(ev: i64) -> (i64, bool):
-    rt_winit_event_mouse_button(ev)
+    (_host_gui_event.btn, _host_gui_event.pressed)
 
 fn browser_winit_event_free(ev: i64):
-    rt_winit_event_free(ev)
+    _host_gui_event = GuiEvent.none()
 
-fn browser_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]):
-    rt_winit_window_present_rgba(win, w, h, pixels)
+fn browser_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64]) -> bool:
+    _host_gui.present_rgba(w, h, pixels)
 
 fn browser_winit_window_free(win: i64):
-    rt_winit_window_free(win)
+    _host_gui.close()
 
 fn browser_winit_event_loop_free(el: i64):
-    rt_winit_event_loop_free(el)
+    _host_gui.close()
+    _host_gui = GuiRenderer.empty()
 
 fn browser_time_now_unix_micros() -> i64:
-    rt_time_now_unix_micros()
+    time_now_unix_micros()
 
 val EVT_CLOSE: i64 = 3
 val EVT_KEYBOARD: i64 = 10
 val EVT_MOUSE_BUTTON: i64 = 20
 val EVT_MOUSE_MOVED: i64 = 21
 val HOST_WINDOW_TITLE: text = "Simple Browser"
-val BROWSER_WINDOW_SCALE: i32 = 7
+val BROWSER_WINDOW_SCALE: i32 = 1
 val FILE_CHANGE_POLL_INTERVAL_TICKS: i32 = 15
 
 fn browser_file_change_poll_next(had_event: bool, ticks: i32, interval: i32) -> (bool, i32):
@@ -92,32 +103,37 @@ class BrowserApp:
     last_mouse_y: i32
     file_change_poll_ticks: i32
     file_change_poll_interval_ticks: i32
+    next_draw_ir_input_key: i64
 
-    static fn new(file_path: text, port: i32, gpu_backend: text) -> Result<BrowserApp, text>:
-        return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "")
+    static fn new(file_path: text, port: i32, gpu_backend: text, web_engine: text = "pure_simple") -> Result<BrowserApp, text>:
+        return BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, "", web_engine)
 
     static fn file_poll_interval_ticks() -> i32:
         FILE_CHANGE_POLL_INTERVAL_TICKS
 
-    static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text) -> Result<BrowserApp, text>:
+    static fn new_with_access_store_path(file_path: text, port: i32, gpu_backend: text, access_db_path: text, web_engine: text = "pure_simple") -> Result<BrowserApp, text>:
+        dbg_stage("browser", "parse_start")
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
                 return Err(e)
             Ok(tree):
+                dbg_stage("browser", "parse_done")
                 var session = UISession.new(tree)
                 session.set_active_backend("browser")
                 if access_db_path != "":
                     val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "browser")
                     if store != nil:
                         session.attach_access_store(store)
-                val width: i32 = 96
-                val height: i32 = 64
-                val backend_result = BrowserBackend.create(width, height, gpu_backend)
+                val width: i32 = 672
+                val height: i32 = 448
+                dbg_stage("browser", "backend_create_start")
+                val backend_result = BrowserBackend.create(width, height, gpu_backend, web_engine)
                 match backend_result:
                     Err(e):
                         return Err(e)
                     Ok(backend):
+                        dbg_stage("browser", "backend_create_done")
                         val content = if file_exists(file_path):
                             read_file(file_path) ?? ""
                         else:
@@ -132,7 +148,8 @@ class BrowserApp:
                             last_mouse_x: 0,
                             last_mouse_y: 0,
                             file_change_poll_ticks: 0,
-                            file_change_poll_interval_ticks: FILE_CHANGE_POLL_INTERVAL_TICKS
+                            file_change_poll_interval_ticks: FILE_CHANGE_POLL_INTERVAL_TICKS,
+                            next_draw_ir_input_key: 0
                         ))
 
     me run_once(snapshot_path: text) -> i64:
@@ -140,39 +157,46 @@ class BrowserApp:
 
         Returns 0 on success, 1 on failure.
         """
-        val state = self.session.current_state()
-        self.backend.render_frame(state.tree, state)
+        self.render_session_frame()
         val ok = self.backend.snapshot_ppm(snapshot_path)
         self.backend.shutdown()
         if ok:
             return 0
         return 1
 
-    me run():
+    me run() -> bool:
         """Main browser engine loop with a real hosted window."""
+        var presentation_ok = true
         val width = (self.backend.viewport_width() * BROWSER_WINDOW_SCALE).to_i64()
         val height = (self.backend.viewport_height() * BROWSER_WINDOW_SCALE).to_i64()
         val event_loop = browser_winit_event_loop_new()
         if event_loop == 0:
             print "Error: failed to create host event loop"
             self.backend.shutdown()
-            return
+            return false
 
         val window = browser_winit_window_new(event_loop, width, height, HOST_WINDOW_TITLE)
         if window == 0:
             print "Error: failed to create host browser window"
             browser_winit_event_loop_free(event_loop)
             self.backend.shutdown()
-            return
+            return false
+        dbg_stage("browser", "window_created")
 
-        val initial_state = self.session.current_state()
-        self.backend.render_frame(initial_state.tree, initial_state)
-        self.present_host_window(window)
+        dbg_stage("browser", "first_frame_start")
+        self.render_session_frame()
+        dbg_stage("browser", "first_frame_done")
+        if not self.present_host_window(window):
+            print "Error: failed to present initial browser frame"
+            browser_winit_window_free(window)
+            browser_winit_event_loop_free(event_loop)
+            self.backend.shutdown()
+            return false
 
         var next_present_at = browser_time_now_unix_micros() + 16000
         while self.running:
             var had_event = false
-            var ev = rt_winit_event_loop_poll_events(event_loop, 1)
+            var ev = browser_winit_event_loop_poll_events(event_loop, 1)
             while ev != 0:
                 had_event = true
                 self.handle_host_event(ev)
@@ -186,14 +210,17 @@ class BrowserApp:
 
             val now = browser_time_now_unix_micros()
             if had_event or now >= next_present_at:
-                val state = self.session.current_state()
-                self.backend.render_frame(state.tree, state)
-                self.present_host_window(window)
+                self.render_session_frame()
+                if not self.present_host_window(window):
+                    print "Error: failed to present browser frame"
+                    presentation_ok = false
+                    self.running = false
                 next_present_at = now + 16000
 
         browser_winit_window_free(window)
         browser_winit_event_loop_free(event_loop)
         self.backend.shutdown()
+        presentation_ok
 
     me consume_file_change_poll(had_event: bool) -> bool:
         """Throttle idle file reload checks while preserving event-time checks."""
@@ -224,7 +251,24 @@ class BrowserApp:
             UIEvent.Quit:
                 self.running = false
             _:
-                self.session.dispatch(event)
+                # Keep host input on the same backend queue/receipt path as
+                # the frame it causes; the session still rejects stale or
+                # replayed Draw IR identities before a dispatch is recorded.
+                self.backend.push_event(event)
+                val queued_events = self.backend.poll_events()
+                for queued_event in queued_events:
+                    self.next_draw_ir_input_key = self.next_draw_ir_input_key + 1
+                    val accepted = self.session.dispatch_draw_ir_event(self.session.current_draw_ir_event(
+                        "browser-input-{self.next_draw_ir_input_key}", queued_event
+                    ))
+                    if accepted:
+                        self.backend.record_event_dispatch(queued_event)
+
+    me render_session_frame():
+        val state = self.session.current_state()
+        val composition = self.backend.widget_draw_ir_composition(state)
+        val submitted = self.session.submit_draw_ir_composition(composition)
+        self.backend.render_frame_with_composition(state.tree, state, submitted)
 
     me handle_host_event(ev: i64):
         val event_type = browser_winit_event_get_type(ev)
@@ -269,7 +313,7 @@ class BrowserApp:
             if translated != nil:
                 self.handle_ui_event(translated)
 
-    me present_host_window(window: i64):
+    me present_host_window(window: i64) -> bool:
         val pixels = self.backend.pixels_rgba_i64()
         browser_winit_window_present_rgba(
             window,
@@ -308,25 +352,37 @@ fn run_shared_wm_browser(title: text) -> i64:
         print "Error: failed to initialise shared WM (Browser backend)"
         return 1
     dbg_stage("browser", "shared_wm_init_done")
-    handle.tick_forever()
+    # Destructure: a `me` method called through an OPTION-typed binding mutates
+    # a discarded temporary. See doc/08_tracking/bug/
+    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md
+    if val Some(wm) = handle:
+        wm.tick_forever()
     return 0
 
 fn run_browser_gui_with_access_store(file_path: text, port: i32, access_db_path: text, shared_wm: bool = false) -> i64:
     """Start browser-engine mode for a .ui.sdn file."""
+    dbg_stage("browser", "launch_start")
+    if shared_wm:
+        return run_shared_wm_browser("Simple Browser")
+
     if not file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
+    dbg_stage("browser", "file_checked")
 
     val gpu_backend = parse_backend_flag()
+    val web_engine = parse_web_engine_flag()
 
-    val app_result = BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, access_db_path)
+    val app_result = BrowserApp.new_with_access_store_path(file_path, port, gpu_backend, access_db_path, web_engine)
     match app_result:
         Err(e):
             print "Error: {e}"
             return 1
         Ok(app):
-            app.run()
-            return 0
+            dbg_stage("browser", "app_created")
+            if app.run():
+                return 0
+            return 1
 
 fn parse_backend_flag() -> text:
     """Parse --backend flag from CLI args. Defaults to auto-detect."""
@@ -340,3 +396,21 @@ fn parse_backend_flag() -> text:
             return arg[10:]
         i = i + 1
     return "auto"
+
+fn parse_web_engine_flag() -> text:
+    """Parse --web-engine flag from CLI args (Gap B: WebRenderer facade engine
+    selector, distinct from --backend which selects the Engine2D backend).
+    Defaults to "pure_simple" — no flag/env means unchanged default behavior.
+    An unrecognized value is passed through unvalidated here; BrowserBackend.create
+    loud-fails (Result::Err) rather than silently normalizing it, so callers see
+    an honest error instead of a silent fallback to the default engine."""
+    val raw_args = get_args()
+    var i = 0
+    while i < raw_args.len():
+        val arg = raw_args[i]
+        if arg == "--web-engine" and i + 1 < raw_args.len():
+            return raw_args[i + 1]
+        elif arg.starts_with("--web-engine="):
+            return arg[13:]
+        i = i + 1
+    return "pure_simple"

@@ -35,7 +35,10 @@ use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
 use os.kernel.loader.spawn_authority.{
     spawn_authority_check_spawn, spawn_authority_spawn_caps
 }
-use os.kernel.loader.spawn_recipes.{spawn_recipe_launch_contract_valid}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
+    spawn_recipe_launch_contract_valid
+}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
 use os.kernel.scheduler.scheduler.{
@@ -47,6 +50,11 @@ use os.kernel.scheduler.process_execution_observation.{
     scheduler_execution_compare_and_deliver_reaped_v2,
     scheduler_execution_discard_terminal_v2
 }
+
+fn _rv32_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
 
 fn _rv32_prepare_authenticated_task_v1(
     scheduler: Scheduler,
@@ -175,20 +183,11 @@ pub fn riscv32_fs_exec_spawn_authenticated_v1(
     path: text,
     recipe: i64
 ) -> i64:
-    """Retire the cap-less RV32 ABI and revoke its admitted authority.
-
-    A scalar caller cannot prove the real process capability ceiling needed by
-    the launch-aware route.  Compatibility callers must therefore fail closed
-    after retiring the one-shot admission token; they may not synthesize a
-    recipe pouch from caller identity.
-    """
-    val _scheduler = scheduler
-    val _consumer = consumer
-    val _entry_point = entry_point
-    val _caller = caller
-    val _path = path
-    val _recipe = recipe
-    if executable_loader_revoke(table, authorities, token).is_ok(): -13 else: -5
+    """Compatibility launch with path as argv[0] and no environment."""
+    riscv32_fs_exec_spawn_authenticated_with_launch_v1(
+        scheduler, table, authorities, token, consumer, entry_point,
+        caller, _rv32_parent_caps_v1(caller, recipe),
+        path, [path], [], recipe).exit_code
 
 export riscv32_fs_exec_spawn_authenticated_v1
 export riscv32_fs_exec_spawn_authenticated_with_launch_v1

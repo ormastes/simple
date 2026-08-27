@@ -13,7 +13,6 @@ use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions, CompiledModule}
 use compiler.backend.backend.c_backend_translate.{MirToC}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # MirToC - Lower-level translation helpers (impl block continued from
@@ -221,7 +220,7 @@ impl MirToC:
                 self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_pow((void*)" + left_val + r", (void*)" + right_val + r")")
 
             case Offset:
-                self.builder.emit_assign(dest_name, r"(int64_t)((char*)(intptr_t)" + left_val + r" + " + right_val + r")")
+                self.builder.emit_assign(dest_name, r"(" + ty + r")((char*)(intptr_t)" + left_val + r" + " + right_val + r")")
 
     # === Unary Operations ===
 
@@ -255,11 +254,6 @@ impl MirToC:
                         self.ensure_stack_slot(dest.id, operands.len() * 8)
                     case GpuSharedAlloc(dest, type_, size):
                         self.ensure_stack_slot(dest.id, size)
-                    case GpuSharedAllocInit(_, _, _, _):
-                        # Legacy split-module entrypoint follows the canonical
-                        # prepass policy: no allocation without preserving the
-                        # MIR node's atomic initialization semantics.
-                        self._unsupported_c_inst("GpuSharedAllocInit", inst.span)
                     case Const(dest, value, type_):
                         val sz = self.const_composite_size(value)
                         if sz > 0:
@@ -275,17 +269,19 @@ impl MirToC:
 
     me ensure_stack_slot(local_id: i64, requested_size: i64) -> text:
         val required = self.normalized_slot_size(requested_size)
-        match self.stack_slots.get(local_id):
-            case Some(existing):
-                val current = self.stack_slot_sizes[local_id]
-                if required > current:
-                    self.stack_slot_sizes[local_id] = required
-                existing
-            case nil:
-                val slot_name = self.slot_name_for_local(local_id)
-                self.stack_slots[local_id] = slot_name
+        # contains_key + index read, never `.get()`.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if self.stack_slots.contains_key(local_id):
+            val existing = self.stack_slots[local_id]
+            val current = self.stack_slot_sizes[local_id]
+            if required > current:
                 self.stack_slot_sizes[local_id] = required
-                slot_name
+            existing
+        else:
+            val slot_name = self.slot_name_for_local(local_id)
+            self.stack_slots[local_id] = slot_name
+            self.stack_slot_sizes[local_id] = required
+            slot_name
 
     me emit_pointer_assign(dest_local_id: i64, ptr_expr: text):
         val dest_name = self.get_local(dest_local_id)

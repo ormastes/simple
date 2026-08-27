@@ -7,7 +7,6 @@ handles; no raw driver pointer crosses this boundary.
 """
 
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
-use std.fs_driver.mount_table.PositionedOpenBindingV1
 use os.sosix.core.operation.SosixOperationId
 use os.sosix.fs.open_file_description_sequencer.{
     SosixOfdIoState, SosixOfdIoTicket, SosixOfdIoReservation,
@@ -25,7 +24,6 @@ pub val SIMPLEOS_OFD_MUTABLE_STATUS_MASK_V1: u32 =
 
 val _OFD_GENERATION_MAX_V1: u32 = 0xffffffffu32
 val _OFD_NONCE_MAX_V1: u64 = 0xffffffffffffffffu64
-val _OFD_POSITIONED_MOUNT_TABLE_BACKEND_KIND_V1: u8 = 7u8
 
 pub enum OpenFileDescriptionAccessV1:
     ReadOnly
@@ -38,7 +36,6 @@ pub enum OpenFileDescriptionStateV1:
     Closing
     CloseQuarantined
     Retired
-    IoQuarantined
 
 pub enum OpenFileDescriptionIoKindV1:
     Read
@@ -70,7 +67,6 @@ pub struct OpenFileDescriptionBackendBindingV1:
     file_object_id: u64
     file_object_generation: u32
     backend_kind: u8
-    positioned: PositionedOpenBindingV1?
 
 pub(package) struct OpenFileDescriptionPinV1:
     ref_: OpenFileDescriptionRefV1
@@ -145,8 +141,7 @@ fn _ofd_empty_free_slots_v1() -> [i32]:
 
 fn _ofd_empty_backend_v1() -> OpenFileDescriptionBackendBindingV1:
     OpenFileDescriptionBackendBindingV1(
-        file_object_id: 0u64, file_object_generation: 0u32,
-        backend_kind: 0u8, positioned: nil)
+        file_object_id: 0u64, file_object_generation: 0u32, backend_kind: 0u8)
 
 fn _ofd_empty_ticket_v1() -> SosixOfdIoTicket:
     SosixOfdIoTicket(
@@ -222,26 +217,7 @@ fn _ofd_ref_index_v1(
         return -1
     ref_.slot
 
-fn _ofd_live_ref_index_v1(ref_: OpenFileDescriptionRefV1) -> i32:
-    if (ref_.slot < 0 or ref_.slot >= _ofd_owner_v1.slots.len() or
-        ref_.generation == 0u32):
-        return -1
-    val slot = _ofd_owner_v1.slots[ref_.slot]
-    if (slot.generation != ref_.generation or
-        (slot.state != OpenFileDescriptionStateV1.Active and
-            slot.state != OpenFileDescriptionStateV1.IoQuarantined)):
-        return -1
-    ref_.slot
-
 fn _ofd_backend_valid_v1(binding: OpenFileDescriptionBackendBindingV1) -> bool:
-    if binding.positioned.?:
-        val positioned = binding.positioned.unwrap()
-        return (binding.backend_kind ==
-                _OFD_POSITIONED_MOUNT_TABLE_BACKEND_KIND_V1 and
-            positioned.shape_valid_v1() and
-            binding.file_object_id == positioned.file_object_id_v1() and
-            binding.file_object_generation ==
-                positioned.file_object_generation_v1())
     (binding.file_object_id != 0u64 and
         binding.file_object_generation != 0u32 and binding.backend_kind != 0u8)
 
@@ -319,37 +295,6 @@ pub(package) fn open_file_description_create_v1(
     if not _ofd_unlock_v1(): return Err("serialization-unavailable")
     Ok(ref_)
 
-pub(package) fn open_file_description_create_positioned_v1(
-    access: OpenFileDescriptionAccessV1,
-    status_flags: u32,
-    positioned: PositionedOpenBindingV1,
-    initial_offset: u64
-) -> Result<OpenFileDescriptionRefV1, text>:
-    """Create only from a MountTable-issued opaque positioned binding."""
-    if not positioned.shape_valid_v1():
-        return Err("invalid-positioned-open-binding")
-    open_file_description_create_v1(
-        access, status_flags,
-        OpenFileDescriptionBackendBindingV1(
-            file_object_id: positioned.file_object_id_v1(),
-            file_object_generation: positioned.file_object_generation_v1(),
-            backend_kind: _OFD_POSITIONED_MOUNT_TABLE_BACKEND_KIND_V1,
-            positioned: Some(positioned)),
-        initial_offset)
-
-pub(package) fn open_file_description_backend_is_positioned_v1(
-    ref_: OpenFileDescriptionRefV1
-) -> bool:
-    if not _ofd_lock_v1(): return false
-    val index = _ofd_live_ref_index_v1(ref_)
-    if index < 0:
-        _ = _ofd_unlock_v1()
-        return false
-    val positioned = _ofd_backend_valid_v1(_ofd_owner_v1.slots[index].backend) and
-        _ofd_owner_v1.slots[index].backend.positioned.?
-    if not _ofd_unlock_v1(): return false
-    positioned
-
 pub(package) fn open_file_description_retain_v1(
     ref_: OpenFileDescriptionRefV1
 ) -> Result<u32, text>:
@@ -389,9 +334,7 @@ pub fn open_file_description_protocol_transition_v1(
 ) -> OpenFileDescriptionStateV1?:
     """Pure lifecycle oracle used by the owner and focused specifications."""
     if event == OpenFileDescriptionProtocolEventV1.LastReferenceReleased:
-        if ((state == OpenFileDescriptionStateV1.Active or
-            state == OpenFileDescriptionStateV1.IoQuarantined) and
-            ref_count == 0u32):
+        if state == OpenFileDescriptionStateV1.Active and ref_count == 0u32:
             return Some(OpenFileDescriptionStateV1.Closing)
         return nil
     if event == OpenFileDescriptionProtocolEventV1.PinDrained:
@@ -508,44 +451,6 @@ pub(package) fn open_file_description_resolve_io_dispatch_v1(
     if not _ofd_unlock_v1(): return Err("serialization-unavailable")
     Ok(dispatch)
 
-pub(package) fn open_file_description_cancel_undispatched_io_v1(
-    pin: OpenFileDescriptionPinV1
-) -> Result<OpenFileDescriptionIoCompleteV1, text>:
-    """Roll back a pin when dispatch data could not be resolved or accepted."""
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
-    val index = _ofd_pin_index_v1(pin)
-    if index < 0:
-        _ = _ofd_unlock_v1()
-        return Err("stale-pin")
-    var slot = _ofd_owner_v1.slots[index]
-    if slot.io_dispatched:
-        _ = _ofd_unlock_v1()
-        return Err("dispatch-already-resolved")
-    val cancelled = sosix_ofd_commit(
-        slot.io, slot.active_ticket, -1, 0u64, 0u64, false)
-    if not cancelled.accepted:
-        _ = _ofd_unlock_v1()
-        return Err(cancelled.reason)
-    slot.io = cancelled.state
-    slot.pin_count = 0u32
-    slot.active_pin_nonce = 0u64
-    slot.active_ticket = _ofd_empty_ticket_v1()
-    slot.io_dispatched = false
-    _ofd_owner_v1.slots[index] = slot
-    var close_ready: OpenFileDescriptionCloseTicketV1? = nil
-    if slot.state == OpenFileDescriptionStateV1.Closing and slot.ref_count == 0u32:
-        val issued = _ofd_issue_close_ticket_v1(index, slot)
-        if issued.is_err():
-            _ofd_owner_v1.slots[index].state =
-                OpenFileDescriptionStateV1.CloseQuarantined
-        else:
-            close_ready = Some(issued.unwrap())
-    val result = OpenFileDescriptionIoCompleteV1(
-        shared_offset: cancelled.state.shared_offset,
-        close_ready: close_ready)
-    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
-    Ok(result)
-
 fn _ofd_issue_close_ticket_v1(
     index: i32, slot: OpenFileDescriptionSlotV1
 ) -> Result<OpenFileDescriptionCloseTicketV1, text>:
@@ -605,46 +510,6 @@ pub(package) fn open_file_description_complete_io_v1(
     if not _ofd_unlock_v1(): return Err("serialization-unavailable")
     Ok(result)
 
-pub(package) fn open_file_description_complete_io_indeterminate_v1(
-    pin: OpenFileDescriptionPinV1
-) -> Result<OpenFileDescriptionIoCompleteV1, text>:
-    """Retire an I/O pin when backend progress cannot be reconstructed.
-
-    Further I/O and retains fail closed, but existing aliases may still be
-    released so the last alias can drive the exact backend-close protocol.
-    """
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
-    val index = _ofd_pin_index_v1(pin)
-    if index < 0:
-        _ = _ofd_unlock_v1()
-        return Err("stale-pin")
-    var slot = _ofd_owner_v1.slots[index]
-    if not slot.io_dispatched:
-        _ = _ofd_unlock_v1()
-        return Err("dispatch-not-resolved")
-    val prior_offset = slot.io.shared_offset
-    slot.state = OpenFileDescriptionStateV1.IoQuarantined
-    slot.io = sosix_ofd_io_state_new(prior_offset)
-    slot.pin_count = 0u32
-    slot.active_pin_nonce = 0u64
-    slot.active_ticket = _ofd_empty_ticket_v1()
-    slot.io_dispatched = false
-    _ofd_owner_v1.slots[index] = slot
-    var close_ready: OpenFileDescriptionCloseTicketV1? = nil
-    if slot.ref_count == 0u32:
-        slot.state = OpenFileDescriptionStateV1.Closing
-        _ofd_owner_v1.slots[index] = slot
-        val issued = _ofd_issue_close_ticket_v1(index, slot)
-        if issued.is_err():
-            _ofd_owner_v1.slots[index].state =
-                OpenFileDescriptionStateV1.CloseQuarantined
-        else:
-            close_ready = Some(issued.unwrap())
-    val result = OpenFileDescriptionIoCompleteV1(
-        shared_offset: prior_offset, close_ready: close_ready)
-    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
-    Ok(result)
-
 pub(package) fn open_file_description_set_status_v1(
     ref_: OpenFileDescriptionRefV1, requested_flags: u32
 ) -> Result<u32, text>:
@@ -685,7 +550,7 @@ pub(package) fn open_file_description_begin_close_v1(
     ref_: OpenFileDescriptionRefV1
 ) -> Result<OpenFileDescriptionCloseBeginV1, text>:
     if not _ofd_lock_v1(): return Err("serialization-unavailable")
-    val index = _ofd_live_ref_index_v1(ref_)
+    val index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
     if index < 0:
         _ = _ofd_unlock_v1()
         return Err("stale-open-file-description")

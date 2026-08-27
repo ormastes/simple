@@ -2,55 +2,28 @@
 # Bounded RT/HAL arena over an admitted isolated-host capability. No path
 # lookup, arbitrary argv, shared temp pathname, or raw process hook exists here.
 
-use std.common.env_access.model.{EnvToolIdentity,env_rt_hal_operation_identity_error}
-use std.common.hash.djb2.{djb2_hash_text}
+use std.common.env_access.model.{EnvToolIdentity}
 use std.common.rt_hal.model.{
-    RtHalComparison, RtHalProviderKind, rt_hal_default_comparison,
-    rt_hal_comparison_error
+    RtHalComparison, rt_hal_default_comparison, rt_hal_comparison_error
 }
 use std.nogc_sync_mut.rt_hal.parallel_executor.{
     RtHalTaskArenaCapabilities, RtHalDelegatedProvider, RtHalProviderRegistry
 }
 use std.nogc_sync_mut.rt_hal.exact_boundary.{
     RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactJoin,
-    RtHalExactJoinV2,RtHalExactArenaPortV2, RtHalExactReport,
-    rt_hal_compare_observed_pure_exact
-}
-use std.nogc_sync_mut.rt_hal.exact_io_schema.{
-    RtHalExactIoJoinStatus, RtHalExactIoParentBatch,
-    RtHalExactIoArena, RtHalExactIoBounds
-}
-use std.nogc_sync_mut.rt_hal.exact_type_identity_owner.{
-    RtHalExactTypeRegistryOwner, RtHalExactTypeRegistrySeal
-}
-use std.nogc_sync_mut.rt_hal.exact_byte_codec_owner.{RtHalCodecRootDomain}
-use std.nogc_sync_mut.rt_hal.exact_io_parent_admission.{
-    rt_hal_exact_io_parent_readmit, rt_hal_exact_io_parent_reconstruct,
-    rt_hal_exact_io_parent_commit_three
-}
-use std.nogc_sync_mut.rt_hal.exact_io_request_encoder.{
-    RtHalExactIoEncodedInput,rt_hal_exact_io_encode_input,
-    rt_hal_exact_io_encoded_input_release
-}
-use std.nogc_sync_mut.rt_hal.exact_io_wire_owner.{
-    RtHalExactWireHandle, RtHalExactWireJoin, rt_hal_exact_wire_failed_join,
-    rt_hal_exact_wire_release,rt_hal_exact_wire_consumer_acquire,
-    rt_hal_exact_wire_consumer_release
+    RtHalExactArenaPort, RtHalExactReport, rt_hal_compare_observed_pure_exact
 }
 use std.nogc_sync_mut.rt_hal.boundary.{
-    rt_hal_boundary_install_exact_v2, rt_hal_boundary_drain_owner,
+    rt_hal_boundary_install_exact, rt_hal_boundary_drain_owner,
     rt_hal_boundary_current_owner_id, rt_hal_boundary_status,
     rt_hal_boundary_register_owner, rt_hal_boundary_registered_owner_ids,
-    rt_hal_boundary_global_failure_status, rt_hal_boundary_reset
+    rt_hal_boundary_global_failure_status
 }
-use std.nogc_sync_mut.concurrent.mutex.{Mutex,mutex_new,mutex_lock,mutex_unlock}
 
 const RT_HAL_ARENA_MAX_ADAPTERS = 16
 const RT_HAL_ARENA_MAX_TASKS = 256
 const RT_HAL_TASK_HANDLE_STRIDE = 512
-const RT_HAL_SCALAR_ARGV_SCHEMA = "rthal-scalar-v2"
-const RT_HAL_EFFECT_ADMISSION_INDEX_CAP = 1024
-const RT_HAL_EXACT_PROVIDER_MAX = 3
+const RT_HAL_SCALAR_ARGV_SCHEMA = "rthal-scalar-v1"
 
 pub enum RtHalProcessAdapterKind:
     C
@@ -75,269 +48,29 @@ pub struct RtHalIsolatedHostCapabilities:
     bounded_timed_join: bool
     cancellation_and_reap: bool
     portable_host_contract: bool
-    # A host may be bounded yet still depend on an allocating runtime transport
-    # (for example, an API which returns every stdout poll as a new `text`).
-    # Critical @rt(hal) admission must distinguish that from a preprovisioned,
-    # caller-buffered transport and reject the former rather than promising a
-    # no-allocation dispatch it cannot deliver.
-    critical_no_alloc_dispatch: bool
 
-pub struct RtHalIsolatedExactHostPortV2:
+pub struct RtHalIsolatedHostPort:
     capabilities: RtHalIsolatedHostCapabilities
     current_owner_fn: fn() -> i64
     bind_adapter_fn: fn(i64, text, text, text, text, text, text) -> bool
     cancel_and_reap_fn: fn(i64, i64) -> bool
     close_fn: fn(i64) -> bool
-    spawn_compare_exact_fn: fn(i64, RtHalExactRequest) -> i64
-    spawn_replay_exact_fn: fn(i64, RtHalExactRequest, RtHalDigest256) -> i64
-    deadline_after_fn: fn(i64) -> i64
-    join_exact_until_fn: fn(i64, i64) -> RtHalExactJoinV2
-    shutdown_fn: fn() ->bool
-
-# Deprecated source-compatible v1 surface. It is quarantined because both
-# callbacks receive the Pure expected receipt. Mission-critical installation
-# never adapts this port into the oracle-free V2 dispatcher.
-pub struct RtHalIsolatedHostPort:
-    capabilities: RtHalIsolatedHostCapabilities
-    current_owner_fn: fn() ->i64
-    bind_adapter_fn: fn(i64,text,text,text,text,text,text) ->bool
-    cancel_and_reap_fn: fn(i64,i64) ->bool
-    close_fn: fn(i64) ->bool
-    spawn_compare_exact_fn: fn(i64,RtHalExactRequest,RtHalCanonicalReceipt) ->i64
-    spawn_replay_exact_fn: fn(i64,RtHalExactRequest,RtHalCanonicalReceipt) ->i64
-    join_exact_until_fn: fn(i64,i64) ->RtHalExactJoin
-    shutdown_fn: fn() ->bool
-
-# Additive versioned surface. Legacy host constructors remain source-compatible
-# and general IO fails closed unless this port is explicitly installed.
-pub struct RtHalIsolatedIoHostPortV2:
-    available: bool
-    cancel_and_reap_fn: fn(i64,i64) ->bool
-    close_fn: fn(i64) ->bool
-    shutdown_fn: fn() ->bool
-    # Host receives child-only consumer capabilities, never producer handles.
-    spawn_compare_io_fn: fn(i64, i64, RtHalExactWireHandle) -> i64
-    spawn_replay_io_fn: fn(i64, i64, RtHalExactWireHandle, RtHalExactWireHandle) -> i64
-    join_io_until_fn: fn(i64, i64) -> RtHalExactWireJoin
-
-# V3 is deliberately additive.  V2 remains the quarantined fixture protocol;
-# a typed foreign call can enter this port only after cold registration binds
-# its exact source operation identity to one native adapter implementation.
-# IDs 1..3 are query-only; ID 4 is the separately registered replay-only
-# EnvAccess effect adapter.
-pub struct RtHalIsolatedIoHostPortV3:
-    available: bool
-    bind_operation_adapter_fn: fn(i64,text,i64,bool) ->bool
-    cancel_and_reap_fn: fn(i64,i64) ->bool
-    close_fn: fn(i64) ->bool
-    shutdown_fn: fn() ->bool
-    spawn_compare_io_fn: fn(i64,i64,text,RtHalExactWireHandle) ->i64
-    spawn_replay_io_fn: fn(i64,i64,text,RtHalExactWireHandle,RtHalExactWireHandle) ->i64
-    join_io_until_fn: fn(i64,i64) ->RtHalExactWireJoin
+    spawn_compare_exact_fn: fn(i64, RtHalExactRequest, RtHalCanonicalReceipt) -> i64
+    spawn_replay_exact_fn: fn(i64, RtHalExactRequest, RtHalCanonicalReceipt) -> i64
+    join_exact_until_fn: fn(i64, i64) -> RtHalExactJoin
+    shutdown_fn: fn() -> bool
 
 struct RtHalIsolatedTask:
     active: bool
     generation: i64
     host_handle: i64
-    io_v2: bool
-    io_v3: bool
-    # These are terminal host acknowledgements, not observations.  A retry
-    # must never repeat a successful non-idempotent reap just because close
-    # failed afterwards.
-    reaped: bool
-    closed: bool
 
-var rt_hal_host: RtHalIsolatedExactHostPortV2? = nil
-var rt_hal_io_host_v2: RtHalIsolatedIoHostPortV2?=nil
-var rt_hal_io_host_v3: RtHalIsolatedIoHostPortV3?=nil
-# Shutdown callbacks are external side effects and therefore not assumed
-# idempotent.  These cold, bounded acknowledgements are retained while the
-# arena is Draining so a retry never repeats an already accepted host edge.
-var rt_hal_host_shutdown_acknowledged=false
-var rt_hal_io_v2_shutdown_acknowledged=false
-var rt_hal_io_v3_shutdown_acknowledged=false
+var rt_hal_host: RtHalIsolatedHostPort? = nil
 var rt_hal_installer_owner_id = -1
 var rt_hal_controller_owner_id = -1
 var rt_hal_adapters: [RtHalProcessAdapter] = []
-# Installed once by the controller while lifecycle state is Installing.  The
-# comparator reads this value by reference; it never rebuilds a provider vector
-# or searches the mutable adapter catalog on an RT comparison path.
-var rt_hal_exact_registry: RtHalProviderRegistry?=nil
-# Immutable comparison shape paired with `rt_hal_exact_registry`.  Keeping the
-# scalar contract separately lets the hot path reject an incompatible caller
-# without allocating a fingerprint or materializing another registry.
-var rt_hal_exact_worker_count: i64=0
-var rt_hal_exact_queue_capacity: i64=0
-var rt_hal_exact_timeout_ticks: i64=0
-var rt_hal_exact_max_output_bytes: i64=0
-var rt_hal_exact_require_all=false
-var rt_hal_exact_compare_c=false
-var rt_hal_exact_compare_rust=false
-# Cold-provisioned controller scratch. It is sized with the task arena at
-# installation and is never grown by a comparison dispatch.
-var rt_hal_exact_wave_handles: [i64] = []
-var rt_hal_exact_wave_ordinals: [i64] = []
-var rt_hal_exact_wave_leased = false
-var rt_hal_exact_wave_lease_lock: Mutex=mutex_new(0)
-# Fixed open-addressed cold mirror of host-accepted adapter-4 rows.  At most
-# 256 canonical operations x two providers are possible, so 1024 slots keeps
-# the effect-capture query bounded and avoids a linear string scan per effect.
-var rt_hal_effect_admission_keys: [i64]=[]
-var rt_hal_effect_admission_operations: [text]=[]
-var rt_hal_effect_admission_handles: [i64]=[]
-var rt_hal_operation_adapter_count: i64=0
-var rt_hal_effect_adapter_count: i64=0
 var rt_hal_tasks: [RtHalIsolatedTask] = []
 var rt_hal_generation = 1
-# Installed once from the canonical EnvAccessPlan.  Exit-arena dispatch reads
-# these scalars at the controller boundary; it never re-parses configuration
-# or discovers providers from PATH on a terminal hot path.
-var rt_hal_io_timeout_ticks: i64=0
-var rt_hal_io_max_retained_bytes: i64=0
-# Registered by the typed-exit owner during cold setup. The process arena
-# consumes it only after every child and both admitted hosts have quiesced.
-var rt_hal_post_quiescence_reset: (fn() -> bool)?=nil
-var rt_hal_post_quiescence_drain: (fn() -> bool)?=nil
-# Cold lifecycle authority: 0=Closed, 1=Installing, 2=Ready, 3=Draining.
-# It serializes setup/teardown without putting a lock in any RT producer path.
-var rt_hal_lifecycle_lock: Mutex=mutex_new(0)
-var rt_hal_lifecycle_state: i64=0
-var rt_hal_lifecycle_plan_fingerprint=""
-var rt_hal_lifecycle_error=""
-# A cold registration reserves this slot before invoking an external host
-# callback. The callback therefore never runs under the lifecycle mutex and
-# re-entry cannot publish Ready between validation and commit.
-var rt_hal_install_mutation_reserved=false
-# Teardown callbacks are external side effects.  The lifecycle mutex grants
-# this cold claim before the first reap/close/shutdown edge, so even two calls
-# from the same controller owner cannot duplicate an acknowledgement while a
-# retryable teardown is in progress.
-var rt_hal_teardown_reserved=false
-# A bounded in-flight admission fence.  It is incremented only around a
-# controller spawn, never in the RT producer path.  Draining fails closed if
-# a spawn has crossed the Ready admission point, rather than racing host
-# process creation with teardown.
-var rt_hal_lifecycle_controller_spawns: i64=0
-
-fn lifecycle_transition(from: i64,to: i64) ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==from
-    if allowed:rt_hal_lifecycle_state=to
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-
-pub fn rt_hal_process_lifecycle_begin_install(plan_fingerprint: text) ->bool:
-    if plan_fingerprint=="" or mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==0
-    if allowed:
-        rt_hal_lifecycle_state=1
-        rt_hal_lifecycle_plan_fingerprint=plan_fingerprint
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-pub fn rt_hal_process_lifecycle_fail_install():
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return
-    if rt_hal_lifecycle_state==1 and not rt_hal_install_mutation_reserved and
-       not rt_hal_teardown_reserved:
-        # A failed installation may already have bound an executable or
-        # admitted a child.  Do not publish Closed in that case: a new
-        # installer could reuse the pinned host while cleanup still owns it.
-        # Retain the bounded arena in Draining until its acknowledged retry
-        # path has completed.
-        if rt_hal_host!=nil or rt_hal_io_host_v2!=nil or rt_hal_io_host_v3!=nil or
-           rt_hal_tasks.len()!=0:
-            rt_hal_lifecycle_state=3
-            rt_hal_lifecycle_error="RTHAL-E-INSTALL-ROLLBACK"
-        else:
-            rt_hal_lifecycle_state=0
-            rt_hal_lifecycle_plan_fingerprint=""
-            rt_hal_lifecycle_error=""
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-fn lifecycle_ready_catalog_complete_locked() ->bool:
-    # Ready is a seal, not merely a base-port admission.  Every mutable
-    # catalog consumed by dispatch must already be fully provisioned.
-    rt_hal_host!=nil and rt_hal_io_host_v2!=nil and rt_hal_io_host_v3!=nil and
-    rt_hal_exact_registry!=nil and rt_hal_tasks.len()>0 and
-    rt_hal_exact_wave_handles.len()==rt_hal_tasks.len() and
-    rt_hal_exact_wave_ordinals.len()==rt_hal_tasks.len() and
-    rt_hal_adapters.len()>0 and
-    rt_hal_operation_adapter_count>0 and rt_hal_effect_adapter_count>0 and
-    rt_hal_effect_admission_keys.len()==RT_HAL_EFFECT_ADMISSION_INDEX_CAP and
-    rt_hal_effect_admission_operations.len()==RT_HAL_EFFECT_ADMISSION_INDEX_CAP and
-    rt_hal_effect_admission_handles.len()==RT_HAL_EFFECT_ADMISSION_INDEX_CAP and
-    rt_hal_post_quiescence_reset!=nil and rt_hal_post_quiescence_drain!=nil and
-    rt_hal_exact_worker_count>0 and rt_hal_exact_queue_capacity>0 and
-    rt_hal_exact_timeout_ticks>0 and rt_hal_exact_max_output_bytes>0
-
-pub fn rt_hal_process_lifecycle_mark_ready() ->bool:
-    # Ready releases every immutable adapter/operation map.  It is therefore
-    # not a naked state transition: the installing owner must still own the
-    # admitted host while the lifecycle mutex is held.
-    # `current_owner_fn` belongs to an external port and may re-enter. Take
-    # the immutable-port snapshot before locking; the lock validates the
-    # matching reserved installer identity before publishing Ready.
-    if rt_hal_host==nil:return false
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    val caller=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    var allowed=false
-    if rt_hal_lifecycle_state==1 and not rt_hal_install_mutation_reserved and
-       not rt_hal_teardown_reserved and rt_hal_installer_owner_id>0 and
-       caller==rt_hal_installer_owner_id and
-       lifecycle_ready_catalog_complete_locked():
-            rt_hal_lifecycle_state=2
-            allowed=true
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-pub fn rt_hal_process_lifecycle_begin_draining() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==2 and rt_hal_lifecycle_controller_spawns==0 and
-        not rt_hal_install_mutation_reserved and not rt_hal_teardown_reserved
-    if allowed:rt_hal_lifecycle_state=3
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-pub fn rt_hal_process_lifecycle_finish_closed() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==3 and not rt_hal_install_mutation_reserved and
-        not rt_hal_teardown_reserved and
-        rt_hal_host==nil and rt_hal_io_host_v2==nil and rt_hal_io_host_v3==nil and
-        rt_hal_tasks.len()==0 and rt_hal_adapters.len()==0 and
-        rt_hal_exact_registry==nil and rt_hal_exact_wave_handles.len()==0 and
-        rt_hal_exact_wave_ordinals.len()==0 and rt_hal_effect_admission_keys.len()==0 and
-        rt_hal_effect_admission_operations.len()==0 and rt_hal_effect_admission_handles.len()==0 and
-        rt_hal_post_quiescence_reset==nil and rt_hal_post_quiescence_drain==nil and
-        rt_hal_lifecycle_controller_spawns==0
-    if allowed:
-        rt_hal_lifecycle_state=0
-        rt_hal_lifecycle_plan_fingerprint=""
-        rt_hal_lifecycle_error=""
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-pub fn rt_hal_process_lifecycle_is_closed() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val closed=rt_hal_lifecycle_state==0
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    closed
-pub fn rt_hal_process_lifecycle_is_ready() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val ready=rt_hal_lifecycle_state==2
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    ready
-pub fn rt_hal_process_lifecycle_is_installing() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val installing=rt_hal_lifecycle_state==1
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    installing
-pub fn rt_hal_process_lifecycle_is_draining() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val draining=rt_hal_lifecycle_state==3
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    draining
-pub fn rt_hal_process_lifecycle_is_ready_for_plan(plan_fingerprint: text) ->bool:
-    if plan_fingerprint=="" or mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val ready=rt_hal_lifecycle_state==2 and
-        rt_hal_lifecycle_plan_fingerprint==plan_fingerprint
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    ready
 
 fn exact_sha256(value: text) -> bool:
     if value.len() != 71 or not value.starts_with("sha256:"): return false
@@ -359,17 +92,7 @@ fn canonical_absolute(path: text) -> bool:
         return false
     path.starts_with("/") or (path.len() >= 3 and path[1..3] == ":/")
 
-fn host_error(port: RtHalIsolatedExactHostPortV2,
-        required_assurance_rank: i64) -> text:
-    # Capability fields are public value data, so a caller-constructed port
-    # can forge them.  Critical foreign dispatch is consequently impossible
-    # until the process runtime exposes an opaque owner attestation for its
-    # fixed argv/frame/read-buffer transport.  Lower tiers remain eligible for
-    # the bounded comparator path but cannot make the no-allocation claim.
-    if required_assurance_rank<0 or required_assurance_rank>4:
-        return "RTHAL-E-ASSURANCE"
-    if required_assurance_rank>=3:
-        return "RTHAL-E-CRITICAL-HOST-ATTESTATION"
+fn host_error(port: RtHalIsolatedHostPort) -> text:
     val cap = port.capabilities
     if (not cap.available or not cap.canonical_executable_identity or
         not cap.static_executable_closure or not cap.fixed_scalar_argv or
@@ -384,219 +107,59 @@ fn unavailable_owner() -> i64: -1
 fn unavailable_bind(handle: i64, provider: text, kind: text, tool_id: text, path: text, hash: text, schema: text) -> bool: false
 fn unavailable_cancel(handle: i64, deadline: i64) -> bool: false
 fn unavailable_close(handle: i64) -> bool: false
-fn unavailable_compare_spawn(handle: i64, request: RtHalExactRequest) -> i64: -1
-fn unavailable_replay_spawn(handle: i64, request: RtHalExactRequest, trace: RtHalDigest256) -> i64: -1
-fn unavailable_deadline_after(timeout_ticks: i64) -> i64: -1
-fn unavailable_exact_join(handle: i64, deadline: i64) -> RtHalExactJoinV2:
-    RtHalExactJoinV2(
-        completed: false, status: RtHalExactIoJoinStatus.SpawnFailure,
-        child_exit_code: -1, reaped: false,
+fn unavailable_exact_spawn(handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt) -> i64: -1
+fn unavailable_exact_join(handle: i64, deadline: i64) -> RtHalExactJoin:
+    RtHalExactJoin(
+        completed: false,
         outcome_digest: receipt_zero_digest(), error_digest: receipt_zero_digest(),
         trace_digest: receipt_zero_digest()
     )
-fn unavailable_io_spawn(adapter: i64, ordinal: i64, request: RtHalExactWireHandle) -> i64: -1
-fn unavailable_io_replay_spawn(adapter: i64, ordinal: i64, request: RtHalExactWireHandle,
-                               effect: RtHalExactWireHandle) -> i64: -1
-fn unavailable_io_v3_bind(adapter: i64,operation: text,adapter_id: i64,effect_capable: bool) ->bool: false
-fn unavailable_io_v3_spawn(adapter: i64,ordinal: i64,operation: text,
-                            request: RtHalExactWireHandle) ->i64:-1
-fn unavailable_io_v3_replay_spawn(adapter: i64,ordinal: i64,operation: text,
-        request: RtHalExactWireHandle,effect: RtHalExactWireHandle) ->i64:-1
-fn unavailable_io_join(handle: i64, deadline: i64) -> RtHalExactWireJoin:
-    rt_hal_exact_wire_failed_join(RtHalExactIoJoinStatus.SpawnFailure, -1, false)
-fn unavailable_legacy_join(handle: i64,deadline: i64) ->RtHalExactJoin:
-    RtHalExactJoin(completed:false,outcome_digest:receipt_zero_digest(),
-        error_digest: receipt_zero_digest(),trace_digest:receipt_zero_digest())
 fn unavailable_shutdown() -> bool: true
 
 fn receipt_zero_digest() -> RtHalDigest256:
     RtHalDigest256(word0: 0, word1: 0, word2: 0, word3: 0)
 
-pub fn rt_hal_unavailable_isolated_exact_host_v2() -> RtHalIsolatedExactHostPortV2:
-    RtHalIsolatedExactHostPortV2(
+pub fn rt_hal_unavailable_isolated_host() -> RtHalIsolatedHostPort:
+    RtHalIsolatedHostPort(
         capabilities: RtHalIsolatedHostCapabilities(
             available: false, canonical_executable_identity: false,
             static_executable_closure: false,
             fixed_scalar_argv: true, private_ipc: false,
             no_symlink_path_transport: false, process_tree_containment: false,
             bounded_timed_join: false, cancellation_and_reap: false,
-            portable_host_contract: false, critical_no_alloc_dispatch: false
+            portable_host_contract: false
         ), current_owner_fn: unavailable_owner, bind_adapter_fn: unavailable_bind,
         cancel_and_reap_fn: unavailable_cancel,
         close_fn: unavailable_close,
-        spawn_compare_exact_fn: unavailable_compare_spawn,
-        spawn_replay_exact_fn: unavailable_replay_spawn,
-        deadline_after_fn: unavailable_deadline_after,
+        spawn_compare_exact_fn: unavailable_exact_spawn,
+        spawn_replay_exact_fn: unavailable_exact_spawn,
         join_exact_until_fn: unavailable_exact_join,
         shutdown_fn: unavailable_shutdown
     )
 
-fn unavailable_legacy_spawn(handle: i64,request: RtHalExactRequest,
-        receipt: RtHalCanonicalReceipt) ->i64:-1
-
-pub fn rt_hal_unavailable_isolated_host() ->RtHalIsolatedHostPort:
-    RtHalIsolatedHostPort(capabilities:RtHalIsolatedHostCapabilities(
-        available: false,canonical_executable_identity:false,
-        static_executable_closure: false,fixed_scalar_argv:true,private_ipc:false,
-        no_symlink_path_transport: false,process_tree_containment:false,
-        bounded_timed_join: false,cancellation_and_reap:false,
-        portable_host_contract: false,critical_no_alloc_dispatch:false),current_owner_fn:unavailable_owner,
-        bind_adapter_fn: unavailable_bind,cancel_and_reap_fn:unavailable_cancel,
-        close_fn: unavailable_close,spawn_compare_exact_fn:unavailable_legacy_spawn,
-        spawn_replay_exact_fn: unavailable_legacy_spawn,
-        join_exact_until_fn: unavailable_legacy_join,shutdown_fn:unavailable_shutdown)
-
-# Original signature retained for external source compatibility. Receipt-taking
-# comparators are never admitted into exact mission-critical mode.
-pub fn rt_hal_process_host_install(port: RtHalIsolatedHostPort,
-                                   queue_capacity: i64) ->text:
-    if queue_capacity<=0 or queue_capacity>RT_HAL_ARENA_MAX_TASKS:return "RTHAL-E-BOUND"
-    "RTHAL-W-LEGACY-ORACLE-UNSAFE"
-
-pub fn rt_hal_unavailable_isolated_io_host_v2() ->RtHalIsolatedIoHostPortV2:
-    RtHalIsolatedIoHostPortV2(available:false,
-        cancel_and_reap_fn: unavailable_cancel,close_fn:unavailable_close,
-        shutdown_fn: unavailable_shutdown,
-        spawn_compare_io_fn: unavailable_io_spawn,
-        spawn_replay_io_fn: unavailable_io_replay_spawn,
-        join_io_until_fn: unavailable_io_join)
-
-pub fn rt_hal_unavailable_isolated_io_host_v3() ->RtHalIsolatedIoHostPortV3:
-    RtHalIsolatedIoHostPortV3(available:false,
-        bind_operation_adapter_fn: unavailable_io_v3_bind,
-        cancel_and_reap_fn: unavailable_cancel,close_fn:unavailable_close,
-        shutdown_fn: unavailable_shutdown,
-        spawn_compare_io_fn: unavailable_io_v3_spawn,
-        spawn_replay_io_fn: unavailable_io_v3_replay_spawn,
-        join_io_until_fn: unavailable_io_join)
-
-pub fn rt_hal_process_io_host_v2_install(port: RtHalIsolatedIoHostPortV2) ->text:
-    # Ownership comes from the admitted exact host, never from an ambient
-    # caller.  Reserve before asking that external host: its callback can
-    # synchronously re-enter any lifecycle entrypoint.
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var result=""
-    if not installer_ok_locked() or rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved:result="RTHAL-E-LIFECYCLE"
-    elif rt_hal_io_host_v2!=nil:result="RTHAL-E-ARENA-BUSY"
-    elif not port.available:result="RTHAL-W-PARALLEL-UNSUPPORTED"
-    if result=="":rt_hal_install_mutation_reserved=true
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    val installer=rt_hal_installer_owner_id
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if result!="":return result
-    val caller=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    if rt_hal_lifecycle_state!=1 or not rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved or rt_hal_host==nil or
-       rt_hal_installer_owner_id!=installer:
-        result="RTHAL-E-LIFECYCLE"
-    elif caller!=installer:
-        result="RTHAL-E-OWNER"
-    elif rt_hal_io_host_v2!=nil:
-        result="RTHAL-E-ARENA-BUSY"
-    else:
-        rt_hal_io_host_v2=port
-    rt_hal_install_mutation_reserved=false
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    result
-
-pub fn rt_hal_process_io_host_v3_install(port: RtHalIsolatedIoHostPortV3) ->text:
-    # See V2: publication is an owner-authenticated reservation, not merely
-    # an Installing-state check.
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var result=""
-    if not installer_ok_locked() or rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved:result="RTHAL-E-LIFECYCLE"
-    elif rt_hal_io_host_v3!=nil:result="RTHAL-E-ARENA-BUSY"
-    elif not port.available:result="RTHAL-W-PARALLEL-UNSUPPORTED"
-    if result=="":rt_hal_install_mutation_reserved=true
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    val installer=rt_hal_installer_owner_id
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if result!="":return result
-    val caller=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    if rt_hal_lifecycle_state!=1 or not rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved or rt_hal_host==nil or
-       rt_hal_installer_owner_id!=installer:
-        result="RTHAL-E-LIFECYCLE"
-    elif caller!=installer:
-        result="RTHAL-E-OWNER"
-    elif rt_hal_io_host_v3!=nil:
-        result="RTHAL-E-ARENA-BUSY"
-    else:
-        rt_hal_io_host_v3=port
-    rt_hal_install_mutation_reserved=false
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    result
-
 fn installer_ok() -> bool:
     if rt_hal_host == nil or rt_hal_installer_owner_id <= 0: return false
-    val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
-    if host.current_owner_fn() != rt_hal_installer_owner_id:return false
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val installing=rt_hal_lifecycle_state==1
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    installing
-
-# Caller holds `rt_hal_lifecycle_lock`.  Keep this distinct from
-# `installer_ok`: the latter is a read-only probe, while install transactions
-# must never check, unlock, and then mutate a host or registry. Host callbacks
-# made while this lock is held are leaf owner operations and never re-enter
-# lifecycle entrypoints.
-fn installer_ok_locked() -> bool:
-    if rt_hal_lifecycle_state!=1 or rt_hal_host==nil or
-       rt_hal_installer_owner_id<=0:return false
-    # Never call an external port callback while holding this non-reentrant
-    # mutex. Public registration paths snapshot/validate the caller before
-    # entering their reservation transaction.
-    true
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
+    host.current_owner_fn() == rt_hal_installer_owner_id
 
 fn controller_ok() -> bool:
-    if rt_hal_host == nil: return false
-    val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
-    val owner=host.current_owner_fn()
-    if owner<=0:return false
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val admitted=(rt_hal_lifecycle_state==2 or rt_hal_lifecycle_state==3) and
-        rt_hal_controller_owner_id==owner
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    admitted
-
-fn controller_spawn_begin() ->bool:
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==2
-    if allowed:rt_hal_lifecycle_controller_spawns=rt_hal_lifecycle_controller_spawns+1
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-
-fn controller_spawn_end():
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return
-    if rt_hal_lifecycle_controller_spawns>0:
-        rt_hal_lifecycle_controller_spawns=rt_hal_lifecycle_controller_spawns-1
-    mutex_unlock(rt_hal_lifecycle_lock,0)
+    if rt_hal_host == nil or rt_hal_controller_owner_id <= 0: return false
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
+    host.current_owner_fn() == rt_hal_controller_owner_id
 
 # Called by the non-RT boundary drain. Installation/configuration ownership and
 # controller ownership are deliberately distinct; dispatch producers never
 # acquire this capability implicitly.
 pub fn rt_hal_process_controller_claim() -> text:
     if rt_hal_host == nil: return "RTHAL-W-PARALLEL-UNSUPPORTED"
-    val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     val owner = host.current_owner_fn()
     if owner <= 0: return "RTHAL-E-OWNER"
-    # The lifecycle mutex owns the claim transition.  Two cold contenders
-    # cannot both observe an unclaimed controller and overwrite each other.
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var result=""
-    if rt_hal_lifecycle_state!=2 and rt_hal_lifecycle_state!=3:
-        result="RTHAL-E-LIFECYCLE"
-    elif rt_hal_controller_owner_id<0:
-        rt_hal_controller_owner_id=owner
-    elif rt_hal_controller_owner_id!=owner:
-        result="RTHAL-E-OWNER"
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    result
+    if rt_hal_controller_owner_id < 0:
+        rt_hal_controller_owner_id = owner
+        return ""
+    if rt_hal_controller_owner_id != owner: return "RTHAL-E-OWNER"
+    ""
 
 # Cold controller entry. The producer owner identifies the fixed queue being
 # drained; it need not be the installing thread or the controller thread.
@@ -616,35 +179,15 @@ pub fn rt_hal_process_register_current_owner() -> text:
 # while an admitted receipt is undrained or any comparator timed out, mismatched,
 # overflowed, or failed cancellation. Panic is the stable nonzero process ABI.
 pub fn rt_hal_process_finalize_current_owner():
-    # Close producer admission before touching the controller queue. The
-    # boundary snapshot below publishes the close epoch and waits every pin/
-    # worker that entered before it, so no capture can appear after drain.
-    # A shared library may be loaded and shut down without any tagged export
-    # being called. Its C lifecycle still invokes this bridge, but no runtime
-    # controller was installed, so closed is the sole harmless no-op state.
-    if rt_hal_process_lifecycle_is_closed():return
-    if not rt_hal_process_lifecycle_begin_draining():
-        panic("RTHAL-E-LIFECYCLE-DRAINING")
     val owners = rt_hal_boundary_registered_owner_ids()
-    var failure = if owners.len() == 0: "RTHAL-E-FINALIZE-OWNER" else: ""
-    if failure=="" and rt_hal_post_quiescence_drain!=nil:
-        if not rt_hal_post_quiescence_drain.unwrap()():
-            failure="RTHAL-E-FINALIZE-EXIT-DRAIN"
+    if owners.len() == 0: panic("RTHAL-E-FINALIZE-OWNER")
     for owner_id in owners:
         val drain_problem = rt_hal_process_drain_owner(owner_id)
-        if failure == "" and drain_problem != "": failure = "RTHAL-E-FINALIZE-DRAIN: {drain_problem}"
-        if failure == "" and rt_hal_boundary_status(owner_id) != 0:
-            failure = "RTHAL-E-FINALIZE-STATUS"
-    if failure == "" and rt_hal_boundary_global_failure_status() != 0:
-        failure = "RTHAL-E-FINALIZE-GLOBAL"
-    # The controller is the sole teardown owner.  It has already closed
-    # producer admission via registered_owner_ids(), drained every admitted
-    # owner, and checked the comparison result; only then may it release the
-    # process, wire, and typed-exit fixed arenas.
-    val shutdown_problem = rt_hal_process_arena_shutdown()
-    if failure != "": panic(failure)
-    if shutdown_problem != "": panic("RTHAL-E-FINALIZE-SHUTDOWN: {shutdown_problem}")
-    if not rt_hal_process_lifecycle_finish_closed():panic("RTHAL-E-LIFECYCLE-CLOSE")
+        if drain_problem != "": panic("RTHAL-E-FINALIZE-DRAIN: {drain_problem}")
+        if rt_hal_boundary_status(owner_id) != 0:
+            panic("RTHAL-E-FINALIZE-STATUS")
+    if rt_hal_boundary_global_failure_status() != 0:
+        panic("RTHAL-E-FINALIZE-GLOBAL")
 
 fn adapter_index(handle: i64) -> i64:
     var index = 0
@@ -668,390 +211,54 @@ fn task_slot(handle: i64) -> i64:
 
 fn release_slot(slot: i64):
     val task = rt_hal_tasks[slot]
-    rt_hal_tasks[slot] = RtHalIsolatedTask(active: false, generation: task.generation,
-        host_handle: -1,io_v2:false,io_v3:false,reaped:false,closed:false)
-
-fn task_reap_once(task: RtHalIsolatedTask) ->bool:
-    if task.io_v3:
-        return (rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()).cancel_and_reap_fn(task.host_handle,1000)
-    if task.io_v2:
-        return (rt_hal_io_host_v2??rt_hal_unavailable_isolated_io_host_v2()).cancel_and_reap_fn(task.host_handle,1000)
-    (rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()).cancel_and_reap_fn(task.host_handle,1000)
-
-fn task_close_once(task: RtHalIsolatedTask) ->bool:
-    if task.io_v3:
-        return (rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()).close_fn(task.host_handle)
-    if task.io_v2:
-        return (rt_hal_io_host_v2??rt_hal_unavailable_isolated_io_host_v2()).close_fn(task.host_handle)
-    (rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()).close_fn(task.host_handle)
-
-# Controller-owned terminal cleanup.  The record is written after every
-# successful acknowledgement, so a partial success retries only its unresolved
-# operation.  The result deliberately preserves which host edge failed.
-fn cleanup_slot(slot: i64) ->text:
-    if slot<0 or slot>=rt_hal_tasks.len() or not rt_hal_tasks[slot].active:
-        return "RTHAL-E-TASK"
-    var task=rt_hal_tasks[slot]
-    var failure=""
-    if not task.reaped:
-        if task_reap_once(task):
-            task.reaped=true
-            rt_hal_tasks[slot]=task
-        else:
-            # Reap is the first non-idempotent terminal acknowledgement.  Do
-            # not invoke close while it remains unacknowledged: a close can
-            # destroy the process resource needed by the next reap retry.
-            # Keep the active generation intact so its retry starts here.
-            return "RTHAL-E-REAP"
-    task=rt_hal_tasks[slot]
-    # A close is legal only after the successful reap acknowledgement above
-    # has been persisted in the arena record.  This ordering is observable on
-    # host implementations whose close consumes the underlying process handle.
-    if not task.closed:
-        if task_close_once(task):
-            task.closed=true
-            rt_hal_tasks[slot]=task
-        elif failure=="":
-            failure="RTHAL-E-CLOSE"
-    task=rt_hal_tasks[slot]
-    if task.reaped and task.closed:
-        release_slot(slot)
-    failure
+    rt_hal_tasks[slot] = RtHalIsolatedTask(active: false, generation: task.generation, host_handle: -1)
 
 fn cancel(task_handle: i64) -> bool:
     if not controller_ok(): return false
     val slot = task_slot(task_handle)
     if slot < 0: return false
-    cleanup_slot(slot)==""
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
+    val cancelled = host.cancel_and_reap_fn(rt_hal_tasks[slot].host_handle, 1000)
+    val closed = host.close_fn(rt_hal_tasks[slot].host_handle)
+    if cancelled and closed: release_slot(slot)
+    cancelled and closed
 
-fn reserve_exact_task(adapter_handle: i64, request: RtHalExactRequest, replay: bool, trace: RtHalDigest256) -> i64:
-    if not controller_ok() or not controller_spawn_begin(): return -1
-    var result=-1
-    val index = adapter_index(adapter_handle)
-    if index >= 0:
-        val adapter = rt_hal_adapters[index]
-        if (not replay or adapter.replay_capable) and (replay or adapter.query_capable):
-            var slot = 0
-            while slot < rt_hal_tasks.len() and rt_hal_tasks[slot].active: slot = slot + 1
-            if slot < rt_hal_tasks.len() and rt_hal_generation < 1000000000:
-                val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
-                val host_handle = if replay:
-                    host.spawn_replay_exact_fn(adapter_handle, request, trace)
-                else:
-                    host.spawn_compare_exact_fn(adapter_handle, request)
-                if host_handle > 0:
-                    val generation = rt_hal_generation
-                    rt_hal_generation = rt_hal_generation + 1
-                    rt_hal_tasks[slot] = RtHalIsolatedTask(active: true, generation: generation,
-                        host_handle: host_handle,io_v2:false,io_v3:false,reaped:false,closed:false)
-                    result=generation * RT_HAL_TASK_HANDLE_STRIDE + slot + 1
-    controller_spawn_end()
-    result
-
-fn spawn_compare_exact(adapter_handle: i64, request: RtHalExactRequest) -> i64:
-    reserve_exact_task(adapter_handle, request, false, receipt_zero_digest())
-
-fn spawn_replay_exact(adapter_handle: i64, request: RtHalExactRequest, trace: RtHalDigest256) -> i64:
-    reserve_exact_task(adapter_handle, request, true, trace)
-
-fn reserve_io_task(adapter_handle: i64, request: RtHalExactWireHandle,
-                   provider_ordinal: i64, replay: bool,
-                   effect: RtHalExactWireHandle) -> i64:
-    if not controller_ok() or rt_hal_io_host_v2==nil: return -1
-    if provider_ordinal <= 0: return -1
+fn spawn_exact(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt, replay: bool) -> i64:
+    if not controller_ok(): return -1
     val index = adapter_index(adapter_handle)
     if index < 0: return -1
     val adapter = rt_hal_adapters[index]
-    if (replay and not adapter.replay_capable) or
-       (not replay and not adapter.query_capable): return -1
+    if replay and not adapter.replay_capable: return -1
+    if not replay and not adapter.query_capable: return -1
     var slot = 0
     while slot < rt_hal_tasks.len() and rt_hal_tasks[slot].active: slot = slot + 1
     if slot >= rt_hal_tasks.len() or rt_hal_generation >= 1000000000: return -1
-    val host = rt_hal_io_host_v2 ?? rt_hal_unavailable_isolated_io_host_v2()
-    val request_consumer=rt_hal_exact_wire_consumer_acquire(request)
-    if request_consumer>=-1:return -1
-    val effect_consumer=if replay:rt_hal_exact_wire_consumer_acquire(effect) else:-1
-    if replay and effect_consumer>=-1:
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        return -1
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     val host_handle = if replay:
-        if not controller_spawn_begin():
-            rt_hal_exact_wire_consumer_release(request_consumer)
-            rt_hal_exact_wire_consumer_release(effect_consumer)
-            -1
-        else:
-            val spawned=host.spawn_replay_io_fn(adapter_handle, provider_ordinal,
-                request_consumer, effect_consumer)
-            controller_spawn_end()
-            spawned
+        host.spawn_replay_exact_fn(adapter_handle, request, receipt)
     else:
-        if not controller_spawn_begin():
-            rt_hal_exact_wire_consumer_release(request_consumer)
-            -1
-        else:
-            val spawned=host.spawn_compare_io_fn(adapter_handle, provider_ordinal,request_consumer)
-            controller_spawn_end()
-            spawned
-    if host_handle <= 0:
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        if replay:rt_hal_exact_wire_consumer_release(effect_consumer)
-        return -1
+        host.spawn_compare_exact_fn(adapter_handle, request, receipt)
+    if host_handle <= 0: return -1
     val generation = rt_hal_generation
     rt_hal_generation = rt_hal_generation + 1
-    rt_hal_tasks[slot] = RtHalIsolatedTask(active: true,
-        generation: generation, host_handle: host_handle,io_v2:true,io_v3:false,
-        reaped: false,closed:false)
-    # The host accepted child-only consumer capabilities.  This releases only
-    # producer move authority; host-held capabilities retain each slot until
-    # child reap/cancel/close.
-    val request_moved = rt_hal_exact_wire_release(request)
-    val effect_moved = if replay:
-        if effect == request: true else: rt_hal_exact_wire_release(effect)
-    else: true
-    if not request_moved or not effect_moved:
-        # The producer move failed after the child accepted its consumer
-        # lease.  The task slot is still the sole generation-bound owner
-        # until *both* host transitions acknowledge terminal cleanup.  Do
-        # not make it reusable merely because rollback itself must fail.
-        val cleanup=cleanup_slot(slot)
-        return -1
+    rt_hal_tasks[slot] = RtHalIsolatedTask(active: true, generation: generation, host_handle: host_handle)
     generation * RT_HAL_TASK_HANDLE_STRIDE + slot + 1
 
-pub fn rt_hal_process_spawn_compare_io(adapter_handle: i64,
-                                       provider_ordinal: i64,
-                                       request: RtHalExactWireHandle) -> i64:
-    reserve_io_task(adapter_handle, request, provider_ordinal, false, request)
+fn spawn_compare_exact(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt) -> i64:
+    spawn_exact(adapter_handle, request, receipt, false)
 
-pub fn rt_hal_process_spawn_replay_io(adapter_handle: i64,
-                                      provider_ordinal: i64,
-                                      request: RtHalExactWireHandle,
-                                      effect: RtHalExactWireHandle) -> i64:
-    reserve_io_task(adapter_handle, request, provider_ordinal, true, effect)
+fn spawn_replay_exact(adapter_handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt) -> i64:
+    spawn_exact(adapter_handle, request, receipt, true)
 
-# V3 has no replay path: a Pure effect receipt is not an execution seed for a
-# native provider.  The exact operation identity is checked twice: once by the
-# sealed host registry before spawn and again by the independent provider while
-# parsing the HIO2 Operation stream.
-pub fn rt_hal_process_spawn_compare_io_v3(adapter_handle: i64,
-        provider_ordinal: i64,operation_id: text,
-        request: RtHalExactWireHandle) ->i64:
-    if not controller_ok() or rt_hal_io_host_v3==nil or provider_ordinal<=0:
-        return -1
-    if operation_identity_error(operation_id)!="":return -1
-    val index=adapter_index(adapter_handle)
-    if index<0 or not rt_hal_adapters[index].query_capable:return -1
-    var slot=0
-    while slot<rt_hal_tasks.len() and rt_hal_tasks[slot].active:slot=slot+1
-    if slot>=rt_hal_tasks.len() or rt_hal_generation>=1000000000:return -1
-    val request_consumer=rt_hal_exact_wire_consumer_acquire(request)
-    if request_consumer>=-1:return -1
-    val host=rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()
-    if not controller_spawn_begin():
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        return -1
-    val host_handle=host.spawn_compare_io_fn(adapter_handle,provider_ordinal,
-        operation_id,request_consumer)
-    controller_spawn_end()
-    if host_handle<=0:
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        return -1
-    val generation=rt_hal_generation
-    rt_hal_generation=rt_hal_generation+1
-    rt_hal_tasks[slot]=RtHalIsolatedTask(active:true,generation:generation,
-        host_handle: host_handle,io_v2:false,io_v3:true,reaped:false,closed:false)
-    if not rt_hal_exact_wire_release(request):
-        # Keep the slot poisoned/active if either cleanup acknowledgement is
-        # absent.  A later controller teardown may retry; a fresh install may
-        # never reuse this generation while the child could still hold it.
-        val cleanup=cleanup_slot(slot)
-        return -1
-    generation*RT_HAL_TASK_HANDLE_STRIDE+slot+1
-
-pub fn rt_hal_process_spawn_replay_io_v3(adapter_handle: i64,
-        provider_ordinal: i64,operation_id: text,request: RtHalExactWireHandle,
-        effect: RtHalExactWireHandle) ->i64:
-    if not controller_ok() or rt_hal_io_host_v3==nil or provider_ordinal<=0:
-        return -1
-    if operation_identity_error(operation_id)!="":return -1
-    val index=adapter_index(adapter_handle)
-    if index<0 or not rt_hal_adapters[index].replay_capable:return -1
-    var slot=0
-    while slot<rt_hal_tasks.len() and rt_hal_tasks[slot].active:slot=slot+1
-    if slot>=rt_hal_tasks.len() or rt_hal_generation>=1000000000:return -1
-    val request_consumer=rt_hal_exact_wire_consumer_acquire(request)
-    if request_consumer>=-1:return -1
-    val effect_consumer=rt_hal_exact_wire_consumer_acquire(effect)
-    if effect_consumer>=-1:
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        return -1
-    val host=rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()
-    if not controller_spawn_begin():
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        rt_hal_exact_wire_consumer_release(effect_consumer)
-        return -1
-    val host_handle=host.spawn_replay_io_fn(adapter_handle,provider_ordinal,
-        operation_id,request_consumer,effect_consumer)
-    controller_spawn_end()
-    if host_handle<=0:
-        rt_hal_exact_wire_consumer_release(request_consumer)
-        rt_hal_exact_wire_consumer_release(effect_consumer)
-        return -1
-    val generation=rt_hal_generation
-    rt_hal_generation=rt_hal_generation+1
-    rt_hal_tasks[slot]=RtHalIsolatedTask(active:true,generation:generation,
-        host_handle: host_handle,io_v2:false,io_v3:true,reaped:false,closed:false)
-    val request_moved=rt_hal_exact_wire_release(request)
-    val effect_moved=if effect==request:true else:rt_hal_exact_wire_release(effect)
-    if not request_moved or not effect_moved:
-        # See V2: a failed producer move is the primary failure.  Cleanup is
-        # best-effort only, and cannot authorize slot reuse without both
-        # terminal acknowledgements.
-        val cleanup=cleanup_slot(slot)
-        return -1
-    generation*RT_HAL_TASK_HANDLE_STRIDE+slot+1
-
-pub fn rt_hal_process_encode_submit_io(adapter_handle: i64,provider_ordinal: i64,
-        arena: RtHalExactIoArena,bounds: RtHalExactIoBounds,request_index: i64,
-        receipt_index: i64,replay: bool) ->i64:
-    val encoded=rt_hal_exact_io_encode_input(
-        arena,bounds,request_index,receipt_index,replay)
-    if not encoded.valid:return -1
-    # On success spawn consumes the producer lease after the host explicitly
-    # acknowledges a child consumer lease.  On failure this function retains
-    # the producer lease and this caller releases it below.
-    val handle=if replay:
-        rt_hal_process_spawn_replay_io(adapter_handle,provider_ordinal,
-            encoded.request,encoded.effect)
-    else:
-        rt_hal_process_spawn_compare_io(adapter_handle,provider_ordinal,
-            encoded.request)
-    if handle<=0:
-        rt_hal_exact_io_encoded_input_release(encoded)
-        return -1
-    handle
-
-pub fn rt_hal_process_join_io_until(task_handle: i64,
-                                    deadline_ticks: i64) -> RtHalExactWireJoin:
-    if not controller_ok() or deadline_ticks <= 0:
-        return unavailable_io_join(-1, deadline_ticks)
-    val slot = task_slot(task_handle)
-    if slot < 0: return unavailable_io_join(-1, deadline_ticks)
-    val task=rt_hal_tasks[slot]
-    val joined=if task.io_v3:
-        (rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()).join_io_until_fn(task.host_handle,deadline_ticks)
-    elif task.io_v2:
-        (rt_hal_io_host_v2??rt_hal_unavailable_isolated_io_host_v2()).join_io_until_fn(task.host_handle,deadline_ticks)
-    else: return unavailable_io_join(-1,deadline_ticks)
-    # Completion transfers an immutable result observation, not the process
-    # ownership token.  Only the host's reap acknowledgement authorizes slot
-    # reuse; callers that consume a completed-but-unreaped result must use the
-    # controller cancel-and-reap path below before they commit it.
-    if joined.reaped:
-        # Joining has supplied the reap acknowledgement.  Persist it before
-        # attempting close so a failed close cannot cause a future cleanup to
-        # repeat a non-idempotent reap.
-        task.reaped=true
-        rt_hal_tasks[slot]=task
-        val cleanup=cleanup_slot(slot)
-        if cleanup!="":
-            if joined.completed:rt_hal_exact_wire_release(joined.result)
-            return unavailable_io_join(-1,deadline_ticks)
-    joined
-
-# Parent-authoritative terminal consumer. Foreign type scalars are parsed only
-# after an authoritative join, atomically re-admitted, then rebuilt under the
-# local frozen seal before deterministic batch publication.
-pub fn rt_hal_process_join_admit_io(task_handle: i64, deadline_ticks: i64,
-        registry: RtHalExactTypeRegistryOwner, seal: RtHalExactTypeRegistrySeal,
-        batch: RtHalExactIoParentBatch, ordinal_base: i64,
-        max_retained_bytes: i64) -> bool:
-    val joined = rt_hal_process_join_io_until(task_handle, deadline_ticks)
-    if not joined.completed or joined.status != RtHalExactIoJoinStatus.Completed:
-        batch.abort()
-        # A timed-out/protocol-failed join does not transfer result ownership.
-        # Keep task lifecycle encapsulated: force the controller's
-        # cancel-and-reap path before returning instead of leaving a host-held
-        # consumer lease live behind a generic admission failure.
-        if not joined.reaped: rt_hal_process_cancel_io_task(task_handle)
-        return false
-    val parsed = rt_hal_exact_io_parent_readmit(
-        registry, joined.result, max_retained_bytes)
-    if not parsed.valid:
-        rt_hal_exact_wire_release(joined.result)
-        batch.abort()
-        return false
-    # The parent has retained the result bytes, so it may now perform the
-    # authoritative lifecycle transition before reconstructing/publishing the
-    # child result.  A completed notification alone never frees this slot.
-    if not joined.reaped and not rt_hal_process_cancel_io_task(task_handle):
-        rt_hal_exact_wire_release(joined.result)
-        batch.abort()
-        return false
-    val output = rt_hal_exact_io_parent_reconstruct(
-        registry, seal, parsed, RtHalCodecRootDomain.Output)
-    val error = rt_hal_exact_io_parent_reconstruct(
-        registry, seal, parsed, RtHalCodecRootDomain.Error)
-    val effect = rt_hal_exact_io_parent_reconstruct(
-        registry, seal, parsed, RtHalCodecRootDomain.Effect)
-    val committed = rt_hal_exact_io_parent_commit_three(
-        registry, seal, batch, output, error, effect, ordinal_base)
-    val released = rt_hal_exact_wire_release(joined.result)
-    committed and released
-
-fn exact_deadline_after(timeout_ticks: i64) -> i64:
-    if not controller_ok(): return -1
-    val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
-    host.deadline_after_fn(timeout_ticks)
-
-fn exact_wave_capacity() -> i64:
-    if not controller_ok(): return 0
-    rt_hal_exact_wave_handles.len()
-
-fn exact_wave_claim() -> bool:
-    if not controller_ok() or mutex_lock(rt_hal_exact_wave_lease_lock) == nil:
-        return false
-    val available = not rt_hal_exact_wave_leased
-    if available: rt_hal_exact_wave_leased = true
-    mutex_unlock(rt_hal_exact_wave_lease_lock, 0)
-    available
-
-fn exact_wave_release() -> bool:
-    if not controller_ok() or mutex_lock(rt_hal_exact_wave_lease_lock) == nil:
-        return false
-    val held = rt_hal_exact_wave_leased
-    if held: rt_hal_exact_wave_leased = false
-    mutex_unlock(rt_hal_exact_wave_lease_lock, 0)
-    held
-
-fn exact_wave_store(index: i64, handle: i64, ordinal: i64) -> bool:
-    if not controller_ok() or index < 0 or index >= rt_hal_exact_wave_handles.len(): return false
-    rt_hal_exact_wave_handles[index] = handle
-    rt_hal_exact_wave_ordinals[index] = ordinal
-    true
-
-fn exact_wave_handle(index: i64) -> i64:
-    if not controller_ok() or index < 0 or index >= rt_hal_exact_wave_handles.len(): return -1
-    rt_hal_exact_wave_handles[index]
-
-fn exact_wave_ordinal(index: i64) -> i64:
-    if not controller_ok() or index < 0 or index >= rt_hal_exact_wave_ordinals.len(): return -1
-    rt_hal_exact_wave_ordinals[index]
-
-fn join_exact_until(task_handle: i64, deadline_ticks: i64) -> RtHalExactJoinV2:
+fn join_exact_until(task_handle: i64, deadline_ticks: i64) -> RtHalExactJoin:
     if not controller_ok() or deadline_ticks <= 0: return unavailable_exact_join(-1, deadline_ticks)
     val slot = task_slot(task_handle)
     if slot < 0: return unavailable_exact_join(-1, deadline_ticks)
-    val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     val joined = host.join_exact_until_fn(rt_hal_tasks[slot].host_handle, deadline_ticks)
-    # `completed` is deliberately insufficient here: an unreaped child still
-    # owns its host process and its generation-bound arena slot.  The exact
-    # comparator calls `cancel` for that terminal state; already-reaped joins
-    # keep the no-extra-round-trip fast path.
-    if joined.reaped:
-        var task=rt_hal_tasks[slot]
-        task.reaped=true
-        rt_hal_tasks[slot]=task
-        if cleanup_slot(slot)!="":return unavailable_exact_join(-1, deadline_ticks)
+    if joined.completed:
+        if host.close_fn(rt_hal_tasks[slot].host_handle): release_slot(slot)
+        else: return unavailable_exact_join(-1, deadline_ticks)
     joined
 
 pub fn rt_hal_process_adapter_error(adapter: RtHalProcessAdapter) -> text:
@@ -1069,412 +276,76 @@ pub fn rt_hal_process_adapter_error(adapter: RtHalProcessAdapter) -> text:
     if adapter.kind == RtHalProcessAdapterKind.Rust and adapter.provider_id != "rust-comparator": return "RTHAL-E-PROVIDER-ID"
     ""
 
-pub fn rt_hal_process_exact_host_v2_install(port: RtHalIsolatedExactHostPortV2, queue_capacity: i64) -> text:
-    # Legacy direct callers have no compiler-produced assurance provenance.
-    # They are intentionally lower-tier and cannot elevate a forged port.
-    rt_hal_process_exact_host_v2_install_for_assurance(port,queue_capacity,0)
-
-pub fn rt_hal_process_exact_host_v2_install_for_assurance(
-        port: RtHalIsolatedExactHostPortV2, queue_capacity: i64,
-        required_assurance_rank: i64) -> text:
-    val problem = host_error(port,required_assurance_rank)
+pub fn rt_hal_process_host_install(port: RtHalIsolatedHostPort, queue_capacity: i64) -> text:
+    val problem = host_error(port)
     if problem != "": return problem
     if queue_capacity <= 0 or queue_capacity > RT_HAL_ARENA_MAX_TASKS: return "RTHAL-E-BOUND"
-    # Reserve *before* invoking the candidate port's external ownership
-    # callback.  Otherwise a reentrant callback can publish IO or tear down
-    # between admission and the initial host publication.
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var admission=""
-    if rt_hal_lifecycle_state!=1 or rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved:admission="RTHAL-E-LIFECYCLE"
-    elif rt_hal_host!=nil:admission="RTHAL-E-ARENA-BUSY"
-    if admission=="":rt_hal_install_mutation_reserved=true
-    val install_generation=rt_hal_lifecycle_plan_fingerprint
-    if admission!="":
-        mutex_unlock(rt_hal_lifecycle_lock,0)
-        return admission
-    mutex_unlock(rt_hal_lifecycle_lock,0)
+    if rt_hal_host != nil: return "RTHAL-E-ARENA-BUSY"
     val owner = port.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    # The reservation, lifecycle generation, empty initial host slot, and
-    # installer identity must all still describe the exact admission we made
-    # before the untrusted callback ran.
-    if owner<=0 or rt_hal_lifecycle_state!=1 or
-       not rt_hal_install_mutation_reserved or rt_hal_teardown_reserved or
-       rt_hal_host!=nil or rt_hal_installer_owner_id!=-1 or
-       rt_hal_controller_owner_id!=-1 or
-       rt_hal_lifecycle_plan_fingerprint!=install_generation:
-        rt_hal_install_mutation_reserved=false
-        mutex_unlock(rt_hal_lifecycle_lock,0)
-        return "RTHAL-E-OWNER"
+    if owner <= 0: return "RTHAL-E-OWNER"
     rt_hal_host = port
     rt_hal_installer_owner_id = owner
     rt_hal_controller_owner_id = -1
-    rt_hal_host_shutdown_acknowledged=false
-    rt_hal_io_v2_shutdown_acknowledged=false
-    rt_hal_io_v3_shutdown_acknowledged=false
-    rt_hal_install_mutation_reserved=false
-    rt_hal_effect_admission_keys=[0;RT_HAL_EFFECT_ADMISSION_INDEX_CAP]
-    rt_hal_effect_admission_operations=["";RT_HAL_EFFECT_ADMISSION_INDEX_CAP]
-    rt_hal_effect_admission_handles=[0;RT_HAL_EFFECT_ADMISSION_INDEX_CAP]
-    rt_hal_operation_adapter_count=0
-    rt_hal_effect_adapter_count=0
     rt_hal_tasks = []
-    rt_hal_exact_wave_handles = []
-    rt_hal_exact_wave_ordinals = []
-    rt_hal_exact_wave_leased = false
     var slot = 0
     while slot < queue_capacity:
-        rt_hal_tasks.push(RtHalIsolatedTask(active: false, generation: 0,
-            host_handle: -1,io_v2:false,io_v3:false,reaped:false,closed:false))
-        rt_hal_exact_wave_handles.push(-1)
-        rt_hal_exact_wave_ordinals.push(-1)
+        rt_hal_tasks.push(RtHalIsolatedTask(active: false, generation: 0, host_handle: -1))
         slot = slot + 1
-    mutex_unlock(rt_hal_lifecycle_lock,0)
     ""
 
 pub fn rt_hal_process_adapter_register(adapter: RtHalProcessAdapter) -> text:
+    if not installer_ok(): return "RTHAL-E-OWNER"
     val problem = rt_hal_process_adapter_error(adapter)
     if problem != "": return problem
-    if rt_hal_host==nil:return "RTHAL-E-OWNER"
-    val owner=(rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()).current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var result=""
-    if not installer_ok_locked() or owner!=rt_hal_installer_owner_id or
-       rt_hal_install_mutation_reserved or rt_hal_teardown_reserved:result="RTHAL-E-OWNER"
-    elif rt_hal_adapters.len() >= RT_HAL_ARENA_MAX_ADAPTERS:result="RTHAL-E-BOUND"
+    if rt_hal_adapters.len() >= RT_HAL_ARENA_MAX_ADAPTERS: return "RTHAL-E-BOUND"
     for present in rt_hal_adapters:
-        if result=="" and (present.handle == adapter.handle or present.provider_id == adapter.provider_id):
-            result="RTHAL-E-PROVIDER-DUPLICATE"
-    if result=="":rt_hal_install_mutation_reserved=true
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if result!="":return result
-    # Binding is external and may synchronously re-enter lifecycle APIs.
-    val bound=(rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()).bind_adapter_fn(
+        if present.handle == adapter.handle or present.provider_id == adapter.provider_id: return "RTHAL-E-PROVIDER-DUPLICATE"
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
+    if not host.bind_adapter_fn(
         adapter.handle, adapter.provider_id, adapter_kind_name(adapter.kind),
         adapter.executable.tool_id, adapter.executable.canonical_path,
-        adapter.executable.identity_hash, RT_HAL_SCALAR_ARGV_SCHEMA)
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    if not rt_hal_install_mutation_reserved or not installer_ok_locked() or owner!=rt_hal_installer_owner_id:
-        result="RTHAL-E-LIFECYCLE"
-    elif not bound:result="RTHAL-E-PROVIDER-ABI"
-    else: rt_hal_adapters.push(adapter)
-    rt_hal_install_mutation_reserved=false
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    result
-
-# Cold-only policy registration for the independent V3 providers.  The host
-# keeps the immutable map; this wrapper deliberately exposes neither a host
-# capability nor an adapter-selected argv surface to producer code.
-fn operation_identity_error(operation_id: text) ->text:
-    # One canonical validator owns the sourcefile::function grammar for both
-    # plan ingestion and this runtime mirror.  Do not let a weaker process
-    # registry spelling create an authority alias after plan validation.
-    env_rt_hal_operation_identity_error(operation_id)
-
-pub fn rt_hal_process_operation_adapter_register(adapter_handle: i64,
-        operation_id: text,adapter_id: i64) ->text:
-    val operation_problem=operation_identity_error(operation_id)
-    if operation_problem!="":return operation_problem
-    # Query implementations are the independently maintained 1..3 set.
-    # Adapter 4 is reserved exclusively for an admitted effect replay path.
-    if adapter_id<1 or adapter_id>3:return "RTHAL-E-PROVIDER-ADAPTER"
-    if rt_hal_host==nil:return "RTHAL-E-OWNER"
-    val owner=(rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()).current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var result=""
-    if not installer_ok_locked() or owner!=rt_hal_installer_owner_id or
-       rt_hal_install_mutation_reserved or rt_hal_teardown_reserved:result="RTHAL-E-LIFECYCLE"
-    elif adapter_index(adapter_handle)<0:result="RTHAL-E-PROVIDER-ID"
-    elif rt_hal_io_host_v3==nil:result="RTHAL-W-PARALLEL-UNSUPPORTED"
-    if result=="":rt_hal_install_mutation_reserved=true
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if result!="":return result
-    val bound=(rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()).bind_operation_adapter_fn(
-        adapter_handle,operation_id,adapter_id,false)
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    if not rt_hal_install_mutation_reserved or not installer_ok_locked() or owner!=rt_hal_installer_owner_id:
-        result="RTHAL-E-LIFECYCLE"
-    elif not bound:result="RTHAL-E-PROVIDER-OPERATION"
-    else:rt_hal_operation_adapter_count=rt_hal_operation_adapter_count+1
-    rt_hal_install_mutation_reserved=false
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    result
-
-# Effects require an explicit, separately admitted provider operation.  This
-# flag is immutable once registered; ordinary query registration can never be
-# upgraded after controller sealing.
-pub fn rt_hal_process_operation_effect_adapter_register(adapter_handle: i64,
-        operation_id: text,adapter_id: i64) ->text:
-    val operation_problem=operation_identity_error(operation_id)
-    if operation_problem!="":return operation_problem
-    if adapter_id!=4:return "RTHAL-E-PROVIDER-ADAPTER"
-    if rt_hal_host==nil:return "RTHAL-E-OWNER"
-    val owner=(rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()).current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var result=""
-    if not installer_ok_locked() or owner!=rt_hal_installer_owner_id or
-       rt_hal_install_mutation_reserved or rt_hal_teardown_reserved:result="RTHAL-E-LIFECYCLE"
-    elif adapter_index(adapter_handle)<0:result="RTHAL-E-PROVIDER-ID"
-    elif rt_hal_io_host_v3==nil:result="RTHAL-W-PARALLEL-UNSUPPORTED"
-    if result=="":rt_hal_install_mutation_reserved=true
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if result!="":return result
-    val bound=(rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()).bind_operation_adapter_fn(
-        adapter_handle,operation_id,adapter_id,true)
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    if not rt_hal_install_mutation_reserved or not installer_ok_locked() or owner!=rt_hal_installer_owner_id:
-        result="RTHAL-E-LIFECYCLE"
-    elif not bound:result="RTHAL-E-PROVIDER-OPERATION"
-    # The host has accepted this exact immutable row. Mirror it in a fixed
-    # open-addressed index so request capture performs no O(N) registry scan.
-    if result=="" and not effect_admission_insert(adapter_handle,operation_id):
-        result="RTHAL-E-PROVIDER-OPERATION"
-    if result=="":rt_hal_effect_adapter_count=rt_hal_effect_adapter_count+1
-    rt_hal_install_mutation_reserved=false
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    result
-
-fn effect_admission_key(adapter_handle: i64,operation_id: text) ->i64:
-    ((djb2_hash_text("rthal-effect|"+adapter_handle.to_text()+"|"+operation_id)&2147483647)+1)
-
-fn effect_admission_slot(adapter_handle: i64,operation_id: text) ->i64:
-    if rt_hal_effect_admission_keys.len()!=RT_HAL_EFFECT_ADMISSION_INDEX_CAP:return -1
-    val key=effect_admission_key(adapter_handle,operation_id)
-    var probe=0
-    while probe<RT_HAL_EFFECT_ADMISSION_INDEX_CAP:
-        val index=(key+probe)%RT_HAL_EFFECT_ADMISSION_INDEX_CAP
-        val stored=rt_hal_effect_admission_keys[index]
-        if stored==0:return -1
-        if stored==key and rt_hal_effect_admission_handles[index]==adapter_handle and
-           rt_hal_effect_admission_operations[index]==operation_id:return index
-        probe=probe+1
-    -1
-
-fn effect_admission_insert(adapter_handle: i64,operation_id: text) ->bool:
-    if rt_hal_effect_admission_keys.len()!=RT_HAL_EFFECT_ADMISSION_INDEX_CAP:return false
-    val key=effect_admission_key(adapter_handle,operation_id)
-    var probe=0
-    while probe<RT_HAL_EFFECT_ADMISSION_INDEX_CAP:
-        val index=(key+probe)%RT_HAL_EFFECT_ADMISSION_INDEX_CAP
-        val stored=rt_hal_effect_admission_keys[index]
-        if stored==key and rt_hal_effect_admission_handles[index]==adapter_handle and
-           rt_hal_effect_admission_operations[index]==operation_id:return false
-        if stored==0:
-            rt_hal_effect_admission_keys[index]=key
-            rt_hal_effect_admission_handles[index]=adapter_handle
-            rt_hal_effect_admission_operations[index]=operation_id
-            return true
-        probe=probe+1
-    false
-
-# Read-only sealed-plan query.  It is valid during Installing for the cold
-# compiler/runtime reconciliation and during Ready for request capture.  It
-# never grants authority: the answer is derived solely from adapter-4 rows
-# already accepted by the pinned host registry.
-pub fn rt_hal_process_operation_effect_admission_matches(operation_id: text,
-        require_effect: bool,compare_c: bool,compare_rust: bool) ->bool:
-    if operation_identity_error(operation_id)!="":return false
-    if not rt_hal_process_lifecycle_is_installing() and not rt_hal_process_lifecycle_is_ready():
-        return false
-    var provider=1
-    while provider<=2:
-        val enabled=(provider==1 and compare_c) or (provider==2 and compare_rust)
-        if enabled:
-            val handle=rt_hal_process_adapter_handle_for_kind(provider)
-            if handle<=0:return false
-            val found=effect_admission_slot(handle,operation_id)>=0
-            if found!=require_effect:return false
-        provider=provider+1
-    true
-
-# Provider code is intentionally a closed controller ABI: 1=C, 2=Rust.
-# Return only the installed opaque adapter handle, never the executable or
-# host capability.  A missing required provider remains a fail-closed zero.
-pub fn rt_hal_process_adapter_handle_for_kind(provider_code: i64) ->i64:
-    var index=0
-    while index<rt_hal_adapters.len():
-        val adapter=rt_hal_adapters[index]
-        if (provider_code==1 and adapter.kind==RtHalProcessAdapterKind.C) or
-           (provider_code==2 and adapter.kind==RtHalProcessAdapterKind.Rust):
-            return adapter.handle
-        index=index+1
-    0
-
-pub fn rt_hal_process_io_timeout_ticks() ->i64:
-    if not controller_ok():return 0
-    rt_hal_io_timeout_ticks
-
-# The exact host owns the monotonic deadline source. IO V2 tasks use the same
-# controller-owned clock so every provider in one fanout wave receives one
-# absolute deadline, rather than a fresh relative budget per join.
-pub fn rt_hal_process_io_deadline_after(timeout_ticks: i64) ->i64:
-    if not controller_ok() or timeout_ticks<=0:return -1
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    host.deadline_after_fn(timeout_ticks)
-
-# Producers never receive IO task handles. This controller-only helper keeps
-# generation validation, cancellation/reap, close, and slot release together.
-pub fn rt_hal_process_cancel_io_task(task_handle: i64) ->bool:
-    if not controller_ok():return false
-    val slot=task_slot(task_handle)
-    if slot<0 or (not rt_hal_tasks[slot].io_v2 and not rt_hal_tasks[slot].io_v3):return false
-    cancel(task_handle)
-
-pub fn rt_hal_process_io_max_retained_bytes() ->i64:
-    if not controller_ok():return 0
-    rt_hal_io_max_retained_bytes
-
-pub fn rt_hal_process_register_post_quiescence_reset(reset: fn() ->bool) ->bool:
-    # Function values are stored only during the single Installing
-    # transaction. The write must not race the Ready seal.
-    if rt_hal_host==nil:return false
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    val caller=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==1 and not rt_hal_install_mutation_reserved and
-        not rt_hal_teardown_reserved and
-        (caller==rt_hal_installer_owner_id or caller==rt_hal_controller_owner_id) and
-        rt_hal_post_quiescence_reset==nil
-    if allowed:rt_hal_post_quiescence_reset=Some(reset)
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
-
-pub fn rt_hal_process_register_post_quiescence_drain(drain: fn() ->bool) ->bool:
-    if rt_hal_host==nil:return false
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    val caller=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return false
-    val allowed=rt_hal_lifecycle_state==1 and not rt_hal_install_mutation_reserved and
-        not rt_hal_teardown_reserved and
-        (caller==rt_hal_installer_owner_id or caller==rt_hal_controller_owner_id) and
-        rt_hal_post_quiescence_drain==nil
-    if allowed:rt_hal_post_quiescence_drain=Some(drain)
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    allowed
+        adapter.executable.identity_hash, RT_HAL_SCALAR_ARGV_SCHEMA
+    ):
+        return "RTHAL-E-PROVIDER-ABI"
+    rt_hal_adapters.push(adapter)
+    ""
 
 pub fn rt_hal_process_arena_shutdown() -> text:
     if rt_hal_host == nil: return ""
-    val host = rt_hal_host ?? rt_hal_unavailable_isolated_exact_host_v2()
-    # Snapshot the external owner before taking the non-reentrant lifecycle
-    # mutex.  The claim is held across all host callbacks and released on all
-    # exits, including retryable failures.
-    val owner=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var admission=""
-    if rt_hal_install_mutation_reserved or rt_hal_teardown_reserved:
-        admission="RTHAL-E-LIFECYCLE"
-    elif rt_hal_lifecycle_state==1:
-        if owner<=0 or owner!=rt_hal_installer_owner_id:admission="RTHAL-E-OWNER"
-    elif rt_hal_lifecycle_state==3:
-        if owner<=0 or owner!=rt_hal_controller_owner_id:admission="RTHAL-E-OWNER"
-    else:
-        admission="RTHAL-E-LIFECYCLE"
-    if admission=="":rt_hal_teardown_reserved=true
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if admission!="":return admission
+    if not installer_ok() and not controller_ok(): return "RTHAL-E-OWNER"
+    val host = rt_hal_host ?? rt_hal_unavailable_isolated_host()
     var error = ""
     var slot = 0
     while slot < rt_hal_tasks.len():
         if rt_hal_tasks[slot].active:
-            val cleanup=cleanup_slot(slot)
-            # A failed cancel/reap or close leaves the task generation active
-            # and poisons this draining arena.  In particular, do not invoke
-            # host shutdown below: it could free host/wire state while a
-            # retained slot still represents a live child lease.
-            if cleanup!="" and error=="":error=cleanup
+            val task = rt_hal_tasks[slot]
+            if not host.cancel_and_reap_fn(task.host_handle, 1000): error = "RTHAL-E-CANCEL"
+            if not host.close_fn(task.host_handle): error = "RTHAL-E-CANCEL"
+            release_slot(slot)
         slot = slot + 1
-    if error!="":
-        if mutex_lock(rt_hal_lifecycle_lock)!=nil:
-            rt_hal_teardown_reserved=false
-            mutex_unlock(rt_hal_lifecycle_lock,0)
-        return error
-    # Persist each successful host shutdown acknowledgement before advancing
-    # to the next edge.  A later edge may fail, but retry must not call an
-    # earlier host shutdown twice (nor close a pinned executable twice).
-    if error=="" and rt_hal_io_host_v2!=nil and not rt_hal_io_v2_shutdown_acknowledged:
-        val io_host=rt_hal_io_host_v2??rt_hal_unavailable_isolated_io_host_v2()
-        if io_host.shutdown_fn():rt_hal_io_v2_shutdown_acknowledged=true
-        elif error=="":error="RTHAL-E-IO-V2-SHUTDOWN"
-    if error=="" and rt_hal_io_host_v3!=nil and not rt_hal_io_v3_shutdown_acknowledged:
-        val io_host=rt_hal_io_host_v3??rt_hal_unavailable_isolated_io_host_v3()
-        if io_host.shutdown_fn():rt_hal_io_v3_shutdown_acknowledged=true
-        elif error=="":error="RTHAL-E-IO-V3-SHUTDOWN"
-    if error=="" and not rt_hal_host_shutdown_acknowledged:
-        if host.shutdown_fn():rt_hal_host_shutdown_acknowledged=true
-        elif error=="": error = "RTHAL-E-HOST-SHUTDOWN"
-    # Generic V2 teardown owns this edge: do not reset a typed transcript
-    # until both IO and base host owners have quiesced successfully.
-    if error=="" and rt_hal_post_quiescence_reset!=nil:
-        val reset=rt_hal_post_quiescence_reset.unwrap()
-        if not reset():error="RTHAL-E-EXIT-RESET"
-        else:rt_hal_post_quiescence_reset=nil
-    if error=="":
-        rt_hal_adapters = []
-        rt_hal_exact_registry=nil
-        rt_hal_exact_worker_count=0
-        rt_hal_exact_queue_capacity=0
-        rt_hal_exact_timeout_ticks=0
-        rt_hal_exact_max_output_bytes=0
-        rt_hal_exact_require_all=false
-        rt_hal_exact_compare_c=false
-        rt_hal_exact_compare_rust=false
-        rt_hal_exact_wave_handles=[]
-        rt_hal_exact_wave_ordinals=[]
-        rt_hal_exact_wave_leased=false
-        rt_hal_effect_admission_keys=[]
-        rt_hal_effect_admission_operations=[]
-        rt_hal_effect_admission_handles=[]
-        rt_hal_operation_adapter_count=0
-        rt_hal_effect_adapter_count=0
-        rt_hal_tasks = []
-        rt_hal_host = nil
-        rt_hal_io_host_v2=nil
-        rt_hal_io_host_v3=nil
-        rt_hal_installer_owner_id = -1
-        rt_hal_controller_owner_id = -1
-        rt_hal_host_shutdown_acknowledged=false
-        rt_hal_io_v2_shutdown_acknowledged=false
-        rt_hal_io_v3_shutdown_acknowledged=false
-        rt_hal_io_timeout_ticks=0;rt_hal_io_max_retained_bytes=0
-        rt_hal_post_quiescence_drain=nil
-        rt_hal_install_mutation_reserved=false
-        # The reset hook has run successfully above. Only now may a later
-        # library lifetime replace the boundary owner/TLS state.
-        rt_hal_boundary_reset()
-    # On failure retain the complete Draining state, including hooks and
-    # arena ownership. Reentry is rejected by lifecycle state 3; no later
-    # initialization can inherit a partially torn-down transcript.
-    if mutex_lock(rt_hal_lifecycle_lock)!=nil:
-        rt_hal_teardown_reserved=false
-        mutex_unlock(rt_hal_lifecycle_lock,0)
+    if not host.shutdown_fn(): error = "RTHAL-E-CANCEL"
+    rt_hal_adapters = []
+    rt_hal_tasks = []
+    rt_hal_host = nil
+    rt_hal_installer_owner_id = -1
+    rt_hal_controller_owner_id = -1
     error
 
 pub fn rt_hal_process_arena_reset() -> text: rt_hal_process_arena_shutdown()
 
-pub fn rt_hal_process_exact_arena() -> RtHalExactArenaPortV2:
+pub fn rt_hal_process_exact_arena() -> RtHalExactArenaPort:
     val available = rt_hal_host != nil
-    RtHalExactArenaPortV2(
+    RtHalExactArenaPort(
         capabilities: RtHalTaskArenaCapabilities(
             available: available, bounded_queue: available,
             bounded_timed_join: available, cancellation: available,
             frozen_scalar_input: true, isolated_scalar_result: true
         ), spawn_compare_fn: spawn_compare_exact,
         spawn_replay_fn: spawn_replay_exact,
-        deadline_after_fn: exact_deadline_after,
-        join_until_fn: join_exact_until, cancel_fn: cancel,
-        wave_claim_fn: exact_wave_claim,
-        wave_release_fn: exact_wave_release,
-        wave_capacity_fn: exact_wave_capacity,
-        wave_store_fn: exact_wave_store,
-        wave_handle_fn: exact_wave_handle,
-        wave_ordinal_fn: exact_wave_ordinal
+        join_until_fn: join_exact_until, cancel_fn: cancel
     )
 
-# Cold installer construction only.  The adapter catalog is mutable while the
-# installer binds host capabilities, so this is the one permitted catalog scan.
-# It must not be called by `rt_hal_process_compare_observed_exact`.
-fn exact_registry_cold_build(comparison: RtHalComparison) -> RtHalProviderRegistry:
+fn exact_registry(comparison: RtHalComparison) -> RtHalProviderRegistry:
     var providers: [RtHalDelegatedProvider] = []
     var ordinal = 0
     while ordinal < comparison.providers.len():
@@ -1498,143 +369,30 @@ fn exact_registry_cold_build(comparison: RtHalComparison) -> RtHalProviderRegist
         ordinal = ordinal + 1
     RtHalProviderRegistry(providers: providers)
 
-# Source contract for the hot exact-comparison boundary:
-#
-# * it accepts only the same fixed Pure/C/Rust provider order installed by the
-#   controller;
-# * it performs no vector construction, registry lookup, hashing, or text
-#   concatenation; and
-# * state is published only after the immutable registry is accepted by the
-#   compiler boundary, then cleared only after controller-owned shutdown.
-#
-# The provider set is fixed by `rt_hal_default_comparison`, so direct ordinal
-# checks are both stricter and cheaper than an open-ended provider scan.
-fn exact_comparison_matches_installed(comparison: RtHalComparison) ->bool:
-    if rt_hal_exact_registry==nil or
-       comparison.worker_count!=rt_hal_exact_worker_count or
-       comparison.queue_capacity!=rt_hal_exact_queue_capacity or
-       comparison.timeout_ticks!=rt_hal_exact_timeout_ticks or
-       comparison.max_output_bytes!=rt_hal_exact_max_output_bytes or
-       comparison.require_all!=rt_hal_exact_require_all:
-        return false
-    val expected=1+(if rt_hal_exact_compare_c:1 else:0)+
-        (if rt_hal_exact_compare_rust:1 else:0)
-    if expected>RT_HAL_EXACT_PROVIDER_MAX or comparison.providers.len()!=expected:
-        return false
-    val pure=comparison.providers[0]
-    if pure.provider_id!="pure-simple" or pure.kind!=RtHalProviderKind.PureSimple or
-       pure.abi_version!=1 or pure.schema_version!=1 or
-       not pure.query_capable or not pure.replay_capable:return false
-    var ordinal=1
-    if rt_hal_exact_compare_c:
-        val c=comparison.providers[ordinal]
-        if c.provider_id!="c-comparator" or c.kind!=RtHalProviderKind.CComparator or
-           c.abi_version!=1 or c.schema_version!=1 or
-           not c.query_capable or not c.replay_capable:return false
-        ordinal=ordinal+1
-    if rt_hal_exact_compare_rust:
-        val rust=comparison.providers[ordinal]
-        if rust.provider_id!="rust-comparator" or rust.kind!=RtHalProviderKind.RustComparator or
-           rust.abi_version!=1 or rust.schema_version!=1 or
-           not rust.query_capable or not rust.replay_capable:return false
-    true
-
 pub fn rt_hal_process_exact_ready(comparison: RtHalComparison) -> bool:
-    rt_hal_host != nil and exact_comparison_matches_installed(comparison)
+    rt_hal_host != nil and exact_registry(comparison).providers.len() == comparison.providers.len()
 
 pub fn rt_hal_process_compare_observed_exact(comparison: RtHalComparison, requests: [RtHalExactRequest], receipts: [RtHalCanonicalReceipt]) -> RtHalExactReport:
-    # Fixed-registry hot path: no provider vector allocation and no mutable
-    # adapter catalog scan.  The lifecycle controller is the exclusive writer.
-    if rt_hal_host == nil or not exact_comparison_matches_installed(comparison):
+    if not rt_hal_process_exact_ready(comparison):
         return RtHalExactReport(results: [], error: "RTHAL-W-PARALLEL-UNSUPPORTED", submitted_tasks: 0, completed_tasks: 0, cancelled_tasks: 0, actual_parallel: false)
-    val registry=rt_hal_exact_registry.unwrap()
     val controller_problem = rt_hal_process_controller_claim()
     if controller_problem != "":
         return RtHalExactReport(results: [], error: controller_problem, submitted_tasks: 0, completed_tasks: 0, cancelled_tasks: 0, actual_parallel: false)
-    rt_hal_compare_observed_pure_exact(comparison, requests, receipts, registry, rt_hal_process_exact_arena())
+    rt_hal_compare_observed_pure_exact(comparison, requests, receipts, exact_registry(comparison), rt_hal_process_exact_arena())
 
 # Installs the foreign-only exact arena into the compiler boundary. Pure is a
 # synthetic registry authority only and is never bound or spawned.
 pub fn rt_hal_process_install_boundary_exact(compare_c: bool, compare_rust: bool, worker_count: i64, queue_capacity: i64, timeout_ticks: i64, max_output_bytes: i64) -> text:
-    # This is a cold publication transaction.  Keep the lifecycle lock from
-    # admission through the lower-boundary install and the paired cache write:
-    # a Ready/Draining transition or a second installer can therefore neither
-    # overwrite a published registry nor observe a half-published contract.
-    # Do this before constructing the comparison/registry, whose vectors are
-    # cold allocations but must not occur for an unauthorized caller.
-    # Reserve the one mutable installer transaction before asking the host who
-    # the caller is.  `current_owner_fn` is an external callback and may
-    # synchronously try to install an IO port or start teardown; it must never
-    # execute under this non-reentrant lock, nor be able to publish during the
-    # snapshot-to-commit gap.
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    var admission=""
-    if rt_hal_lifecycle_state!=1 or rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved:
-        admission="RTHAL-E-LIFECYCLE"
-    elif rt_hal_host==nil or rt_hal_installer_owner_id<=0:
-        admission="RTHAL-E-OWNER"
-    # A local registry and its scalar contract are one publication unit.
-    # Reject either half being present: accepting a second install would make
-    # an old comparator cache disagree with the boundary authority.
-    elif rt_hal_exact_registry!=nil or
-         rt_hal_exact_worker_count!=0 or rt_hal_exact_queue_capacity!=0 or
-         rt_hal_exact_timeout_ticks!=0 or rt_hal_exact_max_output_bytes!=0 or
-         rt_hal_exact_require_all or rt_hal_exact_compare_c or
-         rt_hal_exact_compare_rust:
-        admission="RTHAL-E-ARENA-BUSY"
-    if admission=="":rt_hal_install_mutation_reserved=true
-    val host=rt_hal_host??rt_hal_unavailable_isolated_exact_host_v2()
-    val installer=rt_hal_installer_owner_id
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    if admission!="":
-        return admission
-    # Snapshot outside the lifecycle mutex.  Reentrant lifecycle APIs see the
-    # reservation above and fail closed without mutating IO/teardown state.
-    val caller=host.current_owner_fn()
-    if mutex_lock(rt_hal_lifecycle_lock)==nil:return "RTHAL-E-OWNER"
-    if rt_hal_lifecycle_state!=1 or not rt_hal_install_mutation_reserved or
-       rt_hal_teardown_reserved or rt_hal_host==nil or
-       rt_hal_installer_owner_id!=installer or caller!=installer:
-        rt_hal_install_mutation_reserved=false
-        mutex_unlock(rt_hal_lifecycle_lock,0)
-        return "RTHAL-E-OWNER"
-    if not compare_c and not compare_rust:
-        rt_hal_install_mutation_reserved=false
-        mutex_unlock(rt_hal_lifecycle_lock,0)
-        return "RTHAL-W-PARALLEL-UNSUPPORTED"
+    if not compare_c and not compare_rust: return "RTHAL-W-PARALLEL-UNSUPPORTED"
     val comparison = rt_hal_default_comparison(
         compare_c, compare_rust, worker_count, queue_capacity,
         timeout_ticks, max_output_bytes, true
     )
     val comparison_problem = rt_hal_comparison_error(comparison)
-    if comparison_problem != "":
-        rt_hal_install_mutation_reserved=false
-        mutex_unlock(rt_hal_lifecycle_lock,0)
-        return comparison_problem
-    val registry=exact_registry_cold_build(comparison)
-    if registry.providers.len()!=comparison.providers.len():
-        rt_hal_install_mutation_reserved=false
-        mutex_unlock(rt_hal_lifecycle_lock,0)
+    if comparison_problem != "": return comparison_problem
+    if not rt_hal_process_exact_ready(comparison):
         return "RTHAL-W-PARALLEL-UNSUPPORTED"
-    val installed=rt_hal_boundary_install_exact_v2(registry, rt_hal_process_exact_arena())
-    if installed=="":
-        # Publish only after the boundary accepted the same immutable registry.
-        # The lifecycle has a single installer, so no comparison can observe a
-        # partial map; Ready is not entered until this function returns.
-        rt_hal_exact_registry=Some(registry)
-        rt_hal_exact_worker_count=worker_count
-        rt_hal_exact_queue_capacity=queue_capacity
-        rt_hal_exact_timeout_ticks=timeout_ticks
-        rt_hal_exact_max_output_bytes=max_output_bytes
-        rt_hal_exact_require_all=true
-        rt_hal_exact_compare_c=compare_c
-        rt_hal_exact_compare_rust=compare_rust
-        rt_hal_io_timeout_ticks=timeout_ticks
-        rt_hal_io_max_retained_bytes=max_output_bytes
-    rt_hal_install_mutation_reserved=false
-    mutex_unlock(rt_hal_lifecycle_lock,0)
-    installed
+    rt_hal_boundary_install_exact(exact_registry(comparison), rt_hal_process_exact_arena())
 
 pub fn rt_hal_c_process_adapter(handle: i64, executable: EnvToolIdentity) -> RtHalProcessAdapter:
     RtHalProcessAdapter(handle: handle, provider_id: "c-comparator", kind: RtHalProcessAdapterKind.C, executable: executable, query_capable: true, replay_capable: true)
@@ -1645,35 +403,12 @@ pub fn rt_hal_rust_process_adapter(handle: i64, executable: EnvToolIdentity) -> 
 export RtHalProcessAdapterKind, RtHalProcessAdapter
 export RtHalIsolatedHostCapabilities, RtHalIsolatedHostPort
 export rt_hal_unavailable_isolated_host, rt_hal_process_host_install
-export RtHalIsolatedExactHostPortV2,RtHalIsolatedIoHostPortV2,RtHalIsolatedIoHostPortV3
-export rt_hal_unavailable_isolated_exact_host_v2
-export rt_hal_process_exact_host_v2_install
-export rt_hal_process_exact_host_v2_install_for_assurance
-export rt_hal_unavailable_isolated_io_host_v2,rt_hal_process_io_host_v2_install
-export rt_hal_unavailable_isolated_io_host_v3,rt_hal_process_io_host_v3_install
 export rt_hal_process_adapter_error, rt_hal_process_adapter_register
-export rt_hal_process_operation_adapter_register
-export rt_hal_process_operation_effect_adapter_register
-export rt_hal_process_operation_effect_admission_matches
-export rt_hal_process_adapter_handle_for_kind,rt_hal_process_io_timeout_ticks
-export rt_hal_process_io_max_retained_bytes
-export rt_hal_process_io_deadline_after,rt_hal_process_cancel_io_task
 export rt_hal_process_arena_reset, rt_hal_process_arena_shutdown
-export rt_hal_process_register_post_quiescence_reset
-export rt_hal_process_lifecycle_begin_install,rt_hal_process_lifecycle_fail_install
-export rt_hal_process_lifecycle_mark_ready,rt_hal_process_lifecycle_begin_draining
-export rt_hal_process_lifecycle_finish_closed,rt_hal_process_lifecycle_is_closed
-export rt_hal_process_lifecycle_is_ready,rt_hal_process_lifecycle_is_installing
-export rt_hal_process_lifecycle_is_draining
-export rt_hal_process_lifecycle_is_ready_for_plan
 export rt_hal_process_controller_claim, rt_hal_process_drain_owner
 export rt_hal_process_register_current_owner
 export rt_hal_process_finalize_current_owner
 export rt_hal_process_exact_arena, rt_hal_process_exact_ready
 export rt_hal_process_compare_observed_exact
-export rt_hal_process_spawn_compare_io,rt_hal_process_spawn_replay_io
-export rt_hal_process_spawn_compare_io_v3,rt_hal_process_spawn_replay_io_v3
-export rt_hal_process_encode_submit_io,rt_hal_process_join_io_until
-export rt_hal_process_join_admit_io
 export rt_hal_process_install_boundary_exact
 export rt_hal_c_process_adapter, rt_hal_rust_process_adapter

@@ -2,6 +2,7 @@
 # after a module parse has finished and the lexer is idle.
 
 use compiler.core.ast.{
+    EXPR_IDENT,
     EXPR_STRING_LIT,
     expr_count,
     expr_get_int,
@@ -32,6 +33,40 @@ use compiler.frontend.desugar.placeholder_lambda.{
     set_placeholder_transform_suppressed,
     transform_interpolated_placeholder_args
 }
+
+use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
+
+# Level-gated operation counters (DEFAULT OFF; SIMPLE_PARSE_PHASE_PROFILE=1).
+# These count OPERATIONS, not milliseconds: how many string literals each pass
+# looks at, and how many of them pay a real lex+parse SUB-PARSE. That ratio is
+# the mechanism this file's performance work is pinned on -- a timing number
+# alone cannot tell a slow machine from a pass doing avoidable work.
+# NOT a throwaway probe -- do not delete.
+var _si_prof_cached: i64 = -1
+var si_stat_literals_seen: i64 = 0
+var si_stat_subparses: i64 = 0
+var si_stat_ph_args_seen: i64 = 0
+var si_stat_nodes_walked: i64 = 0
+var si_stat_subparse_us: i64 = 0
+
+fn si_prof_enabled() -> bool:
+    if _si_prof_cached < 0:
+        _si_prof_cached = if (env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    _si_prof_cached == 1
+
+pub fn si_stats_reset():
+    si_stat_literals_seen = 0
+    si_stat_subparses = 0
+    si_stat_ph_args_seen = 0
+    si_stat_nodes_walked = 0
+    si_stat_subparse_us = 0
+
+pub fn si_stat_subparse_count() -> i64: si_stat_subparses
+pub fn si_stat_literal_count() -> i64: si_stat_literals_seen
+
+pub fn si_stats_report(tag: text):
+    if si_prof_enabled():
+        print("PARSESTAT\t{tag}\tliterals\t{si_stat_literals_seen}\tsubparses\t{si_stat_subparses}\tph_args\t{si_stat_ph_args_seen}\tnodes_walked\t{si_stat_nodes_walked}\tsubparse_us\t{si_stat_subparse_us}")
 
 fn interpolation_fragment_is_brace_literal(inner: text) -> bool:
     """Bug interp_brace_literal_collides_with_string_interpolation: a `{...}`
@@ -68,6 +103,8 @@ fn parse_interpolation_fragment(inner: text) -> i64:
     # new expression nodes append to the same AST arena.
     if interpolation_fragment_is_brace_literal(inner):
         return -1
+    si_stat_subparses = si_stat_subparses + 1
+    val _sp_t0 = if si_prof_enabled(): time_now_unix_micros() else: 0
     val had_error_before = parser_has_errors()
     val diagnostics_before = parser_diagnostics_suppressed_get()
     val placeholder_before = set_placeholder_transform_suppressed(true)
@@ -83,31 +120,54 @@ fn parse_interpolation_fragment(inner: text) -> i64:
     parser_set_had_error(had_error_before)
     parser_diagnostics_suppressed_set(diagnostics_before)
     set_placeholder_transform_suppressed(placeholder_before)
+    if si_prof_enabled():
+        si_stat_subparse_us = si_stat_subparse_us + (time_now_unix_micros() - _sp_t0)
     if not clean:
         return -1
     idx
 
 fn decode_interpolation_brace_escapes(value: text) -> text:
-    var result = ""
+    # Fast path (perf, exact): this function only ever rewrites `{{` -> `{` and
+    # `}}` -> `}`. A value carrying neither doubled brace decodes to itself, so
+    # entering the scanner is pure waste for the overwhelming majority of
+    # string literals. Measured 2026-08-21: the old loop ran over every plain
+    # literal and grew `result + ch` once per character. The slow path below
+    # keeps untouched source spans and joins once, so brace-bearing inputs no
+    # longer retain that quadratic accumulator-copy term. See
+    # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
+    if not (value.contains("{{") or value.contains("}}")):
+        return value
+    var chunks: [text] = []
+    var copied_until = 0
     var i = 0
     while i < value.len():
         val ch = value[i:i + 1]
         val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
         if ch == "{" and next == "{":
-            result = result + "{"
+            chunks.push(value.substring(copied_until, i))
+            chunks.push("{")
             i = i + 2
+            copied_until = i
         elif ch == "}" and next == "}":
-            result = result + "}"
+            chunks.push(value.substring(copied_until, i))
+            chunks.push("}")
             i = i + 2
+            copied_until = i
         else:
-            result = result + ch
             i = i + 1
-    result
+    chunks.push(value.substring(copied_until, value.len()))
+    chunks.join("")
 
 fn parse_string_interpolation_parts(value: text) -> [i64]:
+    # Fast path (perf, exact): every branch of the scanner below is gated on
+    # seeing a `{` or a `}`. A literal with neither cannot produce a part and
+    # cannot leave `depth != 0`, so it always returns `[]` -- reached here
+    # without the per-character `value[i:i+1]` substring allocations.
+    if not (value.contains("{") or value.contains("}")):
+        return []
     var parts: [i64] = []
     var depth = 0
-    var inner = ""
+    var inner_start = -1
     var i = 0
     while i < value.len():
         val ch = value[i:i + 1]
@@ -118,21 +178,22 @@ fn parse_string_interpolation_parts(value: text) -> [i64]:
             i = i + 1
         elif depth == 0 and ch == "{":
             depth = 1
-            inner = ""
+            inner_start = i + 1
         elif depth > 0 and ch == "{":
             depth = depth + 1
-            inner = inner + ch
         elif depth > 0 and ch == "}":
             depth = depth - 1
             if depth == 0:
+                # The old scanner appended one one-character substring at a
+                # time (`inner = inner + ch`), reallocating/copying the growing
+                # fragment quadratically. The matching indices already delimit
+                # the exact same text, including nested braces, so materialize
+                # it once at the completed-region boundary.
+                val inner = value.substring(inner_start, i)
                 val part = parse_interpolation_fragment(inner)
                 if part < 0:
                     return []
                 parts.push(part)
-            else:
-                inner = inner + ch
-        elif depth > 0:
-            inner = inner + ch
         i = i + 1
     if depth != 0:
         return []
@@ -201,7 +262,12 @@ fn expand_string_interpolations_with_placeholder_receipt(start_expr: i64) -> boo
     var has_placeholder_ident = false
     var idx = start_expr
     while idx < expr_count():
-        if expr_get_tag(idx) == EXPR_STRING_LIT and expr_get_int(idx) == 0:
+        si_stat_nodes_walked = si_stat_nodes_walked + 1
+        val tag = expr_get_tag(idx)
+        if not has_placeholder_ident and tag == EXPR_IDENT and placeholder_ident_name(expr_get_str(idx)):
+            has_placeholder_ident = true
+        elif tag == EXPR_STRING_LIT and expr_get_int(idx) == 0:
+            si_stat_literals_seen = si_stat_literals_seen + 1
             val value = expr_get_str(idx)
             val parts = parse_string_interpolation_parts(value)
             if parts.len() > 0:
@@ -211,3 +277,7 @@ fn expand_string_interpolations_with_placeholder_receipt(start_expr: i64) -> boo
                     idx, decode_interpolation_brace_escapes(value)
                 )
         idx = idx + 1
+    has_placeholder_ident
+
+fn expand_string_interpolations(start_expr: i64):
+    val _has_placeholder = expand_string_interpolations_with_placeholder_receipt(start_expr)

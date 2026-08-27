@@ -47,19 +47,21 @@ struct MacroExpander:
 impl MacroExpander:
     static fn new() -> MacroExpander:
         return MacroExpander {
-            macros: Dict.new(),
+            macros: {},
             expansion_depth: 0,
             max_depth: 256
         }
 
     fn register(m: Macro):
-        self.macros.set(m.name.clone(), m)
+        self.macros[m.name.clone()] = m
 
     fn has_macro(name: &str) -> bool:
         return self.macros.contains_key(name)
 
     fn get_macro(name: &str) -> Option<&Macro>:
-        return self.macros.get(name)
+        if self.macros.contains_key(name):
+            return Some(self.macros[name])
+        return nil
 
 # Expand a macro invocation
 fn expand_macro(expander: &mut MacroExpander, name: &str, args: &Array<Expr>) -> Result<Expr, InterpreterError>:
@@ -70,19 +72,19 @@ fn expand_macro(expander: &mut MacroExpander, name: &str, args: &Array<Expr>) ->
     # Look up macro
     match expander.get_macro(name):
         case Some(m):
-            expander.expansion_depth += 1
+            expander.expansion_depth = expander.expansion_depth + 1
 
             # Try each rule
             for rule in m.rules:
                 match try_match_rule(&rule, args):
                     case Some(bindings):
                         val result = apply_template(&rule.template, &bindings)?
-                        expander.expansion_depth -= 1
+                        expander.expansion_depth = expander.expansion_depth - 1
                         return Ok(result)
                     case nil:
                         continue
 
-            expander.expansion_depth -= 1
+            expander.expansion_depth = expander.expansion_depth - 1
             return Err(InterpreterError.MacroError("no matching rule for: {name}".to_string()))
 
         case nil:
@@ -90,7 +92,7 @@ fn expand_macro(expander: &mut MacroExpander, name: &str, args: &Array<Expr>) ->
 
 # Try to match a macro rule
 fn try_match_rule(rule: &MacroRule, args: &Array<Expr>) -> Option<Dict<String, MacroBinding>>:
-    val bindings: Dict<String, MacroBinding> = Dict.new()
+    var bindings: Dict<String, MacroBinding> = {}
 
     if match_pattern(&rule.pattern, args, &mut bindings):
         return Some(bindings)
@@ -112,14 +114,14 @@ fn match_pattern(pattern: &MacroPattern, args: &Array<Expr>, bindings: &mut Dict
         case MacroPattern.Ident(name):
             # Bind identifier
             if args.len() == 1:
-                bindings.set(name.clone(), MacroBinding.Single(args[0].clone()))
+                bindings[name.clone()] = MacroBinding.Single(args[0].clone())
                 return true
             return false
 
         case MacroPattern.Expr(name):
             # Bind expression
             if args.len() == 1:
-                bindings.set(name.clone(), MacroBinding.Single(args[0].clone()))
+                bindings[name.clone()] = MacroBinding.Single(args[0].clone())
                 return true
             return false
 
@@ -130,7 +132,7 @@ fn match_pattern(pattern: &MacroPattern, args: &Array<Expr>, bindings: &mut Dict
 
             while idx < args.len():
                 # Try to match the pattern at current position
-                val item_bindings: Dict<String, MacroBinding> = Dict.new()
+                var item_bindings: Dict<String, MacroBinding> = {}
                 if match_pattern(pattern, &[args[idx].clone()], &mut item_bindings):
                     items.push(args[idx].clone())
                     idx += 1
@@ -166,7 +168,7 @@ fn match_pattern(pattern: &MacroPattern, args: &Array<Expr>, bindings: &mut Dict
                 case MacroPattern.Ident(name): name.clone()
                 case _: "items".to_string()
 
-            bindings.set(var_name, MacroBinding.Sequence(items))
+            bindings[var_name] = MacroBinding.Sequence(items)
             return true
 
         case MacroPattern.Group(patterns):
@@ -188,11 +190,13 @@ fn apply_template(template: &MacroTemplate, bindings: &Dict<String, MacroBinding
             return Ok(Expr.Identifier(s.clone()))
 
         case MacroTemplate.Var(name):
-            match bindings.get(name):
-                case Some(MacroBinding.Single(expr)):
-                    return Ok(expr.clone())
-                case _:
-                    return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
+            if bindings.contains_key(name):
+                match bindings[name]:
+                    case MacroBinding.Single(expr):
+                        return Ok(expr.clone())
+                    case _:
+                        return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
+            return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
 
         case MacroTemplate.Expr(expr):
             return Ok(*expr.clone())
@@ -208,17 +212,19 @@ fn apply_template(template: &MacroTemplate, bindings: &Dict<String, MacroBinding
             return Ok(Expr.Tuple(exprs))
 
         case MacroTemplate.Sequence(var_name, template, separator):
-            match bindings.get(var_name):
-                case Some(MacroBinding.Sequence(items)):
-                    val exprs: Array<Expr> = []
-                    for item in items:
-                        val item_bindings = Dict.new()
-                        item_bindings.set(var_name.clone(), MacroBinding.Single(item.clone()))
-                        val e = apply_template(template, &item_bindings)?
-                        exprs.push(e)
-                    return Ok(Expr.Array(exprs))
-                case _:
-                    return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
+            if bindings.contains_key(var_name):
+                match bindings[var_name]:
+                    case MacroBinding.Sequence(items):
+                        val exprs: Array<Expr> = []
+                        for item in items:
+                            var item_bindings: Dict<String, MacroBinding> = {}
+                            item_bindings[var_name.clone()] = MacroBinding.Single(item.clone())
+                            val e = apply_template(template, &item_bindings)?
+                            exprs.push(e)
+                        return Ok(Expr.Array(exprs))
+                    case _:
+                        return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
+            return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
 
         case _:
             return Err(InterpreterError.NotImplemented("macro template".to_string()))

@@ -31,33 +31,20 @@ use compiler.core.parser.{par_kind_get, par_text_get}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type}
-use compiler.frontend.core.parser_expr.{parse_expr}
-use compiler.core.tokens.{TOK_KW_DYN, TOK_DOT, TOK_ASSIGN}
-use compiler.core.ast.{decl_enum_payload_unnamed_marker}
+use compiler.core.tokens.{TOK_KW_DYN, TOK_DOT}
 use compiler.core.types.{named_type_register, named_type_find}
+use compiler.frontend.core.flat_pool_codec.*
 
 # One entry per parsed `complete:`/`dyn:` SECTION, in source order.
 var EXTEND_TARGETS: [text] = []
 var EXTEND_CLOSURES: [text] = []          # "complete" | "dyn"
 var EXTEND_CTOR_COUNTS: [i64] = []        # constructors in this section
-var EXTEND_SOURCE_ORDINALS: [i64] = []    # insertion point in flat decl order
 
 # Flat, in-order concatenation across every section (sliced by the counts above).
 var EXTEND_CTOR_PROVIDERS: [text] = []
 var EXTEND_CTOR_NAMES: [text] = []
 var EXTEND_CTOR_TYPE_COUNTS: [i64] = []   # payload arity per constructor
 var EXTEND_CTOR_TYPE_IDS: [i64] = []      # flat payload type ids
-var EXTEND_CTOR_PAYLOAD_KINDS: [i64] = [] # 0 unit, 1 tuple, 2 struct
-var EXTEND_CTOR_FIELD_NAMES: [text] = []  # parallel to TYPE_IDS
-var EXTEND_CTOR_DISCRIMINANTS: [i64] = [] # flat expr id, -1 when absent
-var EXTEND_ATTR_COUNTS:[i64]=[]
-var EXTEND_ATTR_NAMES:[text]=[]
-var EXTEND_ATTR_ARGS:[text]=[]
-var EXTEND_ATTR_ARG_ROWS:[text]=[]
-var EXTEND_ATTR_STARTS:[i64]=[]
-var EXTEND_ATTR_ENDS:[i64]=[]
-var EXTEND_ATTR_LINES:[i64]=[]
-var EXTEND_ATTR_COLS:[i64]=[]
 
 fn parser_extend_targets() -> [text]:
     """Target enum name of each parsed `extend` section, in source order."""
@@ -70,9 +57,6 @@ fn parser_extend_closures() -> [text]:
 fn parser_extend_ctor_counts() -> [i64]:
     """Constructor count of each parsed `extend` section."""
     EXTEND_CTOR_COUNTS
-
-fn parser_extend_source_ordinals() -> [i64]:
-    EXTEND_SOURCE_ORDINALS
 
 fn parser_extend_ctor_providers() -> [text]:
     """Flat provider names across all `extend` sections."""
@@ -89,49 +73,16 @@ fn parser_extend_ctor_type_counts() -> [i64]:
 fn parser_extend_ctor_type_ids() -> [i64]:
     """Flat payload type ids, sliceable by parser_extend_ctor_type_counts()."""
     EXTEND_CTOR_TYPE_IDS
-fn parser_extend_ctor_payload_kinds() -> [i64]: EXTEND_CTOR_PAYLOAD_KINDS
-fn parser_extend_ctor_field_names() -> [text]: EXTEND_CTOR_FIELD_NAMES
-fn parser_extend_ctor_discriminants() -> [i64]: EXTEND_CTOR_DISCRIMINANTS
-fn parser_extend_attr_counts()->[i64]: EXTEND_ATTR_COUNTS
-fn parser_extend_attr_names()->[text]: EXTEND_ATTR_NAMES
-fn parser_extend_attr_args()->[text]: EXTEND_ATTR_ARGS
-fn parser_extend_attr_arg_rows()->[text]: EXTEND_ATTR_ARG_ROWS
-fn parser_extend_attr_starts()->[i64]: EXTEND_ATTR_STARTS
-fn parser_extend_attr_ends()->[i64]: EXTEND_ATTR_ENDS
-fn parser_extend_attr_lines()->[i64]: EXTEND_ATTR_LINES
-fn parser_extend_attr_cols()->[i64]: EXTEND_ATTR_COLS
 
 fn parser_reset_extend_enums():
     """Clear the per-module `extend` registry."""
     EXTEND_TARGETS = []
     EXTEND_CLOSURES = []
     EXTEND_CTOR_COUNTS = []
-    EXTEND_SOURCE_ORDINALS = []
     EXTEND_CTOR_PROVIDERS = []
     EXTEND_CTOR_NAMES = []
     EXTEND_CTOR_TYPE_COUNTS = []
     EXTEND_CTOR_TYPE_IDS = []
-    EXTEND_CTOR_PAYLOAD_KINDS = []
-    EXTEND_CTOR_FIELD_NAMES = []
-    EXTEND_CTOR_DISCRIMINANTS = []
-    EXTEND_ATTR_COUNTS=[]; EXTEND_ATTR_NAMES=[]; EXTEND_ATTR_ARGS=[]
-    EXTEND_ATTR_ARG_ROWS=[]
-    EXTEND_ATTR_STARTS=[]; EXTEND_ATTR_ENDS=[]
-    EXTEND_ATTR_LINES=[]; EXTEND_ATTR_COLS=[]
-
-fn record_extend_attributes(names:[text],args:[text],arg_rows:[text],
-    starts:[i64],ends:[i64],lines:[i64],cols:[i64]):
-    if (args.len()!=names.len() or starts.len()!=names.len() or
-        ends.len()!=names.len() or lines.len()!=names.len() or
-        cols.len()!=names.len() or arg_rows.len()!=names.len()):
-        EXTEND_ATTR_COUNTS.push(-1); return
-    EXTEND_ATTR_COUNTS.push(names.len())
-    var i=0
-    while i<names.len():
-        EXTEND_ATTR_NAMES.push(names[i]); EXTEND_ATTR_ARGS.push(args[i])
-        EXTEND_ATTR_ARG_ROWS.push(arg_rows[i])
-        EXTEND_ATTR_STARTS.push(starts[i]); EXTEND_ATTR_ENDS.push(ends[i])
-        EXTEND_ATTR_LINES.push(lines[i]); EXTEND_ATTR_COLS.push(cols[i]); i=i+1
 
 # Parses one `provider.Name(T, ...)` constructor line. Returns true when a
 # constructor was recorded. The dotted form is REQUIRED: an extension
@@ -139,7 +90,11 @@ fn record_extend_attributes(names:[text],args:[text],arg_rows:[text],
 # the persistent-identity scheme keys on, so an undotted `Name(...)` is a
 # parse error rather than a silently-provider-less constructor.
 fn parse_extend_constructor() -> bool:
-    if par_kind_get() != 6:
+    # The provider is matched on its TEXT, not on TOK_IDENT: real provider
+    # names collide with hard keywords in this lexer (`async.Await(...)` from
+    # the design's own example lexes `async` as TOK_KW_ASYNC), and a provider
+    # namespace is a plain dotted name, not an expression.
+    if not parser_is_identifier_shaped(par_text_get()):
         parser_error("expected `provider.Name(...)` constructor in `extend` section, got " + par_text_get())
         parser_advance()
         return false
@@ -149,14 +104,13 @@ fn parse_extend_constructor() -> bool:
         parser_error("expected `.` after extension provider `" + provider + "`")
         return false
     parser_advance()
-    if par_kind_get() != 6:
+    if not parser_is_identifier_shaped(par_text_get()):
         parser_error("expected constructor name after `" + provider + ".`")
         return false
     val ctor_name = par_text_get()
     parser_advance()
 
     var type_ids: [i64] = []
-    var field_names: [text] = []
     if par_kind_get() == 140:
         parser_advance()
         while true:
@@ -172,38 +126,31 @@ fn parse_extend_constructor() -> bool:
                 if par_kind_get() == 161:
                     parser_advance()
                     type_ids.push(parser_parse_type())
-                    field_names.push(first)
                 else:
                     type_ids.push(parser_type_id_for_name(first))
-                    field_names.push(decl_enum_payload_unnamed_marker())
             elif par_kind_get() == 144:
                 type_ids.push(parser_parse_type())
-                field_names.push(decl_enum_payload_unnamed_marker())
             else:
                 parser_advance()
             if par_kind_get() == 160:
                 parser_advance()
         parser_expect(141)
 
-    var discriminant = -1
-    if par_kind_get() == TOK_ASSIGN:
-        parser_advance()
-        discriminant = parse_expr()
-
     EXTEND_CTOR_PROVIDERS.push(provider)
     EXTEND_CTOR_NAMES.push(ctor_name)
     EXTEND_CTOR_TYPE_COUNTS.push(type_ids.len())
-    var payload_kind = if type_ids.len() == 0: 0 else: 1
-    for field_name in field_names:
-        if field_name != decl_enum_payload_unnamed_marker(): payload_kind = 2
-    EXTEND_CTOR_PAYLOAD_KINDS.push(payload_kind)
-    EXTEND_CTOR_DISCRIMINANTS.push(discriminant)
-    var payload_index = 0
-    while payload_index < type_ids.len():
-        EXTEND_CTOR_TYPE_IDS.push(type_ids[payload_index])
-        EXTEND_CTOR_FIELD_NAMES.push(field_names[payload_index])
-        payload_index = payload_index + 1
+    for t in type_ids:
+        EXTEND_CTOR_TYPE_IDS.push(t)
     true
+
+# True when `t` looks like an identifier (letter/underscore first). Used
+# instead of a TOK_IDENT check so keyword-spelled provider/constructor names
+# are accepted in the dotted extension-constructor position.
+fn parser_is_identifier_shaped(t: text) -> bool:
+    if t == "":
+        return false
+    val c = t.substring(0, 1)
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
 
 # A bare `T` payload position: the identifier was already consumed to decide
 # between `name: T` and `T`, so the type is resolved from its name here rather
@@ -216,10 +163,7 @@ fn parser_type_id_for_name(name: text) -> i64:
 
 # Parses one `complete:` / `dyn:` subsection body. `closure` is the recorded
 # axis spelling. Returns the number of constructors parsed.
-fn parse_extend_section(target:text,closure:text,source_ordinal:i64,
-    attr_names:[text],attr_args:[text],attr_arg_rows:[text],
-    attr_starts:[i64],attr_ends:[i64],
-    attr_lines:[i64],attr_cols:[i64])->i64:
+fn parse_extend_section(target: text, closure: text) -> i64:
     parser_expect(161)
     parser_skip_newlines()
     var count = 0
@@ -229,9 +173,6 @@ fn parse_extend_section(target:text,closure:text,source_ordinal:i64,
         EXTEND_TARGETS.push(target)
         EXTEND_CLOSURES.push(closure)
         EXTEND_CTOR_COUNTS.push(0)
-        EXTEND_SOURCE_ORDINALS.push(source_ordinal)
-        record_extend_attributes(attr_names,attr_args,attr_arg_rows,attr_starts,attr_ends,
-            attr_lines,attr_cols)
         return 0
     parser_advance()
     while true:
@@ -247,9 +188,6 @@ fn parse_extend_section(target:text,closure:text,source_ordinal:i64,
     EXTEND_TARGETS.push(target)
     EXTEND_CLOSURES.push(closure)
     EXTEND_CTOR_COUNTS.push(count)
-    EXTEND_SOURCE_ORDINALS.push(source_ordinal)
-    record_extend_attributes(attr_names,attr_args,attr_arg_rows,attr_starts,attr_ends,
-        attr_lines,attr_cols)
     count
 
 # Parses `extend <EnumName>:` with its `complete:` / `dyn:` subsections.
@@ -257,9 +195,7 @@ fn parse_extend_section(target:text,closure:text,source_ordinal:i64,
 # so an `extend` decl is inert for HIR/MIR/codegen in this change -- exactly
 # like the `layer` marker. Returns -1 so the module-body dispatcher adds
 # nothing.
-fn parse_extend_enum_decl(source_ordinal:i64,attr_names:[text],attr_args:[text],
-    attr_arg_rows:[text],attr_starts:[i64],attr_ends:[i64],
-    attr_lines:[i64],attr_cols:[i64])->i64:
+fn parse_extend_enum_decl() -> i64:
     parser_advance()  # consume `extend`
     if par_kind_get() != 6:
         parser_error("expected enum name after `extend`")
@@ -282,14 +218,12 @@ fn parse_extend_enum_decl(source_ordinal:i64,attr_names:[text],attr_args:[text],
             break
         if par_kind_get() == 6 and par_text_get() == "complete":
             parser_advance()
-            parse_extend_section(target,"complete",source_ordinal,attr_names,
-                attr_args,attr_arg_rows,attr_starts,attr_ends,attr_lines,attr_cols)
+            parse_extend_section(target, "complete")
             saw_section = true
             continue
         if par_kind_get() == TOK_KW_DYN:
             parser_advance()
-            parse_extend_section(target,"dyn",source_ordinal,attr_names,
-                attr_args,attr_arg_rows,attr_starts,attr_ends,attr_lines,attr_cols)
+            parse_extend_section(target, "dyn")
             saw_section = true
             continue
         parser_error("expected `complete:` or `dyn:` in `extend " + target + "`, got " + par_text_get())
@@ -303,3 +237,45 @@ export parse_extend_enum_decl, parser_reset_extend_enums
 export parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts
 export parser_extend_ctor_providers, parser_extend_ctor_names
 export parser_extend_ctor_type_counts, parser_extend_ctor_type_ids
+
+
+# --- flat-AST pool codec: extend-enum registry ------------------------------
+#
+# Dump/restore for this file's per-parse state, in a FIXED SORTED ORDER that
+# dump and restore share. Order is the whole contract: the blob carries no
+# names, so a reordering on one side silently pairs each item with its
+# neighbour's data.
+#
+# Completeness is enforced by scripts/check/check-flat-ast-codec-complete.shs,
+# whose oracle is the per-parse RESET functions. Do not add state here by hand
+# without running it.
+
+pub fn flat_extend_pools_dump() -> text:
+    # Sub-blobs are collected and joined once. `out = out + <sub-blob>` across
+    # ~165 pools re-copied the whole growing multi-megabyte blob on every pool,
+    # which is quadratic in the pool count and paid on every cache-MISS store.
+    # The bytes emitted are unchanged: the same pieces, in the same order.
+    # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
+    var parts: [text] = []
+    parts = parts.push(flat_pool_enc_text(EXTEND_CLOSURES))
+    parts = parts.push(flat_pool_enc_i64(EXTEND_CTOR_COUNTS))
+    parts = parts.push(flat_pool_enc_text(EXTEND_CTOR_NAMES))
+    parts = parts.push(flat_pool_enc_text(EXTEND_CTOR_PROVIDERS))
+    parts = parts.push(flat_pool_enc_i64(EXTEND_CTOR_TYPE_COUNTS))
+    parts = parts.push(flat_pool_enc_i64(EXTEND_CTOR_TYPE_IDS))
+    parts = parts.push(flat_pool_enc_text(EXTEND_TARGETS))
+    parts.join("")
+
+# Returns false when the blob ran short or was malformed; the caller must
+# treat that as a cache MISS and reparse, never as an empty parse.
+pub fn flat_extend_pools_restore(r: FlatPoolReader) -> bool:
+    EXTEND_CLOSURES = flat_pool_dec_text(r)
+    EXTEND_CTOR_COUNTS = flat_pool_dec_i64(r)
+    EXTEND_CTOR_NAMES = flat_pool_dec_text(r)
+    EXTEND_CTOR_PROVIDERS = flat_pool_dec_text(r)
+    EXTEND_CTOR_TYPE_COUNTS = flat_pool_dec_i64(r)
+    EXTEND_CTOR_TYPE_IDS = flat_pool_dec_i64(r)
+    EXTEND_TARGETS = flat_pool_dec_text(r)
+    r.ok
+
+export flat_extend_pools_dump, flat_extend_pools_restore

@@ -272,6 +272,7 @@ impl VirtioBlkDriver:
         rt_virtq_desc_write(_virtq_desc_addr(0), 2, sa_low, sa_high, 1, 2, 0)
 
         # Submit to available ring
+        _virtio_blk_sync_for_device(dma.virt_addr, dma_total)
         _virtq_push_avail(desc0.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
@@ -280,6 +281,8 @@ impl VirtioBlkDriver:
             log_info("[virtio] " + "[virtio-blk] read timeout lba={lba} count={count}")
             val _ = _virtio_blk_free_dma(dma.virt_addr, dma_total)
             return Result.Err("virtio-blk read timeout")
+
+        _virtio_blk_sync_for_cpu(dma.virt_addr, dma_total)
 
         # Check status
         val status = mmio_read8(status_addr)
@@ -372,6 +375,7 @@ impl VirtioBlkDriver:
         val d2_flags = 2
         mmio_write32(d2_addr + 12, d2_flags << 16)
 
+        _virtio_blk_sync_for_device(dma.virt_addr, required_total)
         val d0_u16 = desc0.to_u16()
         _virtq_push_avail(d0_u16.to_u32())
         _virtio_blk_reg_write32(80, 0)
@@ -384,6 +388,8 @@ impl VirtioBlkDriver:
             _virtq_free_desc(fd1.to_u32())
             _virtq_free_desc(fd2.to_u32())
             return Result.Err("virtio-blk read timeout")
+
+        _virtio_blk_sync_for_cpu(dma.virt_addr, required_total)
 
         val status_virt = dma.virt_addr + 16 + data_len.to_u64()
         val status = mmio_read8(status_virt)
@@ -473,6 +479,7 @@ impl VirtioBlkDriver:
         val d2_flags = 2
         mmio_write32(d2_addr + 12, d2_flags << 16)
 
+        _virtio_blk_sync_for_device(dma.virt_addr, required_total)
         val d0_u16 = desc0.to_u16()
         _virtq_push_avail(d0_u16.to_u32())
         _virtio_blk_reg_write32(80, 0)
@@ -485,6 +492,9 @@ impl VirtioBlkDriver:
             _virtq_free_desc(fd1.to_u32())
             _virtq_free_desc(fd2.to_u32())
             return Result.Err("virtio-blk write timeout")
+
+        _virtio_blk_sync_for_cpu(
+            dma.virt_addr + 16 + data_len, 1)
 
         val status_virt = dma.virt_addr + 16 + data_len
         val status = mmio_read8(status_virt)
@@ -572,6 +582,10 @@ impl VirtioBlkDriver:
         mmio_write32(d2_addr + 8, 1)
         mmio_write32(d2_addr + 12, 2 << 16)
 
+        # A FromDevice payload can still share dirty CPU cache lines. Clean it
+        # before transfer, then invalidate only after completion.
+        _virtio_blk_sync_for_device(buf.cpu_virt_addr, data_len)
+        _virtio_blk_sync_for_device(scratch.virt_addr, scratch_len)
         _virtq_push_avail(desc0.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
@@ -582,6 +596,8 @@ impl VirtioBlkDriver:
             val _ = _virtio_blk_free_dma(scratch.virt_addr, scratch_len)
             return Result.Err("virtio-blk read timeout")
 
+        _virtio_blk_sync_for_cpu(scratch.virt_addr, scratch_len)
+        _virtio_blk_sync_for_cpu(buf.cpu_virt_addr, data_len)
         val status = mmio_read8(status_addr)
         _virtq_free_desc(desc0.to_u32())
         _virtq_free_desc(desc1.to_u32())
@@ -651,6 +667,8 @@ impl VirtioBlkDriver:
         mmio_write32(d2_addr + 8, 1)
         mmio_write32(d2_addr + 12, 2 << 16)
 
+        _virtio_blk_sync_for_device(buf.cpu_virt_addr, data_len)
+        _virtio_blk_sync_for_device(scratch.virt_addr, scratch_len)
         _virtq_push_avail(desc0.to_u32())
         _virtio_blk_reg_write32(80, 0)
 
@@ -661,6 +679,7 @@ impl VirtioBlkDriver:
             val _ = _virtio_blk_free_dma(scratch.virt_addr, scratch_len)
             return Result.Err("virtio-blk write timeout")
 
+        _virtio_blk_sync_for_cpu(status_addr, 1)
         val status = mmio_read8(status_addr)
         _virtq_free_desc(desc0.to_u32())
         _virtq_free_desc(desc1.to_u32())

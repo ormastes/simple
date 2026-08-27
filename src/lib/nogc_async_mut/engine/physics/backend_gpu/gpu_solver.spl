@@ -19,17 +19,29 @@ use std.nogc_async_mut.engine.physics.graph.graph_coloring.{ColorAssignment, gre
 use std.nogc_async_mut.engine.physics.config.{PhysicsConfig2D}
 
 # ── CUDA extern bindings ────────────────────────────────────────────────────
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_mem_alloc(size: i64) -> i64
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_mem_free(ptr: i64) -> i64
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_memcpy_h2d(dst_device: i64, src_host: [u8], size: i64) -> bool
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_memcpy_d2h(dst_host: [u8], src_device: i64, size: i64) -> bool
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> bool
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_compile_ptx(ptx_source: text) -> i64
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_get_function(module: i64, name: text) -> i64
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_launch_kernel(func: i64, gx: i64, gy: i64, gz: i64, blk_x: i64, blk_y: i64, blk_z: i64, shared_mem: i64, args: [i64]) -> bool
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_unload_module(module: i64) -> bool
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_synchronize() -> bool
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_stream_create() -> i64
+@unsafe(reason: "raw CUDA device/runtime ABI", capabilities: [ffi])
 extern fn rt_cuda_stream_destroy(stream: i64) -> bool
 
 # ── Spatial hash broad-phase ────────────────────────────────────────────────
@@ -548,6 +560,7 @@ impl GpuSolver:
         )
 
     # ── Kernel compilation ──────────────────────────────────────────────────
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me ensure_kernels_compiled():
         if self.vel_module == 0:
             self.vel_module = rt_cuda_compile_ptx(VELOCITY_KERNEL_PTX)
@@ -559,23 +572,26 @@ impl GpuSolver:
     # ── Device buffer helpers ───────────────────────────────────────────────
     # Ensures device array pointer holds at least `need` f64 elements.
     # Returns the existing or newly allocated pointer.
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me ensure_f64_buf(current_ptr: i64, current_cap: i64, need: i64) -> i64:
         if need <= current_cap:
             current_ptr
         else:
             if current_ptr != 0:
-                rt_cuda_free(current_ptr)
-            rt_cuda_malloc(need * 8)
+                rt_cuda_mem_free(current_ptr)
+            rt_cuda_mem_alloc(need * 8)
 
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me ensure_i64_buf(current_ptr: i64, current_cap: i64, need: i64) -> i64:
         if need <= current_cap:
             current_ptr
         else:
             if current_ptr != 0:
-                rt_cuda_free(current_ptr)
-            rt_cuda_malloc(need * 8)
+                rt_cuda_mem_free(current_ptr)
+            rt_cuda_mem_alloc(need * 8)
 
     # ── Upload bodies ───────────────────────────────────────────────────────
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me upload_bodies(bodies: SolverBodyStore2D):
         val n = bodies.body_count
         if n == 0:
@@ -603,6 +619,7 @@ impl GpuSolver:
         self.buffers.body_count = n
 
     # ── Upload constraints ──────────────────────────────────────────────────
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me upload_constraints(constraints: ContactConstraintSoA):
         val n = constraints.count
         if n == 0:
@@ -641,6 +658,7 @@ impl GpuSolver:
     # One kernel launch per color batch; each thread solves one constraint.
     # Graph coloring guarantees no two constraints in a batch share a body,
     # so threads write-conflict-free impulses to the body velocity arrays.
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me dispatch_velocity_solve(coloring: ColorAssignment):
         val BLOCK = 128
         var iter = 0
@@ -669,6 +687,7 @@ impl GpuSolver:
 
     # ── Position solve dispatch ─────────────────────────────────────────────
     # Baumgarte position correction per color batch.
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me dispatch_position_solve(coloring: ColorAssignment):
         val BLOCK = 128
         var iter = 0
@@ -698,6 +717,7 @@ impl GpuSolver:
 
     # ── Download results ────────────────────────────────────────────────────
     # Copy modified velocity and position arrays back to CPU SolverBodyStore2D.
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me download_results(bodies: SolverBodyStore2D):
         val n = self.buffers.body_count
         if n == 0:
@@ -710,6 +730,7 @@ impl GpuSolver:
         rt_cuda_memcpy_d2h(bodies.pos_y   as [u8], self.d_pos_y,    byte_n)
 
     # ── Top-level solve ─────────────────────────────────────────────────────
+    @unsafe(reason: "orchestrates unverified raw CUDA solver operations", capabilities: [ffi])
     me solve(bodies: SolverBodyStore2D, constraints: ContactConstraintSoA):
         if constraints.count == 0:
             return
@@ -722,6 +743,7 @@ impl GpuSolver:
         self.download_results(bodies)
 
     # ── Cleanup ─────────────────────────────────────────────────────────────
+    @unsafe(reason: "raw CUDA solver ownership and dispatch boundary", capabilities: [ffi])
     me destroy():
         if self.vel_module != 0:
             rt_cuda_unload_module(self.vel_module)
@@ -732,24 +754,24 @@ impl GpuSolver:
             self.pos_module = 0
             self.pos_kernel = 0
         # Free body device buffers
-        if self.d_vel_x      != 0: rt_cuda_free(self.d_vel_x)
-        if self.d_vel_y      != 0: rt_cuda_free(self.d_vel_y)
-        if self.d_ang_vel    != 0: rt_cuda_free(self.d_ang_vel)
-        if self.d_pos_x      != 0: rt_cuda_free(self.d_pos_x)
-        if self.d_pos_y      != 0: rt_cuda_free(self.d_pos_y)
-        if self.d_inv_mass   != 0: rt_cuda_free(self.d_inv_mass)
-        if self.d_inv_inertia != 0: rt_cuda_free(self.d_inv_inertia)
+        if self.d_vel_x      != 0: rt_cuda_mem_free(self.d_vel_x)
+        if self.d_vel_y      != 0: rt_cuda_mem_free(self.d_vel_y)
+        if self.d_ang_vel    != 0: rt_cuda_mem_free(self.d_ang_vel)
+        if self.d_pos_x      != 0: rt_cuda_mem_free(self.d_pos_x)
+        if self.d_pos_y      != 0: rt_cuda_mem_free(self.d_pos_y)
+        if self.d_inv_mass   != 0: rt_cuda_mem_free(self.d_inv_mass)
+        if self.d_inv_inertia != 0: rt_cuda_mem_free(self.d_inv_inertia)
         # Free constraint device buffers
-        if self.d_body_a      != 0: rt_cuda_free(self.d_body_a)
-        if self.d_body_b      != 0: rt_cuda_free(self.d_body_b)
-        if self.d_nx          != 0: rt_cuda_free(self.d_nx)
-        if self.d_ny          != 0: rt_cuda_free(self.d_ny)
-        if self.d_px          != 0: rt_cuda_free(self.d_px)
-        if self.d_py          != 0: rt_cuda_free(self.d_py)
-        if self.d_penetration != 0: rt_cuda_free(self.d_penetration)
-        if self.d_restitution != 0: rt_cuda_free(self.d_restitution)
-        if self.d_friction    != 0: rt_cuda_free(self.d_friction)
-        if self.d_lambda_n    != 0: rt_cuda_free(self.d_lambda_n)
-        if self.d_lambda_t    != 0: rt_cuda_free(self.d_lambda_t)
+        if self.d_body_a      != 0: rt_cuda_mem_free(self.d_body_a)
+        if self.d_body_b      != 0: rt_cuda_mem_free(self.d_body_b)
+        if self.d_nx          != 0: rt_cuda_mem_free(self.d_nx)
+        if self.d_ny          != 0: rt_cuda_mem_free(self.d_ny)
+        if self.d_px          != 0: rt_cuda_mem_free(self.d_px)
+        if self.d_py          != 0: rt_cuda_mem_free(self.d_py)
+        if self.d_penetration != 0: rt_cuda_mem_free(self.d_penetration)
+        if self.d_restitution != 0: rt_cuda_mem_free(self.d_restitution)
+        if self.d_friction    != 0: rt_cuda_mem_free(self.d_friction)
+        if self.d_lambda_n    != 0: rt_cuda_mem_free(self.d_lambda_n)
+        if self.d_lambda_t    != 0: rt_cuda_mem_free(self.d_lambda_t)
         self.body_cap = 0
         self.constraint_cap = 0

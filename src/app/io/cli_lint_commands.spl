@@ -2,6 +2,7 @@
 # Keep this module free of interpreter and driver imports so
 # src / app / cli / lint_entry.spl starts quickly and reliably.
 
+use std.tooling.easy_fix.types.{FixConfidence}
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.lint.main.{
     Linter, LintCliPolicy, LintReadFileResult, lint_read_file,
@@ -11,12 +12,24 @@ use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.io.mod_stub.{is_dir}
+use app.io.source_discovery.{discover_spl_files, source_path_identity}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
+use app.io.cli_fix_options.{fix_option_error}
+use app.io.cli_fmt_options.{fmt_option_error}
+use common.text.{escape_json}
 
-fn lint_option_error(args: [text]) -> text:
+pub fn lint_option_error(args: [text]) -> text:
     var help_count = 0
     var other_count = 0
+    var expect_profile_tier = false
     for arg in args:
+        if expect_profile_tier:
+            if arg == "" or arg.starts_with("-"):
+                return "--profile requires a tier"
+            expect_profile_tier = false
+            other_count = other_count + 1
+            continue
         if arg == "lint":
             continue
         if arg == "--help" or arg == "-h":
@@ -32,9 +45,12 @@ fn lint_option_error(args: [text]) -> text:
                 return "--profile requires a tier"
             continue
         if arg == "--profile":
-            return "--profile requires a tier"
+            expect_profile_tier = true
+            continue
         if arg.starts_with("-"):
             return "unknown option: {arg}"
+    if expect_profile_tier:
+        return "--profile requires a tier"
     if help_count > 0 and (help_count != 1 or other_count > 0):
         return "help cannot be combined with files or other options"
     ""
@@ -52,53 +68,90 @@ fn run_lint_command(args: [text]) -> i64:
         print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
         return 0
 
-fn cli_run_lint(args: [text]) -> i64:
     var files: [text] = []
     var run_mcp_perf = false
+    var run_repo_gates = false
     var run_simd = false
     val json_output = args.contains("--json")
+    var normalized_args: [text] = []
+    var expect_profile_tier = false
     for arg in args:
+        if expect_profile_tier:
+            normalized_args.push("--profile=" + arg)
+            expect_profile_tier = false
+            continue
+        if arg == "--profile":
+            expect_profile_tier = true
+            continue
+        normalized_args.push(arg)
         if arg == "lint":
             val _ = 0
-        elif arg == "--mcp-perf" or arg == "--all":
+        elif arg == "--mcp-perf":
             run_mcp_perf = true
+        elif arg == "--all":
+            run_mcp_perf = true
+            run_repo_gates = true
         elif arg == "--simd":
             run_simd = true
         elif not arg.starts_with("-"):
             files.push(arg)
 
     var exit_code = 0
-    val root_guard_exit = _cli_run_workspace_root_guard()
-    if root_guard_exit != 0:
-        exit_code = 1
-
-    if run_mcp_perf:
-        val perf_result = _cli_process_run("bin/simple", ["build", "lint", "--mcp-perf"])
-        val perf_exit = perf_result.exit_code
-        val stdout = perf_result.stdout
-        val stderr = perf_result.stderr
-        if stdout.len() > 0:
-            print(stdout)
-        if stderr.len() > 0:
-            _cli_eprint(stderr)
-        if files.len() == 0:
-            return perf_exit
-        if perf_exit != 0:
+    if json_output and (run_repo_gates or run_mcp_perf):
+        print "{\"type\":\"lint-error\",\"message\":\"--json is unavailable with --all or --mcp-perf\"}"
+        return 2
+    if run_repo_gates:
+        val root_guard_exit = _cli_run_workspace_root_guard()
+        if root_guard_exit != 0:
             exit_code = 1
 
+        val (iso_stdout, iso_stderr, iso_exit) = _cli_process_run("sh", ["scripts/check/check-ui-backend-isolation.shs"])
+        if iso_stdout.len() > 0:
+            print(iso_stdout)
+        if iso_stderr.len() > 0:
+            _cli_eprint(iso_stderr)
+        if iso_exit != 0:
+            exit_code = 1
+
+        val (hot_stdout, hot_stderr, hot_exit) = _cli_process_run("sh", ["scripts/check/check-cpu-hotloop-idiom.shs"])
+        if hot_stdout.len() > 0:
+            print(hot_stdout)
+        if hot_stderr.len() > 0:
+            _cli_eprint(hot_stderr)
+        if hot_exit != 0:
+            exit_code = 1
+
+    if run_mcp_perf:
+        _cli_eprint("Error: --mcp-perf is unavailable until its repository scanner has a production owner")
+        exit_code = 1
+        if files.len() == 0:
+            return exit_code
+
     if files.len() == 0:
-        print "Usage: simple lint <file.spl> [file2.spl...] [--mcp-perf] [--simd]"
+        if json_output:
+            print "{\"type\":\"lint-error\",\"message\":\"no input files\"}"
+            return 2
+        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"
         print "  - Collection performance anti-patterns (COLL001-COLL008)"
         print "  - Duplicate typed arguments (DTYP001)"
         print "  - Bare primitive types in public APIs"
-        print "  - MCP wrapper, hot-path, and invalidation regressions (--mcp-perf)"
+        print "  - MCP performance lint fails closed until its repository scanner has a production owner"
         print "  - SIMD vectorisation opportunities L-SIMD-001..011 (--simd, info only)"
+        print "  - Repository UI/hot-loop gates; MCP performance currently fails closed (--all)"
+        print "Use 'simple fix' to apply source changes."
         return 1
 
     var failed_files = 0
+    # Files the parse gate rejected. These were NOT analysed at all — no
+    # AST-based lint ran on them — so they must be counted and reported
+    # separately from files that were analysed and found faulty. Without this
+    # the verification layer reports a skipped file as "1 error" and it reads
+    # as checked. See
+    # doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
+    var not_linted_files = 0
     var lint_files: [text] = []
     # Dedupe via dict-keyed sets, NOT an array `.contains()` scan. `simple lint
     # src` discovers ~32k files; the array form is O(n^2) membership plus an
@@ -133,41 +186,101 @@ fn cli_run_lint(args: [text]) -> i64:
             exit_code = 1
             failed_files = failed_files + 1
 
+    # One command-scoped linter owns the immutable rule registry and bounded
+    # project-policy cache. Do not reconstruct dozens of descriptors per file.
+    # Target manifests are resolved through the command-owned bounded cache.
+    # Skip Linter.new's direct-library cwd discovery/parsing path.
+    var lint_session = Linter.new(false)
+    # Policy is command-invariant. Parse it once rather than rescanning the
+    # complete target/option array for every discovered file.
+    val lint_policy = LintCliPolicy.from_args(normalized_args)
+    if lint_policy.error != "":
+        if json_output:
+            print "{\"type\":\"lint-error\",\"message\":\"{escape_json(lint_policy.error)}\"}"
+        else:
+            _cli_eprint("Error: {lint_policy.error}")
+        return 2
     for file_path in lint_files:
         if not file_exists(file_path):
-            _cli_eprint("Error: File not found: {file_path}")
+            if json_output:
+                print "{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}"
+            else:
+                _cli_eprint("Error: File not found: {file_path}")
             exit_code = 1
+            failed_files = failed_files + 1
             continue
 
-        val file_exit = run_lint_file(file_path, args)
+        # The command owns one source payload for all read-only analyses. Keep
+        # read failures distinct from a valid empty file.
+        var source = ""
+        match lint_read_file(file_path):
+            case LintReadFileResult.ReadFileErr(read_error):
+                if json_output:
+                    print "{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(read_error)}\"}"
+                else:
+                    _cli_eprint("Error: {read_error}")
+                exit_code = 1
+                failed_files = failed_files + 1
+                continue
+            case LintReadFileResult.ReadFileOk(loaded_source):
+                source = loaded_source
+        val file_exit = run_lint_source_with_linter_policy(
+            lint_session, file_path, lint_policy, source)
         if file_exit == 3:
             not_linted_files = not_linted_files + 1
         if file_exit != 0:
             if exit_code == 0:
-                exit_code = file_exit
+                # 3 is the internal NOT-LINTED marker, not a process exit code.
+                exit_code = if file_exit == 3: 1 else: file_exit
             failed_files = failed_files + 1
 
         # SIMD opportunity pass — info severity, never increments exit code
         if run_simd:
-            val source = file_read(file_path)
             val simd_fixes = check_simd_opportunities(source, file_path)
             var si = 0
             while si < simd_fixes.len():
                 val sf = simd_fixes[si]
-                val id_parts2 = sf.id.split(":")
+                val id_parts2 = easyfix_id_text(sf).split(":")
                 val line_str2 = if id_parts2.len() > 3: id_parts2[3] else: "?"
-                print "{file_path}:{line_str2}: info[simd_opportunity]: {sf.description}"
+                if json_output:
+                    val line_json = if line_str2 == "?": "null" else: line_str2
+                    val rule_code = if id_parts2.len() > 2: id_parts2[2] else: "simd_opportunity"
+                    print "{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(file_path)}\",\"line\":{line_json},\"column\":0,\"level\":\"info\",\"code\":\"{escape_json(rule_code)}\",\"message\":\"{escape_json(easyfix_description_text(sf))}\"}"
+                else:
+                    print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
 
+    # Fail closed on skipped files. A run that could not parse a file has NOT
+    # verified it, so "passed" is never a truthful summary for that run — even
+    # if every diagnostic that did surface was only a warning.
+    if not_linted_files > 0 and exit_code == 0:
+        exit_code = 1
     if failed_files > 0:
         if json_output:
-            print "{\"type\":\"lint-summary\",\"status\":\"passed\",\"failed_files\":0}"
+            print "{\"type\":\"lint-summary\",\"status\":\"failed\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files}}"
+        else:
+            print ""
+            if not_linted_files > 0:
+                print "NOT LINTED: {not_linted_files} file(s) could not be parsed and were never analysed"
+            print "Lint failed in {failed_files} file(s)"
+    elif exit_code == 0:
+        if json_output:
+            print "{\"type\":\"lint-summary\",\"status\":\"passed\",\"failed_files\":0,\"not_linted_files\":0}"
         else:
             print ""
             print "Lint passed: all files clean"
     exit_code
 
-fn cli_run_fmt(args: [text]) -> i64:
+fn run_fmt_command(args: [text]) -> i64:
+    val option_error = fmt_option_error(args)
+    if option_error != "":
+        _cli_eprint("Error: {option_error}")
+        return 2
+
+    if args.contains("--help") or args.contains("-h"):
+        print "Usage: simple fmt <file.spl> [--check] [--write] [--diff]"
+        return 0
+
     var check_mode = false
     var write_mode = false
     var diff_mode = false
@@ -250,7 +363,16 @@ fn cli_run_fmt(args: [text]) -> i64:
                     exit_code = 1
     exit_code
 
-fn cli_run_fix(args: [text]) -> i64:
+fn run_fix_command(args: [text]) -> i64:
+    val option_error = fix_option_error(args)
+    if option_error != "":
+        _cli_eprint("Error: {option_error}")
+        return 2
+
+    if args.contains("--help") or args.contains("-h"):
+        print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
+        return 0
+
     var dry_run = false
     var fix_all = false
     var fix_id: text = ""
@@ -278,18 +400,15 @@ fn cli_run_fix(args: [text]) -> i64:
 
     var exit_code = 0
     for file_path in files:
-        if not file_exists(file_path):
-            _cli_eprint("Error: File not found: {file_path}")
-            exit_code = 1
-            continue
+        var source = ""
+        match fix_read_source(file_path):
+            case Err(e):
+                _cli_eprint("Error: {e}")
+                exit_code = 1
+                continue
+            case Ok(content):
+                source = content
 
-        val source = file_read(file_path)
-        if source == "":
-            _cli_eprint("Error: Could not read file: {file_path}")
-            exit_code = 1
-            continue
-
-        val source = file_read(file_path)
         val fixes = if fix_id.starts_with("L:short_grammar_"):
             check_short_grammar_refactor(source, file_path)
         else:
@@ -311,15 +430,15 @@ fn cli_run_fix(args: [text]) -> i64:
         var sources: Dict<text, text> = {}
         sources[file_path] = source
 
-        val result = FixApplicator.apply_to_disk(filtered, sources, dry_run)
+        val result = apply_fixes_to_disk(filtered, sources, dry_run)
         match result:
             case Ok(report):
                 if dry_run:
                     print "Dry run for {file_path}:"
                 else:
                     print "Applied fixes to {file_path}:"
-                print "  {report.applied} fix(es) applied"
-                for detail in report.details:
+                print "  {fixreport_applied(report)} fix(es) applied"
+                for detail in fixreport_details(report):
                     print "  {detail}"
             case Err(e):
                 _cli_eprint("Error applying fixes to {file_path}: {e}")

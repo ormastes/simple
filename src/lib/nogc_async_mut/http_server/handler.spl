@@ -53,14 +53,12 @@ class HandlerRegistry:
     """
     static_handler: StaticFileHandler?
     custom_handlers: Dict<text, fn(HttpRequestData, LocationConfig) -> HttpResponseData>
-    async_handlers: Dict<text, fn(i64, i64, HttpRequestData, LocationConfig) -> bool>
 
     static fn new() -> HandlerRegistry:
         """Create an empty registry."""
         HandlerRegistry(
             static_handler: nil,
-            custom_handlers: {},
-            async_handlers: {}
+            custom_handlers: {}
         )
 
     me set_static_handler(handler: StaticFileHandler):
@@ -76,32 +74,6 @@ class HandlerRegistry:
             handler: Function to handle requests
         """
         self.custom_handlers[name] = handler
-
-    me register_async(name: text,
-                      handler: fn(i64, i64, HttpRequestData,
-                                  LocationConfig) -> bool):
-        """Register a typed asynchronous submission callback.
-
-        The socket worker remains the lifecycle and connection owner.  The
-        callback receives only the worker-issued job identity, an opaque
-        completion-channel handle, and copied request/location values; it
-        returns whether an executor accepted the submission.
-        """
-        self.async_handlers[name] = handler
-
-    fn has_async(name: text) -> bool:
-        """Return whether ``name`` has a registered async submit callback."""
-        self.async_handlers.contains_key(name)
-
-    fn submit_async(name: text, job_id: i64, completion_channel_id: i64,
-                    request: HttpRequestData, location: LocationConfig) -> bool:
-        """Submit through a typed callback, failing closed when absent."""
-        # Native codegen: Dict.get() on non-scalar values is unsafe.  Keep the
-        # same contains-key plus indexed-read rule as synchronous dispatch.
-        if not self.async_handlers.contains_key(name):
-            return false
-        val handler = self.async_handlers[name]
-        handler(job_id, completion_channel_id, request, location)
 
     fn dispatch(handler_type: text, request: HttpRequestData,
                 location: LocationConfig) -> HttpResponseData:
@@ -122,10 +94,12 @@ class HandlerRegistry:
                     nil: return build_error(501, "Static file handler not configured")
 
             _:
-                val custom = self.custom_handlers.get(handler_type)
-                match custom:
-                    Some(h): return h(request, location)
-                    nil: return build_error(501, "No handler registered for type: {handler_type}")
+                # Native codegen: Dict.get() on non-scalar values is unsafe.
+                # Use contains_key() + indexed read.
+                if self.custom_handlers.contains_key(handler_type):
+                    val h = self.custom_handlers[handler_type]
+                    return h(request, location)
+                return build_error(501, "No handler registered for type: {handler_type}")
 
 # ============================================================================
 # Default Handler Setup

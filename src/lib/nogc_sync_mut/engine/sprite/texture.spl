@@ -201,6 +201,11 @@ impl TextureStore:
             count: 0
         )
 
+    # TextureId.raw is a plain i64 (common/engine/ids.spl); the generational
+    # handle packs index into the low 32 bits and generation into the high 32.
+    # (The previous code constructed TextureId(raw: RawHandle) and read
+    # id.raw.index — inconsistent with ids.spl and rejected by JIT lowering.)
+
     me add(texture: Texture) -> TextureId:
         """Store a texture and return its TextureId handle.
 
@@ -213,22 +218,20 @@ impl TextureStore:
             self.textures[idx] = texture
             self.generations[idx] = new_gen
             self.count = self.count + 1
-            val raw = RawHandle.new(idx, new_gen)
-            return TextureId(raw: raw)
+            return TextureId(raw: idx + (new_gen << 32))
         val idx = self.textures.len()
         val gen_val = 1
         self.textures.push(texture)
         self.generations.push(gen_val)
         self.count = self.count + 1
-        val raw = RawHandle.new(idx, gen_val)
-        TextureId(raw: raw)
+        TextureId(raw: idx + (gen_val << 32))
 
     fn get(id: TextureId) -> Texture?:
         """Look up a texture by its handle. Returns nil if invalid or stale."""
         if not id.is_valid():
             return nil
-        val idx = id.raw.index
-        val gen_val = id.raw.generation.value
+        val idx = id.raw & 0xFFFFFFFF
+        val gen_val = id.raw >> 32
         if idx < 0 or idx >= self.textures.len():
             return nil
         if self.generations[idx] != gen_val:
@@ -239,8 +242,8 @@ impl TextureStore:
         """Remove a texture by its handle. Returns false if handle was invalid."""
         if not id.is_valid():
             return false
-        val idx = id.raw.index
-        val gen_val = id.raw.generation.value
+        val idx = id.raw & 0xFFFFFFFF
+        val gen_val = id.raw >> 32
         if idx < 0 or idx >= self.textures.len():
             return false
         if self.generations[idx] != gen_val:

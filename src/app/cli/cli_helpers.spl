@@ -7,57 +7,19 @@
 # - sdn_line_indent, strip_sdn_quotes: SDN helpers
 # - check_self_contained: Self-contained binary detection
 
-use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, shell, file_size_raw)
+use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, shell, file_size_raw, path_basename)
 use app.io.mod.{ProcessResult}
-use app.cli.help_surface_inventory.{
-    cli_surface_snapshot_v1,
-}
-use app.cli.help_surface_report.{
-    cli_surface_generated_help_text_v1,
-    cli_surface_completion_candidates_with_extensions_v1,
-}
 use std.db_atomic.{atomic_write, DbConfig}
+
+extern fn rt_path_absolute(path: text) -> text
 
 fn get_version() -> text:
     "1.0.0-rc.1"
 
-fn print_cli_help_with_extensions_v1(extension_help: text):
-    print cli_surface_generated_help_text_v1(
-        cli_surface_snapshot_v1(), extension_help)
-
-fn cli_generated_help_text_v1(extension_help: text) -> text:
-    cli_surface_generated_help_text_v1(
-        cli_surface_snapshot_v1(), extension_help)
-
-fn cli_generated_completion_candidates_v1(
-        prefix: text, extension_candidates: [text]) -> [text]:
-    cli_surface_completion_candidates_with_extensions_v1(
-        cli_surface_snapshot_v1(), prefix, extension_candidates)
-
-fn print_cli_help_with_extensions_v1(extension_help: text):
-    print cli_surface_generated_help_text_v1(
-        cli_surface_snapshot_v1(), extension_help)
-
-fn cli_generated_help_text_v1(extension_help: text) -> text:
-    cli_surface_generated_help_text_v1(
-        cli_surface_snapshot_v1(), extension_help)
-
-fn cli_generated_completion_candidates_v1(
-        prefix: text, extension_candidates: [text]) -> [text]:
-    cli_surface_completion_candidates_with_extensions_v1(
-        cli_surface_snapshot_v1(), prefix, extension_candidates)
-
-fn print_cli_help_with_extensions_v1(extension_help: text):
-    print cli_surface_generated_help_text_v1(
-        cli_surface_snapshot_v1(), extension_help)
+fn print_error(msg: text):
+    print "ERROR: " + msg
 
 fn print_cli_help():
-    print_cli_help_with_extensions_v1("")
-
-# Retired handwritten help retained only as a migration-test oracle. Production
-# codegen and rendering never import, scan, or invoke this function; the typed
-# records in command_registry.spl are canonical.
-fn cli_help_legacy_migration_oracle_v1():
     val v = get_version()
     print "Simple Language v{v}"
     print ""
@@ -83,6 +45,11 @@ fn cli_help_legacy_migration_oracle_v1():
     print "  simple test --system        Run system tests only"
     print "  simple test --tag <name>    Filter by tag"
     print "  simple test --fail-fast     Stop on first failure"
+    print "  simple test --unstable      Per-unit process, run to end of list, classify outcomes"
+    print "                              (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN); TERMINATED"
+    print "                              and TIMEOUT are unverified, not failures. Default: ON for"
+    print "                              the bootstrap path, OFF for interactive runs"
+    print "  simple test --no-unstable   Force unstable mode off"
     print "  simple test --format <fmt>  Output format: text, json, doc"
     print "  simple test --list-skip-features  List features from .skip files"
     print "  simple test --planned-only  Filter to planned features only"
@@ -96,6 +63,7 @@ fn cli_help_legacy_migration_oracle_v1():
     print "  simple lint [path]          Run linter on file or directory"
     print "  simple lint --fix           Apply auto-fixes"
     print "  simple duplicate-check <path>  Detect code duplication"
+    print "  simple sspec-maintain <op> <path>  Score, improve, scaffold, or documentize SSpec"
     print "  simple fmt [path]           Format file or directory"
     print "  simple fmt --check          Check formatting without changes"
     print "  simple check [path]         Type check without running (NEW: Full type inference)"
@@ -113,14 +81,17 @@ fn cli_help_legacy_migration_oracle_v1():
     print "  simple traceability-check --scope=all|src|spec|doc"
     print "  simple traceability-check --format=text|json"
     print "  simple tracking export|import|sync      External tracking adapters"
+    print "  simple sbom [root] [--out=path]  Generate SPDX-2.3 SBOM JSON"
     print ""
     print "LLM-Friendly Tools:"
     print "  simple mcp                  Start the Simple MCP server over stdio"
+    print "  simple caret messaging ...  Run LLM Caret messaging server, MCP, hooks, and plugins"
     print "  simple diff [-r rev] [paths]  Show project diff (jj/git)"
     print "  simple brief                Brief project summary (files, lines, tests)"
     print "  simple query --generated    Find LLM-generated code"
-    print "  simple provider <sub>       Inspect or invoke registered CLI providers"
     print "  simple ui <operation>       Inspect or act on live GUI/TUI surfaces"
+    print "  simple office calc [file] --tui  Open Calc in terminal mode"
+    print "  simple ide --feature-check --tui|--gui  Check IDE capabilities"
     print "  simple t32 <command>        Inspect or control TRACE32 sessions"
     print "  simple mem <top|diff|help>  Inspect or diff memory snapshot files"
     print "  simple saml <check|analyze|generate|doc> <file.saml>  SAML LLM-function tooling"
@@ -152,6 +123,7 @@ fn cli_help_legacy_migration_oracle_v1():
     print "  simple build --target=wasm32-wasi       Compile to WebAssembly"
     print "  simple build --wasm-backend=auto|llvm|wat  WASM backend (default: auto)"
     print "  simple perf record|compare|explain|baseline promote  Build/test abnormality evidence"
+    print "  simple provider <subcommand>            Manage model/tool providers"
     print ""
     print "Package Management:"
     print "  simple init [name]          Create a new project"
@@ -263,7 +235,11 @@ fn cli_help_legacy_migration_oracle_v1():
     print "  --interpret                    Force interpreter mode (no JIT)"
     print "  --interpret-optimized          Alias for shared/optimized interpreter mode"
     print "  --interpreter-mode=optimized|classic  Select interpreter mode (classic is legacy)"
-    print "  SIMPLE_EXECUTION_MODE env var  jit|interpret|interpret-optimized|cranelift|llvm"
+    print "  --mem-infra=a,b,c[,auto] [--mem-infra-strict]  Enable memory-infra rows (attr, guard, harden, genarena, strict, asan, memprof) for the active backend"
+    print "  SIMPLE_EXECUTION_MODE env var  jit|interpret|interpreter|interpret-optimized|cranelift|llvm"
+    print "                                 THE reliable way to force the interpreter. The --interpret"
+    print "                                 and --no-jit flags are no-ops on the bootstrap seed binary."
+    print "                                 doc/07_guide/runtime/execution_engine_selection.md"
     print ""
     print "Fault Detection:"
     print "  --no-jit                       Disable JIT compilation (pure tree-walk)"
@@ -314,7 +290,7 @@ fn handle_init(args: [text]) -> i64:
             name = arg
         i = i + 1
     if name == "":
-        name = path.basename(current_dir)
+        name = path_basename(current_dir)
     if name == "":
         name = "my-project"
 
@@ -390,12 +366,10 @@ fn strip_sdn_quotes(s: text) -> text:
 
 fn check_self_contained() -> bool:
     # Check if this binary is a self-contained executable (runtime + SMF)
-    val exe_path_result = shell("readlink -f /proc/self/exe 2>/dev/null")
-    if exe_path_result.exit_code != 0:
-        return false
-
-    val exe_path = exe_path_result.stdout.replace("\n", "")
-    if exe_path == "":
+    # Canonicalize in-process. Inside `sh -c`, /proc/self is the shell itself,
+    # so a shell-out here checks the shell for an SMF trailer (2026-07-25).
+    val exe_path = rt_path_absolute("/proc/self/exe") ?? ""
+    if exe_path == "" or exe_path == "/proc/self/exe":
         return false
 
     # Quick size check: must be > 32 bytes

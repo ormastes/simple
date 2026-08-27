@@ -14,7 +14,7 @@ use compiler.mir.mir_coverage_probe_admission.{
 }
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BackendCompileOptions, CompileError, OptimizationLevel, compileerror_backend_error}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
-use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_passes.{llvm_default_pipeline_for_level}
 use compiler.backend.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
 use compiler.backend.backend.llvm_lib_translate.{translate_module_to_llvm}
@@ -24,7 +24,6 @@ use std.nogc_sync_mut.io.file_ops.{file_delete}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
-extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
 # ============================================================================
@@ -75,7 +74,15 @@ pub fn llvm_lib_compile_module_direct(options: BackendCompileOptions, module: Mi
     # 6a. Verify generated IR before optimization/emission
     val ir_valid = llvm_verify_module(llvm_mod)
     if not ir_valid:
-        print "[llvm-lib] ERROR: generated IR failed verification for module '{module.name}' - output may crash or produce wrong results"
+        # Refuse to proceed into LLVM emission with an invalid module — that path
+        # segfaults inside libLLVM. Fail loudly with an Err instead (this usually
+        # means a called function, e.g. a runtime builtin like `print`, was never
+        # declared in the module — see translate_call).
+        llvm_dispose_builder(builder)
+        llvm_dispose_module(llvm_mod)
+        llvm_context_dispose(ctx)
+        return Err(compileerror_backend_error(BackendKind.LlvmLib,
+            "generated IR failed verification for module '{module.name}' — refusing to emit (would crash inside libLLVM)"))
 
     # 7. Get target machine
     val target = llvm_get_target_from_triple(triple_str)
@@ -153,15 +160,15 @@ impl Codegen for LlvmLibCodegenAdapter:
             case AArch64_MacOS | X86_64_MacOS: true
             case Riscv64: true
             case X86: true
-            case Arm32: true
+            case Arm: true
             case Riscv32: true
+            case Native | Host: true
             case Wasm32: false
             case Wasm64: false
-            case C: false
             case CudaPtx: false
+            case HipHsaco: false
+            case OpenClC | OpenClSpirv: false
             case VulkanSpirv: false
-            case Metal: false
-            case OpenCL: false
             case Avr: false
             case I8086: false
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.ObjectCode

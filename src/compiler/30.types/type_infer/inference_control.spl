@@ -19,7 +19,6 @@ use compiler.traits.traits.*
 use type_infer_types.*
 use compiler.types.type_infer.inference_effects.*
 use compiler.types.type_infer_types.{HmInferContext}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 impl HmInferContext:
     # =========================================================================
@@ -444,20 +443,21 @@ impl HmInferContext:
 
     me infer_block(block: HirBlock) -> Result<HirType, TypeInferError>:
         """Infer type of a block."""
-        var result_ty = HirType(kind: HirTypeKind.Unit, span: block.span)
-
         val stmts: [HirStmt] = block.stmts
         var stmt_idx = 0
         while stmt_idx < stmts.len():
             val stmt: HirStmt = stmts[stmt_idx]
             match self.infer_stmt(stmt):
-                case Ok(ty):
-                    result_ty = ty
+                case Ok(_):
+                    pass
                 case Err(e):
                     return Err(e)
             stmt_idx = stmt_idx + 1
 
-        Ok(result_ty)
+        if block.has:
+            return self.synthesize_expr(block.value)
+
+        Ok(HirType(kind: HirTypeKind.Unit, span: block.span))
 
     me infer_stmt(stmt: HirStmt) -> Result<HirType, TypeInferError>:
         """Infer type of a statement."""
@@ -598,7 +598,7 @@ impl HmInferContext:
         self._register_module_symbols(module)
 
         for fn_ in module.functions.values():
-            val symbol = module.symbols.get(fn_.symbol)
+            val symbol = module.symbols.get_symbol(fn_.symbol)
             if symbol.?:
                 self.infer_function(fn_)
 
@@ -609,4 +609,3 @@ impl HmInferContext:
         """Register all symbol mutability info from a module for narrowing analysis."""
         for sym in module.symbols.symbols.values():
             self.register_symbol_mutability(sym.id.id, sym.is_mutable)
-

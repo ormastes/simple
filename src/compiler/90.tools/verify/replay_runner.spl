@@ -11,7 +11,7 @@ use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
     ReplayOutcomeV1, ReplayCheckerReceiptV1}
 
-struct ReplayRunnerConfigV1:
+pub struct ReplayRunnerConfigV1:
     project_dir: text
     module_name: text
     declaration_root: text
@@ -54,13 +54,13 @@ fn replay_module_segment_is_safe_v1(segment: text) -> bool:
         index = index + 1
     true
 
-fn replay_module_name_is_safe_v1(name: text) -> bool:
+pub fn replay_module_name_is_safe_v1(name: text) -> bool:
     if name == "": return false
     for segment in name.split("."):
         if not replay_module_segment_is_safe_v1(segment): return false
     true
 
-fn replay_runner_config_error_v1(config: ReplayRunnerConfigV1) -> text:
+pub fn replay_runner_config_error_v1(config: ReplayRunnerConfigV1) -> text:
     if config.project_dir == "": return "FV2-E-REPLAY-PROJECT: project directory is empty"
     if not replay_module_name_is_safe_v1(config.module_name):
         return "FV2-E-REPLAY-MODULE-NAME: module name is not canonical"
@@ -88,6 +88,18 @@ fn replay_failed_receipt_v1(
         config.tool_version, "", config.module_name, config.declaration_root,
         config.artifact_hash,
         policy_hash, "", outcome, diagnostic)
+
+# A build-directory manifest cannot authorize itself: an attacker able to
+# replace the replay executable can replace an adjacent manifest too.  Until a
+# repository-owned/provisioned trust anchor and resolver pin these exact
+# identities, the public receipt-owning entrypoints must not promote a
+# caller-supplied configuration into accepted replay evidence.
+fn replay_authority_error_v1(class_: ReplayCheckerClassV1) -> text:
+    match class_:
+        case ReplayCheckerClassV1.FreshLeanKernel:
+            "FV2-E-REPLAY-AUTHORITY: canonical fresh-replay authority is unavailable; provision a trust-anchored manifest/resolver for exact Lake and leanchecker paths, SHA-256 identities, and versions"
+        case ReplayCheckerClassV1.IndependentKernel:
+            "FV2-E-REPLAY-AUTHORITY: canonical independent-replay authority is unavailable; provision a trust-anchored manifest/resolver for the exact adapter, lean4export, and nanoda paths, SHA-256 identities, and versions"
 
 fn replay_run_v1(
     class_: ReplayCheckerClassV1,
@@ -175,9 +187,16 @@ fn replay_run_v1(
         sha256_text(retained_output),
         ReplayOutcomeV1.Accepted, "")
 
-fn run_fresh_leanchecker_v1(
+pub fn run_fresh_leanchecker_v1(
     config: ReplayRunnerConfigV1
 ) -> ReplayCheckerReceiptV1:
+    val authority_error = replay_authority_error_v1(
+        ReplayCheckerClassV1.FreshLeanKernel)
+    if authority_error != "":
+        return replay_failed_receipt_v1(
+            ReplayCheckerClassV1.FreshLeanKernel, config,
+            sha256_text("fresh-leanchecker-v1|authority-unavailable"),
+            ReplayOutcomeV1.ToolFailure, authority_error)
     # Lake -d selects the package without shell-level `cd`.
     val args = ["-d", config.project_dir, "env", config.tool_path, "--fresh",
         config.module_name]
@@ -186,9 +205,16 @@ fn run_fresh_leanchecker_v1(
         "fresh-leanchecker-v1|lake-d|env|leanchecker|fresh|root=" +
             config.declaration_root + "|retained-output")
 
-fn run_independent_replay_adapter_v1(
+pub fn run_independent_replay_adapter_v1(
     config: ReplayRunnerConfigV1
 ) -> ReplayCheckerReceiptV1:
+    val authority_error = replay_authority_error_v1(
+        ReplayCheckerClassV1.IndependentKernel)
+    if authority_error != "":
+        return replay_failed_receipt_v1(
+            ReplayCheckerClassV1.IndependentKernel, config,
+            sha256_text("independent-adapter-v1|authority-unavailable"),
+            ReplayOutcomeV1.ToolFailure, authority_error)
     # The pinned adapter accepts PROJECT_DIR MODULE ARTIFACT_PATH and must export the exact
     # module with lean4export, invoke nanoda with sorryAx disabled, and retain
     # a nonempty result record.  Its binary hash is part of this receipt.

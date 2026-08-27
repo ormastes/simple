@@ -543,9 +543,69 @@ fn posix_close_all_fds_with_backends() -> u32:
         i = i + 1
     closed
 
-fn posix_close_task_fds_with_backends(owner: u64) -> u32:
-    """Close and release a task fd context through backend-aware close hooks."""
-    if not fd_task_context_exists(owner):
+var _fd_cleanup_retry_initialized_v1 = false
+var _fd_cleanup_retry_task_v1: [u64] = []
+var _fd_cleanup_retry_generation_v1: [u64] = []
+var _fd_cleanup_retry_receipt_v1: [ActiveFdCleanupReceiptV1?] = []
+
+fn _fd_cleanup_retry_initialize_v1():
+    if _fd_cleanup_retry_initialized_v1: return
+    var i = 0
+    while i < ACTIVE_FD_CONTEXT_LIMIT_V1:
+        _fd_cleanup_retry_task_v1.push(0u64)
+        _fd_cleanup_retry_generation_v1.push(0u64)
+        _fd_cleanup_retry_receipt_v1.push(nil)
+        i = i + 1
+    _fd_cleanup_retry_initialized_v1 = true
+
+fn _fd_cleanup_retry_find_v1(owner: u64, lifecycle_generation: u64) -> i32:
+    _fd_cleanup_retry_initialize_v1()
+    var i = 0
+    while i < _fd_cleanup_retry_receipt_v1.len():
+        if (_fd_cleanup_retry_receipt_v1[i] != nil and
+            _fd_cleanup_retry_task_v1[i] == owner and
+            _fd_cleanup_retry_generation_v1[i] == lifecycle_generation):
+            return i
+        i = i + 1
+    -1
+
+fn _fd_cleanup_retry_store_v1(
+    owner: u64, lifecycle_generation: u64, receipt: ActiveFdCleanupReceiptV1
+) -> bool:
+    var index = _fd_cleanup_retry_find_v1(owner, lifecycle_generation)
+    if index < 0:
+        var i = 0
+        while i < _fd_cleanup_retry_receipt_v1.len():
+            if _fd_cleanup_retry_receipt_v1[i] == nil:
+                index = i
+                break
+            i = i + 1
+    if index < 0: return false
+    _fd_cleanup_retry_task_v1[index] = owner
+    _fd_cleanup_retry_generation_v1[index] = lifecycle_generation
+    _fd_cleanup_retry_receipt_v1[index] = Some(receipt)
+    true
+
+fn _fd_cleanup_retry_clear_v1(index: i32):
+    if index < 0 or index >= _fd_cleanup_retry_receipt_v1.len(): return
+    _fd_cleanup_retry_task_v1[index] = 0u64
+    _fd_cleanup_retry_generation_v1[index] = 0u64
+    _fd_cleanup_retry_receipt_v1[index] = nil
+
+fn posix_close_task_fds_with_backends(
+    owner: u64, lifecycle_generation: u64
+) -> u32:
+    """Close a lifecycle's descriptors under the active-context cleanup lease.
+
+    A failed backend close retains the owner-issued retry receipt.  A later
+    exit/reap attempt must consume that receipt; it cannot recreate ambient
+    authority from the numeric task id.
+    """
+    if owner == 0u64 or lifecycle_generation == 0u64:
+        return 0u32
+    val retry_index = _fd_cleanup_retry_find_v1(owner, lifecycle_generation)
+    val context_exists = fd_task_context_exists(owner)
+    if retry_index < 0 and not context_exists:
         return 0u32
     val previous_owner = fd_current_task()
     var cleanup_receipt: ActiveFdCleanupReceiptV1? = nil

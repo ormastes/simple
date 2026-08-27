@@ -18,6 +18,10 @@ use common.ui.web_render_api.{WEB_RENDER_TARGET_HEADLESS, web_render_capabilitie
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.none.event_queue.{EventQueue}
 
+# Keep enough snapshots for test diagnostics without retaining one complete
+# HTML document for every event processed by a long-lived headless session.
+val NONE_RENDER_HISTORY_CAPACITY: i32 = 64
+
 # =========================================================================
 # None Backend
 # =========================================================================
@@ -28,6 +32,7 @@ class NoneBackend:
     height: i32
     event_queue: EventQueue
     render_history: [text]
+    total_render_count: i32
     last_rendered_html: text
 
     static fn new() -> Result<NoneBackend, text>:
@@ -37,6 +42,7 @@ class NoneBackend:
             height: 24,
             event_queue: EventQueue.new(),
             render_history: [],
+            total_render_count: 0,
             last_rendered_html: ""
         ))
 
@@ -54,7 +60,12 @@ class NoneBackend:
     me render(state: UIState) -> Result<bool, text>:
         val html = render_html_tree(state.tree.root_node(), state)
         self.last_rendered_html = html
-        self.render_history.push(html)
+        val history_slot = self.total_render_count % NONE_RENDER_HISTORY_CAPACITY
+        if self.render_history.len() < NONE_RENDER_HISTORY_CAPACITY:
+            self.render_history.push(html)
+        else:
+            self.render_history[history_slot] = html
+        self.total_render_count = self.total_render_count + 1
         return Ok(true)
 
     fn render_html(state: UIState) -> text:
@@ -104,6 +115,9 @@ class NoneBackend:
         self.event_queue.push_all(events)
 
     fn render_count() -> i32:
+        return self.total_render_count
+
+    fn retained_render_count() -> i32:
         return self.render_history.len()
 
     fn last_html() -> text:
@@ -116,12 +130,15 @@ class NoneBackend:
         semantic_ui_snapshot_transport_json(WEB_RENDER_TARGET_HEADLESS, surface_id, revision, none_semantic_snapshot(state))
 
     fn html_at(index: i32) -> text:
-        if index < 0 or index >= self.render_history.len():
+        val retained = self.render_history.len()
+        val oldest_index = self.total_render_count - retained
+        if index < oldest_index or index < 0 or index >= self.total_render_count:
             return ""
-        return self.render_history[index]
+        return self.render_history[index % NONE_RENDER_HISTORY_CAPACITY]
 
     me clear_history():
         self.render_history = []
+        self.total_render_count = 0
         self.last_rendered_html = ""
 
     me set_viewport(width: i32, height: i32):

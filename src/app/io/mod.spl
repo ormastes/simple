@@ -13,11 +13,12 @@
 # ============================================================================
 
 # File operations
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow, file_read, file_write, file_copy, file_delete, file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_read, file_write, file_copy, file_delete, file_atomic_write}
 use std.nogc_sync_mut.io.file_ops.{file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_size, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes}
-use std.nogc_sync_mut.io.file_ops.{file_rename}
+use std.nogc_sync_mut.io.file_ops.{file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.{file_rename}
 
 # Directory operations
 use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir}
@@ -25,8 +26,12 @@ use std.nogc_sync_mut.io.dir_ops.{dir_list, dir_remove}
 
 # Process operations
 use std.nogc_sync_mut.io.process_ops.{ProcessResult}
-use std.nogc_sync_mut.io.process_ops.{process_run, process_run_timeout, process_run_with_limits}
+use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process_is_running, process_kill}
+use std.nogc_sync_mut.io.process_ops.{
+    process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some,
+    process_read_stdout, process_is_piped_alive, process_close_piped
+}
 use std.nogc_sync_mut.io.process_ops.{process_output, shell}
 use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, shell_output_trimmed, shell_lines, shell_int}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -34,12 +39,6 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # it is only defined (pub) in the pre-migration io_runtime.spl monolith.
 use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result, env_get_opt}
 use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
-use app.io.rt_hal_isolated_host.{
-    rt_hal_linux_isolated_host_port,
-    rt_hal_linux_isolated_exact_host_port_v2,
-    rt_hal_install_isolated_exact_host_from_plan
-}
-use app.io.env_access_host.{rt_hal_install_isolated_exact_host_from_plan_path, rt_hal_install_isolated_exact_host_from_plan_path_or_fail}
 
 # Process limit enforcer
 use std.nogc_sync_mut.io.process_limit_enforcer.{build_ulimit_command, build_timeout_wrapper}
@@ -52,10 +51,10 @@ use std.nogc_sync_mut.io.env_ops.{env_get, env_set, cwd, home, env_vars}
 use std.nogc_sync_mut.io.env_ops.{host_arch, host_os}
 
 # Time operations
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, current_time_unix, current_time_ms}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, time_now_micros, current_time_unix, current_time_ms}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day}
 use std.nogc_sync_mut.io.time_ops.{timestamp_hour, timestamp_minute, timestamp_second}
-use std.nogc_sync_mut.io.time_ops.{rt_timestamp_now, rt_sleep_ms}
+use std.nogc_sync_mut.io.time_ops.{timestamp_now, sleep_ms}
 
 # System info
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname, cpu_count, path_basename}
@@ -71,18 +70,15 @@ use std.nogc_sync_mut.io.debug_stubs.{rt_debug_set_active, rt_hook_enable_debugg
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_stack_trace_lines, rt_debug_local_vars}
-use std.nogc_sync_mut.io.debug_stubs.{rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_run_file_debug}
+use std.nogc_sync_mut.io.debug_stubs.{rt_debug_get_current_file, rt_debug_get_current_line}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info}
-use std.nogc_sync_mut.io.debug_stubs.{rt_debug_list_breakpoints, rt_debug_get_pending_condition, rt_debug_report_condition_result}
+use std.nogc_sync_mut.io.debug_stubs.{rt_debug_list_breakpoints}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_get_source_lines}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate}
-use std.nogc_sync_mut.io.debug_stubs.{rt_fault_set_stack_overflow_detection, rt_fault_set_max_recursion_depth}
-use std.nogc_sync_mut.io.debug_stubs.{rt_fault_set_timeout, rt_fault_set_execution_limit}
 use std.nogc_sync_mut.io.debug_stubs.{atomic_i64_new, atomic_bool_new}
-use std.nogc_sync_mut.io.debug_stubs.{rt_vulkan_is_available, upx_is_available}
 
 # String helpers
 use std.nogc_sync_mut.io.string_helpers.{hex_to_char, byte_to_char, char_code}
@@ -113,8 +109,6 @@ use app.io.cli_ops.{fault_set_timeout, fault_set_execution_limit}
 # ============================================================================
 
 # Platform detection
-extern fn rt_env_get(key: text) -> text
-
 fn is_windows_platform() -> bool:
     val os_env = env_get_opt("OS")
     if os_env == nil:
@@ -198,7 +192,14 @@ fn shell_tuple(command: text) -> (text, text, i64):
 fn shell_bc_calc(bc_expr: text, default: f64) -> f64:
     val result = shell("echo '{bc_expr}' | bc -l")
     if result.exit_code == 0:
-        result.stdout.trim().to_float_or(default)
+        # `.to_float()` fails open to 0.0, which would silently replace a
+        # non-zero caller default. bc only emits a number on exit 0, so the
+        # one divergent case is empty output; guard it explicitly.
+        val out = result.stdout.trim()
+        if out.len() == 0:
+            default
+        else:
+            out.to_float()
     else:
         default
 
@@ -234,24 +235,30 @@ fn math_random() -> f64:
         0.5
 
 # Volatile memory access
-extern fn rt_read_volatile_i64(addr: i64) -> i64
-extern fn rt_write_volatile_i64(addr: i64, value: i64)
+@unsafe(reason: "raw volatile read dereferences caller-supplied address", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_read_u64(addr: i64) -> i64
+@unsafe(reason: "raw volatile write dereferences caller-supplied address", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_write_u64(addr: i64, value: i64)
 
+@unsafe(reason: "caller must supply a live aligned volatile u64 address", capabilities: [ffi, raw_ptr])
 fn read_volatile(addr: i64) -> i64:
-    rt_read_volatile_i64(addr)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)
 
+@unsafe(reason: "caller must supply a live aligned writable volatile u64 address", capabilities: [ffi, raw_ptr])
 fn write_volatile(addr: i64, value: i64):
-    rt_write_volatile_i64(addr, value)
+    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_write_u64(addr, value)
 
 # ============================================================================
 # All re-exports (backward compatibility)
 # ============================================================================
 
 # File operations
-export file_exists, file_is_regular_no_follow, file_read, file_write, file_copy, file_delete, file_atomic_write
+export file_exists, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines
 export file_lock, file_unlock, file_size, file_size_raw
 export file_read_text, file_read_bytes, file_read_bytes_i64, file_write_bytes, file_mmap_read_text, file_mmap_read_bytes
+export file_fsync, directory_fsync
+export read_file_text_result
 export file_rename
 
 # Directory operations
@@ -260,8 +267,10 @@ export dir_list, dir_remove
 
 # Process operations
 export ProcessResult
-export process_run, process_run_timeout, process_run_with_limits
+export process_run, process_run_bounded, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded
 export process_spawn_async, process_wait, process_is_running, process_kill
+export process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some
+export process_read_stdout, process_is_piped_alive, process_close_piped
 export process_spawn_async_env, process_is_alive
 export process_output, shell
 export shell_bool, shell_output, shell_output_default, shell_output_trimmed, shell_lines, shell_int
@@ -278,51 +287,54 @@ export env_get, env_set, cwd, home, env_vars
 export host_arch, host_os
 
 # Time operations
-export time_now_unix_micros, current_time_unix, current_time_ms
+export time_now_unix_micros, time_now_micros, current_time_unix, current_time_ms
 export timestamp_year, timestamp_month, timestamp_day
 export timestamp_hour, timestamp_minute, timestamp_second
-export rt_timestamp_now, rt_sleep_ms
+export timestamp_now, sleep_ms
 
 # System info
 export getpid, hostname, cpu_count, path_basename
 
 # Volatile memory
+export volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64
+export volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64
+export memory_barrier, load_barrier, store_barrier
+export volatile_read_modify_write_u32
 
 # Debug stubs
 export rt_debug_set_active, rt_hook_enable_debugging
 export rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at
 export rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val
 export rt_debug_stack_trace_lines, rt_debug_local_vars
-export rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_run_file_debug
+export rt_debug_get_current_file, rt_debug_get_current_line
 export rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint
 export rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info
-export rt_debug_list_breakpoints, rt_debug_get_pending_condition, rt_debug_report_condition_result
+export rt_debug_list_breakpoints
 export rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals
 export rt_debug_get_source_lines
 export rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches
 export rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate
-export rt_fault_set_stack_overflow_detection, rt_fault_set_max_recursion_depth
-export rt_fault_set_timeout, rt_fault_set_execution_limit
 export atomic_i64_new, atomic_bool_new
-export rt_vulkan_is_available, upx_is_available
 
 # String helpers
+export hex_to_char, byte_to_char, char_code
+export text_hash_native
 
-# File operations
+# Thread management
+export thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id
+export atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange
 
-# Time operations
-
-# Directory operations
-
-# Environment operations
-
-# Process operations
-
-# Process limit enforcer
-
-# System info
+# Math
+export math_log, math_log10, math_log2
+export math_asin, math_acos, math_atan, math_atan2
+export math_sinh, math_cosh, math_tanh
+export math_ceil, math_floor, math_round
 
 # CLI operations
+export get_args, exit, cli_get_args, cli_exit, cli_file_exists
+export cli_read_file, context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, settlement_main
+export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
+export fault_set_timeout, fault_set_execution_limit
 
 # Hub-local exports
 export is_windows_platform

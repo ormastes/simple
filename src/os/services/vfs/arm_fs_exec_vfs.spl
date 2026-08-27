@@ -20,20 +20,80 @@ use common.string_core.{str_char_at}
 use os.kernel.boot.mmio.{mmio_read32}
 use os.services.vfs.arm_fs_exec_alias.{_arm_exec_alias, arm_fs_exec_disk_alias, _arm_short_name_for_mapped_path}
 use os.services.vfs.arm_fs_exec_dirent.{_arm_dirent_is_hello_smf, _arm_dirent_is_version_txt, _arm_dirent_is_scomp_smf, _arm_dirent_is_sload_smf, _arm_dirent_is_sint_smf, _arm_dirent_is_llvm_smf, _arm_dirent_is_clang_smf, _arm_dirent_is_rust_smf, _arm_dirent_is_scomp_man, _arm_dirent_is_sload_man, _arm_dirent_is_llvm_man, _arm_dirent_is_clang_man, _arm_dirent_is_rust_man, _arm_dirent_is_toolset_sdn, _arm_dirent_is_sys_dir, _arm_dirent_is_apps_dir, _arm_fat83_short_name_key, _arm_dirent_matches_literal, _arm_dirent_matches_short_name_bytes, _arm_dirent_matches_short_name}
+@unsafe(reason: "raw ARM tagged byte-array length projection ABI", capabilities: [ffi])
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+@unsafe(reason: "raw ARM tagged byte-array indexed byte projection ABI", capabilities: [ffi])
 extern fn rt_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32
+@unsafe(reason: "raw ARM tagged byte-array bounded little-endian u16 projection ABI", capabilities: [ffi])
 extern fn rt_arm_array_get_u16_le(arr: [u8], idx: u64) -> u32
+@unsafe(reason: "raw ARM tagged byte-array bounded little-endian u32 projection ABI", capabilities: [ffi])
 extern fn rt_arm_array_get_u32_le(arr: [u8], idx: u64) -> u32
+@unsafe(reason: "raw ARM tagged byte-array bounded append count ABI", capabilities: [ffi])
 extern fn rt_arm_array_append_bytes(dst: [u8], src: [u8], max_count: u64) -> u32
+@unsafe(reason: "raw VirtIO block prefix read ABI; short array means read failure", capabilities: [ffi])
 extern fn rt_arm_virtio_blk_read_prefix(first_lba: u64, size: u64) -> [u8]
-extern fn rt_arm_virtio_blk_read_hello_smf() -> [u8]
+@unsafe(reason: "raw VirtIO FAT32 BPB probe status ABI", capabilities: [ffi])
 extern fn rt_arm_fat32_probe_bpb_from_virtio() -> u64
+@unsafe(reason: "raw owned tagged byte-array allocation ABI", capabilities: [ffi])
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+@unsafe(reason: "raw serial diagnostic output ABI", capabilities: [ffi])
 extern fn serial_println(msg: text)
+@unsafe(reason: "raw ARM filesystem execution trace event ABI", capabilities: [ffi])
 extern fn arm_fs_exec_trace(id: u64)
+
+@always_inline
+fn _sffi_arm_array_len_u32(arr: [u8]) -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_arm_array_len_u32(arr)
+
+@always_inline
+fn _sffi_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_arm_array_get_byte_u32(arr, idx)
+
+@always_inline
+fn _sffi_arm_array_get_u16_le(arr: [u8], idx: u64) -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_arm_array_get_u16_le(arr, idx)
+
+@always_inline
+fn _sffi_arm_array_get_u32_le(arr: [u8], idx: u64) -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_arm_array_get_u32_le(arr, idx)
+
+@always_inline
+fn _sffi_arm_array_append_bytes(dst: [u8], src: [u8], max_count: u64) -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_arm_array_append_bytes(dst, src, max_count)
+
+@always_inline
+fn _sffi_arm_virtio_blk_read_prefix(first_lba: u64, size: u64) -> [u8]:
+    unsafe(capabilities: [ffi]):
+        rt_arm_virtio_blk_read_prefix(first_lba, size)
+
+@always_inline
+fn _sffi_arm_fat32_probe_bpb_from_virtio() -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_fat32_probe_bpb_from_virtio()
+
+@always_inline
+fn _sffi_array_new_with_cap(cap: i64) -> [u8]:
+    unsafe(capabilities: [ffi]):
+        rt_array_new_with_cap(cap)
+
+@always_inline
+fn _sffi_serial_println(msg: text):
+    unsafe(capabilities: [ffi]):
+        serial_println(msg)
+
+@always_inline
+fn _sffi_arm_fs_exec_trace(id: u64):
+    unsafe(capabilities: [ffi]):
+        arm_fs_exec_trace(id)
 
 var g_arm_blk: VirtioBlkDriver? = nil
 var g_arm_vfs_initialized: bool = false
+var g_arm_mount_table_ready: bool = false
 var g_arm_hello_smf_bytes: [u8] = []
 var g_arm_version_bytes: [u8] = []
 var g_arm_hello_smf_len: u32 = 0
@@ -45,6 +105,18 @@ var g_arm_fats: u64 = 0
 var g_arm_fat_size: u64 = 0
 var g_arm_root_cluster: u64 = 2
 var g_arm_data_start: u64 = 0
+
+val ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES: u64 = 536870912
+
+pub struct ArmFsExecRegularFileReadV1:
+    """One directory-observed ARM FAT32 regular-file read.
+
+    `stat.size == 0` with an empty byte array is a successful empty file.
+    Missing paths, directories, oversized entries, short chains, and device
+    failures remain typed errors rather than collapsing into the same array.
+    """
+    stat: StatInfo
+    bytes: [u8]
 
 @cfg(arm32)
 val ARM_FS_EXEC_SYS_CLUSTER_FALLBACK: u64 = 3
@@ -75,10 +147,83 @@ fn _text_has_prefix(source: text, prefix: text) -> bool:
     true
 
 fn _arm_vfs_log(msg: text):
-    serial_println(msg)
+    _sffi_serial_println(msg)
+
+fn _arm_vfs_read_mounted_regular_file_bounded_v1(
+    path: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    """Read one canonical absolute path through the mounted VFS owner.
+
+    The virtual handle keeps lookup, stat, and positioned read bound to one
+    opened object.  Every exit after open closes that handle.  A zero-length
+    regular file is returned as a successful typed observation, distinct from
+    every lookup, type, read, and close error.
+    """
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    val opened = g_vfs_positioned_open(path, OpenFlags.read_only())
+    if opened.is_err():
+        return Err(opened.unwrap_err())
+    val file_object_id = opened.unwrap()
+    val stat_result = g_vfs_positioned_fstat(file_object_id)
+    if stat_result.is_err():
+        val _ = g_vfs_positioned_close(file_object_id)
+        return Err(stat_result.unwrap_err())
+    val file_stat = stat_result.unwrap()
+    # Reject every explicitly non-regular object.  Legacy FAT32 regular files
+    # publish permission bits without S_IFREG, while directories still publish
+    # S_IFDIR; a zero type is therefore the common-driver regular-file fallback.
+    val file_type = file_stat.mode & 0o170000u32
+    if file_type != 0u32 and file_type != 0o100000u32:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return Err(FsError.InvalidArg)
+    if file_stat.size > max_bytes:
+        val _ = g_vfs_positioned_close(file_object_id)
+        return Err(FsError.TooLarge)
+    if file_stat.size == 0u64:
+        val closed_empty = g_vfs_positioned_close(file_object_id)
+        if closed_empty.is_err():
+            return Err(closed_empty.unwrap_err())
+        return Ok(ArmFsExecRegularFileReadV1(
+            stat: StatInfo(is_dir: false, is_file: true, size: 0),
+            bytes: []))
+    val read_result = g_vfs_positioned_read_at(
+        file_object_id, 0u64, file_stat.size)
+    val close_result = g_vfs_positioned_close(file_object_id)
+    if read_result.is_err():
+        return Err(read_result.unwrap_err())
+    if close_result.is_err():
+        return Err(close_result.unwrap_err())
+    val bytes = read_result.unwrap()
+    if bytes.len() != file_stat.size:
+        return Err(FsError.Corrupt)
+    Ok(ArmFsExecRegularFileReadV1(
+        stat: StatInfo(
+            is_dir: false, is_file: true, size: file_stat.size.to_i64()),
+        bytes: bytes))
+
+pub fn arm_fs_exec_read_mounted_regular_file_bounded_v1(
+    path: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    """Read through the authoritative mounted namespace without boot fallback.
+
+    This is the backend-neutral ARM filesystem boundary used after boot has
+    published a MountTable.  Keeping it explicit also lets hosted conformance
+    specs exercise empty files, typed lookup failures, and object-type/size
+    admission without emulating the ARM VirtIO device.
+    """
+    # Preserve the public ARM reader's argument-error precedence: malformed
+    # namespace input is InvalidArg even when the supplied bound is also bad.
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    if max_bytes > ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES:
+        return Err(FsError.TooLarge)
+    _arm_vfs_read_mounted_regular_file_bounded_v1(path, max_bytes)
 
 pub fn arm_fs_exec_vfs_boot_init() -> bool:
-    arm_fs_exec_trace(211)
+    _sffi_arm_fs_exec_trace(211)
+    g_arm_mount_table_ready = false
+    vfs_state_reset_rootfs()
     _arm_vfs_log("[vfs-init] Starting VirtIO-BLK FAT32 initialization...")
     _arm_vfs_log("[vfs-init] virtio mmio magic={mmio_read32(0x0A003E00)} version={mmio_read32(0x0A003E04)} device_id={mmio_read32(0x0A003E08)}")
     var dev = VirtioBlkDriver.arm_qemu_virt()
@@ -86,11 +231,11 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
     dev = init_result.driver
     val dev_init = init_result.ok
     if not dev_init:
-        arm_fs_exec_trace(212)
+        _sffi_arm_fs_exec_trace(212)
         _arm_vfs_log("[vfs-init] VirtIO-BLK init failed")
         return false
     if not _arm_fat32_probe_bpb(dev):
-        arm_fs_exec_trace(213)
+        _sffi_arm_fs_exec_trace(213)
         _arm_vfs_log("[vfs-init] FAT32 BPB probe failed")
         return false
     # Publish the same live VirtIO-BLK owner through the kernel FAT32 mount.
@@ -123,28 +268,29 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
     _arm_vfs_log("[vfs-init] kernel FAT32 publication ready")
     _sffi_arm_fs_exec_trace(214)
     val hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
-    if rt_arm_array_len_u32(hello_smf_bytes) <= 4:
-        arm_fs_exec_trace(215)
+    val hello_smf_len = _sffi_arm_array_len_u32(hello_smf_bytes)
+    if hello_smf_len <= 4:
+        _sffi_arm_fs_exec_trace(215)
         _arm_vfs_log("[vfs-init] executable FAT32 read probe failed path=/HELLOSMF.SMF")
         return false
-    g_arm_hello_smf_len = rt_arm_array_len_u32(hello_smf_bytes)
+    g_arm_hello_smf_len = hello_smf_len
     g_arm_hello_smf_bytes = hello_smf_bytes
     g_arm_version_bytes = []
     g_arm_blk = Some(dev)
     g_arm_vfs_initialized = true
     if not _arm_schedule_loaded_hello_smf(hello_smf_bytes):
-        arm_fs_exec_trace(216)
+        _sffi_arm_fs_exec_trace(216)
         _arm_vfs_log("[vfs-init] executable scheduler registration failed")
         return false
     _arm_vfs_log("[vfs-init] VirtIO FAT32 direct reader ready")
     val probe = hello_smf_bytes
-    if rt_arm_array_len_u32(probe) <= 4:
-        arm_fs_exec_trace(217)
+    if _sffi_arm_array_len_u32(probe) <= 4:
+        _sffi_arm_fs_exec_trace(217)
         _arm_vfs_log("[vfs-init] executable load probe failed path=/SYS/APPS/HELLOSMF.SMF")
         return false
     _arm_vfs_log("[vfs-init] executable load probe ok path=/sys/apps/hello_world.smf")
     _arm_vfs_log("[vfs-init] VFS ready (VirtIO-BLK FAT32)")
-    arm_fs_exec_trace(218)
+    _sffi_arm_fs_exec_trace(218)
     true
 
 pub fn arm_fs_exec_probe_init() -> bool:
@@ -153,6 +299,7 @@ pub fn arm_fs_exec_probe_init() -> bool:
     directory-scan path, independent of the /SYS/APPS descent. Sets g_arm_blk
     to a real device (freestanding module-globals are never zero-initialized,
     so the garbage default must be overwritten before any read)."""
+    g_arm_mount_table_ready = false
     var dev = VirtioBlkDriver.arm_qemu_virt()
     val init_result = virtio_blk_arm_init(dev)
     dev = init_result.driver
@@ -169,36 +316,82 @@ pub fn arm_fs_exec_probe_init() -> bool:
     _arm_vfs_log("[vfs-probe] VirtIO FAT32 direct reader ready")
     true
 
-pub fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
+pub fn arm_fs_exec_read_regular_file_bounded_v1(
+    path: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    if max_bytes > ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES:
+        return Err(FsError.TooLarge)
     val mapped = _arm_exec_alias(path)
     _arm_vfs_log("[vfs-read] path={path} mapped={mapped} initialized={g_arm_vfs_initialized}")
-    val cached_hello_len = rt_arm_array_len_u32(g_arm_hello_smf_bytes)
-    if mapped == "/SYS/APPS/HELLOSMF.SMF" and cached_hello_len > 4:
+    val cached_hello_len = _sffi_arm_array_len_u32(g_arm_hello_smf_bytes)
+    # A published namespace is authoritative over the boot-time byte cache.
+    # Otherwise a later nested mount at /SYS/APPS could be bypassed by the
+    # pre-mount hello image.  Probe-only media may still use the cache.
+    if not g_arm_mount_table_ready and
+       mapped == "/SYS/APPS/HELLOSMF.SMF" and cached_hello_len > 4:
+        if cached_hello_len.to_u64() > max_bytes:
+            return Err(FsError.TooLarge)
         _arm_vfs_log("[vfs-read] cached-hello len={cached_hello_len}")
-        return g_arm_hello_smf_bytes
+        return Ok(ArmFsExecRegularFileReadV1(
+            stat: StatInfo(is_dir: false, is_file: true, size: cached_hello_len.to_i64()),
+            bytes: g_arm_hello_smf_bytes))
+    # The production ARM boot path publishes its live FAT32 driver into the
+    # canonical MountTable before setting g_arm_vfs_initialized.  Prefer that
+    # backend-neutral path so any safe absolute mounted path (including future
+    # nested directories and non-curated filenames) is readable.  Once a mount
+    # is published its result is authoritative: even NotFound must not fall
+    # through to a raw root-device walk that bypasses nested-mount namespace
+    # routing.  Probe/legacy media use the direct walker only when no MountTable
+    # publication occurred.
+    if g_arm_mount_table_ready:
+        val mounted = arm_fs_exec_read_mounted_regular_file_bounded_v1(
+            mapped, max_bytes)
+        if mounted.is_ok():
+            _arm_vfs_log("[vfs-read] mounted-hit len={_sffi_arm_array_len_u32(mounted.unwrap().bytes)}")
+        return mounted
     if val Some(dev) = g_arm_blk:
-        val bytes = _arm_fat32_read_path_from_dev(dev, mapped)
-        _arm_vfs_log("[vfs-read] blk-hit len={rt_arm_array_len_u32(bytes)}")
-        return bytes
+        val result = _arm_fat32_read_regular_path_from_dev_v1(dev, mapped, max_bytes)
+        if result.is_ok():
+            _arm_vfs_log("[vfs-read] blk-hit len={_sffi_arm_array_len_u32(result.unwrap().bytes)}")
+        return result
 
     var dev = VirtioBlkDriver.arm_qemu_virt()
     val init_result = virtio_blk_arm_init(dev)
     dev = init_result.driver
     if init_result.ok:
-        _arm_fat32_probe_bpb(dev)
-        val bytes = _arm_fat32_read_path_from_dev(dev, mapped)
-        _arm_vfs_log("[vfs-read] late-init len={rt_arm_array_len_u32(bytes)}")
-        return bytes
+        if not _arm_fat32_probe_bpb(dev):
+            return Err(FsError.Corrupt)
+        val result = _arm_fat32_read_regular_path_from_dev_v1(dev, mapped, max_bytes)
+        if result.is_ok():
+            _arm_vfs_log("[vfs-read] late-init len={_sffi_arm_array_len_u32(result.unwrap().bytes)}")
+        return result
 
     if not g_arm_vfs_initialized:
         _arm_vfs_log("[vfs-read] unavailable")
-        return []
+        return Err(FsError.IoError(code: 0u32))
 
-    if mapped == "/SYS/VERSION.TXT" and rt_arm_array_len_u32(g_arm_version_bytes) > 0:
-        _arm_vfs_log("[vfs-read] cached-version len={rt_arm_array_len_u32(g_arm_version_bytes)}")
-        return g_arm_version_bytes
+    if mapped == "/SYS/VERSION.TXT" and _sffi_arm_array_len_u32(g_arm_version_bytes) > 0:
+        _arm_vfs_log("[vfs-read] cached-version len={_sffi_arm_array_len_u32(g_arm_version_bytes)}")
+        val size = _sffi_arm_array_len_u32(g_arm_version_bytes)
+        if size.to_u64() > max_bytes:
+            return Err(FsError.TooLarge)
+        return Ok(ArmFsExecRegularFileReadV1(
+            stat: StatInfo(is_dir: false, is_file: true, size: size.to_i64()),
+            bytes: g_arm_version_bytes))
     _arm_vfs_log("[vfs-read] miss")
-    []
+    Err(FsError.NotFound)
+
+pub fn arm_fs_exec_read_regular_file_v1(path: text) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    arm_fs_exec_read_regular_file_bounded_v1(path, ARM_FS_EXEC_MAX_REGULAR_FILE_BYTES)
+
+pub fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
+    """Compatibility reader retaining the historical empty-on-error API."""
+    val result = arm_fs_exec_read_regular_file_v1(path)
+    if result.is_err():
+        return []
+    result.unwrap().bytes
 
 pub fn arm_fs_exec_loaded_hello_len() -> u32:
     if not g_arm_vfs_initialized:
@@ -220,33 +413,34 @@ fn _arm_schedule_loaded_hello_smf(bytes: [u8]) -> bool:
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = []
     var i: i64 = 0
-    val len = rt_arm_array_len_u32(buf).to_i64()
+    val len = _sffi_arm_array_len_u32(buf).to_i64()
     while i < len:
         out.push(buf[i])
         i = i + 1
     out
 
 fn _u16_le(buf: [u8], off: i32) -> u32:
-    rt_arm_array_get_u16_le(buf, off as u64)
+    _sffi_arm_array_get_u16_le(buf, off as u64)
 
 fn _u32_le(buf: [u8], off: i32) -> u32:
-    rt_arm_array_get_u32_le(buf, off as u64)
+    _sffi_arm_array_get_u32_le(buf, off as u64)
 
 fn _byte(buf: [u8], off: i32) -> u32:
-    rt_arm_array_get_byte_u32(buf, off as u64)
+    _sffi_arm_array_get_byte_u32(buf, off as u64)
 
 fn _arm_read_sector(dev: VirtioBlkDriver, lba: u64) -> [u8]:
     val _dev = dev
-    val direct = rt_arm_virtio_blk_read_prefix(lba, 512)
-    if rt_arm_array_len_u32(direct) >= 512:
+    val direct = _sffi_arm_virtio_blk_read_prefix(lba, 512)
+    val direct_len = _sffi_arm_array_len_u32(direct)
+    if direct_len >= 512:
         return direct
-    if rt_arm_array_len_u32(direct) == 0:
+    if direct_len == 0:
         _arm_vfs_log("[vfs-root] direct_sector_failed")
     direct
 
 fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
     val _dev = dev
-    if rt_arm_fat32_probe_bpb_from_virtio() == 0:
+    if _sffi_arm_fat32_probe_bpb_from_virtio() == 0:
         _arm_vfs_log("[vfs-init] FAT32 BPB probe failed in C bridge")
         return false
     # Parse the real geometry from sector 0. scripts/os/make_os_disk.shs used
@@ -255,7 +449,7 @@ fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
     # hardcoded constants mis-address every cluster there. Fall back to the
     # historical constants only when the boot-sector read fails.
     val bpb = _arm_read_sector(dev, 0)
-    if rt_arm_array_len_u32(bpb) >= 512 and _byte(bpb, 11) + _byte(bpb, 12) > 0:
+    if _sffi_arm_array_len_u32(bpb) >= 512 and _byte(bpb, 11) + _byte(bpb, 12) > 0:
         g_arm_bps = ((_u16_le(bpb, 11)) as u64)
         g_arm_spc = (_byte(bpb, 13) as u64)
         g_arm_reserved = ((_u16_le(bpb, 14)) as u64)
@@ -273,25 +467,27 @@ fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
         g_arm_spc = 1
     g_arm_data_start = g_arm_reserved + (g_arm_fats * g_arm_fat_size)
     val root_probe = _arm_read_sector(dev, g_arm_data_start)
-    arm_fs_exec_trace(250)
-    arm_fs_exec_trace(rt_arm_array_len_u32(root_probe).to_u64())
-    arm_fs_exec_trace(_byte(root_probe, 0).to_u64())
-    arm_fs_exec_trace(_byte(root_probe, 1).to_u64())
-    arm_fs_exec_trace(_byte(root_probe, 2).to_u64())
-    arm_fs_exec_trace(_byte(root_probe, 11).to_u64())
-    _arm_vfs_log("[vfs-init] root probe len={rt_arm_array_len_u32(root_probe)} b0={_byte(root_probe, 0)} b1={_byte(root_probe, 1)} b2={_byte(root_probe, 2)} b11={_byte(root_probe, 11)}")
+    _sffi_arm_fs_exec_trace(250)
+    _sffi_arm_fs_exec_trace(_sffi_arm_array_len_u32(root_probe).to_u64())
+    _sffi_arm_fs_exec_trace(_byte(root_probe, 0).to_u64())
+    _sffi_arm_fs_exec_trace(_byte(root_probe, 1).to_u64())
+    _sffi_arm_fs_exec_trace(_byte(root_probe, 2).to_u64())
+    _sffi_arm_fs_exec_trace(_byte(root_probe, 11).to_u64())
+    _arm_vfs_log("[vfs-init] root probe len={_sffi_arm_array_len_u32(root_probe)} b0={_byte(root_probe, 0)} b1={_byte(root_probe, 1)} b2={_byte(root_probe, 2)} b11={_byte(root_probe, 11)}")
     _arm_vfs_log("[vfs-init] FAT32 bpb parsed bps={g_arm_bps} spc={g_arm_spc} reserved={g_arm_reserved} fats={g_arm_fats} fat_size={g_arm_fat_size} root={g_arm_root_cluster} data_start={g_arm_data_start}")
     return true
 
 fn _arm_cluster_sector(cluster: u64) -> u64:
-    96 + (cluster - 2)
+    val data_start = if g_arm_data_start >= 1: g_arm_data_start else: 96
+    data_start + (cluster - 2) * g_arm_spc
 
 fn _arm_fat_next(dev: VirtioBlkDriver, cluster: u64) -> u64:
     val fat_offset = cluster * 4
-    val sector = 32 + (fat_offset / 512)
+    val reserved = if g_arm_reserved >= 1: g_arm_reserved else: 32
+    val sector = reserved + (fat_offset / 512)
     val off = (fat_offset % 512).to_i32()
     val buf = _arm_read_sector(dev, sector)
-    if rt_arm_array_len_u32(buf) < 512:
+    if _sffi_arm_array_len_u32(buf) < 512:
         return 0x0FFFFFFF
     (_u32_le(buf, off) & 0x0FFFFFFF) as u64
 
@@ -305,23 +501,30 @@ fn _arm_read_cluster(dev: VirtioBlkDriver, cluster: u64) -> [u8]:
     # concatenate — same append helper _arm_read_file_chain relies on.
     if spc <= 1:
         return _arm_read_sector(dev, first)
-    var out: [u8] = rt_array_new_with_cap((spc * 512).to_i64())
+    var out: [u8] = _sffi_array_new_with_cap((spc * 512).to_i64())
     var i: u64 = 0
     while i < spc:
-        val sec = rt_arm_virtio_blk_read_prefix(first + i, 512)
-        if rt_arm_array_len_u32(sec) < 512:
+        val sec = _sffi_arm_virtio_blk_read_prefix(first + i, 512)
+        if _sffi_arm_array_len_u32(sec) < 512:
             return out
-        _ = rt_arm_array_append_bytes(out, sec, 512)
+        if _sffi_arm_array_append_bytes(out, sec, 512) < 512:
+            return out
         i = i + 1
     out
 
 fn _arm_read_file_chain(dev: VirtioBlkDriver, first_cluster: u64, size: u64) -> [u8]:
-    var out: [u8] = rt_array_new_with_cap(size.to_i64())
+    var out: [u8] = _sffi_array_new_with_cap(size.to_i64())
     var cluster = first_cluster
-    while cluster >= 2 and cluster < 0x0FFFFFF8 and rt_arm_array_len_u32(out).to_u64() < size:
+    while cluster >= 2 and cluster < 0x0FFFFFF8 and _sffi_arm_array_len_u32(out).to_u64() < size:
         val data = _arm_read_cluster(dev, cluster)
-        val remaining = size - rt_arm_array_len_u32(out).to_u64()
-        _ = rt_arm_array_append_bytes(out, data, remaining)
+        val out_len = _sffi_arm_array_len_u32(out).to_u64()
+        val remaining = size - out_len
+        val data_len = _sffi_arm_array_len_u32(data).to_u64()
+        if data_len == 0:
+            return out
+        val expected = if data_len < remaining: data_len else: remaining
+        if _sffi_arm_array_append_bytes(out, data, remaining).to_u64() < expected:
+            return out
         cluster = _arm_fat_next(dev, cluster)
     out
 
@@ -375,7 +578,7 @@ fn _arm_fat32_read_hello_smf_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
             if _byte(data, off) == 0:
                 return []
@@ -397,7 +600,7 @@ fn _arm_fat32_read_hello_smf_from_dir(dev: VirtioBlkDriver, start_cluster: u64) 
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
             if _byte(data, off) == 0:
                 return []
@@ -416,13 +619,32 @@ fn _arm_fat32_read_short_name_from_dir(dev: VirtioBlkDriver, start_cluster: u64,
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
             if start_cluster == 2 and short_name == "HELLOSMF.SMF" and (off == 0 or off == 32 or off == 64 or off == 256 or off == 320 or off == 448):
                 _arm_vfs_log("[vfs-root-match] off={off} b0={_byte(data, off)} b1={_byte(data, off + 1)} b2={_byte(data, off + 2)} b3={_byte(data, off + 3)} attr={_byte(data, off + 11)}")
             if _byte(data, off) == 0:
                 return []
-            if _byte(data, off) != 0xE5 and _byte(data, off + 11) != 0x0F and _arm_dirent_matches_short_name(data, off, short_name):
+            # Pure inline byte comparison for the Lane BA root-staged probe
+            # files (avoids array-literal / big-match helpers that miscompile on
+            # the cranelift seed). "SIMPLE  ELF" and "HELLO   SPL" 8.3 names.
+            val is_simple_elf = short_name == "SIMPLE.ELF" and
+                _byte(data, off + 0) == 0x53 and _byte(data, off + 1) == 0x49 and
+                _byte(data, off + 2) == 0x4D and _byte(data, off + 3) == 0x50 and
+                _byte(data, off + 4) == 0x4C and _byte(data, off + 5) == 0x45 and
+                _byte(data, off + 6) == 0x20 and _byte(data, off + 7) == 0x20 and
+                _byte(data, off + 8) == 0x45 and _byte(data, off + 9) == 0x4C and
+                _byte(data, off + 10) == 0x46
+            val is_hello_spl = short_name == "HELLO.SPL" and
+                _byte(data, off + 0) == 0x48 and _byte(data, off + 1) == 0x45 and
+                _byte(data, off + 2) == 0x4C and _byte(data, off + 3) == 0x4C and
+                _byte(data, off + 4) == 0x4F and _byte(data, off + 5) == 0x20 and
+                _byte(data, off + 6) == 0x20 and _byte(data, off + 7) == 0x20 and
+                _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x50 and
+                _byte(data, off + 10) == 0x4C
+            val matched = if is_simple_elf or is_hello_spl: true
+                else: _byte(data, off) != 0xE5 and _byte(data, off + 11) != 0x0F and _arm_dirent_matches_short_name(data, off, short_name)
+            if matched:
                 _arm_vfs_log("[vfs-root-match] hit off={off} name={short_name} hi={_u16_le(data, off + 20)} lo={_u16_le(data, off + 26)} size={_u32_le(data, off + 28)}")
                 val hi = _u16_le(data, off + 20)
                 val lo = _u16_le(data, off + 26)
@@ -434,68 +656,68 @@ fn _arm_fat32_read_short_name_from_dir(dev: VirtioBlkDriver, start_cluster: u64,
     []
 
 fn _arm_fat32_find_sys_cluster(dev: VirtioBlkDriver) -> u64:
-    arm_fs_exec_trace(221)
+    _sffi_arm_fs_exec_trace(221)
     var dir_cluster: u64 = 2
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
-        arm_fs_exec_trace(251)
-        arm_fs_exec_trace(rt_arm_array_len_u32(data).to_u64())
-        arm_fs_exec_trace(_byte(data, 0).to_u64())
-        arm_fs_exec_trace(_byte(data, 1).to_u64())
-        arm_fs_exec_trace(_byte(data, 2).to_u64())
-        arm_fs_exec_trace(_byte(data, 3).to_u64())
-        arm_fs_exec_trace(_byte(data, 4).to_u64())
-        arm_fs_exec_trace(_byte(data, 5).to_u64())
-        arm_fs_exec_trace(_byte(data, 6).to_u64())
-        arm_fs_exec_trace(_byte(data, 7).to_u64())
-        arm_fs_exec_trace(_byte(data, 8).to_u64())
-        arm_fs_exec_trace(_byte(data, 9).to_u64())
-        arm_fs_exec_trace(_byte(data, 10).to_u64())
-        arm_fs_exec_trace(_byte(data, 11).to_u64())
+        _sffi_arm_fs_exec_trace(251)
+        _sffi_arm_fs_exec_trace(_sffi_arm_array_len_u32(data).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 0).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 1).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 2).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 3).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 4).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 5).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 6).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 7).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 8).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 9).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 10).to_u64())
+        _sffi_arm_fs_exec_trace(_byte(data, 11).to_u64())
         var off: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
             val b0 = _byte(data, off)
             if b0 == 0:
-                arm_fs_exec_trace(222)
+                _sffi_arm_fs_exec_trace(222)
                 return 0
             val attr = _byte(data, off + 11)
             if b0 != 0xE5:
-                arm_fs_exec_trace(260)
+                _sffi_arm_fs_exec_trace(260)
                 if attr == 0x10:
-                    arm_fs_exec_trace(261)
+                    _sffi_arm_fs_exec_trace(261)
                     val b1 = _byte(data, off + 1)
                     val b2 = _byte(data, off + 2)
-                    arm_fs_exec_trace(b0.to_u64())
-                    arm_fs_exec_trace(b1.to_u64())
-                    arm_fs_exec_trace(b2.to_u64())
+                    _sffi_arm_fs_exec_trace(b0.to_u64())
+                    _sffi_arm_fs_exec_trace(b1.to_u64())
+                    _sffi_arm_fs_exec_trace(b2.to_u64())
                     if b0 == 0x53 and b1 == 0x59 and b2 == 0x53:
-                        arm_fs_exec_trace(223)
+                        _sffi_arm_fs_exec_trace(223)
                         val hi = _u16_le(data, off + 20)
                         val lo = _u16_le(data, off + 26)
                         return (hi * 65536) + lo
             off = off + 32
         dir_cluster = _arm_fat_next(dev, dir_cluster)
-    arm_fs_exec_trace(224)
+    _sffi_arm_fs_exec_trace(224)
     if ARM_FS_EXEC_SYS_CLUSTER_FALLBACK >= 2:
-        arm_fs_exec_trace(242)
+        _sffi_arm_fs_exec_trace(242)
         return ARM_FS_EXEC_SYS_CLUSTER_FALLBACK
     0
 
 fn _arm_fat32_find_apps_cluster(dev: VirtioBlkDriver) -> u64:
-    arm_fs_exec_trace(225)
+    _sffi_arm_fs_exec_trace(225)
     var dir_cluster = _arm_fat32_find_sys_cluster(dev)
     if dir_cluster < 2:
-        arm_fs_exec_trace(226)
+        _sffi_arm_fs_exec_trace(226)
         return 0
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
             val b0 = _byte(data, off)
             if b0 == 0:
-                arm_fs_exec_trace(227)
+                _sffi_arm_fs_exec_trace(227)
                 return 0
             val attr = _byte(data, off + 11)
             if b0 != 0xE5:
@@ -504,15 +726,15 @@ fn _arm_fat32_find_apps_cluster(dev: VirtioBlkDriver) -> u64:
                     val b2 = _byte(data, off + 2)
                     val b3 = _byte(data, off + 3)
                     if b0 == 0x41 and b1 == 0x50 and b2 == 0x50 and b3 == 0x53:
-                        arm_fs_exec_trace(228)
+                        _sffi_arm_fs_exec_trace(228)
                         val hi = _u16_le(data, off + 20)
                         val lo = _u16_le(data, off + 26)
                         return (hi * 65536) + lo
             off = off + 32
         dir_cluster = _arm_fat_next(dev, dir_cluster)
-    arm_fs_exec_trace(229)
+    _sffi_arm_fs_exec_trace(229)
     if ARM_FS_EXEC_APPS_CLUSTER_FALLBACK >= 2:
-        arm_fs_exec_trace(243)
+        _sffi_arm_fs_exec_trace(243)
         return ARM_FS_EXEC_APPS_CLUSTER_FALLBACK
     0
 
@@ -523,7 +745,7 @@ fn _arm_fat32_read_sys_version_from_dev(dev: VirtioBlkDriver, path: text) -> [u8
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
             if _byte(data, off) == 0:
                 return []
@@ -537,45 +759,118 @@ fn _arm_fat32_read_sys_version_from_dev(dev: VirtioBlkDriver, path: text) -> [u8
         dir_cluster = _arm_fat_next(dev, dir_cluster)
     []
 
+fn _arm_fat32_read_regular_short_name_v1(
+    dev: VirtioBlkDriver, start_cluster: u64, short_name: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    if start_cluster < 2 or short_name == "":
+        return Err(FsError.NotFound)
+    var dir_cluster = start_cluster
+    while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
+        val data = _arm_read_cluster(dev, dir_cluster)
+        if _sffi_arm_array_len_u32(data) == 0:
+            return Err(FsError.IoError(code: 0u32))
+        var off: i32 = 0
+        val data_len = _sffi_arm_array_len_u32(data).to_i32()
+        while off + 32 <= data_len:
+            val first_byte = _byte(data, off)
+            if first_byte == 0:
+                return Err(FsError.NotFound)
+            val attr = _byte(data, off + 11)
+            if (first_byte != 0xE5 and attr != 0x0F and
+                _arm_dirent_matches_short_name(data, off, short_name)):
+                # FAT directory and volume-label entries are not regular files.
+                if (attr & 0x18) != 0:
+                    return Err(FsError.InvalidArg)
+                val size = _u32_le(data, off + 28).to_u64()
+                if size > max_bytes:
+                    return Err(FsError.TooLarge)
+                if size == 0:
+                    return Ok(ArmFsExecRegularFileReadV1(
+                        stat: StatInfo(is_dir: false, is_file: true, size: 0),
+                        bytes: []))
+                val hi = _u16_le(data, off + 20)
+                val lo = _u16_le(data, off + 26)
+                val first_cluster = (hi * 65536 + lo).to_u64()
+                if first_cluster < 2:
+                    return Err(FsError.Corrupt)
+                val bytes = _arm_read_file_chain(dev, first_cluster, size)
+                if _sffi_arm_array_len_u32(bytes).to_u64() != size:
+                    return Err(FsError.Corrupt)
+                return Ok(ArmFsExecRegularFileReadV1(
+                    stat: StatInfo(is_dir: false, is_file: true, size: size.to_i64()),
+                    bytes: bytes))
+            off = off + 32
+        dir_cluster = _arm_fat_next(dev, dir_cluster)
+    Err(FsError.NotFound)
+
+fn _arm_fat32_read_regular_path_from_dev_v1(
+    dev: VirtioBlkDriver, path: text, max_bytes: u64
+) -> Result<ArmFsExecRegularFileReadV1, FsError>:
+    val mapped = _arm_exec_alias(path)
+    val short_name = _arm_short_name_for_mapped_path(mapped)
+    if short_name == "":
+        return Err(FsError.InvalidArg)
+    if mapped == "/HELLOSMF.SMF":
+        return _arm_fat32_read_regular_short_name_v1(dev, 2, short_name, max_bytes)
+    if _text_has_prefix(mapped, "/SYS/APPS/"):
+        val apps_cluster = _arm_fat32_find_apps_cluster(dev)
+        if apps_cluster >= 2:
+            val nested = _arm_fat32_read_regular_short_name_v1(dev, apps_cluster, short_name, max_bytes)
+            if nested.is_ok():
+                return nested
+            # Only absence may use the historical root-staged media fallback.
+            val nested_error = nested.unwrap_err()
+            if not _arm_fs_error_is_not_found(nested_error):
+                return Err(nested_error)
+        return _arm_fat32_read_regular_short_name_v1(dev, 2, short_name, max_bytes)
+    if _text_has_prefix(mapped, "/SYS/"):
+        val sys_cluster = _arm_fat32_find_sys_cluster(dev)
+        if sys_cluster < 2:
+            return Err(FsError.NotFound)
+        return _arm_fat32_read_regular_short_name_v1(dev, sys_cluster, short_name, max_bytes)
+    if _text_has_prefix(mapped, "/"):
+        return _arm_fat32_read_regular_short_name_v1(dev, 2, short_name, max_bytes)
+    Err(FsError.InvalidArg)
+
 fn _arm_fat32_read_path_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
-    arm_fs_exec_trace(230)
+    _sffi_arm_fs_exec_trace(230)
     val mapped = _arm_exec_alias(path)
     # The known-path override table hardcodes (cluster, size) pairs that are
     # only valid for the historical 4MB spc=1/fat_size=64 media layout. On any
     # other geometry the real dirent walk below must be used.
     if g_arm_spc == 1 and g_arm_fat_size == 64:
         val overridden = _arm_known_path_override(dev, mapped)
-        if rt_arm_array_len_u32(overridden) > 0:
-            arm_fs_exec_trace(244)
+        if _sffi_arm_array_len_u32(overridden) > 0:
+            _sffi_arm_fs_exec_trace(244)
             return overridden
     val short_name = _arm_short_name_for_mapped_path(mapped)
     if mapped == "/HELLOSMF.SMF":
-        arm_fs_exec_trace(231)
+        _sffi_arm_fs_exec_trace(231)
         return _arm_fat32_read_short_name_from_dir(dev, 2, short_name)
     if _text_has_prefix(mapped, "/SYS/APPS/"):
-        arm_fs_exec_trace(232)
+        _sffi_arm_fs_exec_trace(232)
         val apps_cluster = _arm_fat32_find_apps_cluster(dev)
         if apps_cluster >= 2:
-            arm_fs_exec_trace(233)
+            _sffi_arm_fs_exec_trace(233)
             val app_bytes = _arm_fat32_read_short_name_from_dir(dev, apps_cluster, short_name)
-            if rt_arm_array_len_u32(app_bytes) > 0:
-                arm_fs_exec_trace(234)
+            if _sffi_arm_array_len_u32(app_bytes) > 0:
+                _sffi_arm_fs_exec_trace(234)
                 return app_bytes
-        arm_fs_exec_trace(235)
+        _sffi_arm_fs_exec_trace(235)
         return _arm_fat32_read_short_name_from_dir(dev, 2, short_name)
     if _text_has_prefix(mapped, "/SYS/"):
-        arm_fs_exec_trace(236)
+        _sffi_arm_fs_exec_trace(236)
         val sys_cluster = _arm_fat32_find_sys_cluster(dev)
         if sys_cluster < 2:
-            arm_fs_exec_trace(237)
+            _sffi_arm_fs_exec_trace(237)
             return []
         if short_name == "VERSION.TXT":
-            arm_fs_exec_trace(238)
+            _sffi_arm_fs_exec_trace(238)
             return _arm_fat32_read_sys_version_from_dev(dev, mapped)
-        arm_fs_exec_trace(239)
+        _sffi_arm_fs_exec_trace(239)
         return _arm_fat32_read_short_name_from_dir(dev, sys_cluster, short_name)
     if _text_has_prefix(mapped, "/") and short_name != "":
-        arm_fs_exec_trace(240)
+        _sffi_arm_fs_exec_trace(240)
         return _arm_fat32_read_short_name_from_dir(dev, 2, short_name)
-    arm_fs_exec_trace(241)
+    _sffi_arm_fs_exec_trace(241)
     []

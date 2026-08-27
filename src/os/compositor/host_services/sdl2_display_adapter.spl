@@ -10,6 +10,10 @@ use common.ui.draw_ir.{DrawIrComposition}
 use os.compositor.display_backend_core.{CompositorBackend}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
+use os.compositor.host_services.display_adapter_common.{
+    display_adapter_make_completion,
+    display_adapter_make_rejection_components
+}
 use os.sosix.host.service_contract.{
     SosixDisplayRequest,
     SosixDisplayCompletionKey,
@@ -32,26 +36,20 @@ pub struct SosixSdl2PresentSubmission:
 
 export SosixSdl2PresentSubmission
 
-fn _sosix_sdl2_completion(request: SosixDisplayRequest) -> SosixDisplayCompletionKey:
-    SosixDisplayCompletionKey(
-        surface: request.surface,
-        surface_generation: request.surface_generation,
-        frame_sequence: request.frame_sequence
-    )
-
 fn _sosix_sdl2_rejected(
     reason: text,
     state: SosixDisplaySurfaceState,
     request: SosixDisplayRequest,
     composition_id: text
 ) -> SosixSdl2PresentSubmission:
+    val components = display_adapter_make_rejection_components(reason, state, request, composition_id)
     SosixSdl2PresentSubmission(
-        accepted: false,
-        reason: reason,
-        state: state,
-        completion: _sosix_sdl2_completion(request),
+        accepted: components.accepted,
+        reason: components.reason,
+        state: components.state,
+        completion: components.completion,
         pixel_count: 0,
-        composition_id: composition_id
+        composition_id: components.composition_id
     )
 
 pub fn sosix_sdl2_submit_composition(
@@ -103,14 +101,14 @@ pub fn sosix_sdl2_submit_composition(
     # pending fence explicit so asynchronous hosts can share the lifecycle
     # without claiming completion before their own fence is observed.
     val pending = sosix_display_present_fence_pending(
-        submitted.state, _sosix_sdl2_completion(request))
+        submitted.state, display_adapter_make_completion(request))
     val completed = sosix_display_present_fence_observe(
-        pending, _sosix_sdl2_completion(request))
+        pending, display_adapter_make_completion(request))
     SosixSdl2PresentSubmission(
         accepted: completed.accepted,
         reason: if completed.accepted: "presented-synchronously" else: completed.reason,
         state: completed.fence.state,
-        completion: _sosix_sdl2_completion(request),
+        completion: display_adapter_make_completion(request),
         pixel_count: rendered.pixels.len() as u64,
         composition_id: composition.composition_id
     )

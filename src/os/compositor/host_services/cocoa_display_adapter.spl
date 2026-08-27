@@ -10,6 +10,10 @@ pending until a separate host completion producer observes it.
 use common.ui.draw_ir.{DrawIrComposition}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
+use os.compositor.host_services.display_adapter_common.{
+    display_adapter_make_completion,
+    display_adapter_make_rejection_components
+}
 use os.sosix.host.service_contract.{
     SosixHostConfigurationSnapshot,
     SosixDisplayRequest,
@@ -31,25 +35,19 @@ pub struct SosixCocoaPresentSubmission:
 
 export SosixCocoaPresentSubmission
 
-fn _cocoa_completion(request: SosixDisplayRequest) -> SosixDisplayCompletionKey:
-    SosixDisplayCompletionKey(
-        surface: request.surface,
-        surface_generation: request.surface_generation,
-        frame_sequence: request.frame_sequence
-    )
-
 fn _cocoa_rejected(
     reason: text,
     state: SosixDisplaySurfaceState,
     request: SosixDisplayRequest,
     composition_id: text
 ) -> SosixCocoaPresentSubmission:
+    val components = display_adapter_make_rejection_components(reason, state, request, composition_id)
     SosixCocoaPresentSubmission(
-        accepted: false,
-        reason: reason,
-        state: state,
-        completion: _cocoa_completion(request),
-        composition_id: composition_id
+        accepted: components.accepted,
+        reason: components.reason,
+        state: components.state,
+        completion: components.completion,
+        composition_id: components.composition_id
     )
 
 pub fn sosix_cocoa_submit_composition(
@@ -97,12 +95,12 @@ pub fn sosix_cocoa_submit_composition(
     display.blit_pixels(0, 0, display.w, display.h, rendered.pixels)
     display.present()
     val pending = sosix_display_present_fence_pending(
-        submitted.state, _cocoa_completion(request))
+        submitted.state, display_adapter_make_completion(request))
     SosixCocoaPresentSubmission(
         accepted: true,
         reason: "present-awaiting-host-completion",
         state: pending.state,
-        completion: _cocoa_completion(request),
+        completion: display_adapter_make_completion(request),
         composition_id: composition.composition_id
     )
 

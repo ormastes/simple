@@ -44,7 +44,11 @@ use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_resource_set_label, device_grant_is_isolated}
-use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision}
+use os.kernel.boot.boot_nvme_production_handoff.{
+    boot_nvme_production_handoff_provision_bound,
+    boot_nvme_production_handoff_clear
+}
+use os.kernel.fs.block_device_identity_owner_v1.{BlockDeviceRegionBindingV1}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
 use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
@@ -59,7 +63,6 @@ use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, dma_alloc, dma_free, dma_buffe
 use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle}
 use std.fs_driver.ops.{FsDriver}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
-use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_leaf_for_canonical}
 
@@ -118,6 +121,9 @@ pub fn vfs_boot_pure_nvme_root_read_file_bytes(path: text) -> [u8]:
 var g_vfs_nvme_active_leases: [NvmeFilesystemLease] = []
 var g_vfs_nvme_direct_adapter_leases: [NvmeFilesystemLease] = []
 var g_vfs_nvme_direct_adapters: [NvmeBlockAdapter] = []
+var g_nvme_boot_backend_owner_id: u64 = 0u64
+var g_nvme_boot_backend_generation: u64 = 0u64
+var g_nvme_boot_backend_next_generation: u64 = 1u64
 
 # The mutable driver never leaves this module.  Callers receive immutable
 # facts, transfer evidence, DMA leases, or adapters that have already been
@@ -125,6 +131,11 @@ var g_vfs_nvme_direct_adapters: [NvmeBlockAdapter] = []
 # of g_nvme and therefore cannot accidentally become a second controller
 # owner under Simple's value semantics.
 fn nvme_boot_runtime_reset():
+    # Invalidate the observable handoff before replacing the controller owner.
+    # The monotonic next generation intentionally survives reset.
+    boot_nvme_production_handoff_clear()
+    g_nvme_boot_backend_owner_id = 0u64
+    g_nvme_boot_backend_generation = 0u64
     g_nvme = NvmeDriver.new()
 
 fn nvme_boot_runtime_reset_leases():
@@ -133,7 +144,30 @@ fn nvme_boot_runtime_reset_leases():
     g_vfs_nvme_direct_adapters = []
 
 fn nvme_boot_runtime_init(grant: DeviceGrant) -> Result<bool, text>:
-    g_nvme.init_from_grant(grant)
+    if grant.bar0_cap == 0u64:
+        return Err("nvme-runtime: missing authoritative BAR capability identity")
+    if g_nvme_boot_backend_next_generation == 0u64 or g_nvme_boot_backend_next_generation == 0xffffffffffffffffu64:
+        return Err("nvme-runtime: backend generation exhausted")
+    val initialized = g_nvme.init_from_grant(grant)
+    if not initialized.?: return initialized
+    if not initialized.unwrap():
+        return Err("nvme-runtime: controller owner did not acknowledge initialization")
+    g_nvme_boot_backend_owner_id = grant.bar0_cap
+    g_nvme_boot_backend_generation = g_nvme_boot_backend_next_generation
+    g_nvme_boot_backend_next_generation = g_nvme_boot_backend_next_generation + 1u64
+    initialized
+
+fn nvme_boot_runtime_backend_binding(base_lba: u64, sector_count: u64) -> Result<BlockDeviceRegionBindingV1, text>:
+    if g_nvme_boot_backend_owner_id == 0u64 or g_nvme_boot_backend_generation == 0u64:
+        return Err("nvme-runtime: backend identity unavailable")
+    if sector_count == 0u64 or base_lba > g_nvme.get_sector_count() or sector_count > g_nvme.get_sector_count() - base_lba:
+        return Err("nvme-runtime: backend region invalid")
+    Ok(BlockDeviceRegionBindingV1(
+        backend_kind: 1u32,
+        backend_owner_id: g_nvme_boot_backend_owner_id,
+        backend_generation: g_nvme_boot_backend_generation,
+        base_lba: base_lba,
+        sector_count: sector_count))
 
 fn nvme_boot_runtime_sector_size() -> u32:
     g_nvme.get_sector_size()
@@ -719,7 +753,6 @@ pub fn vfs_boot_probe_pure_simple_nvme_adapter() -> Result<BlockDevice, text>:
     val bounce_init = adapter.init_bounce_buffer()
     if bounce_init.is_err():
         return Err("root-probe: bounce buffer failed: {bounce_init.unwrap_err()}")
-    boot_nvme_production_handoff_provision(adapter, transfer_evidence, lease)
     log_raw_println("[vfs-init] root-probe: pure-Simple NVMe adapter ready for NVFS/DBFS probing")
     val dev: BlockDevice = adapter
     Ok(dev)

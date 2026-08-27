@@ -41,7 +41,7 @@ fn _xz_write_u32_le(buf: [u8], value: u32) -> [u8]:
     result
 
 fn _xz_read_u32_le(data: [u8], pos: i64) -> Result<u32, CompressionError>:
-    if pos + 4 > data.len():
+    if pos < 0 or pos + 4 > data.len():
         return Err(CompressionError.TruncatedInput("need 4 bytes"))
     Ok(data[pos].to_u32() |
         (data[pos + 1].to_u32() << 8) |
@@ -49,7 +49,7 @@ fn _xz_read_u32_le(data: [u8], pos: i64) -> Result<u32, CompressionError>:
         (data[pos + 3].to_u32() << 24))
 
 fn _xz_read_u64_le(data: [u8], pos: i64) -> Result<u64, CompressionError>:
-    if pos + 8 > data.len():
+    if pos < 0 or pos + 8 > data.len():
         return Err(CompressionError.TruncatedInput("need 8 bytes"))
     var value: u64 = 0u64
     var shift: u64 = 0u64
@@ -121,6 +121,8 @@ fn _vli_encode(value: u64) -> [u8]:
     out
 
 fn _vli_decode(data: [u8], start: i64) -> Result<(u64, i64), CompressionError>:
+    if start < 0:
+        return Err(CompressionError.TruncatedInput("xz vli"))
     var value: u64 = 0u64
     var shift: u64 = 0u64
     var pos = start
@@ -191,6 +193,8 @@ fn _crc64_bytes_for_tier(data: [u8], tier: CompressionSimdTier) -> u64:
     crc ^ 0xFFFFFFFFFFFFFFFFu64
 
 fn _consume_alignment_zeroes(data: [u8], start: i64, pos: i64, label: text) -> Result<i64, CompressionError>:
+    if start < 0 or pos < 0 or pos < start:
+        return Err(CompressionError.TruncatedInput(label))
     var cursor = pos
     while (cursor - start) % 4 != 0:
         if cursor >= data.len():
@@ -201,7 +205,7 @@ fn _consume_alignment_zeroes(data: [u8], start: i64, pos: i64, label: text) -> R
     Ok(cursor)
 
 fn _validate_lzma_range_decoder_init(data: [u8], pos: i64) -> Result<(), CompressionError>:
-    if pos + 5 > data.len():
+    if pos < 0 or pos + 5 > data.len():
         return Err(CompressionError.TruncatedInput("lzma2 range decoder init"))
     if data[pos] != 0x00u8:
         return Err(CompressionError.CorruptStream("lzma2 range decoder init"))
@@ -268,7 +272,7 @@ fn _encode_xz_footer(index_size: i64, tier: CompressionSimdTier) -> [u8]:
     out
 
 fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier) -> Result<XzBlockHeader, CompressionError>:
-    if block_start >= input.len():
+    if block_start < 0 or block_start >= input.len():
         return Err(CompressionError.TruncatedInput("xz block header"))
     val header_size_byte = input[block_start]
     if header_size_byte == 0x00u8:
@@ -277,10 +281,11 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
     if block_start + header_size > input.len():
         return Err(CompressionError.TruncatedInput("xz block header"))
     val stored_crc_res = _xz_read_u32_le(input, block_start + header_size - 4)
-    if stored_crc_res.is_err():
-        return Err(stored_crc_res.unwrap_err())
+    val stored_crc = match stored_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
     val actual_crc = _xz_crc32_for_tier(_copy_bytes_range(input, block_start, block_start + header_size - 4), tier)
-    if stored_crc_res.unwrap() != actual_crc:
+    if stored_crc != actual_crc:
         return Err(CompressionError.ChecksumMismatch("xz block header crc32"))
 
     val flags = input[block_start + 1]
@@ -294,36 +299,38 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
     var declared_uncompressed_size: i64? = nil
     if (flags & 0x40u8) != 0x00u8:
         val decoded = _vli_decode(input, pos)
-        if decoded.is_err():
-            return Err(decoded.unwrap_err())
-        val comp_size_res = _vli_to_i64(decoded.unwrap().0, "xz block compressed size")
-        if comp_size_res.is_err():
-            return Err(comp_size_res.unwrap_err())
-        declared_compressed_size = comp_size_res.unwrap()
-        pos = decoded.unwrap().1
+        val (compressed_size_vli, after_compressed_size) = match decoded:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        val comp_size_res = _vli_to_i64(compressed_size_vli, "xz block compressed size")
+        declared_compressed_size = match comp_size_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_compressed_size
     if (flags & 0x80u8) != 0x00u8:
         val decoded = _vli_decode(input, pos)
-        if decoded.is_err():
-            return Err(decoded.unwrap_err())
-        val uncomp_size_res = _vli_to_i64(decoded.unwrap().0, "xz block uncompressed size")
-        if uncomp_size_res.is_err():
-            return Err(uncomp_size_res.unwrap_err())
-        declared_uncompressed_size = uncomp_size_res.unwrap()
-        pos = decoded.unwrap().1
+        val (uncompressed_size_vli, after_uncompressed_size) = match decoded:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        val uncomp_size_res = _vli_to_i64(uncompressed_size_vli, "xz block uncompressed size")
+        declared_uncompressed_size = match uncomp_size_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_uncompressed_size
 
     val filter_id_res = _vli_decode(input, pos)
-    if filter_id_res.is_err():
-        return Err(filter_id_res.unwrap_err())
-    val filter_id = filter_id_res.unwrap().0
-    pos = filter_id_res.unwrap().1
+    val (filter_id, after_filter_id) = match filter_id_res:
+        case Ok(found_filter): found_filter
+        case Err(reason): return Err(reason)
+    pos = after_filter_id
     if filter_id != XZ_LZMA2_FILTER_ID:
         return Err(CompressionError.UnsupportedFeature("only xz lzma2 filter chains are supported"))
 
     val props_size_res = _vli_decode(input, pos)
-    if props_size_res.is_err():
-        return Err(props_size_res.unwrap_err())
-    val props_size = props_size_res.unwrap().0
-    pos = props_size_res.unwrap().1
+    val (props_size, after_props_size) = match props_size_res:
+        case Ok(found_size): found_size
+        case Err(reason): return Err(reason)
+    pos = after_props_size
     if props_size != 1u64:
         return Err(CompressionError.UnsupportedFeature("only xz lzma2 single-byte properties are supported"))
     if pos >= block_start + header_size - 4:
@@ -346,22 +353,23 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
 
 fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: CompressionSimdTier) -> Result<XzDecodedBlock, CompressionError>:
     val header_res = _parse_block_header(input, block_start, tier)
-    if header_res.is_err():
-        return Err(header_res.unwrap_err())
-    val header = header_res.unwrap()
+    val header = match header_res:
+        case Ok(found_header): found_header
+        case Err(reason): return Err(reason)
 
     var pos = header.data_start
     val payload_start = pos
     val check_size_res = _xz_check_size(check_type)
-    if check_size_res.is_err():
-        return Err(check_size_res.unwrap_err())
-    val check_size = check_size_res.unwrap()
+    val check_size = match check_size_res:
+        case Ok(found_size): found_size
+        case Err(reason): return Err(reason)
     if header.declared_compressed_size != nil:
         val declared_payload_end = payload_start + (header.declared_compressed_size ?? 0)
         val declared_padded_pos_res = _consume_alignment_zeroes(input, payload_start, declared_payload_end, "xz block padding")
-        if declared_padded_pos_res.is_err():
-            return Err(declared_padded_pos_res.unwrap_err())
-        if declared_padded_pos_res.unwrap() + check_size > input.len():
+        val declared_padded_pos = match declared_padded_pos_res:
+            case Ok(found_pos): found_pos
+            case Err(reason): return Err(reason)
+        if declared_padded_pos + check_size > input.len():
             return Err(CompressionError.TruncatedInput("xz block check"))
     var out: [u8] = []
     var lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
@@ -377,9 +385,9 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
             pos = pos + 1
             break
         val chunk_res = _parse_lzma2_chunk_header(input, pos, state)
-        if chunk_res.is_err():
-            return Err(chunk_res.unwrap_err())
-        val chunk_pair = chunk_res.unwrap()
+        val chunk_pair = match chunk_res:
+            case Ok(found_chunk): found_chunk
+            case Err(reason): return Err(reason)
         val chunk = chunk_pair.0
         state = chunk_pair.1
         pos = chunk.body_end
@@ -391,18 +399,20 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
                 lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
             continue
         val range_init_res = _validate_lzma_range_decoder_init(input, chunk.body_start)
-        if range_init_res.is_err():
-            return Err(range_init_res.unwrap_err())
+        match range_init_res:
+            case Ok(_): nil
+            case Err(reason): return Err(reason)
         if chunk.control.sets_props:
             val props_byte = chunk.props ?? 0u8
             val parsed_res = _lzma_parse_props_byte(props_byte)
-            if parsed_res.is_err():
-                return Err(parsed_res.unwrap_err())
+            val parsed_props = match parsed_res:
+                case Ok(found_props): found_props
+                case Err(reason): return Err(reason)
             # Only LCLPPB = 3/0/2 (props byte 0x5D) supported by range decoder.
             if props_byte != 0x5Du8:
                 return Err(CompressionError.UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2"))
             lzma_props = props_byte
-            lzma_parsed_props = parsed_res.unwrap()
+            lzma_parsed_props = parsed_props
             lzma_props_set = true
         if not lzma_props_set:
             # No props yet -- only chunks 0xC0-0xFF set props, and the
@@ -425,9 +435,9 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
             reset_probs,
             lzma_parsed_props
         )
-        if decoded.is_err():
-            return Err(decoded.unwrap_err())
-        val triple = decoded.unwrap()
+        val triple = match decoded:
+            case Ok(decoded_chunk): decoded_chunk
+            case Err(reason): return Err(reason)
         out = triple.0
         lzma_st = triple.1
         lzma_probs = triple.2
@@ -439,23 +449,25 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
         return Err(CompressionError.CorruptStream("xz block uncompressed size"))
 
     val padded_pos_res = _consume_alignment_zeroes(input, payload_start, pos, "xz block padding")
-    if padded_pos_res.is_err():
-        return Err(padded_pos_res.unwrap_err())
-    pos = padded_pos_res.unwrap()
+    pos = match padded_pos_res:
+        case Ok(found_pos): found_pos
+        case Err(reason): return Err(reason)
 
     if pos + check_size > input.len():
         return Err(CompressionError.TruncatedInput("xz block check"))
     if check_type == XZ_CHECK_CRC32:
         val stored_check_res = _xz_read_u32_le(input, pos)
-        if stored_check_res.is_err():
-            return Err(stored_check_res.unwrap_err())
-        if stored_check_res.unwrap() != _xz_crc32_for_tier(out, tier):
+        val stored_check = match stored_check_res:
+            case Ok(found_check): found_check
+            case Err(reason): return Err(reason)
+        if stored_check != _xz_crc32_for_tier(out, tier):
             return Err(CompressionError.ChecksumMismatch("xz block crc32"))
     elif check_type == XZ_CHECK_CRC64:
         val stored_check_res = _xz_read_u64_le(input, pos)
-        if stored_check_res.is_err():
-            return Err(stored_check_res.unwrap_err())
-        if stored_check_res.unwrap() != _crc64_bytes_for_tier(out, tier):
+        val stored_check = match stored_check_res:
+            case Ok(found_check): found_check
+            case Err(reason): return Err(reason)
+        if stored_check != _crc64_bytes_for_tier(out, tier):
             return Err(CompressionError.ChecksumMismatch("xz block crc64"))
 
     Ok(XzDecodedBlock(
@@ -468,49 +480,53 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
     ))
 
 fn _parse_xz_index(input: [u8], index_start: i64, records: [XzBlockRecord], tier: CompressionSimdTier) -> Result<i64, CompressionError>:
-    if index_start >= input.len():
+    if index_start < 0 or index_start >= input.len():
         return Err(CompressionError.TruncatedInput("xz index"))
     if input[index_start] != 0x00u8:
         return Err(CompressionError.CorruptStream("xz index marker"))
 
     val record_count_res = _vli_decode(input, index_start + 1)
-    if record_count_res.is_err():
-        return Err(record_count_res.unwrap_err())
-    if record_count_res.unwrap().0 != records.len().to_u64():
+    val (record_count, after_record_count) = match record_count_res:
+        case Ok(found_count): found_count
+        case Err(reason): return Err(reason)
+    if record_count != records.len().to_u64():
         return Err(CompressionError.CorruptStream("xz index record count"))
 
-    var pos = record_count_res.unwrap().1
+    var pos = after_record_count
     var i = 0
     while i < records.len():
         val up_res = _vli_decode(input, pos)
-        if up_res.is_err():
-            return Err(up_res.unwrap_err())
-        pos = up_res.unwrap().1
+        val (unpadded_size, after_unpadded_size) = match up_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_unpadded_size
         val uc_res = _vli_decode(input, pos)
-        if uc_res.is_err():
-            return Err(uc_res.unwrap_err())
-        pos = uc_res.unwrap().1
-        if up_res.unwrap().0 != records[i].unpadded_size:
+        val (uncompressed_size, after_uncompressed_size) = match uc_res:
+            case Ok(found_size): found_size
+            case Err(reason): return Err(reason)
+        pos = after_uncompressed_size
+        if unpadded_size != records[i].unpadded_size:
             return Err(CompressionError.CorruptStream("xz index unpadded size"))
-        if uc_res.unwrap().0 != records[i].uncompressed_size:
+        if uncompressed_size != records[i].uncompressed_size:
             return Err(CompressionError.CorruptStream("xz index uncompressed size"))
         i = i + 1
 
     val padded_pos_res = _consume_alignment_zeroes(input, index_start, pos, "xz index padding")
-    if padded_pos_res.is_err():
-        return Err(padded_pos_res.unwrap_err())
-    pos = padded_pos_res.unwrap()
+    pos = match padded_pos_res:
+        case Ok(found_pos): found_pos
+        case Err(reason): return Err(reason)
     if pos + 4 > input.len():
         return Err(CompressionError.TruncatedInput("xz index crc32"))
     val stored_crc_res = _xz_read_u32_le(input, pos)
-    if stored_crc_res.is_err():
-        return Err(stored_crc_res.unwrap_err())
-    if stored_crc_res.unwrap() != _xz_crc32_for_tier(_copy_bytes_range(input, index_start, pos), tier):
+    val stored_crc = match stored_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
+    if stored_crc != _xz_crc32_for_tier(_copy_bytes_range(input, index_start, pos), tier):
         return Err(CompressionError.ChecksumMismatch("xz index crc32"))
     Ok(pos + 4)
 
 fn _decompress_xz_stream(input: [u8], start: i64, tier: CompressionSimdTier) -> Result<([u8], i64), CompressionError>:
-    if start + 12 > input.len():
+    if start < 0 or start + 12 > input.len():
         return Err(CompressionError.TruncatedInput("xz stream"))
     var i = 0
     while i < XZ_HEADER_MAGIC.len():
@@ -522,50 +538,55 @@ fn _decompress_xz_stream(input: [u8], start: i64, tier: CompressionSimdTier) -> 
     if stream_flags_0 != XZ_STREAM_FLAGS_0:
         return Err(CompressionError.CorruptStream("xz stream flags"))
     val header_crc_res = _xz_read_u32_le(input, start + 8)
-    if header_crc_res.is_err():
-        return Err(header_crc_res.unwrap_err())
+    val header_crc = match header_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
     val stream_flags: [u8] = [stream_flags_0, stream_flags_1]
-    if header_crc_res.unwrap() != _xz_crc32_for_tier(stream_flags, tier):
+    if header_crc != _xz_crc32_for_tier(stream_flags, tier):
         return Err(CompressionError.ChecksumMismatch("xz header crc32"))
     val check_size_res = _xz_check_size(stream_flags_1)
-    if check_size_res.is_err():
-        return Err(check_size_res.unwrap_err())
+    match check_size_res:
+        case Ok(_): nil
+        case Err(reason): return Err(reason)
 
     var pos = start + 12
     var decoded: [u8] = []
     var records: [XzBlockRecord] = []
     while pos < input.len() and input[pos] != 0x00u8:
         val block_res = _decode_xz_block(input, pos, stream_flags_1, tier)
-        if block_res.is_err():
-            return Err(block_res.unwrap_err())
-        decoded = _xz_append_bytes(decoded, block_res.unwrap().decoded)
-        records.push(block_res.unwrap().record)
-        pos = block_res.unwrap().next_pos
+        val block = match block_res:
+            case Ok(found_block): found_block
+            case Err(reason): return Err(reason)
+        decoded = _xz_append_bytes(decoded, block.decoded)
+        records.push(block.record)
+        pos = block.next_pos
     if pos >= input.len():
         return Err(CompressionError.TruncatedInput("xz index"))
 
     val index_start = pos
     val footer_start_res = _parse_xz_index(input, index_start, records, tier)
-    if footer_start_res.is_err():
-        return Err(footer_start_res.unwrap_err())
-    val footer_start = footer_start_res.unwrap()
+    val footer_start = match footer_start_res:
+        case Ok(found_start): found_start
+        case Err(reason): return Err(reason)
     if footer_start + 12 > input.len():
         return Err(CompressionError.TruncatedInput("xz footer"))
     if input[footer_start + 10] != XZ_FOOTER_MAGIC_0 or input[footer_start + 11] != XZ_FOOTER_MAGIC_1:
         return Err(CompressionError.InvalidHeader("xz footer magic"))
 
     val footer_crc_res = _xz_read_u32_le(input, footer_start)
-    if footer_crc_res.is_err():
-        return Err(footer_crc_res.unwrap_err())
+    val footer_crc = match footer_crc_res:
+        case Ok(found_crc): found_crc
+        case Err(reason): return Err(reason)
     val footer_fields = _copy_bytes_range(input, footer_start + 4, footer_start + 10)
-    if footer_crc_res.unwrap() != _xz_crc32_for_tier(footer_fields, tier):
+    if footer_crc != _xz_crc32_for_tier(footer_fields, tier):
         return Err(CompressionError.ChecksumMismatch("xz footer crc32"))
 
     val backward_size_res = _xz_read_u32_le(input, footer_start + 4)
-    if backward_size_res.is_err():
-        return Err(backward_size_res.unwrap_err())
+    val backward_size = match backward_size_res:
+        case Ok(found_size): found_size
+        case Err(reason): return Err(reason)
     val computed_index_size = footer_start - index_start
-    if ((backward_size_res.unwrap().to_i64() + 1) * 4) != computed_index_size:
+    if ((backward_size.to_i64() + 1) * 4) != computed_index_size:
         return Err(CompressionError.CorruptStream("xz backward size"))
 
     if input[footer_start + 8] != stream_flags_0 or input[footer_start + 9] != stream_flags_1:
@@ -573,10 +594,10 @@ fn _decompress_xz_stream(input: [u8], start: i64, tier: CompressionSimdTier) -> 
 
     Ok((decoded, footer_start + 12))
 
-fn lzma2_compress_xz(input: [u8], options: CompressionOptions) -> [u8]:
+pub fn lzma2_compress_xz(input: [u8], options: CompressionOptions) -> [u8]:
     lzma2_compress_xz_for_tier(input, options, _xz_detect_tier())
 
-fn lzma2_compress_xz_for_tier(input: [u8], options: CompressionOptions, tier: CompressionSimdTier) -> [u8]:
+pub fn lzma2_compress_xz_for_tier(input: [u8], options: CompressionOptions, tier: CompressionSimdTier) -> [u8]:
     var out: [u8] = []
     out = _xz_append_bytes(out, XZ_HEADER_MAGIC)
     val stream_flags: [u8] = [XZ_STREAM_FLAGS_0, XZ_CHECK_CRC32]
@@ -598,10 +619,7 @@ fn lzma2_compress_xz_for_tier(input: [u8], options: CompressionOptions, tier: Co
     out = _xz_append_bytes(out, _encode_xz_footer(index.len(), tier))
     out
 
-fn lzma2_decompress_xz(input: [u8]) -> Result<[u8], CompressionError>:
-    lzma2_decompress_xz_for_tier(input, _xz_detect_tier())
-
-fn lzma2_decompress_xz_for_tier(input: [u8], tier: CompressionSimdTier) -> Result<[u8], CompressionError>:
+fn _decompress_xz_pure(input: [u8], tier: CompressionSimdTier) -> Result<[u8], CompressionError>:
     if input.len() < 24:
         return Err(CompressionError.TruncatedInput("xz stream"))
     var pos = 0
@@ -616,8 +634,22 @@ fn lzma2_decompress_xz_for_tier(input: [u8], tier: CompressionSimdTier) -> Resul
                 return Err(CompressionError.CorruptStream("xz stream padding"))
             continue
         val stream_res = _decompress_xz_stream(input, pos, tier)
-        if stream_res.is_err():
-            return Err(stream_res.unwrap_err())
-        out = _xz_append_bytes(out, stream_res.unwrap().0)
-        pos = stream_res.unwrap().1
+        val (decoded_stream, next_pos) = match stream_res:
+            case Ok(found_stream): found_stream
+            case Err(reason): return Err(reason)
+        out = _xz_append_bytes(out, decoded_stream)
+        pos = next_pos
     Ok(out)
+
+pub fn lzma2_decompress_xz(input: [u8]) -> Result<[u8], CompressionError>:
+    lzma2_decompress_xz_for_tier(input, _xz_detect_tier())
+
+pub fn lzma2_decompress_xz_for_tier(input: [u8], tier: CompressionSimdTier) -> Result<[u8], CompressionError>:
+    # Pure in-memory decode only. The pure range decoder implements the default
+    # LCLPPB = 3/0/2 (props 0x5D) tuple; a stream using a different tuple returns
+    # a typed UnsupportedFeature. The former silent host-`xz` CLI fallback was
+    # removed to keep this CORE-tier module pure (no fs/process) — see #35.
+    # TODO(core-purity): if a real caller ever needs non-default-LCLPPB decode,
+    # add a host-tier wrapper in nogc_sync_mut that shells to `xz` and wire it to
+    # that caller (do not re-introduce fs/process into common/).
+    _decompress_xz_pure(input, tier)

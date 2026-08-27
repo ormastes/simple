@@ -3,17 +3,34 @@
 # Usage: simple fix <file.spl> [--dry-run] [--fix-all] [--fix-interactive]
 
 # I/O imports
-use std.nogc_sync_mut.io.file_ops (file_read, file_write, file_exists)
+use std.nogc_sync_mut.io.file_ops (file_read, file_atomic_write, file_exists, file_size_raw)
+use std.nogc_sync_mut.io_runtime.{dir_exists}
 use app.io.cli_ops (get_args)
 
 # Import EasyFix data types from stdlib
-use std.tooling.easy_fix.types.{EasyFix, Replacement, FixReport, FixConfidence}
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixReport, FixConfidence, FixApplicator}
 use std.tooling.easy_fix.types.{easyfix_replacements, easyfix_id, easyfix_description}
 use compiler.tools.fix.rules.registry.{check_all_rules}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
 
-extern fn input_line() -> String
+# `stdin_read_char` is an always-linked runtime primitive (see
+# std.mcp_sdk.transport.stdio.stdio_read_line for the reference pattern).
+# The previous `extern fn input_line()` had no native-build implementation
+# anywhere in the tree and was falling back to an unresolved-symbol stub.
+extern fn stdin_read_char() -> text
+
+fn input_line() -> String:
+    var parts: [text] = []
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if parts.length() == 0:
+                return ""
+            return parts.join("")
+        if ch == "\n":
+            return parts.join("")
+        parts = parts.push(ch)
 
 # ============================================================================
 # FixToolApplicator: applies fixes to source files
@@ -24,23 +41,7 @@ class FixToolApplicator:
         FixApplicator.apply(fixes, sources)
 
     static fn apply_to_disk(fixes: [EasyFix], sources: Dict<String, String>, dry_run: Bool) -> Result<FixReport, String>:
-        val result = FixApplicator.apply(fixes, sources)
-        match result:
-            case Err(e):
-                return Err(e)
-            case Ok(new_contents):
-                var report = FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
-                report.applied = fixes.len()
-
-                for file in new_contents.keys():
-                    report.modified_files.push(file)
-                    if not dry_run:
-                        file_write(file, new_contents[file])
-
-                for fix in fixes:
-                    report.details.push("[{easyfix_id(fix)}] {easyfix_description(fix)}")
-
-                Ok(report)
+        apply_fixes_to_disk(fixes, sources, dry_run)
 
     static fn filter_by_confidence(fixes: [EasyFix], min_confidence: FixConfidence) -> [EasyFix]:
         match min_confidence:
@@ -171,13 +172,7 @@ async fn main() -> Int:
         if arg.starts_with("--fix-id="):
             fix_id = Some(arg.slice(9))
 
-    # Verify file exists
-    if not file_exists(file_path):
-        print("Error: File not found: {file_path}")
-        return 1
-
-    # Read source
-    val source_result = file_read(file_path)
+    val source_result = fix_read_source(file_path)
     match source_result:
         case Err(e):
             print("Error reading file: {e}")
@@ -216,7 +211,7 @@ async fn main() -> Int:
                     return 0
 
             # Apply fixes
-            val apply_result = FixApplicator.apply_to_disk(filtered, sources, dry_run)
+            val apply_result = apply_fixes_to_disk(filtered, sources, dry_run)
             match apply_result:
                 case Ok(report):
                     print(report.format(dry_run))

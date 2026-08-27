@@ -30,19 +30,25 @@ use app.office.slides.deck_format.{parse_deck, deck_to_text}
 use app.office.render_adapter.{office_render_source}
 use app.office.sheets.chart.{sheet_bar_chart_svg}
 use app.office.sheets.data_ops.{sheet_sort_range, sheet_filter_rows}
+use app.office.sheets.query.{sheet_select, sheet_sort_by, sheet_join, sheet_group_agg}
 use app.office.sheets.pivot.{pivot_build, pivot_to_sheet}
 use app.office.word.edit_ops.{document_find, document_replace, document_stats, document_word_count_new, document_character_count, document_paragraph_count}
 use app.office.word.mail_merge.{merge_fields, merge_all_markdown}
+use common.rich_text.track_changes.{tracked_insert, tracked_delete, accept_revision, reject_revision, accept_all, reject_all, revisions_summary, final_text}
 use app.office.mail.message.{Email}
 use app.office.mail.rules.{parse_rules, apply_rules}
 use app.office.sheets.cond_format.{CondRule, cond_css_for_cell}
 use app.office.sheets.cell_format.{FormatSpec, SheetFormats, empty_sheet_formats, formats_set, sheet_set_number_format}
 use app.office.sheets.number_format.{cell_display_formatted}
-use app.office.sheets.validation.{ValidationRules, empty_validation_rules, validation_add, validation_check, validate_sheet}
+use app.office.sheets.validation.{ValidationRules, ValidationViolation, empty_validation_rules, validation_add, validation_check, validate_sheet}
 use app.office.odf_ooxml.{sheet_to_xlsx_bytes_formatted}
 use app.office.odf_export.{sheet_to_fods_formatted}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use app.office.erp_bridge.{erp_records_to_sheet, erp_invoice_from_sheet, default_invoice_template}
+use app.office.sheets.merge.{MergeResult, sheet_merge3, conflict_report}
+use app.office.sheets.sync.{sheet_diff, sheet_apply, ops_to_lines, lines_to_ops}
+use app.office.notes.notebook.{Notebook, notebook_new, add_page}
+use app.office.notes.search.{notes_search}
 
 # =========================================================================
 # Writer documents (markdown-backed)
@@ -59,7 +65,10 @@ fn macro_new_document(title: text) -> RichDocument:
 
 fn _doc_push(doc: RichDocument, kind: BlockKind, content: text) -> RichDocument:
     var d = doc
-    d.blocks.push(DocBlock(kind: kind, spans: parse_inline_spans(content)))
+    val r = parse_inline_spans(content, d.comments.len() + 1)
+    d.blocks.push(DocBlock(kind: kind, spans: r.spans))
+    for c in r.comments:
+        d.comments.push(c)
     d
 
 fn macro_add_heading(doc: RichDocument, level: i32, content: text) -> RichDocument:
@@ -235,6 +244,74 @@ fn macro_merge_all_markdown(doc: RichDocument, sheet: Sheet) -> text:
     merge_all_markdown(doc, sheet)
 
 # =========================================================================
+# Writer documents: track changes
+# =========================================================================
+
+fn macro_track_insert(doc: RichDocument, block_idx: i32, offset: i32, text_: text, author: text) -> RichDocument:
+    """Insert text at a character offset within one block, tracked as an
+    insert-revision by author (splits spans as needed). Returns updated
+    document.
+
+    Example macro: `doc = macro_track_insert(doc, 0, 5, " there", "Alice")`
+    """
+    tracked_insert(doc, block_idx, offset, text_, author)
+
+fn macro_track_delete(doc: RichDocument, block_idx: i32, from: i32, to: i32, author: text) -> RichDocument:
+    """Mark a character range within one block as deleted by author — the
+    text stays in the document (Office semantics) until accepted. Returns
+    updated document.
+
+    Example macro: `doc = macro_track_delete(doc, 0, 0, 5, "Carol")`
+    """
+    tracked_delete(doc, block_idx, from, to, author)
+
+fn macro_accept_revision(doc: RichDocument, id: text) -> RichDocument:
+    """Accept one pending revision by id (insert: keep text, strip mark;
+    delete: remove the marked spans). Returns updated document.
+
+    Example macro: `doc = macro_accept_revision(doc, "1")`
+    """
+    accept_revision(doc, id)
+
+fn macro_reject_revision(doc: RichDocument, id: text) -> RichDocument:
+    """Reject one pending revision by id — the inverse of accept (insert:
+    remove the inserted spans; delete: restore the text, strip mark).
+    Returns updated document.
+
+    Example macro: `doc = macro_reject_revision(doc, "1")`
+    """
+    reject_revision(doc, id)
+
+fn macro_accept_all_revisions(doc: RichDocument) -> RichDocument:
+    """Accept every pending revision in the document. Returns updated document.
+
+    Example macro: `doc = macro_accept_all_revisions(doc)`
+    """
+    accept_all(doc)
+
+fn macro_reject_all_revisions(doc: RichDocument) -> RichDocument:
+    """Reject every pending revision in the document. Returns updated document.
+
+    Example macro: `doc = macro_reject_all_revisions(doc)`
+    """
+    reject_all(doc)
+
+fn macro_track_changes_summary(doc: RichDocument) -> [text]:
+    """One "<id>|<author>|<kind>|<affected text>" line per pending revision.
+
+    Example macro: `lines = macro_track_changes_summary(doc)`
+    """
+    revisions_summary(doc)
+
+fn macro_final_text(doc: RichDocument) -> text:
+    """The accepted-preview reading of the document (Show Markup off):
+    delete-marked text excluded, insert-marked text included.
+
+    Example macro: `text_ = macro_final_text(doc)`
+    """
+    final_text(doc)
+
+# =========================================================================
 # Mail rules
 # =========================================================================
 
@@ -357,7 +434,7 @@ fn macro_validation_check(rules: ValidationRules, sheet: Sheet, cell_a1: text,
     """
     validation_check(rules, sheet, cell_a1, proposed_text)
 
-fn macro_validate_sheet(rules: ValidationRules, sheet: Sheet) -> [(ref: text, message: text)]:
+fn macro_validate_sheet(rules: ValidationRules, sheet: Sheet) -> [ValidationViolation]:
     """Validate all cells in a sheet against applicable rules.
 
     Returns a list of (cell_ref, error_message) tuples for failed cells.
@@ -559,4 +636,3 @@ fn macro_notes_search(nb: Notebook, query: text) -> [text]:
             println(hit)
     """
     notes_search(nb, query)
-

@@ -37,16 +37,17 @@ class BeRenderResult:
     ok: bool
     error: text
     scene: BrowserRenderScene
+    node_count: i32
 
 impl BeRenderResult:
     static fn success_argb(pixels: [u32], width: i32, height: i32, title: text, scene: BrowserRenderScene) -> BeRenderResult:
-        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, source_html: "", ok: true, error: "", scene: scene)
+        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, source_html: "", ok: true, error: "", scene: scene, node_count: 0)
 
     static fn success_html(pixels: [u32], width: i32, height: i32, title: text, source_html: text, scene: BrowserRenderScene) -> BeRenderResult:
-        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, source_html: source_html, ok: true, error: "", scene: scene)
+        BeRenderResult(pixels: [], pixel_data: pixels, width: width, height: height, title: title, source_html: source_html, ok: true, error: "", scene: scene, node_count: 0)
 
     static fn failure(width: i32, height: i32, error: text) -> BeRenderResult:
-        BeRenderResult(pixels: [], pixel_data: [], width: width, height: height, title: "", source_html: "", ok: false, error: error, scene: BrowserRenderScene(width: width, height: height, commands: []))
+        BeRenderResult(pixels: [], pixel_data: [], width: width, height: height, title: "", source_html: "", ok: false, error: error, scene: BrowserRenderScene(width: width, height: height, commands: []), node_count: 0)
 
     fn byte_count() -> i64:
         self.width.to_i64() * self.height.to_i64() * 4
@@ -105,6 +106,120 @@ impl BrowserRenderer:
         val scene = BrowserRenderScene(width: self.width, height: self.height, commands: [BrowserSceneCommand(kind: "fill_rect", color: _browser_scene_color(html, pixels))])
         BeRenderResult.success_html(pixels, self.width, self.height, _browser_title(html), html, scene)
 
+    fn render_html_with_images(
+        html: text, images: [SimpleOsHostGpuImageResource]
+    ) -> BeRenderResult:
+        self.render_html_to_pixels_with_images(html, images)
+
+    fn render_html_to_pixels_with_images(
+        html: text, images: [SimpleOsHostGpuImageResource]
+    ) -> BeRenderResult:
+        val pixels = simple_web_layout_render_html_pixels_engine2d_with_images(
+            html, self.width, self.height, self.backend_value, images
+        )
+        val scene = BrowserRenderScene(
+            width: self.width, height: self.height,
+            commands: [BrowserSceneCommand(
+                kind: "fill_rect", color: _browser_scene_color(html, pixels)
+            )]
+        )
+        BeRenderResult.success_html(
+            pixels, self.width, self.height, _browser_title(html), html, scene
+        )
+
+    fn render_html_to_pixels_at_time(html: text, animation_time_ms: i64) -> BeRenderResult:
+        val pixels = simple_web_engine2d_render_html_pixels_at_time(
+            html, self.width, self.height, self.backend_value,
+            animation_time_ms
+        )
+        val scene = BrowserRenderScene(width: self.width, height: self.height, commands: [BrowserSceneCommand(kind: "fill_rect", color: _browser_scene_color(html, pixels))])
+        BeRenderResult.success_html(pixels, self.width, self.height, _browser_title(html), html, scene)
+
+    fn render_html_to_pixels_at_time_with_images(
+        html: text, animation_time_ms: i64,
+        images: [SimpleOsHostGpuImageResource]
+    ) -> BeRenderResult:
+        val pixels = (
+            simple_web_layout_render_html_pixels_engine2d_at_time_with_images(
+                html, self.width, self.height, self.backend_value,
+                animation_time_ms, images
+            )
+        )
+        val scene = BrowserRenderScene(
+            width: self.width, height: self.height,
+            commands: [BrowserSceneCommand(
+                kind: "fill_rect", color: _browser_scene_color(html, pixels)
+            )]
+        )
+        BeRenderResult.success_html(
+            pixels, self.width, self.height, _browser_title(html), html, scene
+        )
+
+    fn render_html_to_pixels_at_time_with_animations(
+        html: text, animation_time_ms: i64,
+        animation_instances: [BrowserCssAnimationInstance]
+    ) -> BeRenderResult:
+        val pixels = (
+            simple_web_engine2d_render_html_pixels_at_time_with_animations(
+                html, self.width, self.height, self.backend_value,
+                animation_time_ms, animation_instances
+            )
+        )
+        val scene = BrowserRenderScene(
+            width: self.width, height: self.height,
+            commands: [BrowserSceneCommand(
+                kind: "fill_rect", color: _browser_scene_color(html, pixels)
+            )]
+        )
+        BeRenderResult.success_html(
+            pixels, self.width, self.height, _browser_title(html), html, scene
+        )
+
+    fn render_html_to_pixels_at_time_with_animations_with_images(
+        html: text, animation_time_ms: i64,
+        animation_instances: [BrowserCssAnimationInstance],
+        images: [SimpleOsHostGpuImageResource]
+    ) -> BeRenderResult:
+        val pixels = (
+            simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_with_images(
+                html, self.width, self.height, self.backend_value,
+                animation_time_ms, animation_instances, images
+            )
+        )
+        val scene = BrowserRenderScene(
+            width: self.width, height: self.height,
+            commands: [BrowserSceneCommand(
+                kind: "fill_rect", color: _browser_scene_color(html, pixels)
+            )]
+        )
+        BeRenderResult.success_html(
+            pixels, self.width, self.height, _browser_title(html), html, scene
+        )
+
+    # Render a decorated DOM tree into a canonical RenderScene by running the
+    # real block-layout pass and emitting a fill_rect paint command per box.
+    fn render_dom(dom: BeDomNode) -> RenderScene:
+        val box = layout_tree(dom, self.width.to_f64(), self.height.to_f64())
+        var commands: [SceneCommand] = [SceneCommand.fill_rect(0, 0, self.width, self.height, 16777215)]
+        commands = _browser_paint_boxes(box, commands)
+        render_scene(commands, self.width, self.height)
+
+fn _browser_paint_boxes(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
+    val x = layout_get_x(box).to_i32()
+    val y = layout_get_y(box).to_i32()
+    val w = layout_get_width(box).to_i32()
+    val h = layout_get_height(box).to_i32()
+    var out = commands
+    if w > 0 and h > 0:
+        out = out.push(SceneCommand.stroke_rect(x, y, w, h, 13421772, 1))
+    val children = layout_get_children(box)
+    var idx = 0
+    val child_count = children.len()
+    while idx < child_count:
+        out = _browser_paint_boxes(children[idx], out)
+        idx = idx + 1
+    out
+
 fn _browser_title(html: text) -> text:
     val lower = html.lower()
     val start = lower.index_of("<title>")
@@ -133,7 +248,7 @@ fn _browser_scene_color(html: text, pixels: [u32]) -> u32:
 
 fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     var root = BeDomNode.document()
-    var body = BeDomNode.element(1, "body")
+    var body = BeDomNode.element_with_id(1, "body")
     body.children.push(BeDomNode.text_node(2, html))
     root.children.push(body)
     root

@@ -18,6 +18,7 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMod
 use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
 use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct, llvm_compile_module_direct_compiled}
+use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
 use compiler.backend.backend.llvm_lib_backend.{llvm_lib_compile_module_direct}
 use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
@@ -36,7 +37,7 @@ use std.simd.{has_avx2}
 # ============================================================================
 
 fn backend_helper_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 # DS3: `--debug-info=none|line-tables|full` (see compile_opt_and_driver.spl)
 # is threaded down to here via SIMPLE_DEBUG_INFO_LEVEL rather than a new
@@ -47,7 +48,7 @@ fn backend_helper_trace_enabled() -> bool:
 # (see MirToLlvm.translate_function's debug_info doc). Explicit
 # none/line-tables/full always wins over the release-mode default.
 fn backend_helper_debug_info(is_release: bool) -> bool:
-    val level = rt_env_get("SIMPLE_DEBUG_INFO_LEVEL") ?? ""
+    val level = env_get_opt("SIMPLE_DEBUG_INFO_LEVEL") ?? ""
     if level == "none":
         return false
     if level == "line-tables" or level == "full":
@@ -133,7 +134,7 @@ fn preferred_value_supports_target(kind: BackendKind, target: CodegenTarget) -> 
 fn format_mir_module(module: MirModule) -> text:
     """Format MIR module for debugging."""
     var output = "MIR Module: {module.name}\n"
-    output = "{output}Functions: {module.functions.len()}\n"
+    output = "{output}Functions: {module.functions.keys().len()}\n"
     # Would include more detailed MIR dump
     output
 
@@ -178,7 +179,7 @@ fn select_backend_with_mode(
     2. 32-bit targets -> LLVM (only backend supporting 32-bit)
     3. WebAssembly -> Wasm backend
     4. Test mode -> Interpreter (no compilation overhead)
-    5. Debug mode -> Cranelift (2[5]x faster compilation)
+    5. Debug mode -> Cranelift (2.5x faster compilation)
     6. Release mode -> LLVM (15-30% faster runtime)
     7. Bootstrap mode -> Cranelift (minimal dependencies)
 
@@ -232,48 +233,72 @@ fn select_backend_with_mode(
 fn available_backends() -> [BackendKind]:
     """Get list of available backends."""
     val first = BackendKind.Cranelift
-    [first, BackendKind.Llvm, BackendKind.LlvmLib, BackendKind.Native, BackendKind.Wasm, BackendKind.Lean, BackendKind.Interpreter, BackendKind.Cuda, BackendKind.Hip, BackendKind.OpenCl, BackendKind.Vulkan, BackendKind.CCodegen, BackendKind.Vhdl, BackendKind.IrTc]
+    [first, BackendKind.Llvm, BackendKind.LlvmLib, BackendKind.Native, BackendKind.Wasm, BackendKind.Lean, BackendKind.Byl, BackendKind.Interpreter, BackendKind.Cuda, BackendKind.Hip, BackendKind.OpenCl, BackendKind.Vulkan, BackendKind.CCodegen, BackendKind.Vhdl, BackendKind.IrTc]
 
 fn gpu_backends() -> [BackendKind]:
     """Get list of GPU backends."""
     val first = BackendKind.Cuda
     [first, BackendKind.Hip, BackendKind.OpenCl, BackendKind.Vulkan]
 
-fn backend_for_name(name: text) -> has_BackendKind:
+fn backend_for_name(name: text) -> has_BackendKind?:
     """Get backend by name."""
-    match name:
-        case "cranelift": BackendKind.Cranelift
-        case "llvm": BackendKind.Llvm
-        case "llvm-lib": BackendKind.LlvmLib
-        case "llvmlib": BackendKind.LlvmLib
-        case "native": BackendKind.Native
-        case "wasm": BackendKind.Wasm
-        case "lean": BackendKind.Lean
-        case "interpreter": BackendKind.Interpreter
-        case "cuda": BackendKind.Cuda
-        case "ptx": BackendKind.Cuda
-        case "hip": BackendKind.Hip
-        case "hip-cpp": BackendKind.Hip
-        case "hsaco": BackendKind.Hip
-        case "rocm": BackendKind.Hip
-        case "opencl": BackendKind.OpenCl
-        case "opencl-c": BackendKind.OpenCl
-        case "opencl-spirv": BackendKind.OpenCl
-        case "cl": BackendKind.OpenCl
-        case "vulkan": BackendKind.Vulkan
-        case "spirv": BackendKind.Vulkan
-        case "c": BackendKind.CCodegen
-        case "cpp": BackendKind.CCodegen
-        case "ccodegen": BackendKind.CCodegen
-        case "vhdl": BackendKind.Vhdl
-        case "irtc": BackendKind.IrTc
-        case "mllvm-qemu": BackendKind.IrTc
-        case "lua": BackendKind.Lua
-        # case  # DESUGARED: _: nil
+    if name == "cranelift":
+        return Some(BackendKind.Cranelift)
+    if name == "llvm":
+        return Some(BackendKind.Llvm)
+    if name == "llvm-lib" or name == "llvmlib":
+        return Some(BackendKind.LlvmLib)
+    if name == "native":
+        return Some(BackendKind.Native)
+    if name == "wasm":
+        return Some(BackendKind.Wasm)
+    if name == "lean":
+        return Some(BackendKind.Lean)
+    if name == "byl":
+        return Some(BackendKind.Byl)
+    if name == "interpreter":
+        return Some(BackendKind.Interpreter)
+    if name == "cuda" or name == "ptx":
+        return Some(BackendKind.Cuda)
+    if name == "hip" or name == "hip-cpp" or name == "hsaco" or name == "rocm":
+        return Some(BackendKind.Hip)
+    if name == "opencl" or name == "opencl-c" or name == "opencl-spirv" or name == "cl":
+        return Some(BackendKind.OpenCl)
+    if name == "vulkan" or name == "spirv":
+        return Some(BackendKind.Vulkan)
+    if name == "c" or name == "cpp" or name == "ccodegen":
+        return Some(BackendKind.CCodegen)
+    if name == "vhdl":
+        return Some(BackendKind.Vhdl)
+    if name == "irtc" or name == "mllvm-qemu":
+        return Some(BackendKind.IrTc)
+    if name == "lua":
+        return Some(BackendKind.Lua)
+    nil
 
 # ============================================================================
 # Convenience Functions for Driver Integration
 # ============================================================================
+
+
+fn codegen_output_to_compiled_module(output: CodegenOutput) -> CompiledModule:
+    # Free-function conversion: calling codegen_output_to_compiled_module(output) on a
+    # match-arm-bound receiver reads self fields as false/0 on the stage4
+    # native lane (caller-side field reads of the same value are correct —
+    # receiver transport defect); plain-argument passing is reliable. Keep bare
+    # values in typed conditionals (flat implicit lift) instead of explicit
+    # Some(...) boxes for the optional fields.
+    val oc: [u8]? = if output.has_object_code: output.object_code else: nil
+    val asm_opt: text? = if output.has_text_output: output.text_output else: nil
+    CompiledModule(
+        name: output.name,
+        object_code: oc,
+        assembly: asm_opt,
+        has_llvm_ir: output.has_header_output,
+        llvm_ir: if output.has_header_output: output.header_output else: "",
+        symbols: output.symbols,
+        compile_time_ms: output.compile_time_ms
+    )
 
 fn compile_module_with_backend(
     backend_name: text,
@@ -334,7 +359,9 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
     Returns:
         CompiledModule with object_code bytes, or CompileError
     """
-    print "[backend-helper] start {backend_name}"
+    val trace = backend_helper_trace_enabled()
+    if trace:
+        print "[backend-helper] start {backend_name}"
     # Resolve backend kind
     var kind = BackendKind.Llvm
     if backend_name == "llvm":
@@ -353,8 +380,12 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         kind = BackendKind.Hip
     elif backend_name == "opencl" or backend_name == "opencl-c" or backend_name == "opencl-spirv" or backend_name == "cl":
         kind = BackendKind.OpenCl
+    elif backend_name == "vulkan" or backend_name == "spirv":
+        kind = BackendKind.Vulkan
     elif backend_name == "vhdl":
         kind = BackendKind.Vhdl
+    elif backend_name == "byl":
+        kind = BackendKind.Byl
     elif backend_name == "irtc" or backend_name == "mllvm-qemu":
         kind = BackendKind.IrTc
     elif backend_name == "lua":
@@ -369,7 +400,8 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
             kind = BackendKind.LlvmLib
         else:
             kind = BackendKind.Cranelift
-    print "[backend-helper] kind resolved"
+    if trace:
+        print "[backend-helper] kind resolved"
 
     # Preserve the driver's explicit optimization level instead of collapsing to build mode defaults.
     val opt = if opt_level_i64 <= 0:
@@ -380,7 +412,8 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         OptimizationLevel.Speed
     else:
         OptimizationLevel.Aggressive
-    print "[backend-helper] opt resolved"
+    if trace:
+        print "[backend-helper] opt resolved"
 
     # Create backend options and compile
     val configured_target = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
@@ -389,7 +422,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
     val options = BackendCompileOptions(
         target: backend_helper_native_target(),
         opt_level: opt,
-        debug_info: not is_release,
+        debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false,
         emit_llvm_ir: false,
         emit_mir: false,
@@ -397,7 +430,9 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         target_opt_ctx: target_opt_ctx,
         backend_kind: nil
     )
-    print "[backend-helper] options ready"
+    if trace:
+        print "[backend-helper] options ready"
+
     val effective_backend = if kind == BackendKind.LlvmLib:
         "llvm-lib"
     elif kind == BackendKind.Llvm:
@@ -425,10 +460,10 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
     val backend_module = optimize_module_for_backend(
         storage_lowered.module, mir_opt_level, effective_backend)
 
-    if effective_backend == "llvm" and not backend_helper_llc_available():
+    if kind == BackendKind.Llvm and not backend_helper_llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,
             "llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)"))
-    if effective_backend == "llvm-lib" and not backend_helper_llvm_lib_available():
+    if kind == BackendKind.LlvmLib and not backend_helper_llvm_lib_available():
         return Err(compileerror_backend_error(BackendKind.LlvmLib,
             "libLLVM not found. Install LLVM: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"))
 
@@ -440,7 +475,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         val result = llvm_compile_module_direct(options, backend_module)
         match result:
             case Ok(output):
-                return Ok(output.to_compiled_module())
+                return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
@@ -450,7 +485,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         val result = llvm_lib_compile_module_direct(options, backend_module)
         match result:
             case Ok(output):
-                return Ok(output.to_compiled_module())
+                return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
@@ -458,7 +493,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         val result = cranelift_compile_module_direct(options, backend_module)
         match result:
             case Ok(output):
-                return Ok(output.to_compiled_module())
+                return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
@@ -466,7 +501,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
     val result = codegen.compile_module(backend_module)
     match result:
         case Ok(output):
-            Ok(output.to_compiled_module())
+            Ok(codegen_output_to_compiled_module(output))
         case Err(err):
             Err(err)
 
@@ -484,7 +519,9 @@ fn compile_bootstrap_module_with_backend(
     opt_level_i64: i64
 ) -> Result<CompiledModule, CompileError>:
     """Compile the bootstrap entry without passing MirModule across module boundaries."""
-    print "[backend-helper] bootstrap start {backend_name}"
+    val trace = backend_helper_trace_enabled()
+    if trace:
+        print "[backend-helper] bootstrap start {backend_name}"
     val opt = if opt_level_i64 <= 0:
         OptimizationLevel.None_
     elif opt_level_i64 == 1:
@@ -496,7 +533,7 @@ fn compile_bootstrap_module_with_backend(
     val options = BackendCompileOptions(
         target: CodegenTarget.Host,
         opt_level: opt,
-        debug_info: not is_release,
+        debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false,
         emit_llvm_ir: false,
         emit_mir: false,
@@ -514,7 +551,8 @@ fn compile_bootstrap_module_with_backend(
         constants: {},
         types: {}
     )
-    print "[backend-helper] bootstrap direct llvm"
+    if trace:
+        print "[backend-helper] bootstrap direct llvm"
     llvm_compile_module_direct_compiled(options, module)
 
 fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
@@ -535,19 +573,18 @@ fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
         "hip"
     elif backend_name == "opencl" or backend_name == "opencl-c" or backend_name == "opencl-spirv" or backend_name == "cl":
         "opencl"
+    elif backend_name == "vulkan" or backend_name == "spirv":
+        "vulkan"
     elif backend_name == "vhdl":
         "vhdl"
     elif backend_name == "irtc" or backend_name == "mllvm-qemu":
         "irtc"
     elif backend_name == "lua":
         "lua"
-    elif backend_name == "auto":
-        if is_release:
-            "llvm-lib"
-        else:
-            "cranelift"
+    elif backend_name == "auto" or backend_name == "":
+        "llvm"
     else:
-        "cranelift"
+        "llvm"
 
 fn mode_default_optimization(mode: BuildMode) -> OptimizationLevel:
     match mode:

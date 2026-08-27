@@ -9,7 +9,7 @@
 
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo}
+use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FsStatfs, FileStat, DirEntry, StatInfo, ExecuteFileObservationV1}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.capability.{Capability, FsCapabilitySet}
 use std.fs_driver.extension.{Extension, DirectIoExt}
@@ -18,7 +18,6 @@ use std.storage.storage_class.{StorageClass}
 use std.storage.nvme_feature_policy.{samsung_mzql2960hcjr_sysfs_facts, nvme_policy_for_class}
 
 val _NVFS_MAX_POSITIONED_OFFSET: i64 = 9223372036854775807
-val _NVFS_MAX_BOUNDED_PREAD_BYTES: i64 = 65536
 
 struct NvfsDriver:
     name: text
@@ -53,26 +52,6 @@ impl NvfsDriver:
         inner.trim_supported = policy.uses_discard
         inner.write_zeroes_supported = policy.uses_write_zeroes
         NvfsDriver(name: name, inner: inner)
-
-    fn device_instance_id() -> i64:
-        """Return the exact DBFS backing instance owned by this NVFS driver."""
-        self.inner.device_instance_id()
-
-    fn durability_serialization_ready() -> bool:
-        """Require the DBFS backing owner before publishing a writable root."""
-        self.inner.durability_serialization_ready()
-
-    fn issue_root_mount_identity() -> Result<(i64, u64, u64), FsError>:
-        """Issue the backing-owner identity used by an exact NVFS root seal."""
-        self.inner.issue_server_data_root_mount_identity()
-
-    fn root_mount_identity_current() -> Result<(i64, u64), FsError>:
-        """Revalidate the backing instance and mutation epoch of a live root."""
-        self.inner.server_data_root_instance_identity()
-
-    fn close_device_backing(expected_inst_id: i64) -> Result<bool, FsError>:
-        """Release only this driver's exact DBFS backing instance."""
-        self.inner.close_device_backing(expected_inst_id)
 
     fn preferred_io_unit_bytes() -> i64:
         self.inner.preferred_io_unit_bytes()
@@ -118,8 +97,10 @@ impl NvfsDriver:
         self.inner.close_handle(handle)
 
     fn read(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
-        val content = self.inner.pread_handle(handle, offset, buf.len() as i64)?
-        val bytes = text_to_bytes_pure(content)
+        val length = buf.len() as i64
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        val bytes = self.inner.pread_bytes_handle(handle, offset, length)?
         var i: i64 = 0
         while i < bytes.len() as i64 and i < buf.len() as i64:
             buf[i] = bytes[i]
@@ -127,41 +108,70 @@ impl NvfsDriver:
         Ok(i)
 
     fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        val length = buf.len() as i64
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
         if offset != 0:
             return Err(FsError.Unsupported)
-        var content = ""
-        var i: i64 = 0
-        while i < buf.len() as i64:
-            content = content + buf[i as i32].chr()
-            i = i + 1
-        self.inner.pwrite_handle(handle, content, offset)?
-        Ok(buf.len() as i64)
+        self.inner.pwrite_bytes_handle(handle, offset, buf)
 
-    fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+    fn pread(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
         self.read(handle, offset, buf)
 
     fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        self.write(handle, offset, buf)
+        val length = buf.len() as i64
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        self.inner.pwrite_bytes_handle(handle, offset, buf)
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         self.inner.fstat(handle)
 
+    fn file_generation_v1(handle: FileHandle) -> Result<u64, FsError>:
+        """Return the stable content generation of this exact open inode.
+
+        DBFS is the storage owner behind hosted NVFS, so forwarding preserves
+        open-file identity across rename while same-inode writes, truncation,
+        and replacement advance or invalidate the observed generation.  Do
+        not derive this from the mount epoch: unrelated files must not revoke
+        a live source snapshot.
+        """
+        self.inner.file_generation_v1(handle)
+
+    fn execute_observation_v1(handle: FileHandle) -> Result<ExecuteFileObservationV1, FsError>:
+        """Capture one coherent executable version from the retained handle.
+
+        Metadata and generation are separate DBFS queries.  Bracketing fstat
+        with the handle's content generation rejects a truncate/write that
+        lands between those queries instead of publishing a mixed tuple.
+        Rename and CoW namespace publication do not disturb the observation:
+        every query resolves the inode retained by the open descriptor.
+        """
+        val generation_before = self.inner.file_generation_v1(handle)?
+        val stat = self.inner.fstat(handle)?
+        val generation_after = self.inner.file_generation_v1(handle)?
+        if generation_before != generation_after:
+            return Err(FsError.Transient(code: 0u32))
+        if (stat.mode & 0o170000) == 0o040000:
+            return Err(FsError.InvalidArg)
+        Ok(ExecuteFileObservationV1(
+            contract_version: 1u32, object_identity: stat.inode,
+            content_generation: generation_after, size: stat.size))
+
+    fn execute_observation_current_v1(
+        handle: FileHandle, observation: ExecuteFileObservationV1
+    ) -> bool:
+        if observation.contract_version != 1u32:
+            return false
+        val current = match self.execute_observation_v1(handle):
+            case Err(_): return false
+            case Ok(value): value
+        current.object_identity == observation.object_identity and
+            current.content_generation == observation.content_generation and
+            current.size == observation.size
+
     fn stat(path: Path) -> Result<FileStat, FsError>:
-        val info = self.inner.stat_path(path)?
-        Ok(FileStat(
-            inode: 1u64,
-            size: info.size as u64,
-            blocks: ((info.size as u64) + 4095u64) / 4096u64,
-            block_size: 4096,
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-            nlinks: 1,
-            atime_ns: 0u64,
-            mtime_ns: 0u64,
-            ctime_ns: 0u64,
-            birth_time_ns: 0u64
-        ))
+        self.inner.file_stat_path(path)
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
         self.inner.stat_path(path)
@@ -190,23 +200,6 @@ impl NvfsDriver:
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         self.inner.pread_handle(handle, offset, length)
 
-    fn pread_bytes_handle(
-        handle: FileHandle, offset: i64, length: i64
-    ) -> Result<[u8], FsError>:
-        """Return a byte-exact positioned slice with ordinary EOF semantics."""
-        if not _nvfs_positioned_range_valid(offset, length):
-            return Err(FsError.InvalidArg)
-        self.inner.pread_bytes_handle(handle, offset, length)
-
-    fn pread_bounded_bytes_handle(
-        handle: FileHandle, offset: i64, length: i64
-    ) -> Result<[u8], FsError>:
-        """Return an owned positioned chunk bounded to 64 KiB."""
-        if length > _NVFS_MAX_BOUNDED_PREAD_BYTES or
-                not _nvfs_positioned_range_valid(offset, length):
-            return Err(FsError.InvalidArg)
-        self.inner.pread_bounded_bytes_handle(handle, offset, length)
-
     fn close_handle(handle: FileHandle) -> Result<(), FsError>:
         self.inner.close_handle(handle)
 
@@ -220,13 +213,16 @@ impl NvfsDriver:
         self.inner.ftruncate_handle(handle, new_size)
 
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        self.inner.fsync(handle)
 
     fn fdatasync(handle: FileHandle) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        self.inner.fdatasync(handle)
 
     fn probe(cap: Capability) -> Option<Extension>:
         self.inner.probe(cap)
 
     fn capabilities() -> FsCapabilitySet:
         self.inner.capabilities()
+
+fn _nvfs_positioned_range_valid(offset: i64, length: i64) -> bool:
+    offset >= 0 and length >= 0 and offset <= _NVFS_MAX_POSITIONED_OFFSET - length

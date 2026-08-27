@@ -1,11 +1,15 @@
 use std.gc_async_mut.gpu.browser_engine.simple_web_file_renderer.{simple_web_file_render_url_to_pixels}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
-    simple_web_engine2d_render_html_pixels,
-    simple_web_engine2d_render_html_readback,
     simple_web_engine2d_resolved_backend_name,
     simple_web_html_background_color}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    SimpleWebLayoutEngine2DReadbackResult,
+    simple_web_layout_render_html_pixels_engine2d,
+    simple_web_layout_render_html_readback_engine2d,
+    simple_web_layout_render_html_readback_engine2d_result,
+    simple_web_layout_render_html_readback_engine2d_result_at_time
+}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
-use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 
 class SimpleWebRenderer:
@@ -27,23 +31,38 @@ class SimpleWebRenderResult:
     ok: bool
 
 fn _accent_for_html(html: text) -> u32:
+    # Aqua accent (see common.ui.wm_chrome_theme.wm_chrome_theme_defaults).
+    # NOTE: unused within this file as of this pass — kept in sync with the
+    # sibling _html_accent_color in simple_web_engine2d_renderer.spl.
     if html.contains("simple-web-success"):
         return 0xFF22C55Eu32
     if html.contains("simple-web-warning"):
         return 0xFFF59E0Bu32
-    0xFF2563EBu32
+    wm_chrome_theme().accent
 
 fn _css_background_color_for_html(html: text) -> u32:
     simple_web_html_background_color(html)
 
 fn _render_engine2d_surface_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
-    simple_web_engine2d_render_html_pixels(html, width, height, backend_name)
+    simple_web_layout_render_html_pixels_engine2d(html, width, height, backend_name)
 
 fn _render_engine2d_surface_readback(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
-    simple_web_engine2d_render_html_readback(html, width, height, backend_name)
+    simple_web_layout_render_html_readback_engine2d(html, width, height, backend_name)
 
+fn _render_engine2d_surface_readback_result(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DReadbackResult:
+    simple_web_layout_render_html_readback_engine2d_result(html, width, height, backend_name)
+
+# Single source of truth for "which engine2d backend".
+#
+# This is a PURE ALIAS of simple_web_engine2d_resolved_backend_name -- the one
+# the render/readback path itself consults. It previously pre-filtered the name
+# through a local _normalize_backend_name whitelist that collapsed baremetal,
+# virtio_gpu and directx-on-vulkan to "software" WITHOUT probing, so this facade
+# and the engine2d renderer could answer "which backend" differently for the
+# same request inside one render. Never reintroduce a local normalisation here:
+# canonicalisation and viability belong to the resolver that decides the render.
 fn _resolved_backend_name(width: i32, height: i32, backend_name: text) -> text:
-    simple_web_engine2d_resolved_backend_name(width, height, _normalize_backend_name(backend_name))
+    simple_web_engine2d_resolved_backend_name(width, height, backend_name)
 
 pub fn simple_web_render_html_to_scene(html: text, width: i32, height: i32) -> SimpleWebRenderScene:
     val color = _css_background_color_for_html(html)
@@ -52,6 +71,13 @@ pub fn simple_web_render_html_to_scene(html: text, width: i32, height: i32) -> S
         height: height,
         commands: [SimpleWebSceneCommand(kind: "fill_rect", color: color)]
     )
+
+pub fn simple_web_renderer_create(width: i32, height: i32) -> SimpleWebRenderer:
+    SimpleWebRenderer.create(width, height)
+
+export SimpleWebRenderResult
+export simple_web_renderer_create
+export simple_web_render_html_to_scene
 
 impl SimpleWebRenderer:
     static fn create(width: i32, height: i32) -> SimpleWebRenderer:
@@ -74,6 +100,16 @@ pub fn simple_web_render_html_to_pixels_with_engine2d_backend(html: text, width:
 
 pub fn simple_web_render_html_to_readback_with_engine2d_backend(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
     _render_engine2d_surface_readback(html, width, height, _resolved_backend_name(width, height, backend_name))
+
+pub fn simple_web_render_html_to_readback_result_with_engine2d_backend(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DReadbackResult:
+    _render_engine2d_surface_readback_result(html, width, height, _resolved_backend_name(width, height, backend_name))
+
+pub fn simple_web_render_html_to_readback_result_with_engine2d_backend_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> SimpleWebLayoutEngine2DReadbackResult:
+    simple_web_layout_render_html_readback_engine2d_result_at_time(
+        html, width, height,
+        _resolved_backend_name(width, height, backend_name),
+        animation_time_ms
+    )
 
 pub fn simple_web_resolved_engine2d_backend_name(width: i32, height: i32, backend_name: text) -> text:
     _resolved_backend_name(width, height, backend_name)

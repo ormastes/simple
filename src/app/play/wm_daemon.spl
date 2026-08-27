@@ -195,6 +195,12 @@ fn _wm_daemon_serve() -> i64:
         print "wm daemon: failed to init headless compositor"
         return 1
     var comp = handle.compositor
+    # Carrier for the per-frame destructure below: `handle` is `HostWmHandle?`,
+    # and a `me` method invoked through an OPTION-typed binding mutates a
+    # discarded temporary, so `run_once()` reset the compositor every frame.
+    # See doc/08_tracking/bug/
+    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md
+    var wm_opt = handle
     val config = wm_daemon_config()
     val runner = daemon_runner_start(config)
     if not runner.is_running():
@@ -220,7 +226,9 @@ fn _wm_daemon_serve() -> i64:
         if processed_ids.len() > 0:
             clear_processed_requests(config.request_dir, processed_ids)
         if render:
-            handle.run_once()
+            if val Some(wm) = wm_opt:
+                wm.run_once()
+                wm_opt = Some(wm)
         _wm_daemon_last_cycle_micros = time_now_unix_micros()
         sleep_ms(WM_DAEMON_IDLE_SLEEP_MS)
     runner.shutdown()

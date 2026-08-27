@@ -1,10 +1,12 @@
 
 use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
 use common.ui.taskbar_model.{TaskbarModel}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
+use os.compositor.simple_web_window_renderer.{simple_web_content_render_request_with_active_theme}
 use common.ui.window_scene.{SharedWmScene, shared_wm_scene_chrome}
-use os.compositor.wm_action_applier.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
+use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState, wm_lifecycle_motion_contract}
 use os.compositor.web_render_surface.{compositor_render_html_pixels}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d, engine2d_fast_metal_available}
 
 class SceneElement:
     kind: text
@@ -136,10 +138,11 @@ struct WmSceneModernThemeConfig:
     can_disable_motion: bool
 
 fn modern_wm_scene_theme_config() -> WmSceneModernThemeConfig:
+    val theme = wm_chrome_theme()
     WmSceneModernThemeConfig(
-        background_color: 0xFF0F172Au32,
-        foreground_color: 0xFFFFFFFFu32,
-        accent_color: 0xFF2563EBu32,
+        background_color: theme.compositor_bg,
+        foreground_color: theme.text_primary,
+        accent_color: theme.accent,
         titlebar_height_px: 32,
         command_lane_height_px: 32,
         taskbar_height_px: 56,
@@ -193,7 +196,7 @@ fn standard_wm_scene(width: i32, height: i32) -> WmSceneSpec:
         width: width,
         height: height,
         elements: [
-            SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: 0xFF0F172Au32, text: ""),
+            SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: wm_chrome_theme().compositor_bg, text: ""),
             SceneElement(kind: "decoration", x: 48, y: 42, w: panel_w, h: 34, color: 0xFF334155u32, text: ""),
             SceneElement(kind: "glass_panel", x: 48, y: 76, w: panel_w, h: panel_h, color: 0xCCCBD5E1u32, text: ""),
             SceneElement(kind: "text_label", x: 68, y: 60, w: 180, h: 20, color: 0xFFFFFFFFu32, text: "Simple Web WM")
@@ -202,7 +205,7 @@ fn standard_wm_scene(width: i32, height: i32) -> WmSceneSpec:
 
 fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
     var elements: [SceneElement] = [
-        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: 0xFF0F172Au32, text: "")
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: scene.width, h: scene.height, color: wm_chrome_theme().compositor_bg, text: "")
     ]
     for window in scene.windows:
         if not window.minimized:
@@ -237,7 +240,7 @@ fn shared_wm_scene_to_wm_scene(scene: SharedWmScene) -> WmSceneSpec:
 
 fn lifecycle_windows_to_motion_wm_scene(windows: [WmLifecycleWindowState], action_kind: text, width: i32, height: i32) -> WmSceneSpec:
     var elements: [SceneElement] = [
-        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: 0xFF0F172Au32, text: "")
+        SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: width, h: height, color: wm_chrome_theme().compositor_bg, text: "")
     ]
     for window in windows:
         val motion = wm_lifecycle_motion_contract(action_kind, window)
@@ -423,7 +426,7 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
             y: chrome.taskbar.y,
             w: 56,
             h: chrome.taskbar.height,
-            color: 0xFF2563EBu32,
+            color: wm_chrome_theme().accent,
             text: "{app.app_id}|{app.icon}"
         ))
         pin_i = pin_i + 1
@@ -446,24 +449,72 @@ fn shared_wm_scene_to_chromed_wm_scene(scene: SharedWmScene, taskbar: TaskbarMod
             elements = elements.push(elem)
     WmSceneSpec(name: "shared_wm_chromed_scene", width: scene.width, height: scene.height, elements: elements)
 
+# Pixel budget above which the pure-Simple CSS engine is too slow to run per
+# scene present. At the cap a single compositor_render_html_pixels() already
+# costs ~6s under the interpreter and grows to minutes at desktop resolutions
+# (see doc/08_tracking/bug/wm_scene_css_render_perf.md). Scenes larger than
+# this use the direct-rasterizer fallback below.
+val WM_SCENE_CSS_RENDER_PIXEL_CAP: i32 = 10000
+
+fn _wm_scene_element_is_text(kind: text) -> bool:
+    kind == "text_label" or kind == "command_clock" or kind == "label"
+
 fn render_scene_to_backend(scene: WmSceneSpec, backend) -> [u32]:
     if backend != nil:
         if scene.elements.len() == 0:
             return backend.pixels
     val total = if scene.width > 0 and scene.height > 0: scene.width * scene.height else: 0
-    if total > 0 and total <= 10000:
+    if total > 0 and total <= WM_SCENE_CSS_RENDER_PIXEL_CAP:
         val html = scene_to_html(scene)
-        val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, scene.name, html, "", "", scene.width, scene.height).with_pixel_output()
+        val req = simple_web_content_render_request_with_active_theme(scene.name, html, scene.width, scene.height).with_pixel_output()
         val simple_pixels = compositor_render_html_pixels(req, html)
         if simple_pixels.len() == total:
             return simple_pixels
-    var pixels: [u32] = [0xFF0F172Au32; total]
-    if pixels.len() > 0:
-        pixels[0] = 0xFF0F172Au32
-    if pixels.len() > 1:
-        pixels[pixels.len() - 1] = 0xFFCBD5E1u32
-    if scene.width > 70 and scene.height > 70:
-        pixels[60 * scene.width + 68] = 0xFFFFFFFFu32
+    # Above the CSS pixel cap: the pure-Simple CSS engine is too slow per present,
+    # but the same chrome HTML can be laid out and rasterized on the GPU via the
+    # native no-mirror Engine2D fast path (layout Draw IR -> Metal -> one-shot
+    # readback, ~1.4s exec+readback at 1024x768 vs minutes interpreted). Only take
+    # it when Metal is genuinely available; otherwise fall through to the themed
+    # direct-rect rasterizer. Behaviour at/below the cap is unchanged.
+    if total > WM_SCENE_CSS_RENDER_PIXEL_CAP and engine2d_fast_metal_available():
+        val fast_html = scene_to_html(scene)
+        val fast_pixels = simple_web_layout_render_html_pixels_engine2d(fast_html, scene.width, scene.height, "metal")
+        if fast_pixels.len() == total:
+            return fast_pixels
+    # Fallback for real resolutions: rasterize the actual scene elements as
+    # solid rects (painter's order) instead of a near-blank fill, so themed WM
+    # chrome still appears when the CSS engine is skipped for cost.
+    wm_scene_direct_rect_pixels(scene)
+
+fn wm_scene_direct_rect_pixels(scene: WmSceneSpec) -> [u32]:
+    """Themed direct-rect rasterizer (the non-CSS fallback lane). Public so
+    the theme contract spec can pin it deterministically — whether
+    render_scene_to_backend reaches it depends on Metal availability and
+    the CSS pixel cap, which vary by environment."""
+    val total = if scene.width > 0 and scene.height > 0: scene.width * scene.height else: 0
+    val theme = wm_chrome_theme()
+    var pixels: [u32] = [theme.compositor_bg; total]
+    if total == 0:
+        return pixels
+    val stride = scene.width
+    for elem in scene.elements:
+        if not _wm_scene_element_is_text(elem.kind):
+            val x_start = if elem.x < 0: 0 else: elem.x
+            val y_start = if elem.y < 0: 0 else: elem.y
+            var x_end = elem.x + elem.w
+            if x_end > stride:
+                x_end = stride
+            var y_end = elem.y + elem.h
+            if y_end > scene.height:
+                y_end = scene.height
+            var yy = y_start
+            while yy < y_end:
+                val row = yy * stride
+                var xx = x_start
+                while xx < x_end:
+                    pixels[row + xx] = elem.color
+                    xx = xx + 1
+                yy = yy + 1
     pixels
 
 fn wm_scene_visual_quality_report(scene: WmSceneSpec) -> WmSceneVisualQualityReport:
@@ -1094,7 +1145,7 @@ fn _scene_background_color(scene: WmSceneSpec) -> u32:
     for elem in scene.elements:
         if elem.kind == "desktop_chrome":
             return elem.color
-    0xFF0F172Au32
+    wm_chrome_theme().compositor_bg
 
 fn _scene_touch_target_height_px(html: text) -> i32:
     if html.contains(".control-center button{{min-height:44px"):

@@ -21,14 +21,25 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 }
 use std.common.processing.processing_ir.{ProcessingIr, processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
-use app.io.volatile_required.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
+use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
 use app.io.time_ops.{time_now_nanos}
 use app.io.args_ops.{get_args}
 use app.io.thread.{thread_sleep_ms}
 use std.common.text.{parse_i64}
 use std.nogc_sync_mut.ptr.raw.{raw_read_i32, raw_write_u32s_checksum, raw_write_fill_u32s_checksum}
 
-val SIMPLEOS_GPU_PROCESSING_MIN_OFFLOAD_ELEMENTS: i64 = 1048576
+val SIMPLEOS_GPU_CUDA_MIN_OFFLOAD_ELEMENTS: i64 = 536870912
+val SIMPLEOS_GPU_VULKAN_MIN_OFFLOAD_ELEMENTS: i64 = 65536
+val SIMPLEOS_GPU_METAL_MIN_OFFLOAD_ELEMENTS: i64 = 536870912
+
+fn simpleos_gpu_processing_min_offload_elements(backend: text, configured: i64) -> i64:
+    if configured >= 0:
+        return configured
+    if backend == "cuda":
+        return SIMPLEOS_GPU_CUDA_MIN_OFFLOAD_ELEMENTS
+    if backend == "vulkan":
+        return SIMPLEOS_GPU_VULKAN_MIN_OFFLOAD_ELEMENTS
+    SIMPLEOS_GPU_METAL_MIN_OFFLOAD_ELEMENTS
 
 # Per-connection loop state: the request-processed flag `main()` already
 # used to decide whether to sleep, plus the retained image-resource table
@@ -93,9 +104,6 @@ fn _finish(base: i64, generation: i64, status: i64, reason: i64, handle: i64, ou
     _write(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_FRAME_ID, if device_completion: _read(base, SIMPLEOS_HOST_GPU_WIRE_FRAME_ID) else: 0)
     memory_barrier_required()
     _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION, generation)
-    val request_generation = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION)
-    val completion_generation = _read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
-    print("HOST_GPU_DAEMON_COMPLETE generation={generation} status={status} reason={reason} request_generation={request_generation} completion_generation={completion_generation} elapsed_us={elapsed_us}\n")
 
 fn _payload_words(base: i64, payload_bytes: i64) -> [i64]:
     var words: [i64] = []
@@ -149,8 +157,6 @@ fn _render_backend_available(platform: SimpleOsGpuHostPlatform, code: i64) -> bo
             print("HOST_GPU_DAEMON_RENDER_UNAVAILABLE backend={name} reason={reason}\n")
             false
         Ok(available):
-            if not available:
-                print("HOST_GPU_DAEMON_RENDER_UNAVAILABLE backend={name} reason=device-unavailable\n")
             available
 
 fn _process_hello(platform: SimpleOsGpuHostPlatform, base: i64, generation: i64, version: i64, guest_isa_code: i64, render_mask: i64, processing_mask: i64, render_code: i64, processing_selector: text, requested_capability_mask: i64) -> i64:
@@ -226,7 +232,6 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
     # newer guest left behind in an earlier session on a reused backing
     # file — see the staleness note on the wire offsets in the protocol.
     val requested_capability_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_CAPABILITY_MASK)
-    print("HOST_GPU_DAEMON_REQUEST generation={generation} completion_generation={completion} kind={kind} backend={backend_code} version={request_version}\n")
     _write(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_CAPABILITY_MASK, 0)
     # Snapshot correlation fields under the same acquire fence as the request.
     # Completion publishes this snapshot rather than rereading mutable request memory.
@@ -304,7 +309,8 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
         if not processing_ir_validate(ir).valid:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
-        if processing_fallback_cpu and processing_min_offload_elements > 0 and element_count < processing_min_offload_elements:
+        val effective_min_offload_elements = simpleos_gpu_processing_min_offload_elements(backend, processing_min_offload_elements)
+        if processing_fallback_cpu and effective_min_offload_elements > 0 and element_count < effective_min_offload_elements:
             return _loop_state(if _processing_cpu_fallback(base, generation, SIMPLEOS_HOST_GPU_REASON_OFFLOAD_OVERHEAD, ir): 1 else: 0, retained)
         var oracle: [u32] = []
         var cpu_elapsed_us: i64 = 0
@@ -481,7 +487,7 @@ fn simpleos_gpu_host_run(platform: SimpleOsGpuHostPlatform) -> i64:
     val processing_verify_cpu = args.contains("--processing-verify-cpu")
     val requested_processing_min_offload_elements = _arg_value(args, "--processing-min-offload-elements=")
     val processing_min_offload_elements = if requested_processing_min_offload_elements == "":
-        SIMPLEOS_GPU_PROCESSING_MIN_OFFLOAD_ELEMENTS
+        -1
     else:
         parse_i64(requested_processing_min_offload_elements)
     val processing_min_offload_elements_valid =
@@ -527,4 +533,4 @@ fn simpleos_gpu_host_run(platform: SimpleOsGpuHostPlatform) -> i64:
             thread_sleep_ms(1)
     0
 
-export simpleos_gpu_host_run
+export simpleos_gpu_host_run, simpleos_gpu_processing_min_offload_elements

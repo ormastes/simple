@@ -1,19 +1,17 @@
-# Compression utilities — option constructors and helpers.
-#
-# Consumers import `default_compression_options` which takes a codec enum and
-# returns a CompressionOptions ready to pass to compress_frame functions.
+# Compression utilities — byte helpers, checksums, SIMD tier detection, option builders,
+# streaming encoder/decoder, and the public compress/decompress facade.
 
 use std.common.compress.types.{CompressionCodec, CompressionError, CompressionSimdTier}
-use std.common.compress.lz4.{CompressionOptions, CompressionLevel, xxhash32_bytes}
+use std.common.compress.lz4.{CompressionOptions, CompressionLevel}
 use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame, lz4_compress_block, lz4_decompress_block}
 use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
 use std.common.compress.gzip.{gzip_compress, gzip_decompress}
 use std.common.compress.brotli.{brotli_compress, brotli_decompress}
 use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof}
 use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
+use std.simd.{SimdTier, detect_profile, profile_name}
 
 pub use std.common.compress.types.{CompressionSimdTier}
-pub use std.common.compress.lz4.{xxhash32_bytes}
 
 val CRC32_POLY_REV: u32 = 0xEDB88320u32
 
@@ -195,7 +193,7 @@ fn _crc32_update_byte(crc: u32, byte: u8) -> u32:
     next
 
 pub fn crc32_bytes(data: [u8]) -> u32:
-    gzip_crc32(data)
+    crc32_bytes_scalar(data)
 
 pub fn crc32_bytes_scalar(data: [u8]) -> u32:
     var crc: u32 = 0xFFFFFFFFu32
@@ -288,7 +286,6 @@ pub fn xxhash32_bytes_for_tier(data: [u8], seed: u32, tier: CompressionSimdTier)
 # ── Compression option builders ────────────────────────────────────────────
 
 pub fn default_compression_options(codec: CompressionCodec) -> CompressionOptions:
-    """Return a CompressionOptions with the default level for `codec`."""
     val level_val = match codec:
         case CompressionCodec.zstd: 3
         case CompressionCodec.lz4: 1
@@ -297,10 +294,11 @@ pub fn default_compression_options(codec: CompressionCodec) -> CompressionOption
         case CompressionCodec.brotli: 4
         case CompressionCodec.lzma2: 6
         case CompressionCodec.identity: 0
+    val checksum = codec == CompressionCodec.lzma2
     CompressionOptions(
         codec: codec,
         level: CompressionLevel(value: level_val),
-        checksum: false,
+        checksum: checksum,
         block_mode: "frame",
         dictionary_bytes: nil,
         dictionary_id: nil,
@@ -308,7 +306,6 @@ pub fn default_compression_options(codec: CompressionCodec) -> CompressionOption
     )
 
 pub fn compression_options(codec: CompressionCodec, level: i64) -> CompressionOptions:
-    """Return a CompressionOptions with an explicit level."""
     CompressionOptions(
         codec: codec,
         level: CompressionLevel(value: level),
@@ -320,7 +317,6 @@ pub fn compression_options(codec: CompressionCodec, level: i64) -> CompressionOp
     )
 
 pub fn codec_content_encoding(codec: CompressionCodec) -> text:
-    """Return the HTTP Content-Encoding header value for `codec`."""
     match codec:
         case CompressionCodec.zstd: "zstd"
         case CompressionCodec.lz4: "lz4"
@@ -330,8 +326,45 @@ pub fn codec_content_encoding(codec: CompressionCodec) -> text:
         case CompressionCodec.lzma2: "xz"
         case CompressionCodec.identity: "identity"
 
+# ── Option validation ──────────────────────────────────────────────────────
+
+pub fn _validate_options(opts: CompressionOptions) -> Result<[u8], CompressionError>:
+    # Dictionary checks
+    if opts.dictionary_id != nil:
+        val did = opts.dictionary_id ?? 0
+        if did < 0:
+            return Err(CompressionError.UnsupportedFeature("dictionary_id must be >= 0"))
+        if opts.dictionary_bytes == nil:
+            return Err(CompressionError.UnsupportedFeature("dictionary_id requires dictionary_bytes"))
+    if opts.dictionary_bytes != nil:
+        return Err(CompressionError.UnsupportedFeature("dictionaries are not supported"))
+    # Content size checks
+    if opts.content_size != nil:
+        val cs = opts.content_size ?? 0
+        if cs < 0:
+            return Err(CompressionError.UnsupportedFeature("content_size must be >= 0"))
+    # Codec-specific checks
+    val is_lz4 = opts.codec == CompressionCodec.lz4
+    val is_lzma2 = opts.codec == CompressionCodec.lzma2
+    if opts.block_mode == "block":
+        if is_lz4:
+            if opts.checksum:
+                return Err(CompressionError.UnsupportedFeature("block mode does not support checksum"))
+            if opts.content_size != nil:
+                return Err(CompressionError.UnsupportedFeature("block mode does not support content_size"))
+        else:
+            return Err(CompressionError.UnsupportedFeature("block_mode must be frame for this codec"))
+    if is_lz4:
+        if opts.level.value != 1:
+            return Err(CompressionError.UnsupportedFeature("levels other than 1 are not supported for lz4"))
+    if is_lzma2:
+        if not opts.checksum:
+            return Err(CompressionError.UnsupportedFeature("checksum=true is required for lzma2/xz"))
+    Ok([])
+
+# ── Compression facade ─────────────────────────────────────────────────────
+
 pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
-    """Compress bytes through the shared compression facade."""
     match opts.codec:
         case CompressionCodec.zstd:
             zstd_compress_frame(data, opts)
@@ -341,8 +374,8 @@ pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
             else:
                 lz4_compress_frame(data, opts)
         case CompressionCodec.deflate:
-            val result = deflate_compress_sync_flush(data)
-            match result:
+            val res = deflate_compress_sync_flush(data)
+            match res:
                 case Ok(bytes): bytes
                 case _: []
         case CompressionCodec.gzip:
@@ -354,13 +387,21 @@ pub fn compress_bytes(data: [u8], opts: CompressionOptions) -> [u8]:
         case CompressionCodec.identity:
             data
 
+pub fn try_compress_bytes(data: [u8], opts: CompressionOptions) -> Result<[u8], CompressionError>:
+    val check = _validate_options(opts)
+    if check.is_err():
+        return check
+    if opts.content_size != nil:
+        val cs = opts.content_size ?? 0
+        if cs != data.len():
+            return Err(CompressionError.UnsupportedFeature("content_size mismatch: declared " + cs.to_text() + " but actual is " + data.len().to_text()))
+    Ok(compress_bytes(data, opts))
+
 fn _decompress_with_codec(data: [u8], codec: CompressionCodec) -> Result<[u8], CompressionError>:
     match codec:
         case CompressionCodec.zstd:
             zstd_decompress_frame(data)
         case CompressionCodec.lz4:
-            # Auto-detect: if data starts with LZ4 magic (04 22 4D 18) use frame decoder,
-            # otherwise fall back to raw block decoder.
             if (data.len() >= 4 and data[0] == 0x04u8 and data[1] == 0x22u8 and
                     data[2] == 0x4Du8 and data[3] == 0x18u8):
                 lz4_decompress_frame(data)
@@ -369,12 +410,16 @@ fn _decompress_with_codec(data: [u8], codec: CompressionCodec) -> Result<[u8], C
         case CompressionCodec.deflate:
             deflate_decompress_eof(data)
         case CompressionCodec.gzip:
+            if data.len() == 0:
+                return Err(CompressionError.TruncatedInput("gzip empty input"))
             val out = gzip_decompress(data)
             if out.len() == 0 and data.len() > 0:
                 Err(CompressionError.CorruptData("gzip decompress failed"))
             else:
                 Ok(out)
         case CompressionCodec.brotli:
+            if data.len() == 0:
+                return Err(CompressionError.TruncatedInput("brotli empty input"))
             val out = brotli_decompress(data)
             if out.len() == 0 and data.len() > 0:
                 Err(CompressionError.CorruptData("brotli decompress failed"))
@@ -401,7 +446,6 @@ fn _detect_codec(data: [u8]) -> Option<CompressionCodec>:
     nil
 
 pub fn decompress_bytes(data: [u8], codec_hint: Option<CompressionCodec>) -> Result<[u8], CompressionError>:
-    """Decompress bytes with an explicit codec or by frame-header detection."""
     if val Some(codec) = codec_hint:
         return _decompress_with_codec(data, codec)
     val detected = _detect_codec(data)
@@ -409,21 +453,18 @@ pub fn decompress_bytes(data: [u8], codec_hint: Option<CompressionCodec>) -> Res
         return _decompress_with_codec(data, codec)
     Err(CompressionError.InvalidHeader("codec auto-detect failed"))
 
-fn append_bytes(left: [u8], right: [u8]) -> [u8]:
-    var out = left
-    for b in right:
-        out.push(b)
-    out
+# ── Streaming encoder/decoder ──────────────────────────────────────────────
 
-fn append_self_overlap_copy(buf: [u8], offset: i64, count: i64) -> Result<[u8], CompressionError>:
-    if offset <= 0 or offset > buf.len():
-        return Err(CompressionError.CorruptStream("invalid overlap copy offset"))
-    var out = buf
+pub fn new_encoder_state(options: CompressionOptions) -> CompressionEncoderState:
+    CompressionEncoderState(options: options, pending: [])
+
+pub fn encoder_write(state: CompressionEncoderState, chunk: [u8]) -> CompressionEncoderState:
+    var pending = state.pending
     var i = 0
-    while i < count:
-        out.push(out[out.len() - offset])
+    while i < chunk.len():
+        pending.push(chunk[i])
         i = i + 1
-    Ok(out)
+    CompressionEncoderState(options: state.options, pending: pending)
 
 pub fn encoder_finish(state: CompressionEncoderState) -> [u8]:
     compress_bytes(state.pending, state.options)

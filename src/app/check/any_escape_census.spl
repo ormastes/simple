@@ -18,6 +18,7 @@
 # `any_sites` counts E-MC-ANY-001 findings; `escapes` counts E-MC-ANY-002.
 
 use compiler.frontend.{parse_full_frontend}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
 use compiler.common.config.{Logger}
 use compiler.hir.hir_lowering.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
@@ -91,6 +92,7 @@ fn module_name_of(path: text) -> text:
 var CENSUS_MODULES: i64 = 0
 var CENSUS_ANY_SITES: i64 = 0
 var CENSUS_ESCAPES: i64 = 0
+var CENSUS_UNANALYZABLE: i64 = 0
 
 fn census_one(path: text) -> i64:
     val content = rt_file_read_text(path) ?? ""
@@ -101,6 +103,18 @@ fn census_one(path: text) -> i64:
     val mod_name = module_name_of(path)
     val log = Logger(level: 0)
     val pm = parse_full_frontend(content, path, mod_name, log)
+    # Fail closed on a file the parser could not read. The parser RECOVERS from
+    # errors and still hands back a ParserModule, so without this the census
+    # counted a malformed file as a clean, zero-finding module — which lowers
+    # the Any-site and escape totals and reads as progress. See
+    # doc/08_tracking/bug/any_escape_census_undercounts_2026-08-21.md.
+    if parser_has_errors():
+        print "PARSE-FAIL {path}"
+        for e in parser_get_errors():
+            print "  parse-error {e}"
+        CENSUS_UNANALYZABLE = CENSUS_UNANALYZABLE + 1
+        return 1
+
     val surfaces = ModuleSurfacesByName.empty()
     var lowering = hirlowering_for_module("", surfaces)
     val hm: HirModule = lowering.lower_module(pm)
@@ -123,6 +137,8 @@ fn census_one(path: text) -> i64:
 # Entry
 # ---------------------------------------------------------------------------
 
+var EXIT_CODE: i64 = 0
+
 fn main() -> i64:
     val args = get_cli_args()
     var i = 0
@@ -134,10 +150,14 @@ fn main() -> i64:
                 for line in listing.split("\n"):
                     val entry = line.trim()
                     if entry != "":
-                        val _ = census_one(entry)
+                        val rc = census_one(entry)
+                        if rc != 0:
+                            EXIT_CODE = 1
                 i = i + 1
         elif a.ends_with(".spl"):
-            val _ = census_one(a)
+            val rc_one = census_one(a)
+            if rc_one != 0:
+                EXIT_CODE = 1
         i = i + 1
-    print "SUMMARY modules={CENSUS_MODULES} any_sites={CENSUS_ANY_SITES} escapes={CENSUS_ESCAPES}"
-    0
+    print "SUMMARY modules={CENSUS_MODULES} any_sites={CENSUS_ANY_SITES} escapes={CENSUS_ESCAPES} unanalyzable={CENSUS_UNANALYZABLE}"
+    EXIT_CODE

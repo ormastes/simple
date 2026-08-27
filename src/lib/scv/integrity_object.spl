@@ -27,14 +27,14 @@ fn scv_object_index_kind_ok(kind: text) -> bool:
     kind == "chunks" or kind == "files" or kind == "trees" or kind == "commits" or kind == "changes" or kind == "operations" or kind == "conflicts" or kind == "syntax" or kind == "packs"
 
 fn scv_object_index_actual_keys(root: text) -> text:
-    var out = ""
+    var rows: [text] = []
     for kind in ["chunks", "files", "trees", "commits", "changes", "operations", "conflicts", "syntax", "packs"]:
         val dir = "{scv_objects_dir(root)}/{kind}"
         if not file_exists(dir):
             continue
         for path in dir_walk(dir):
-            out = out + "{kind}|{scv_object_id_from_path(path)}\n"
-    out
+            rows.push("{kind}|{scv_object_id_from_path(path)}\n")
+    rows.join("")
 
 fn scv_validate_object_index(root: text) -> text:
     val index_path = scv_object_index_path(root)
@@ -44,13 +44,12 @@ fn scv_validate_object_index(root: text) -> text:
     if content.trim() == "":
         return ""
     val db_opt = SdnDatabase.load(index_path)
-    if not db_opt.?:
+    val Some(db) = db_opt else:
         return "bad object index database\n"
-    val Some(db) = db_opt
     val table_opt = db.get_table("objects")
-    if not table_opt.?:
+    val Some(table) = table_opt else:
         return "missing object index table\n"
-    var errors = ""
+    var errors: [text] = []
     var seen = ""
     for row in table.rows:
         val id = row.get("id") ?? ""
@@ -60,26 +59,26 @@ fn scv_validate_object_index(root: text) -> text:
         val valid = row.get("valid") ?? ""
         val key = "{kind}|{id}"
         if id == "" or kind == "" or path == "":
-            errors = errors + "bad object index row\n"
+            errors.push("bad object index row\n")
             continue
         if not scv_object_index_kind_ok(kind):
-            errors = errors + "bad object index kind: {kind}\n"
+            errors.push("bad object index kind: {kind}\n")
             continue
         if valid != "true":
-            errors = errors + "invalid object index row: {kind} {id}\n"
+            errors.push("invalid object index row: {kind} {id}\n")
         if scv_line_set_contains(seen, key):
-            errors = errors + "duplicate object index row: {kind} {id}\n"
+            errors.push("duplicate object index row: {kind} {id}\n")
         else:
             seen = seen + key + "\n"
         val expected_path = scv_object_index_expected_path(root, kind, id, path)
         if kind == "packs" and not path.starts_with("{scv_objects_dir(root)}/packs/"):
-            errors = errors + "unsafe object index path: {kind} {id}\n"
+            errors.push("unsafe object index path: {kind} {id}\n")
         elif path != expected_path:
-            errors = errors + "object index path mismatch: {kind} {id}\n"
+            errors.push("object index path mismatch: {kind} {id}\n")
         if not file_exists(path):
-            errors = errors + "missing indexed object: {kind} {id}\n"
+            errors.push("missing indexed object: {kind} {id}\n")
         elif size != "{file_size(path)}":
-            errors = errors + "object index size mismatch: {kind} {id}\n"
+            errors.push("object index size mismatch: {kind} {id}\n")
     val actual = scv_object_index_actual_keys(root)
     for key in actual.split("\n"):
         val trimmed = key.trim()
@@ -87,8 +86,8 @@ fn scv_validate_object_index(root: text) -> text:
             continue
         if not scv_line_set_contains(seen, trimmed):
             val parts = trimmed.split("|")
-            errors = errors + "missing object index row: {parts[0]} {parts[1]}\n"
-    errors
+            errors.push("missing object index row: {parts[0]} {parts[1]}\n")
+    errors.join("")
 
 fn scv_expected_object_hash(kind: text, id: text, content: text) -> text:
     if kind == "files":
@@ -110,20 +109,20 @@ fn scv_validate_deterministic_object_dir(root: text, kind: text) -> text:
     val object_dir = "{scv_objects_dir(root)}/{kind}"
     if not file_exists(object_dir):
         return ""
-    var errors = ""
+    var errors: [text] = []
     for path in dir_walk(object_dir):
         val id = scv_object_id_from_path(path)
         val expected = scv_expected_object_hash(kind, id, file_read(path))
         if expected != id:
-            errors = errors + "object hash mismatch: {kind} {id}\n"
-    errors
+            errors.push("object hash mismatch: {kind} {id}\n")
+    errors.join("")
 
 fn scv_validate_deterministic_object_hashes(root: text) -> text:
-    var errors = ""
-    errors = errors + scv_validate_deterministic_object_dir(root, "files")
-    errors = errors + scv_validate_deterministic_object_dir(root, "trees")
-    errors = errors + scv_validate_deterministic_object_dir(root, "commits")
-    errors = errors + scv_validate_deterministic_object_dir(root, "conflicts")
-    errors = errors + scv_validate_deterministic_object_dir(root, "syntax")
-    errors = errors + scv_validate_deterministic_object_dir(root, "operations")
-    errors
+    var errors: [text] = []
+    errors.push(scv_validate_deterministic_object_dir(root, "files"))
+    errors.push(scv_validate_deterministic_object_dir(root, "trees"))
+    errors.push(scv_validate_deterministic_object_dir(root, "commits"))
+    errors.push(scv_validate_deterministic_object_dir(root, "conflicts"))
+    errors.push(scv_validate_deterministic_object_dir(root, "syntax"))
+    errors.push(scv_validate_deterministic_object_dir(root, "operations"))
+    errors.join("")

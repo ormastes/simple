@@ -5,7 +5,6 @@
 # type-hierarchy, semantic-tokens, selection-range,
 # document-formatting, ast-query, sem-query, query-schema.
 
-extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
@@ -16,37 +15,16 @@ use app.cli.query_ast_query.{engine_ast_query}
 use app.cli.query_sem_query.{engine_sem_query}
 use app.cli.query_schema.{engine_query_schema}
 use app.cli.query_helpers.{_has_flag, _replace_word, _collect_symbol_sets, _classify_token, _count_indent, _extract_flag}
+use app.cli.query_lint_scan.{deprecated_new_column_at}
+use app.cli.query_rich_common.{_parse_error_location}
 use compiler.driver.driver.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use compiler.tools.fix.main.{collect_fixes_from_source}
 use compiler.tools.formatter.main.{make_formatter}
-use std.report.emitter.lsp.{LspEmitter, LspDiagnostic, LspCodeAction, LspTextEdit}
+use std.report.emitter.lsp.{LspEmitter, LspDiagnostic, LspTextEdit}
 
 fn query_file_read_rich(path: text) -> text:
     read_file_text(path)
-
-fn _parse_error_location(err: text) -> (i64, i64, text):
-    """Parse line:col:message from an error string. Returns (line, col, message)."""
-    var colon1 = -1
-    var colon2 = -1
-    var ci = 0
-    while ci < err.len():
-        if err.substring(ci, ci + 1) == ":":
-            if colon1 == -1:
-                colon1 = ci
-            elif colon2 == -1:
-                colon2 = ci
-                break
-        ci = ci + 1
-    if colon1 > 0 and colon2 > colon1:
-        val line_str = err.substring(0, colon1)
-        val col_str = err.substring(colon1 + 1, colon2)
-        val msg = err.substring(colon2 + 1).trim()
-        val line = line_str.to_int()
-        val col = col_str.to_int()
-        if line > 0:
-            return (line, if col > 0: col else: 1, msg)
-    (1, 1, err)
 
 fn query_signature_help(symbol: text, file: text, line_num: i64, col: i64) -> i64:
     val clean_sym = sanitize_symbol(symbol)
@@ -116,10 +94,10 @@ fn query_rename(symbol: text, file: text, line_num: i64, cmd_args: [text]) -> i6
                     already_done = true
                     break
             if not already_done:
-                val content = rt_file_read_text(edit_file) ?? ""
+                val content = read_file_text(edit_file)
                 if content != "":
                     val updated = _replace_word(content, clean_sym, clean_new)
-                    rt_file_write_text(edit_file, updated)
+                    file_write(edit_file, updated)
                     edited_files.push(edit_file)
                     print "Applied: {edit_file}"
         print ""
@@ -162,8 +140,8 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
 
     # Run fix tool to collect suggested fixes with text edits
     var has_fixes = false
-    if rt_file_exists(file):
-        val source = rt_file_read_text(file) ?? ""
+    if file_exists(file):
+        val source = read_file_text(file)
         if source != "":
             val fixes = collect_fixes_from_source(file, source)
             if fixes.len() > 0:
@@ -199,37 +177,31 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
 
             # Also run source-level lint to surface EasyFix actions
             val source_lines = source.split("\n")
-            var sli = 0
-            while sli < source_lines.len():
+            if line_num > 0 and line_num <= source_lines.len():
+                val sli = line_num - 1
                 val sline = source_lines[sli]
                 val strimmed = sline.trim()
-                val sline_num = sli + 1
+                # DEPR002: .new() -> suggest StructName(field: value)
+                if deprecated_new_column_at(source_lines, sli) > 0:
+                    if format == "json":
+                        actions.push("{\"title\":\"Replace .new() with constructor syntax\",\"kind\":\"quickfix\",\"isPreferred\":true}")
+                    else:
+                        has_fixes = true
 
-                # Only check the requested line
-                if sline_num == line_num:
-                    # DEPR002: .new() -> suggest StructName(field: value)
-                    if strimmed.contains(".new("):
+                # DEPR003: bare pass -> suggest pass_do_nothing
+                if (strimmed == "pass" or strimmed.starts_with("pass ") or strimmed.starts_with("pass#")):
+                    if not strimmed.starts_with("pass_"):
                         if format == "json":
-                            actions.push("{\"title\":\"Replace .new() with constructor syntax\",\"kind\":\"quickfix\",\"isPreferred\":true}")
+                            val indent_len = sline.len() - strimmed.len()
+                            var ep: [text] = []
+                            ep.push("{\"title\":\"Replace 'pass' with 'pass_do_nothing'\",\"kind\":\"quickfix\",\"isPreferred\":true")
+                            ep.push(",\"edit\":{\"changes\":{")
+                            ep.push("{emitter.encode_string(file)}:[")
+                            ep.push("{\"range\":{\"start\":{\"line\":{sli},\"character\":{indent_len}},\"end\":{\"line\":{sli},\"character\":{indent_len + 4}}},\"newText\":\"pass_do_nothing\"}")
+                            ep.push("]}}}")
+                            actions.push(ep.join(""))
                         else:
                             has_fixes = true
-
-                    # DEPR003: bare pass -> suggest pass_do_nothing
-                    if (strimmed == "pass" or strimmed.starts_with("pass ") or strimmed.starts_with("pass#")):
-                        if not strimmed.starts_with("pass_"):
-                            if format == "json":
-                                val indent_len = sline.len() - strimmed.len()
-                                var ep: [text] = []
-                                ep.push("{\"title\":\"Replace 'pass' with 'pass_do_nothing'\",\"kind\":\"quickfix\",\"isPreferred\":true")
-                                ep.push(",\"edit\":{\"changes\":{")
-                                ep.push("{emitter.encode_string(file)}:[")
-                                ep.push("{\"range\":{\"start\":{\"line\":{sli},\"character\":{indent_len}},\"end\":{\"line\":{sli},\"character\":{indent_len + 4}}},\"newText\":\"pass_do_nothing\"}")
-                                ep.push("]}}}")
-                                actions.push(ep.join(""))
-                            else:
-                                has_fixes = true
-
-                sli = sli + 1
 
     if format == "json":
         print "[{actions.join(\",\")}]"
@@ -244,8 +216,8 @@ fn query_code_actions(file: text, line_num: i64, cmd_args: [text]) -> i64:
         if has_fixes:
             print ""
             print "--- Suggested Fixes ---"
-            if rt_file_exists(file):
-                val source2 = rt_file_read_text(file) ?? ""
+            if file_exists(file):
+                val source2 = read_file_text(file)
                 if source2 != "":
                     val fixes2 = collect_fixes_from_source(file, source2)
                     for fix in fixes2:

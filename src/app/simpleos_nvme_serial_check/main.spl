@@ -1,6 +1,5 @@
 use app.io.mod.{env_get}
 
-extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 
@@ -9,7 +8,7 @@ fn _print_usage():
     print "Optional: SIMPLEOS_NVME_REPORT_OUT=<path> SIMPLEOS_NVME_PREFLIGHT_REPORT=<path>"
 
 fn _read_evidence_text(path: text) -> text:
-    rt_file_read_text(path) ?? ""
+    read_file_text(path)
 
 fn _serial_field(serial_output: text, prefix: text) -> text:
     var normalized = serial_output.replace("\n", " ")
@@ -427,6 +426,13 @@ fn _identity_token(value: text) -> text:
 fn _preflight_identity_match_reason(serial_output: text, preflight_report_text: text) -> text:
     if not preflight_report_text.contains("physical_nvme_preflight:"):
         return "physical-nvme-preflight-report-invalid"
+    # Detect multiple devices BEFORE the duplicate-field check: in a multi-device
+    # report each per-device field (model, serial, controller, ...) legitimately
+    # appears once per device, which the global field-count would otherwise
+    # mis-flag as a duplicate field (e.g. duplicate-field:model). A 2-device
+    # report must report multiple-devices, not a spurious duplicate.
+    if _preflight_device_count(preflight_report_text) > 1:
+        return "physical-nvme-preflight-multiple-devices"
     val duplicate_reason = _preflight_duplicate_field_reason(preflight_report_text, [
         "accepted",
         "nvme_device_glob",
@@ -505,9 +511,9 @@ fn _preflight_identity_match_reason(serial_output: text, preflight_report_text: 
     "ready"
 
 fn main() -> i64:
-    val serial_log = rt_env_get("SIMPLEOS_NVME_SERIAL_LOG") ?? ""
-    val report_out = rt_env_get("SIMPLEOS_NVME_REPORT_OUT") ?? ""
-    val preflight_report = rt_env_get("SIMPLEOS_NVME_PREFLIGHT_REPORT") ?? ""
+    val serial_log = env_get("SIMPLEOS_NVME_SERIAL_LOG") ?? ""
+    val report_out = env_get("SIMPLEOS_NVME_REPORT_OUT") ?? ""
+    val preflight_report = env_get("SIMPLEOS_NVME_PREFLIGHT_REPORT") ?? ""
     if serial_log == "":
         _print_usage()
         return 2
@@ -523,7 +529,7 @@ fn main() -> i64:
             _validation_report(serial_log, serial_output, reason)
         else:
             _validation_report_with_preflight(serial_log, serial_output, reason, preflight_report, preflight_report_text)
-        if not rt_file_write_text(report_out, report):
+        if not file_write(report_out, report):
             print "physical_nvme serial_log={serial_log} reason=validation-report-write-failed report_out={report_out}"
             return 1
     print "physical_nvme serial_log={serial_log} reason={reason}"

@@ -1,17 +1,21 @@
 """Hidden, fail-closed browser renderer worker entry."""
 
 use common.string_builder.{StringBuilder}
-use std.common.base_encoding.utilities.{text_to_bytes}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES,
     BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI,
     browser_renderer_viewport_valid,
     BROWSER_RENDERER_WORKER_ARG,
-    BrowserRendererEncodeResult, BrowserRendererMessage,
+    BrowserRendererCapabilityMessage, BrowserRendererEncodeResult,
+    BrowserRendererMessage,
     BrowserTextInputOverlay, browser_text_input_overlay_empty,
     browser_renderer_action_decode,
     browser_renderer_bookmark_snapshot_decode,
-    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_capability_bind_encoded,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_capability_message_encode,
+    browser_renderer_capability_payload_message,
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_history_proposal,
@@ -25,6 +29,10 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_network_response_decode,
     browser_renderer_resize_decode
 }
+use std.common.web.browser_renderer_history_protocol.{
+    browser_renderer_history_proposal_decode,
+    browser_renderer_history_proposal_encode
+}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResourceRevision
 }
@@ -32,10 +40,8 @@ use common.ui.render_opt.damage_plan.{
     DAMAGE_PLAN_FULL, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_NONE
 }
 use common.ui.access.{WinTextActionRequest}
-use std.common.encoding.utf8.{text_without_last_codepoint}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity_at_element_path, be_dom_find_path_to_id,
-    be_dom_focused_id, be_dom_layout_target_key
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomNodeRoute
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     InputTextVisualMap, SimpleWebLayoutHitIndex,
@@ -48,10 +54,12 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
     SimpleWebRenderSession
 }
 use std.gc_async_mut.web.browser_session.{
-    BrowserBookmarkSnapshot, BrowserResponse, BrowserSession
+    BrowserBookmarkSnapshot, BrowserResponse, BrowserSession,
+    browser_bookmark_stored_title
 }
 use std.gc_async_mut.web.browser_session_url.{
-    browser_address_backspace, normalize_network_navigation_url
+    browser_address_backspace, browser_address_draft_after_control_press,
+    normalize_network_navigation_url
 }
 use std.js.types.pair.{Pair}
 
@@ -59,10 +67,17 @@ fn _worker_network_history_neighbor(url: text) -> text:
     if url.starts_with("http://") or url.starts_with("https://"):
         return url
     ""
-use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
 use std.nogc_sync_mut.io.process_ops.{browser_renderer_sandbox_enter}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_full_html_matches_install_wire
+}
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_init_revision,
+    hosted_theme_init_wire,
+    hosted_theme_ready_encode
+}
 
 extern fn rt_browser_renderer_read_stdin_some(max_bytes: i64) -> text
 extern fn rt_browser_renderer_write_protocol_some(data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
@@ -85,6 +100,10 @@ pub struct HostedBrowserRendererWorkerResult:
     resolved_scroll_y: i32
     max_scroll_y: i32
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
+
+class _WorkerHitTarget:
+    route: DomNodeRoute
+    target_key: text
 
 fn _worker_result_reject(
     reason: text,
@@ -112,15 +131,24 @@ fn _worker_next_animation_ms(
 ) -> i64:
     var next = css_animation_next_ms
     if script_timer_due_ms >= 0:
-        val timer_next = if script_timer_due_ms <= current_time_ms:
-            current_time_ms + 1
-        else:
-            script_timer_due_ms
+        val timer_next = hosted_browser_renderer_safe_wakeup_ms(
+            script_timer_due_ms, current_time_ms
+        )
         if next < 0 or timer_next < next:
             next = timer_next
     if caret_due_ms >= 0 and (next < 0 or caret_due_ms < next):
         next = caret_due_ms
     next
+
+pub fn hosted_browser_renderer_safe_wakeup_ms(
+    due_ms: i64, current_time_ms: i64
+) -> i64:
+    """Defer due work without wrapping the final monotonic timestamp."""
+    if due_ms > current_time_ms:
+        return due_ms
+    if current_time_ms == 9223372036854775807:
+        return current_time_ms
+    current_time_ms + 1
 
 fn _worker_document_animation_time_ms(
     session: BrowserSession, current_time_ms: i64
@@ -150,7 +178,7 @@ fn _worker_diagnostics(session: BrowserSession) -> text:
 fn _worker_frame(
     session: BrowserSession,
     render_session: SimpleWebRenderSession,
-    message: BrowserRendererMessage,
+    message: BrowserRendererCapabilityMessage,
     width: i32,
     height: i32,
     animation_time_ms: i64,
@@ -287,28 +315,17 @@ fn _worker_frame(
         legacy_encoded,
         message.generation,
         response_request_id,
-        message.request_id,
-        _worker_next_animation_ms(
-            css_animation_next_ms,
-            session.next_script_timer_due_ms(),
-            caret_due_ms,
-            animation_time_ms
-        ),
-        layout.material_witness.cpu_composited_count,
-        layout.material_witness.cpu_composited_sha256,
-        layout.material_witness.solid_material_count,
-        layout.material_witness.solid_material_sha256,
-        _worker_diagnostics(session),
-        session.current_url,
-        _worker_network_history_neighbor(session.history_back_url()),
-        _worker_network_history_neighbor(session.history_forward_url()),
-        frame_image_resources,
-        prior_image_resource_revisions
+        message.root_command_request_id,
+        message.command_capability
     )
     if not encoded.ok:
         return _worker_result_reject(
             encoded.reason, true, animation_time_ms
         )
+    if history_proposal != "":
+        session.history_proposal_action = ""
+        session.history_proposal_url_kind = "O"
+        session.history_proposal_raw_url = ""
     HostedBrowserRendererWorkerResult(
         ok: true,
         reason: "ok",
@@ -332,22 +349,44 @@ pub class HostedBrowserRendererWorkerSession:
     width: i32
     height: i32
     initialized: bool
+    theme_required: bool
+    theme_initialized: bool
+    theme_revision: i64
+    theme_wire_text: text
     animation_time_ms: i64
     expected_request_id: i64
     next_outbound_id: i64
-    pressed_target_id: text
+    pressed_target_route: DomNodeRoute?
     pressed_chrome_control: text
     chrome_focus: text
     address_replace_on_text: bool
     last_hit_index: SimpleWebLayoutHitIndex?
+    last_hit_generation: DomDocumentGeneration?
     input_view_target_key: text
     input_view_start_byte: i64
     caret_blink_epoch_ms: i64
     pressed_pointer_default_prevented: bool
+    pressed_compat_mouse_suppressed: bool
     scroll_milli_y: i64
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
+    active_root_command_request_id: i64
+    active_command_capability: text
 
     static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
+        HostedBrowserRendererWorkerSession._create(
+            width, height, false
+        )
+
+    static fn create_for_theme_protocol(
+        width: i32, height: i32
+    ) -> HostedBrowserRendererWorkerSession:
+        HostedBrowserRendererWorkerSession._create(
+            width, height, true
+        )
+
+    static fn _create(
+        width: i32, height: i32, theme_required: bool
+    ) -> HostedBrowserRendererWorkerSession:
         var browser = BrowserSession.new()
         browser.broker_network_policy = true
         HostedBrowserRendererWorkerSession(
@@ -356,36 +395,45 @@ pub class HostedBrowserRendererWorkerSession:
             width: width,
             height: height,
             initialized: false,
+            theme_required: theme_required,
+            theme_initialized: not theme_required,
+            theme_revision: 0,
+            theme_wire_text: "",
             animation_time_ms: 0,
             expected_request_id: 2,
             next_outbound_id: 2,
-            pressed_target_id: "",
+            pressed_target_route: nil,
             pressed_chrome_control: "",
             chrome_focus: "",
             address_replace_on_text: false,
             last_hit_index: nil,
+            last_hit_generation: nil,
             input_view_target_key: "",
             input_view_start_byte: 0,
             caret_blink_epoch_ms: 0,
             pressed_pointer_default_prevented: false,
+            pressed_compat_mouse_suppressed: false,
             scroll_milli_y: 0,
-            image_resource_revisions: []
+            image_resource_revisions: [],
+            active_root_command_request_id: 0,
+            active_command_capability: ""
         )
 
-    me _target_at(x: i64, y: i64) -> text:
-        if self.last_hit_index == nil:
-            return ""
-        val root = self.browser.dom_root()
+    me _target_at(x: i64, y: i64) -> Result<_WorkerHitTarget, text>:
+        if self.last_hit_index == nil or self.last_hit_generation == nil:
+            return Err("no-semantic-target")
         val target_key = simple_web_layout_hit_test_index(
             self.last_hit_index.unwrap(), x.to_i32(), y.to_i32()
         )
-        if target_key.starts_with("id:"):
-            return target_key.slice(3, target_key.len())
-        if target_key.starts_with("path:"):
-            return be_dom_event_identity_at_element_path(
-                root, target_key.slice(5, target_key.len())
-            )
-        ""
+        if target_key == "":
+            return Err("no-semantic-target")
+        match self.browser.route_for_layout_target_key(
+            target_key, self.last_hit_generation.unwrap()
+        ):
+            Ok(route): Ok(_WorkerHitTarget(
+                route: route, target_key: target_key
+            ))
+            Err(reason): Err(reason)
 
     me _input_byte_at(target_key: text, x: i64) -> i64:
         if self.last_hit_index == nil:
@@ -406,18 +454,16 @@ pub class HostedBrowserRendererWorkerSession:
         self.caret_blink_epoch_ms = self.animation_time_ms
 
     me _text_overlay() -> BrowserTextInputOverlay:
-        val root = self.browser.dom_root()
-        val target_id = be_dom_focused_id(root)
-        if target_id == "":
+        val target_route = match self.browser.focused_dom_route():
+            Some(route): route
+            nil: return browser_text_input_overlay_empty()
+        if not self.browser.ensure_dom_text_selection_route(target_route):
             return browser_text_input_overlay_empty()
-        val path = be_dom_find_path_to_id(root, target_id)
-        if path.len() == 0 or
-           not dom_text_control_selectable(path[path.len() - 1]):
-            return browser_text_input_overlay_empty()
-        val _ = self.browser.ensure_dom_text_selection(target_id)
-        val target_key = be_dom_layout_target_key(root, target_id)
-        if target_key == "":
-            return browser_text_input_overlay_empty()
+        val target_key = match self.browser.layout_target_key_for_route(
+            target_route, self.browser.document_generation()
+        ):
+            Ok(value): value
+            Err(_): return browser_text_input_overlay_empty()
         if self.input_view_target_key != target_key:
             self.input_view_target_key = target_key
             self.input_view_start_byte = 0
@@ -476,72 +522,75 @@ pub class HostedBrowserRendererWorkerSession:
         self.chrome_focus = ""
         self.address_replace_on_text = false
         self.pressed_chrome_control = ""
-        val target_id = self._target_at(action.x, action.y)
-        if target_id == "":
-            self.pressed_target_id = ""
-            self.pressed_pointer_default_prevented = false
-            if action.pressed:
-                self._clear_page_text_focus_state()
-            return ""
+        val target = match self._target_at(action.x, action.y):
+            Ok(value): value
+            Err(reason):
+                self.pressed_target_route = nil
+                self.pressed_pointer_default_prevented = false
+                self.pressed_compat_mouse_suppressed = false
+                if action.pressed:
+                    self._clear_page_text_focus_state()
+                return if reason == "no-semantic-target": "" else: reason
         if action.pressed:
-            self.pressed_target_id = target_id
-            val pointer_down = self.browser.dispatch_dom_event(
-                target_id, "pointerdown", true, true
+            self.pressed_target_route = Some(target.route)
+            val pointer_down = match self.browser.dispatch_dom_primary_pointer_down(
+                target.route
+            ):
+                Ok(value): value
+                Err(reason):
+                    self.pressed_target_route = nil
+                    return reason
+            val focused_route = self.browser.focused_dom_route()
+            val default_allowed = not pointer_down.default_prevented
+            self.pressed_pointer_default_prevented = (
+                pointer_down.default_prevented
             )
-            val mouse_down = self.browser.dispatch_dom_event(
-                target_id, "mousedown", true, true
+            self.pressed_compat_mouse_suppressed = (
+                pointer_down.suppress_compat_mouse
             )
-            val focused_id = be_dom_focused_id(self.browser.dom_root())
-            val target_path = be_dom_find_path_to_id(
-                self.browser.dom_root(), target_id
-            )
-            val selectable = (
-                target_path.len() > 0 and
-                dom_text_control_selectable(
-                    target_path[target_path.len() - 1]
+            val target_focused = match focused_route:
+                Some(route): (
+                    route.generation.value == target.route.generation.value and
+                    route.node_id == target.route.node_id
                 )
-            )
-            val default_allowed = (
-                not pointer_down.event.default_prevented and
-                not mouse_down.event.default_prevented
-            )
-            self.pressed_pointer_default_prevented = not default_allowed
-            if selectable and focused_id == target_id and default_allowed:
-                val target_key = be_dom_layout_target_key(
-                    self.browser.dom_root(), target_id
-                )
+                nil: false
+            if target_focused and default_allowed and
+               self.browser.ensure_dom_text_selection_route(target.route):
                 val source_byte = self._input_byte_at(
-                    target_key, action.x
+                    target.target_key, action.x
                 )
-                val _ = self.browser.set_dom_text_selection(
-                    target_id, source_byte, source_byte
+                val _ = self.browser.set_dom_text_selection_route(
+                    target.route, source_byte, source_byte
                 )
-                self.input_view_target_key = target_key
+                self.input_view_target_key = target.target_key
                 self._reset_caret_blink()
             elif default_allowed:
-                if focused_id == target_id:
+                if target_focused:
                     self.input_view_target_key = ""
                     self.input_view_start_byte = 0
                     self.caret_blink_epoch_ms = 0
                 else:
                     self._clear_page_text_focus_state()
             return ""
-        val pressed_target_id = self.pressed_target_id
+        val pressed_target_route = self.pressed_target_route
         val pointer_default_prevented = (
             self.pressed_pointer_default_prevented
         )
-        self.pressed_target_id = ""
+        val suppress_compat_mouse = self.pressed_compat_mouse_suppressed
+        self.pressed_target_route = nil
         self.pressed_pointer_default_prevented = false
-        val _ = self.browser.dispatch_dom_event(
-            target_id, "pointerup", true, true
-        )
-        val _ = self.browser.dispatch_dom_event(
-            target_id, "mouseup", true, true
-        )
-        if pressed_target_id == target_id:
-            val _ = self.browser.dispatch_dom_event(
-                target_id, "click", true, true
+        self.pressed_compat_mouse_suppressed = false
+        val activate_click = match pressed_target_route:
+            Some(pressed_route): (
+                pressed_route.generation.value == target.route.generation.value and
+                pressed_route.node_id == target.route.node_id
             )
+            nil: false
+        match self.browser.dispatch_dom_primary_pointer_up(
+            target.route, suppress_compat_mouse, activate_click
+        ):
+            Err(reason): return reason
+            Ok(_): ()
         if not pointer_default_prevented:
             self._reset_caret_blink()
         ""
@@ -551,24 +600,24 @@ pub class HostedBrowserRendererWorkerSession:
         if not action.ok:
             return action.reason
         if self.chrome_focus == "address":
-            val current = if self.browser.address_draft != "":
+            val current = if (
+                self.browser.address_draft != "" or
+                not self.address_replace_on_text
+            ):
                 self.browser.address_draft
             else:
                 self.browser.current_url
-            val updated = if self.address_replace_on_text:
-                action.value
-            else:
-                current + action.value
-            if text_to_bytes(updated).len() > 2048:
-                return "address-too-long"
+            match self.browser.apply_address_update(
+                current, action.value, self.address_replace_on_text
+            ):
+                Err(reason): return reason
+                Ok(_): ()
             self.address_replace_on_text = false
-            self._chrome_action("address", "set_value", updated)
             return ""
-        val target_id = be_dom_focused_id(self.browser.dom_root())
-        if target_id != "":
-            val _ = self.browser.append_dom_text_input(
-                target_id, action.value
-            )
+        if val Some(target_route) = self.browser.focused_dom_route():
+            match self.browser.append_dom_text_input_route(target_route, action.value):
+                Err(reason): return reason
+                Ok(_): ()
         self._reset_caret_blink()
         ""
 
@@ -582,14 +631,18 @@ pub class HostedBrowserRendererWorkerSession:
             if action.key_code == 13:
                 return "navigation-command-required"
             elif action.key_code == 8:
-                val current = if self.browser.address_draft != "":
+                val current = if (
+                    self.browser.address_draft != "" or
+                    not self.address_replace_on_text
+                ):
                     self.browser.address_draft
                 else:
                     self.browser.current_url
-                val shortened = if current.len() > 0:
-                    text_without_last_codepoint(current)
-                else:
-                    ""
+                val shortened = match browser_address_backspace(
+                    current, self.address_replace_on_text
+                ):
+                    Err(reason): return reason
+                    Ok(value): value
                 self.address_replace_on_text = false
                 self._chrome_action("address", "set_value", shortened)
             elif action.key_code == 27:
@@ -605,20 +658,23 @@ pub class HostedBrowserRendererWorkerSession:
                 self.address_replace_on_text = false
             return ""
         self._reset_caret_blink()
-        val target_id = be_dom_focused_id(self.browser.dom_root())
-        if target_id == "" and action.key_code != 9:
+        val target_route = self.browser.focused_dom_route()
+        if target_route == nil and action.key_code != 9:
             return ""
-        val _ = self.browser.dispatch_dom_keyboard_code_event(
-            target_id, action.key_code, action.pressed, action.shift_key
-        )
+        match self.browser.dispatch_dom_keyboard_code_event(
+            target_route, action.key_code, action.pressed, action.shift_key
+        ):
+            Err(reason): return reason
+            Ok(_): ()
         ""
 
     me _dispatch_chrome(message: BrowserRendererMessage) -> text:
         val action = browser_renderer_action_decode(message)
         if not action.ok:
             return action.reason
-        self.pressed_target_id = ""
+        self.pressed_target_route = nil
         self.pressed_pointer_default_prevented = false
+        self.pressed_compat_mouse_suppressed = false
         if action.pressed:
             self._clear_page_text_focus_state()
             self.pressed_chrome_control = action.value
@@ -626,6 +682,14 @@ pub class HostedBrowserRendererWorkerSession:
                 self.chrome_focus = "address"
                 self.address_replace_on_text = true
             else:
+                if action.value != "go":
+                    val draft = browser_address_draft_after_control_press(
+                        action.value, self.browser.current_url,
+                        self.browser.address_draft
+                    )
+                    val _ = self.browser.apply_address_update(
+                        "", draft, true
+                    )
                 self.chrome_focus = ""
                 self.address_replace_on_text = false
             return ""
@@ -634,8 +698,8 @@ pub class HostedBrowserRendererWorkerSession:
         if pressed != action.value:
             return ""
         if (action.value == "back" or action.value == "forward" or
-            action.value == "stop" or action.value == "home" or
-            action.value == "go"):
+            action.value == "stop" or action.value == "reload" or
+            action.value == "home" or action.value == "go"):
             return "navigation-command-required"
         if action.value != "address":
             self._chrome_action(action.value, "click", "")
@@ -645,6 +709,14 @@ pub class HostedBrowserRendererWorkerSession:
         val navigation = browser_renderer_navigation_decode(message)
         if not navigation.ok:
             return navigation.reason
+        if navigation.action != "stop":
+            val canonical = match normalize_network_navigation_url(
+                navigation.url
+            ):
+                Err(reason): return reason
+                Ok(url): url
+            if canonical != navigation.url:
+                return "navigation-target-mismatch"
         var joined_history_index: i64 = -1
         if navigation.history_snapshot != "":
             val snapshot = browser_renderer_history_proposal_decode(
@@ -674,18 +746,19 @@ pub class HostedBrowserRendererWorkerSession:
                 Ok(url):
                     if url != navigation.url:
                         return "navigation-target-mismatch"
-        self.pressed_target_id = ""
+        self.pressed_target_route = nil
         self.pressed_pointer_default_prevented = false
+        self.pressed_compat_mouse_suppressed = false
         self.pressed_chrome_control = ""
         self.chrome_focus = ""
         self.address_replace_on_text = false
+        if navigation.action == "stop":
+            self.browser.stop_loading()
+            return ""
         self.browser.discard_dom_focus_for_navigation()
         self.input_view_target_key = ""
         self.input_view_start_byte = 0
         self.caret_blink_epoch_ms = 0
-        if navigation.action == "stop":
-            self.browser.stop_loading()
-            return ""
         val result: Result<bool, text> = if (
             navigation.action == "open" or navigation.action == "home"
         ):
@@ -696,8 +769,30 @@ pub class HostedBrowserRendererWorkerSession:
                 navigation.body,
                 navigation.content_type
             )
+        elif (navigation.action == "back" and
+            joined_history_index >= 0):
+            val started = self.browser.begin_network_navigation(
+                navigation.url, "GET", "", "", ""
+            )
+            if val Ok(_) = started:
+                self.browser.pending_navigation_target_index = (
+                    joined_history_index - 1
+                ).to_i32()
+                self.browser.pending_navigation_push_history = false
+            started
         elif navigation.action == "back":
             self.browser.go_back_to(navigation.url)
+        elif (navigation.action == "forward" and
+            joined_history_index >= 0):
+            val started = self.browser.begin_network_navigation(
+                navigation.url, "GET", "", "", ""
+            )
+            if val Ok(_) = started:
+                self.browser.pending_navigation_target_index = (
+                    joined_history_index + 1
+                ).to_i32()
+                self.browser.pending_navigation_push_history = false
+            started
         elif navigation.action == "forward":
             self.browser.go_forward_to(navigation.url)
         else:
@@ -711,6 +806,9 @@ pub class HostedBrowserRendererWorkerSession:
         if actual_url != navigation.url:
             return "navigation-target-mismatch"
         if navigation.action == "back" or navigation.action == "forward":
+            self.browser.history_proposal_action = "T"
+            self.browser.history_proposal_url_kind = "O"
+            self.browser.history_proposal_raw_url = ""
             self.scroll_milli_y = 0
         ""
 
@@ -744,20 +842,116 @@ pub class HostedBrowserRendererWorkerSession:
             return "invalid-bookmark-snapshot"
         ""
 
-    me handle(message: BrowserRendererMessage) -> HostedBrowserRendererWorkerResult:
+    me handle(
+        message: BrowserRendererCapabilityMessage
+    ) -> HostedBrowserRendererWorkerResult:
         if message.request_id != self.expected_request_id:
             return _worker_result_reject(
                 "unexpected-request-id",
                 self.initialized,
                 self.animation_time_ms
             )
+        val nested_response = message.kind == "network_response"
+        if nested_response:
+            if (self.active_command_capability == "" or
+                message.root_command_request_id !=
+                    self.active_root_command_request_id or
+                message.command_capability !=
+                    self.active_command_capability):
+                return _worker_result_reject(
+                    "unissued-network-response",
+                    self.initialized,
+                    self.animation_time_ms
+                )
+        else:
+            if message.root_command_request_id != message.request_id:
+                return _worker_result_reject(
+                    "invalid-command-root",
+                    self.initialized,
+                    self.animation_time_ms
+                )
+            self.active_root_command_request_id = (
+                message.root_command_request_id
+            )
+            self.active_command_capability = message.command_capability
+        val payload_message = (
+            browser_renderer_capability_payload_message(message)
+        )
+        if self.theme_required and not self.theme_initialized:
+            if message.kind != "theme_init":
+                return _worker_result_reject(
+                    "expected-theme-init", false, self.animation_time_ms
+                )
+            val revision = hosted_theme_init_revision(payload_message.payload)
+            val wire_text = hosted_theme_init_wire(payload_message.payload)
+            val ready = hosted_theme_ready_encode(revision, wire_text)
+            if revision <= 0 or wire_text == "":
+                return _worker_result_reject(
+                    "invalid-theme-init", false, self.animation_time_ms
+                )
+            val ready_payload = match ready:
+                Err(_):
+                    return _worker_result_reject(
+                        "invalid-theme-init", false,
+                        self.animation_time_ms
+                    )
+                Ok(value):
+                    value
+            val legacy_encoded = browser_renderer_message_encode(
+                "theme_ready",
+                message.generation,
+                message.request_id,
+                ready_payload
+            )
+            val encoded = browser_renderer_capability_bind_encoded(
+                legacy_encoded,
+                message.generation,
+                message.request_id,
+                message.root_command_request_id,
+                message.command_capability
+            )
+            if not encoded.ok:
+                return _worker_result_reject(
+                    encoded.reason, false, self.animation_time_ms
+                )
+            self.theme_initialized = true
+            self.theme_revision = revision
+            self.theme_wire_text = wire_text
+            self.expected_request_id = self.expected_request_id + 1
+            self.active_root_command_request_id = 0
+            self.active_command_capability = ""
+            return HostedBrowserRendererWorkerResult(
+                ok: true,
+                reason: "ok",
+                initialized: false,
+                animation_time_ms: self.animation_time_ms,
+                wire: encoded.wire,
+                hit_index: nil,
+                resolved_input_view_start_byte: 0,
+                resolved_scroll_y: 0,
+                max_scroll_y: 0,
+                image_resource_revisions: []
+            )
         if not self.initialized:
             if message.kind != "init":
                 return _worker_result_reject(
                     "expected-init", false, self.animation_time_ms
                 )
+            if self.theme_required:
+                if not (
+                    simple_web_content_full_html_matches_install_wire(
+                        self.theme_wire_text,
+                        self.theme_revision,
+                        payload_message.payload
+                    )
+                ):
+                    return _worker_result_reject(
+                        "unthemed-init-rejected",
+                        false,
+                        self.animation_time_ms
+                    )
             if val Err(reason) = self.browser.open_html(
-                "simple-renderer://document", message.payload
+                "simple-renderer://document", payload_message.payload
             ):
                 return _worker_result_reject(
                     reason, false, self.animation_time_ms
@@ -767,7 +961,7 @@ pub class HostedBrowserRendererWorkerSession:
         else:
             var reason = ""
             if message.kind == "advance":
-                val action = browser_renderer_action_decode(message)
+                val action = browser_renderer_action_decode(payload_message)
                 if not action.ok:
                     reason = action.reason
                 elif action.now_ms < self.animation_time_ms:
@@ -776,9 +970,9 @@ pub class HostedBrowserRendererWorkerSession:
                     val _ = self.browser.advance_time(action.now_ms)
                     self.animation_time_ms = action.now_ms
             elif message.kind == "pointer":
-                reason = self._dispatch_pointer(message)
+                reason = self._dispatch_pointer(payload_message)
             elif message.kind == "scroll":
-                val action = browser_renderer_action_decode(message)
+                val action = browser_renderer_action_decode(payload_message)
                 if not action.ok:
                     reason = action.reason
                 else:
@@ -789,17 +983,17 @@ pub class HostedBrowserRendererWorkerSession:
                         next_scroll = BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
                     self.scroll_milli_y = next_scroll
             elif message.kind == "text":
-                reason = self._dispatch_text(message)
+                reason = self._dispatch_text(payload_message)
             elif message.kind == "key":
-                reason = self._dispatch_key(message)
+                reason = self._dispatch_key(payload_message)
             elif message.kind == "chrome":
-                reason = self._dispatch_chrome(message)
+                reason = self._dispatch_chrome(payload_message)
             elif message.kind == "navigation":
-                reason = self._dispatch_navigation(message)
+                reason = self._dispatch_navigation(payload_message)
             elif message.kind == "bookmark-snapshot":
-                reason = self._dispatch_bookmark_snapshot(message)
+                reason = self._dispatch_bookmark_snapshot(payload_message)
             elif message.kind == "resize":
-                val resize = browser_renderer_resize_decode(message)
+                val resize = browser_renderer_resize_decode(payload_message)
                 if not resize.ok:
                     reason = resize.reason
                 else:
@@ -807,7 +1001,7 @@ pub class HostedBrowserRendererWorkerSession:
                     self.height = resize.height
             elif message.kind == "network_response":
                 val response = browser_renderer_network_response_decode(
-                    message
+                    payload_message
                 )
                 if not response.ok:
                     reason = response.reason
@@ -824,12 +1018,27 @@ pub class HostedBrowserRendererWorkerSession:
                     )
                     )
                     if val Err(commit_reason) = committed:
-                        reason = commit_reason
+                        if (response.error != "" and
+                            response.status == 0 and
+                            response.headers == "" and
+                            response.body == "" and
+                            commit_reason == response.error):
+                            self.browser._append_warning(response.error)
+                        else:
+                            reason = commit_reason
                     elif response.kind == "document":
                         self.scroll_milli_y = 0
             else:
                 reason = "unexpected-action"
             if reason != "":
+                if message.kind == "pointer" and reason == "stale_target":
+                    self.pressed_target_route = nil
+                    self.pressed_pointer_default_prevented = false
+                    self.pressed_compat_mouse_suppressed = false
+                    self.last_hit_index = nil
+                    self.last_hit_generation = nil
+                    self.active_root_command_request_id = 0
+                    self.active_command_capability = ""
                 return _worker_result_reject(
                     reason, true, self.animation_time_ms
                 )
@@ -843,7 +1052,7 @@ pub class HostedBrowserRendererWorkerSession:
         val response_id = self.next_outbound_id
         self.next_outbound_id = self.next_outbound_id + 1
         if val Some(request) = self.browser.take_pending_request():
-            val encoded = browser_renderer_fetch_request_encode(
+            val legacy_encoded = browser_renderer_fetch_request_encode(
                 message.generation,
                 response_id,
                 message.request_id,
@@ -857,6 +1066,13 @@ pub class HostedBrowserRendererWorkerSession:
                 request.credentials,
                 request.script_cookie_writes,
                 request.initiator_origin
+            )
+            val encoded = browser_renderer_capability_bind_encoded(
+                legacy_encoded,
+                message.generation,
+                response_id,
+                message.root_command_request_id,
+                message.command_capability
             )
             if not encoded.ok:
                 return _worker_result_reject(
@@ -877,7 +1093,9 @@ pub class HostedBrowserRendererWorkerSession:
             )
         val overlay = self._text_overlay()
         val caret_due_ms = self._caret_due_ms(overlay)
+        val frame_generation = self.browser.document_generation()
         self.last_hit_index = nil
+        self.last_hit_generation = nil
         val frame = _worker_frame(
             self.browser, self.render_session,
             message, self.width, self.height,
@@ -888,20 +1106,25 @@ pub class HostedBrowserRendererWorkerSession:
         )
         if frame.ok:
             self.image_resource_revisions = frame.image_resource_revisions
+            self.active_root_command_request_id = 0
+            self.active_command_capability = ""
         if frame.hit_index != nil:
             self.last_hit_index = frame.hit_index
+            self.last_hit_generation = Some(frame_generation)
             val max_scroll_milli_y = frame.max_scroll_y.to_i64() * 1000
             if self.scroll_milli_y > max_scroll_milli_y:
                 self.scroll_milli_y = max_scroll_milli_y
         if overlay.target_key != "":
             self.input_view_target_key = overlay.target_key
-            self.input_view_start_byte =
-                frame.resolved_input_view_start_byte
+            self.input_view_start_byte = frame.resolved_input_view_start_byte
         frame
 
     me close():
         self.last_hit_index = nil
+        self.last_hit_generation = nil
         self.image_resource_revisions = []
+        self.active_root_command_request_id = 0
+        self.active_command_capability = ""
         self.render_session.close()
         self.browser.close()
 
@@ -946,9 +1169,18 @@ pub fn hosted_browser_renderer_handle_request(
         next_time_ms = requested_time_ms
 
     val render_session = SimpleWebRenderSession.create()
+    val capability_message = BrowserRendererCapabilityMessage(
+        kind: message.kind,
+        generation: message.generation,
+        request_id: message.request_id,
+        root_command_request_id: message.request_id,
+        command_capability: "11111111111111111111111111111111",
+        payload: message.payload
+    )
     _worker_frame(
         session, render_session,
-        message, width, height, next_time_ms, message.request_id,
+        capability_message, width, height, next_time_ms,
+        message.request_id,
         browser_text_input_overlay_empty(), -1, 0, []
     )
 
@@ -1023,7 +1255,9 @@ fn _worker_write(wire: text) -> bool:
     true
 
 pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
-    if args.len() != 5 or args[1] != BROWSER_RENDERER_WORKER_ARG:
+    val themed = args.len() == 6 and args[5] == "--theme-runtime"
+    if ((args.len() != 5 and not themed) or
+        args[1] != BROWSER_RENDERER_WORKER_ARG):
         return 64
 
     val generation = args[2].to_i64() ?? -1
@@ -1036,19 +1270,28 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
     if not browser_renderer_sandbox_enter():
         return 70
 
-    val ready = browser_renderer_message_encode("ready", generation, 1, "")
+    val ready = browser_renderer_capability_message_encode(
+        "ready", generation, 1, 0, "", ""
+    )
     if not ready.ok or not _worker_write(ready.wire):
         return 71
 
-    var decoder = browser_renderer_decoder_new(generation)
-    var session = HostedBrowserRendererWorkerSession.create(
-        width_i64.to_i32(), height_i64.to_i32()
-    )
+    var decoder = browser_renderer_capability_decoder_new(generation)
+    var session = if themed:
+        HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+            width_i64.to_i32(), height_i64.to_i32()
+        )
+    else:
+        HostedBrowserRendererWorkerSession.create(
+            width_i64.to_i32(), height_i64.to_i32()
+        )
     while true:
         val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
         if chunk == "":
             return if decoder.buffer_len == 0: 0 else: 72
-        var decoded = browser_renderer_decoder_feed(decoder, chunk)
+        var decoded = browser_renderer_capability_decoder_feed(
+            decoder, chunk
+        )
         var drain_buffer = true
         var drained_messages: i64 = 0
         while drain_buffer:
@@ -1070,9 +1313,16 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
                     if not session.initialized or
                         decoded.message.request_id != session.expected_request_id:
                         return 74
-                    val acknowledged = browser_renderer_message_encode(
+                    val legacy_acknowledged = browser_renderer_message_encode(
                         "test_hang_ready", decoded.message.generation,
                         decoded.message.request_id, ""
+                    )
+                    val acknowledged = browser_renderer_capability_bind_encoded(
+                        legacy_acknowledged,
+                        decoded.message.generation,
+                        decoded.message.request_id,
+                        decoded.message.root_command_request_id,
+                        decoded.message.command_capability
                     )
                     if not acknowledged.ok or not _worker_write(
                         acknowledged.wire
@@ -1088,6 +1338,8 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
                 if not frame.ok or not _worker_write(frame.wire):
                     return 74
                 if decoder.buffer_len > 0:
-                    decoded = browser_renderer_decoder_feed(decoder, "")
+                    decoded = browser_renderer_capability_decoder_feed(
+                        decoder, ""
+                    )
                 else:
                     drain_buffer = false

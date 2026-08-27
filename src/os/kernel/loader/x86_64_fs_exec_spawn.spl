@@ -7,12 +7,23 @@
 # reconstruct those values and therefore fails closed for path-only callers.
 
 use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn_as}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
 
 pub fn x86_64_fs_exec_handoff_blob_ready(byte_len: i64, raw_blob: u64) -> bool:
+    # Retained as a pure diagnostic predicate for older evidence readers. It no
+    # longer authorizes or triggers a ring-3 handoff.
     byte_len > 4 and raw_blob != 0.to_u64()
 
 pub fn x86_64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
-    """Spawn an x86_64 executable from the filesystem (kernel-origin caller)."""
+    """Reject path-only kernel execution through the canonical auth gate."""
     x86_64_fs_exec_spawn_as(0, path, argv, envp)
 
 pub fn x86_64_fs_exec_spawn_scheduler_owned(
@@ -41,12 +52,6 @@ pub fn x86_64_fs_exec_spawn_authenticated_v1(
     if prepared.pid <= 0:
         return prepared.pid
     val child = TaskId(id: prepared.pid.to_u64())
-    var launch_ipc = IpcManager.new()
-    launch_ipc.cap_manager.init_task(child, prepared.effective_caps)
-    shim_init(prepared.scheduler, launch_ipc, KernelLog.new(256))
-    shim_server_startup_runtime_owner_enable_v1()
-    if recipe == SPAWN_RECIPE_WEB:
-        shim_web_startup_runtime_owner_enable_v1()
     val exit_code = dispatch_fs_exec_user_handoff(
         Architecture.X86_64, child.id, prepared.scheduler)
     var owner = prepared.scheduler
@@ -56,64 +61,6 @@ pub fn x86_64_fs_exec_spawn_authenticated_v1(
        wait_collect_result_status(collected) != exit_code.to_i32():
         return -10
     exit_code
-
-pub(package) fn x86_64_fs_exec_spawn_authenticated_with_launch_v1(
-    scheduler: Scheduler,
-    mut table: MountTable,
-    authorities: ExecutableAuthorityRegistryV1,
-    token: ExecutableAuthorityTokenV1,
-    consumer: ExecutableLoadConsumerV1,
-    entry_point: u64,
-    caller: i64,
-    caller_caps: CapabilitySet,
-    path: text,
-    argv: [text],
-    envp: [text],
-    recipe: i64
-) -> FsExecAuthenticatedRunResultV1:
-    """Adopt the exact x86_64 image and its authorized initial stack."""
-    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
-        scheduler, table, authorities, token, consumer, entry_point, caller,
-        caller_caps, path, argv, envp, recipe)
-    if prepared.pid <= 0:
-        return FsExecAuthenticatedRunResultV1(
-            exit_code: prepared.pid, evidence: nil, scheduler: prepared.scheduler)
-    val child = TaskId(id: prepared.pid.to_u64())
-    val exit_code = dispatch_fs_exec_user_handoff(
-        Architecture.X86_64, child.id, prepared.scheduler)
-    var owner = prepared.scheduler
-    owner.exit_task_by_id(child, exit_code.to_i32())
-    val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
-    if wait_collect_result_error(collected) != 0 or
-       wait_collect_result_status(collected) != exit_code.to_i32():
-        return -10
-    exit_code
-
-pub(package) fn x86_64_fs_exec_adopt_authenticated_async_with_launch_v1(
-    scheduler: Scheduler,
-    mut table: MountTable,
-    authorities: ExecutableAuthorityRegistryV1,
-    token: ExecutableAuthorityTokenV1,
-    consumer: ExecutableLoadConsumerV1,
-    entry_point: u64,
-    caller: i64,
-    caller_caps: CapabilitySet,
-    path: text,
-    argv: [text],
-    envp: [text],
-    recipe: i64
-) -> FsExecPrepareResult:
-    """Adopt an authenticated x86 image without entering or reaping it.
-
-    The returned scheduler remains the sole owner of the runnable task and its
-    mapped image.  The PID is therefore persistent across this call, unlike the
-    synchronous submission above.  Authority still comes exclusively from the
-    loader registry token: this entrypoint performs no path re-open, byte-cache
-    lookup, token reconstruction, or second image copy.
-    """
-    fs_exec_adopt_authenticated_with_launch_v1(
-        scheduler, table, authorities, token, consumer, entry_point,
-        caller, caller_caps, path, argv, envp, recipe)
 
 pub fn x86_64_fs_exec_spawn_as(
     caller: i64,
@@ -133,5 +80,5 @@ pub fn x86_64_fs_exec_spawn_heap(
     fs_exec_spawn_as(0, path, argv, envp)
 
 fn x86_64_fs_exec_spawn_hello_world_smf() -> i64:
-    """Backward-compat wrapper: spawn /sys/apps/hello_world.smf."""
+    """Backward-compatible path-only request; expected to fail closed."""
     x86_64_fs_exec_spawn("/SYS/APPS/HELLOSMF.SMF", [], [])

@@ -14,7 +14,9 @@ use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, llvm_type_mapper_create_f
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
 
+@unsafe(reason: "raw native-symbol policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
 # ============================================================================
@@ -25,26 +27,18 @@ class MirToLlvm:
     """Translates MIR to LLVM IR."""
     builder: LlvmIRBuilder
     local_map: Dict
-    config: LlvmTargetConfig
+    target_arch: text
+    target_os: text
     type_mapper: LlvmTypeMapper
     string_globals: [text]
+    string_global_text: text
     string_counter: i64
     local_types: Dict<i64, text>
+    value_types: Dict<text, text>
+    defined_locals: Dict<i64, bool>
     return_locals: Dict<i64, bool>
     bool_locals: Dict<i64, bool>
     ptr_locals: Dict<i64, bool>
-    # Receiver registration is deliberately tracked separately from both
-    # ptr_locals and declared MirTypeKind.Struct identity. LLVM lowers structs,
-    # enums, tuples, refs, extern handles, and raw pointers to `ptr`, while the
-    # runtime receiver predicate knows only pointers returned by
-    # rt_struct_alloc. A declared Struct local may be an extern/global/ABI
-    # handle, so it is NOT proof of allocator registration.
-    registered_struct_receiver_locals: Dict<i64, bool>
-    # Explicit negative provenance is just as important as the positive fact:
-    # a module static may hold a Struct-shaped trait/FFI ABI value whose
-    # header is not the rt_struct_alloc contract.  Keep it distinct from an
-    # ordinary pointer so field lowering can fail closed before untag/GEP.
-    unregistered_static_struct_receiver_locals: Dict<i64, bool>
     # Element LLVM type per alloca slot local (var_reassign_ssa spill slots).
     # Load/Store through a slot must use THIS type: the SSA pass's fresh
     # load/store temps have no MirLocal entry, so get_local_type falls back to
@@ -68,21 +62,31 @@ class MirToLlvm:
     # Load time (see translate_load) and set directly for Const/Cast dests.
     unsigned_locals: Dict<i64, bool>
     function_return_types: Dict<text, text>
+    # Unsigned bit for a function's declared return type (U8/U16/U32/U64),
+    # parallel to function_return_types. See is_unsigned_mir_kind: a Call's
+    # dest local needs this to widen a narrower-than-i64 unsigned return
+    # value correctly (e.g. print(fn_returning_u8())).
+    function_return_unsigned: Dict<text, bool>
     function_param_types: Dict<text, [text]>
     unknown_func_decls: Dict<text, bool>
     defined_func_names: Dict<text, bool>
     native_int_type: text      # "i32" for 32-bit targets, "i64" for 64-bit
     current_return_type: text
+    bootstrap_return_abi_text: text
+    bootstrap_return_abi_unsigned: bool
+    bootstrap_return_abi_active: bool
     current_function_name: text
+    current_bootstrap_module: i64
     entry_main_symbol: bool
     no_mangle: bool
+    allow_ambient_codegen_policy: bool
     # mutglobal lane (module-level `var` mutation storage, see
     # scratchpad/mutglobal_plan.md): SymbolId.id -> the real `@name` LLVM
     # global emitted for that MirModule.statics entry, and its LLVM element
     # type -- populated by translate_module's static-declaration pass,
     # consumed by LoadGlobal/StoreGlobal translation.
-    global_static_names: Dict<i64, text>
-    global_static_types: Dict<i64, text>
+    global_static_names: Dict<text, text>
+    global_static_types: Dict<text, text>
     # Runtime-owned names (see mir_call_ownership.spl) that this module ALSO
     # defines a local function for -- populated once at the start of
     # translate_module. Non-empty membership is what triggers the local
@@ -107,7 +111,7 @@ class MirToLlvm:
     # llvm_ir_builder.spl emit_debug_info_header/emit_di_subprogram).
     debug_info: bool
 
-    fn native_int() -> text:
+    me native_int() -> text:
         """Return the native integer type for the current target."""
         self.native_int_type
 
@@ -150,8 +154,6 @@ class MirToLlvm:
         self.return_locals = {}
         self.bool_locals = {}
         self.ptr_locals = {}
-        self.registered_struct_receiver_locals = {}
-        self.unregistered_static_struct_receiver_locals = {}
         self.unsigned_locals = {}
         self.alloca_elem_unsigned = {}
         # alloca_elem_types is keyed by LOCAL ID, and local ids are reused
@@ -177,6 +179,12 @@ class MirToLlvm:
             if self.entry_main_symbol:
                 return "__simple_main"
             return "__simple_main_" + self.builder.module_name.replace(".", "_")
+        # A requested `@export("C", name: ...)` symbol wins over every other
+        # naming rule EXCEPT the `main` entry-point contract handled above.
+        if self.export_symbol_names.has(name):
+            val requested = self.export_symbol_names[name]
+            if requested != "":
+                return requested
         if self.no_mangle:
             return name
         if mir_runtime_owned_call_name(name) and self.owned_name_has_local.has(name):
@@ -195,10 +203,10 @@ class MirToLlvm:
             case _:
                 false
 
-    fn llvm_type_text(ty: MirType) -> text:
+    me llvm_type_text(ty: MirType) -> text:
         val kind: MirTypeKind = ty.kind
         match kind:
-            case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Result(_, _): return "i64"
+            case MirTypeKind.I64 | MirTypeKind.U64: return "i64"
             case MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.Char: return "i32"
             case MirTypeKind.I16 | MirTypeKind.U16: return "i16"
             case MirTypeKind.I8 | MirTypeKind.U8: return "i8"
@@ -213,7 +221,7 @@ class MirToLlvm:
             case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_):
                 return "ptr"
             case _:
-                self.native_int_type
+                return self.native_int_type
 
     static fn create(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
         val config: LlvmTargetConfig = LlvmTargetConfig.for_target_portable_numeric(target, cpu_override)
@@ -222,37 +230,83 @@ class MirToLlvm:
     static fn create_baremetal(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
         """Create MIR->LLVM translator for bare-metal targets."""
         val config = LlvmTargetConfig.for_target_portable_numeric_baremetal(target, cpu_override)
+        MirToLlvm.create_with_policy(module_name, target, config, true, true)
+
+    static fn create_explicit_target(
+        module_name: text,
+        target: CodegenTarget,
+        target_arch: text,
+        target_vendor: text,
+        target_os: text,
+        target_env: text,
+        target_has_env: bool,
+        target_datalayout: text,
+        bare_metal: bool
+    ) -> MirToLlvm:
+        """Create from caller-owned target scalars, ignoring ambient policy."""
+        val builder = LlvmIRBuilder.create_explicit_from_scalars(
+            module_name, target_arch, target_vendor, target_os,
+            target_env, target_has_env, target_datalayout)
+        MirToLlvm.create_with_builder(
+            target, builder, target_arch, target_os, bare_metal, false)
+
+    static fn create_with_policy(
+        module_name: text,
+        target: CodegenTarget,
+        config: LlvmTargetConfig,
+        bare_metal: bool,
+        allow_ambient_codegen_policy: bool
+    ) -> MirToLlvm:
         val builder = LlvmIRBuilder.create(module_name, config.triple)
+        val target_arch = config.triple.arch
+        val target_os = config.triple.os
+        MirToLlvm.create_with_builder(
+            target, builder, target_arch, target_os,
+            bare_metal, allow_ambient_codegen_policy)
+
+    static fn create_with_builder(
+        target: CodegenTarget,
+        builder: LlvmIRBuilder,
+        target_arch: text,
+        target_os: text,
+        bare_metal: bool,
+        allow_ambient_codegen_policy: bool
+    ) -> MirToLlvm:
         val nit = if target.is_32bit(): "i32" else: "i64"
 
-        # Same reset as create(): the module-level bootstrap string-constant
-        # accumulator mirrors the per-instance string_global_text/string_counter
-        # initialised below. Clearing it here is safe for bare metal because
-        # emit_baremetal_attributes() queues into the per-instance
-        # pending_baremetal_attrs, not into any string global.
-        llvm_bootstrap_string_globals_reset()
+        # The explicit compiler API uses only per-instance string ownership.
+        # Legacy bootstrap emitters still share the historical accumulator.
+        if allow_ambient_codegen_policy:
+            llvm_bootstrap_string_globals_reset()
 
-        builder.emit_baremetal_attributes()
+        if bare_metal:
+            builder.emit_baremetal_attributes()
+        var no_mangle = false
+        if allow_ambient_codegen_policy:
+            unsafe(capabilities: [ffi]):
+                no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
 
         MirToLlvm(
-            builder: LlvmIRBuilder.create(module_name, config.triple),
+            builder: builder,
             local_map: {},
             target_arch: target_arch,
             target_os: target_os,
             type_mapper: llvm_type_mapper_create_for_target(target),
             string_globals: [],
+            string_global_text: "",
             string_counter: 0,
             local_types: {},
+            value_types: {},
+            defined_locals: {},
             return_locals: {},
             bool_locals: {},
             ptr_locals: {},
-            registered_struct_receiver_locals: {},
-            unregistered_static_struct_receiver_locals: {},
             alloca_elem_types: {},
             alloca_elem_types_by_name: {},
             alloca_elem_unsigned: {},
             unsigned_locals: {},
             function_return_types: {},
+            function_return_unsigned: {},
             function_param_types: {},
             unknown_func_decls: {},
             defined_func_names: {},
@@ -262,14 +316,24 @@ class MirToLlvm:
             bootstrap_return_abi_unsigned: false,
             bootstrap_return_abi_active: false,
             current_function_name: "",
+            current_bootstrap_module: -1,
             entry_main_symbol: true,
-            no_mangle: (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1",
+            no_mangle: no_mangle,
+            allow_ambient_codegen_policy: allow_ambient_codegen_policy,
             global_static_names: {},
             global_static_types: {},
             owned_name_has_local: {},
             export_symbol_names: {},
             debug_info: false
         )
+
+    me enable_debug_info():
+        """Turn on DWARF line-table-level debug info emission (DS3).
+
+        Call before translate_module(). See the `debug_info` field doc for
+        what this wires up.
+        """
+        self.debug_info = true
 
 # ============================================================================
 # MirTextCodegen Trait Implementation
