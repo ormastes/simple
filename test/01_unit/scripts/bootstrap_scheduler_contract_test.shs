@@ -1,0 +1,184 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+contract="$root/scripts/bootstrap/bootstrap-scheduler-contract.shs"
+supervisor="$root/scripts/bootstrap/bootstrap-strategy.sh"
+entrypoint="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+graph="$root/scripts/bootstrap/bootstrap-graph.sdn"
+production_qualifier="$root/scripts/bootstrap/bootstrap-qualify-stage2.shs"
+. "$contract"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-scheduler.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+checked=0
+fail() { echo "FAIL: $1" >&2; exit 1; }
+check() { checked=$((checked + 1)); "$@" || fail "check $checked: $*"; }
+
+bootstrap_scheduler_validate_graph_contract "$graph" ||
+    fail 'static graph contract did not validate'
+checked=$((checked + 1))
+check sh -n "$supervisor" "$production_qualifier" "$contract"
+check grep -Fq 'bootstrap_stage3_verify_stage2_admission_receipt' "$production_qualifier"
+check grep -Fq 'check-stage2-hello-world-native-build.shs' "$production_qualifier"
+lease_check_count=$(grep -Fc 'bootstrap_scheduler_lease_current' "$production_qualifier")
+check test "$lease_check_count" -ge 3
+
+cat >"$scratch/fake-engine.sh" <<'EOF'
+#!/bin/sh
+set -eu
+output=
+resume=0 deploy=0 release=0 forbidden_provisional=0
+for arg in "$@"; do
+    case "$arg" in
+        --output=*) output=${arg#*=} ;;
+        --resume-stage4-from-admitted=*) resume=1 ;;
+        --deploy) deploy=1 ;;
+        --release) release=1 ;;
+        --full-cli) [ "$resume" -eq 1 ] || forbidden_provisional=1 ;;
+    esac
+done
+[ -n "$output" ] || exit 2
+if [ "$resume" -eq 1 ]; then
+    [ -f "$output/stage3/fixture/simple" ] || exit 3
+    {
+        echo schema=fake-stage4-continuation-v1
+        echo quarantine_authority="${SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE:-0}"
+        echo release_authority="${SIMPLE_BOOTSTRAP_SCHEDULER_RELEASE_ADMITTED:-0}"
+        echo deploy_arg="$deploy"
+        echo release_arg="$release"
+    } >"$output/continuation-observed.env"
+    exit 0
+fi
+[ "$deploy" -eq 0 ] && [ "$release" -eq 0 ] &&
+    [ "$forbidden_provisional" -eq 0 ] || exit 91
+mkdir -p "$output/stage3/fixture/stage2-admitted" "$output/logs/fixture"
+sleep 1
+printf '%s\n' schema=fake-smoke-admission-v1 status=admitted \
+    >"$output/stage3/fixture/stage2-admitted/admission.env"
+printf '%s\n' child-started >"$output/logs/fixture/stage3-native-build.log"
+printf '%s\n' quarantined-child >"$output/stage3/fixture/simple"
+sleep 3
+EOF
+chmod +x "$scratch/fake-engine.sh"
+
+cat >"$scratch/fake-qualifier.sh" <<'EOF'
+#!/bin/sh
+set -eu
+output=$1 generation_dir=$2 lease=$3 lease_sha=$4 engine_done=$5
+contract=${SCHEDULER_TEST_CONTRACT:?}
+. "$contract"
+generation=$(bootstrap_scheduler_manifest_value generation "$lease")
+while [ ! -f "$output/stage3/fixture/stage2-admitted/admission.env" ]; do
+    [ ! -f "$engine_done" ] || exit 1
+    sleep 1
+done
+started="$generation_dir/qualification.started.tmp.$$"
+{
+    echo schema=simple-bootstrap-task-start-v1
+    echo generation="$generation"
+    echo task=stage2-qualification
+    echo epoch_seconds="$(date +%s)"
+} >"$started"
+bootstrap_scheduler_atomic_replace "$started" "$generation_dir/qualification.started"
+if [ "${SCHEDULER_TEST_FAIL_PARENT:-0}" = 1 ]; then
+    sleep 2
+    exit 1
+fi
+result="$generation_dir/qualification.result.env.tmp.$$"
+{
+    echo schema=simple-bootstrap-qualification-result-v1
+    echo generation="$generation"
+    echo status=passed
+    echo lease_sha256="$lease_sha"
+    echo child_build_observed=true
+    echo completed_epoch_seconds="$(date +%s)"
+} >"$result"
+bootstrap_scheduler_atomic_replace "$result" "$generation_dir/qualification.result.env"
+if [ "${SCHEDULER_TEST_STALE_LEASE:-0}" = 1 ]; then
+    stale="$lease.tmp.$$"
+    sed '/^status=/s/current/current/' "$lease" >"$stale"
+    echo tampered=true >>"$stale"
+    bootstrap_scheduler_atomic_replace "$stale" "$lease"
+fi
+EOF
+chmod +x "$scratch/fake-qualifier.sh"
+
+run_case() {
+    name=$1; shift
+    out="$scratch/$name"
+    mkdir -p "$out"
+    set +e
+    bootstrap_request=
+    case "$name" in stage4_release) bootstrap_request=--release ;; esac
+    env SCHEDULER_TEST_CONTRACT="$contract" \
+        SIMPLE_BOOTSTRAP_SCHEDULER_SELFTEST=1 \
+        SIMPLE_BOOTSTRAP_SCHEDULER_ENGINE="$scratch/fake-engine.sh" \
+        SIMPLE_BOOTSTRAP_SCHEDULER_QUALIFIER="$scratch/fake-qualifier.sh" \
+        "$@" \
+        sh "$entrypoint" --strategy=full --output="$out" --full-bootstrap \
+        --bootstrap-receipt="$scratch/dummy-planner-receipt.env" \
+        $bootstrap_request \
+        >"$scratch/$name.out" 2>"$scratch/$name.err"
+    case_rc=$?
+    set -e
+    generation_dir=$(sed -n 's/^generation_dir=//p' "$out/scheduler/current.env")
+}
+
+run_case overlap_success \
+    SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=2 \
+    SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB=4096
+check test "$case_rc" -eq 0
+check test "$(bootstrap_scheduler_manifest_value status "$generation_dir/lineage-admission.env")" = qualified
+check test "$(bootstrap_scheduler_manifest_value overlap_observed "$generation_dir/lineage-admission.env")" = true
+check test "$(bootstrap_scheduler_manifest_value schedule_mode "$generation_dir/lineage-admission.env")" = speculative
+check test -f "$scratch/overlap_success/stage3/fixture/simple"
+
+run_case late_parent_failure \
+    SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=2 \
+    SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB=4096 \
+    SCHEDULER_TEST_FAIL_PARENT=1
+check test "$case_rc" -eq 1
+check test "$(bootstrap_scheduler_manifest_value failure_reason "$generation_dir/failure-manifest.env")" = parent-qualification-failed
+for node in stage2 stage3 stage4 deploy release; do
+    check test "$(bootstrap_scheduler_manifest_value status "$generation_dir/invalidations/$node.env")" = invalidated
+done
+check test -f "$scratch/late_parent_failure/stage3/fixture/simple"
+
+run_case stale_lease \
+    SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=2 \
+    SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB=4096 \
+    SCHEDULER_TEST_STALE_LEASE=1
+check test "$case_rc" -eq 1
+check test "$(bootstrap_scheduler_manifest_value failure_reason "$generation_dir/failure-manifest.env")" = stale-generation-lease
+check test ! -e "$generation_dir/lineage-admission.env"
+
+run_case resource_guard \
+    SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=1 \
+    SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB=1024
+check test "$case_rc" -eq 0
+check test "$(bootstrap_scheduler_manifest_value schedule_mode "$generation_dir/lineage-admission.env")" = serialized-resource-guard
+check test "$(bootstrap_scheduler_manifest_value overlap_observed "$generation_dir/lineage-admission.env")" = false
+
+run_case stage4_release \
+    SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS=2 \
+    SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB=4096
+check test "$case_rc" -eq 0
+check test "$(bootstrap_scheduler_manifest_value continuation_status "$generation_dir/lineage-admission.env")" = passed
+check test "$(bootstrap_scheduler_manifest_value output_class "$generation_dir/tasks/stage4-continuation.env")" = protected-publication
+check test "$(bootstrap_scheduler_manifest_value release_authority "$scratch/stage4_release/continuation-observed.env")" = 1
+check test "$(bootstrap_scheduler_manifest_value deploy_arg "$scratch/stage4_release/continuation-observed.env")" = 1
+check test "$(bootstrap_scheduler_manifest_value release_arg "$scratch/stage4_release/continuation-observed.env")" = 1
+
+set +e
+SIMPLE_BOOTSTRAP_SCHEDULER_ENGINE="$scratch/fake-engine.sh" \
+    sh "$supervisor" --strategy=normal --output="$scratch/override-denied" -- \
+    --strategy=normal --output="$scratch/override-denied" \
+    >"$scratch/override.out" 2>"$scratch/override.err"
+override_rc=$?
+set -e
+check test "$override_rc" -eq 2
+check grep -Fq 'task overrides are self-test-only' "$scratch/override.err"
+
+[ "$checked" -gt 0 ] || fail 'zero checks executed'
+echo "bootstrap scheduler contract: PASS ($checked checks)"

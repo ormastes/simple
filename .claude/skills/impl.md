@@ -114,6 +114,11 @@ Run `/verify` (Claude) for production readiness verification.
 
 All pass -> `/git-jj-sync` -> `doc/09_report/<feature>_complete_<date>.md`
 Add/update guide docs in `doc/07_guide/` if needed.
+When typed compatibility evidence selects full bootstrap, use
+`bootstrap-from-scratch.sh --strategy=normal|full`, require the scheduler's
+qualified lineage receipt, and never use a tainted/recursively invalidated
+descendant. `doc/07_guide/tooling/bootstrap_speculative_scheduler.md` defines
+the lease, quarantine, failure, and legacy `adhoc` boundaries.
 Before verify/sync, workflow, tool-contract, evidence-wrapper, or
 verification-contract changes must refresh matching `doc/07_guide`,
 `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,

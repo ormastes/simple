@@ -511,11 +511,20 @@ if [ -n "${resume_stage3_output}" ]; then
 fi
 
 if [ -n "${resume_stage4_output}" ]; then
+  scheduler_stage4_quarantine=${SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE:-0}
+  scheduler_release_admitted=${SIMPLE_BOOTSTRAP_SCHEDULER_RELEASE_ADMITTED:-0}
+  case "${scheduler_stage4_quarantine}:${scheduler_release_admitted}" in
+    0:0|0:1|1:0) ;;
+    *) echo "error: invalid or conflicting scheduler Stage 4 authority" >&2; exit 1 ;;
+  esac
   [ -z "${resume_stage3_output}" ] && [ "${full_bootstrap}" -eq 0 ] &&
-    [ "${fresh_cache}" -eq 0 ] && [ "${release_tests}" -eq 0 ] &&
+    [ "${fresh_cache}" -eq 0 ] &&
     [ "${diagnostic_sweep}" -eq 0 ] && [ "${diagnostics_mode}" = off ] &&
-    [ "${deploy}" -eq 1 ] || {
-    echo "error: Stage 4 resume requires --deploy and excludes rebuild/release/diagnostic options" >&2
+    { [ "${release_tests}" -eq 0 ] ||
+      [ "${scheduler_release_admitted}" -eq 1 ]; } &&
+    { [ "${deploy}" -eq 1 ] ||
+      [ "${scheduler_stage4_quarantine}" -eq 1 ]; } || {
+    echo "error: Stage 4 resume requires --deploy or the qualified scheduler quarantine authority and excludes rebuild/diagnostic options" >&2
     exit 1
   }
   case "${jobs}" in ''|1) jobs=1 ;; *) echo "error: Stage 4 resume permits only --jobs=1 (resume reuses the already-admitted stage-3 artifact and only relinks the full CLI; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac

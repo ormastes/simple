@@ -1,0 +1,136 @@
+#!/bin/sh
+# Typed, side-effect-light helpers for the compatibility bootstrap scheduler.
+# This file never starts a compiler and is safe to source from contract tests.
+
+bootstrap_scheduler_hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+bootstrap_scheduler_hash_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+bootstrap_scheduler_manifest_value() {
+    bootstrap_scheduler_value_key=$1
+    bootstrap_scheduler_value_file=$2
+    [ -f "$bootstrap_scheduler_value_file" ] &&
+        [ ! -L "$bootstrap_scheduler_value_file" ] || return 1
+    bootstrap_scheduler_value_count=$(grep -c \
+        "^${bootstrap_scheduler_value_key}=" \
+        "$bootstrap_scheduler_value_file" 2>/dev/null || true)
+    [ "$bootstrap_scheduler_value_count" -eq 1 ] || return 1
+    sed -n "s/^${bootstrap_scheduler_value_key}=//p" \
+        "$bootstrap_scheduler_value_file"
+}
+
+bootstrap_scheduler_atomic_replace() {
+    bootstrap_scheduler_atomic_tmp=$1
+    bootstrap_scheduler_atomic_destination=$2
+    [ -f "$bootstrap_scheduler_atomic_tmp" ] &&
+        [ ! -L "$bootstrap_scheduler_atomic_tmp" ] || return 1
+    [ ! -L "$bootstrap_scheduler_atomic_destination" ] || return 1
+    chmod 400 "$bootstrap_scheduler_atomic_tmp" || return 1
+    mv -f "$bootstrap_scheduler_atomic_tmp" \
+        "$bootstrap_scheduler_atomic_destination"
+}
+
+bootstrap_scheduler_lease_current() {
+    bootstrap_scheduler_lease_file=$1
+    bootstrap_scheduler_lease_generation=$2
+    bootstrap_scheduler_lease_sha=$3
+    [ "$(bootstrap_scheduler_hash_file "$bootstrap_scheduler_lease_file")" = \
+        "$bootstrap_scheduler_lease_sha" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_lease_file")" = \
+        simple-bootstrap-generation-lease-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value generation \
+        "$bootstrap_scheduler_lease_file")" = \
+        "$bootstrap_scheduler_lease_generation" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value status \
+        "$bootstrap_scheduler_lease_file")" = current ] || return 1
+}
+
+bootstrap_scheduler_verify_task_receipt() {
+    bootstrap_scheduler_task_receipt=$1
+    bootstrap_scheduler_task_generation=$2
+    bootstrap_scheduler_task_lease_sha=$3
+    bootstrap_scheduler_task_name=$4
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_task_receipt")" = \
+        simple-bootstrap-task-receipt-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value generation \
+        "$bootstrap_scheduler_task_receipt")" = \
+        "$bootstrap_scheduler_task_generation" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value lease_sha256 \
+        "$bootstrap_scheduler_task_receipt")" = \
+        "$bootstrap_scheduler_task_lease_sha" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value task \
+        "$bootstrap_scheduler_task_receipt")" = \
+        "$bootstrap_scheduler_task_name" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value status \
+        "$bootstrap_scheduler_task_receipt")" = passed ] || return 1
+}
+
+bootstrap_scheduler_write_invalidation() {
+    bootstrap_scheduler_invalidation_dir=$1
+    bootstrap_scheduler_invalidation_generation=$2
+    bootstrap_scheduler_invalidation_root=$3
+    bootstrap_scheduler_invalidation_reason=$4
+    bootstrap_scheduler_invalidation_lease_sha=$5
+    mkdir -p "$bootstrap_scheduler_invalidation_dir" || return 1
+    for bootstrap_scheduler_invalidation_node in \
+        stage2 stage3 stage4 deploy release; do
+        case "$bootstrap_scheduler_invalidation_root:$bootstrap_scheduler_invalidation_node" in
+            stage2:stage2|stage2:stage3|stage2:stage4|stage2:deploy|stage2:release|\
+            stage3:stage3|stage3:stage4|stage3:deploy|stage3:release|\
+            stage4:stage4|stage4:deploy|stage4:release)
+                bootstrap_scheduler_invalidation_tmp=\
+"$bootstrap_scheduler_invalidation_dir/$bootstrap_scheduler_invalidation_node.env.tmp.$$"
+                {
+                    echo schema=simple-bootstrap-invalidation-receipt-v1
+                    echo generation="$bootstrap_scheduler_invalidation_generation"
+                    echo node="$bootstrap_scheduler_invalidation_node"
+                    echo root="$bootstrap_scheduler_invalidation_root"
+                    echo reason="$bootstrap_scheduler_invalidation_reason"
+                    echo lease_sha256="$bootstrap_scheduler_invalidation_lease_sha"
+                    echo status=invalidated
+                    echo artifact_disposition=preserved-tainted
+                } >"$bootstrap_scheduler_invalidation_tmp" || return 1
+                bootstrap_scheduler_atomic_replace \
+                    "$bootstrap_scheduler_invalidation_tmp" \
+                    "$bootstrap_scheduler_invalidation_dir/$bootstrap_scheduler_invalidation_node.env" ||
+                    return 1
+                ;;
+        esac
+    done
+}
+
+bootstrap_scheduler_validate_graph_contract() {
+    bootstrap_scheduler_graph=$1
+    [ -f "$bootstrap_scheduler_graph" ] &&
+        [ ! -L "$bootstrap_scheduler_graph" ] || return 1
+    grep -qx '  schema: simple-bootstrap-graph-v1' \
+        "$bootstrap_scheduler_graph" || return 1
+    for bootstrap_scheduler_graph_edge in \
+        'from: stage2-smoke-admission' \
+        'to: stage3-build' \
+        'to: stage2-qualification' \
+        'from: stage2-qualification' \
+        'to: lineage-admission'; do
+        grep -F "$bootstrap_scheduler_graph_edge" \
+            "$bootstrap_scheduler_graph" >/dev/null || return 1
+    done
+}
