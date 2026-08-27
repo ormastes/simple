@@ -196,19 +196,43 @@ SHA, exact required check identities, PASS verdict, review/audit digests, issue
 time, and an expiry no more than 24 hours later. A later push changes the current
 head and invalidates the receipt and status.
 
-Only when that verifier mechanism is unavailable may the repository owner use
-`mode=owner_attested_fallback`. It has the same exact bindings and additionally
-requires the literal reason `no eligible independent reviewer`, the provider
-owner identity, and a digest of the retained verifier-unavailability receipt.
-It is not an admin bypass, self-review, or permission to omit checks.
+Only when that verifier mechanism is unavailable may the repository owner
+explicitly dispatch `authority_class=owner_attested_actions` from trusted
+`main`, with `NO-VERIFY:OWNER-PROOF`. The dedicated
+`owner-convergence-admission` environment requires owner ID `2378857` and has
+`prevent_self_review=false`; protected-integration, release, and npm-release
+remain unchanged. The eight-hour receipt is sized for queueing plus the full
+Stage 2/3/4 candidate qualification, says `verification_performed=false` and
+`github_pr_approval_claimed=false`, retains the verifier-unavailability proof,
+and binds the exact run, workflow source commit/blob, live policy, rulesets,
+environment, PR/parents, candidate, manifest, forward ports, and required
+checks. Candidate admission fetches the exact run/artifact/digest and verifies
+its GitHub attestation with `--signer-workflow`, signer digest, source ref, and
+self-hosted runners denied; it separately inspects the authenticated certificate
+identity fields because `--signer-workflow` and `--cert-identity` are mutually
+exclusive GitHub CLI selectors. Immediately before the pure admission decision,
+the candidate re-resolves live main, release, and candidate refs, revalidates
+the environment/ruleset/config projection and trusted workflow, and rechecks
+expiry. The longer queue allowance therefore does not survive any protected
+state drift. Candidate content is fetched as data and never executed. Same
+author/merger is accepted only in this fallback; normal external broker
+admission retains the inequality. This is not an admin bypass, self-review, or
+permission to omit checks.
+
+Forward-port receipt replay branches on the convergence authority before any
+broker lookup. External mode retains the exact broker App admission check.
+Owner mode accepts both empty and non-empty forward-port sets only when every
+row carries `authority_class=owner_attested_actions`, false verification and
+GitHub-approval claims, null broker identity, and the exact configured required
+checks for the recorded PR head.
 
 This candidate/release receipt is distinct from PR `SPipe Self Review
 Admission`. GitHub rulesets cannot natively express conditional model review
 versus owner attestation, and environment required reviewers cannot represent
 that alternative. Therefore the `SPipe Review Admission` App/custom-environment
-portion of `.github/review-admission-broker.json` remains fail-closed until its
-external signed protocol and dedicated App are configured. Existing
-protected-integration, release, and npm-release reviewers remain enabled.
+portion of `.github/review-admission-broker.json` remains the preferred route
+when its external signed protocol and dedicated App are configured. The owner
+fallback must prove that route unavailable and fails closed otherwise.
 
 Prepare one selected fix with `scripts/release/converge-reviewed-fix.shs`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact
