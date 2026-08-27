@@ -17,7 +17,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 # Note: Full parse_stable_db/parse_volatile_db are tested via integration
 # (the build system) due to interpreter limitations with StringInterner mutation.
 
-use std.test_runner.test_db_parser.{parse_fields, detect_table}
+use std.test_runner.test_db_parser.{parse_fields, detect_table, parse_stable_db}
 
 # ============================================================================
 # Test Group 1: Field Parsing
@@ -213,4 +213,26 @@ describe "detect_table edge cases":
         step("Verify: handles table with extra spaces")
         # Extra spaces break the pattern match "strings |"
         expect(detect_table("strings  |id|")).to_equal("")
+
+describe "parse_stable_db numeric field conversion":
+    # Reproduce spec for the phantom-method defect class: every numeric field
+    # here used to call `.to_int_or(0)`, a method with ZERO definitions in the
+    # tree, so reaching this path aborted with
+    #   semantic: method `to_int_or` not found on type `str`
+    # See doc/08_tracking/bug/phantom_conversion_methods_to_int_or_2026-08-27.md
+    it "converts numeric id fields without aborting":
+        step("Verify: parse_stable_db reaches the integer-field conversion path")
+        val content = "strings |id|value|\n0, alpha\n1, beta\nfiles |file_id|path_str|\n0, 1\n"
+        val parsed = parse_stable_db(content)
+        expect(parsed.files.len()).to_equal(1)  # oracle: 1 — the single files row above
+        expect(parsed.files[0].file_id).to_equal(0)
+        expect(parsed.files[0].path_str).to_equal(1)
+
+    it "fails open to 0 on a non-numeric id field":
+        step("Verify: the builtin .to_int() fail-open value matches the old .to_int_or(0) default")
+        val content = "files |file_id|path_str|\nnot_a_number, 2\n"
+        val parsed = parse_stable_db(content)
+        expect(parsed.files.len()).to_equal(1)  # oracle: 1 — the single files row above
+        expect(parsed.files[0].file_id).to_equal(0)
+        expect(parsed.files[0].path_str).to_equal(2)
 

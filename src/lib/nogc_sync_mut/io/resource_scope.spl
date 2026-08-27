@@ -10,6 +10,7 @@ use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{getpid}
+use std.convert.{try_parse_int}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
 
 @unsafe(reason: "runtime-owned bounded child tree with versioned lifecycle and resource receipts", capabilities: [ffi])
@@ -253,7 +254,7 @@ fn _counter_value(content: text, key: text) -> i64:
     for line in content.split("\n"):
         val fields = line.trim().split(" ")
         if fields.len() >= 2 and fields[0] == key:
-            return fields[1].to_int_or(0)
+            return fields[1].to_int()
     0
 
 fn _sum_assignment(content: text, key: text) -> i64:
@@ -262,7 +263,7 @@ fn _sum_assignment(content: text, key: text) -> i64:
     for line in content.split("\n"):
         for field in line.trim().split(" "):
             if field.starts_with(prefix):
-                total = total + field[prefix.len():].to_int_or(0)
+                total = total + field[prefix.len():].to_int()
     total
 
 fn _property_value(content: text, key: text) -> text:
@@ -319,14 +320,16 @@ pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, a
     val executed = process_run_observed_bounded("/usr/bin/systemd-run", run_args, scope.timeout_ms + 5_000, scope.max_output_bytes)
     val shown = process_run_observed_bounded("/usr/bin/systemctl", ["--user", "show", unit + ".service", "--property=Result", "--property=ExecMainCode", "--property=ExecMainStatus", "--property=MemoryPeak", "--property=CPUUsageNSec", "--no-pager"], 5_000, 16_384)
     val result_name = _property_value(shown.stdout, "Result")
-    val main_code = _property_value(shown.stdout, "ExecMainCode").to_int_or(0)
-    val main_status = _property_value(shown.stdout, "ExecMainStatus").to_int_or(executed.usage.exit_code)
+    val main_code = _property_value(shown.stdout, "ExecMainCode").to_int()
+    # Non-zero fallback: `.to_int()` fails open to 0, which would mask a real
+    # exit code here, so parse explicitly and keep the caller's default.
+    val main_status = try_parse_int(_property_value(shown.stdout, "ExecMainStatus")) ?? executed.usage.exit_code
     val memory_peak_text = _property_value(shown.stdout, "MemoryPeak")
-    val memory_peak = memory_peak_text.to_int_or(0)
-    val cpu_ns = _property_value(shown.stdout, "CPUUsageNSec").to_int_or(0)
+    val memory_peak = memory_peak_text.to_int()
+    val cpu_ns = _property_value(shown.stdout, "CPUUsageNSec").to_int()
     val pids_pair = _line_value(executed.stderr, pids_marker).split(":")
-    val pids_limit_event = pids_pair.len() == 2 and pids_pair[1].to_int_or(0) > pids_pair[0].to_int_or(0)
-    val external_signal = _line_value(executed.stderr, external_marker).to_int_or(0)
+    val pids_limit_event = pids_pair.len() == 2 and pids_pair[1].to_int() > pids_pair[0].to_int()
+    val external_signal = _line_value(executed.stderr, external_marker).to_int()
     val _cleanup = process_run_observed_bounded("/usr/bin/systemctl", ["--user", "reset-failed", unit + ".service"], 5_000, 4_096)
     val ended = time_now_unix_micros()
     val evidence = TerminationEvidence(
@@ -378,7 +381,7 @@ fn cgroup_process_limit_event(before: CgroupV2Events, after: CgroupV2Events) -> 
     after.pids_max > before.pids_max
 
 fn _read_i64(path: text) -> i64:
-    file_read_text(path).trim().to_int_or(0)
+    file_read_text(path).trim().to_int()
 
 fn read_cgroup_v2_observation(scope_path: text) -> CgroupV2Observation:
     val memory_current_path = scope_path + "/memory.current"
