@@ -1,0 +1,79 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+runner="$root/scripts/audit/sffi-admission-acceptance-runner.shs"
+
+run() {
+    fixture=$1
+    expected=$2
+    if result=$(sh "$runner" "$fixture"); then
+        status=0
+    else
+        status=$?
+    fi
+    test "$result" = "$expected" || {
+        echo "FAIL: $fixture emitted '$result', expected '$expected'" >&2
+        exit 1
+    }
+    if test "$expected" = admitted; then
+        test "$status" -eq 0 || {
+            echo 'FAIL: admitted fixture exited nonzero' >&2
+            exit 1
+        }
+    else
+        test "$status" -ne 0 || {
+            echo "FAIL: rejected fixture $fixture exited zero" >&2
+            exit 1
+        }
+    fi
+    echo "PASS: $fixture -> $expected"
+}
+
+run admitted admitted
+run_blocked() {
+    fixture=$1
+    if result=$(sh "$runner" "$fixture"); then
+        echo "FAIL: blocked fixture $fixture exited zero as '$result'" >&2
+        exit 1
+    fi
+    test "$result" = internal-error || {
+        echo "FAIL: blocked fixture $fixture emitted '$result'" >&2
+        exit 1
+    }
+    echo "PASS: $fixture remains blocked"
+}
+
+# Missing signatures and untrusted roots are not authenticated evidence, so
+# they remain blocked rather than becoming caller-observable categories.
+run_blocked unsigned
+run artifact-mismatch artifact-mismatch
+run_blocked untrusted-signer
+run abi-mismatch abi-mismatch
+run stale-receipt stale-receipt
+# The real C null-on-success probe runs only after valid evidence admission;
+# its local diagnostic is deliberately blocked, not promoted to a category.
+run_blocked null-contract
+
+# The requested fixture name is not authority. A source digest failure injected
+# into the artifact fixture must retain its distinct verifier code and become
+# internal-error, never the requested artifact-mismatch category.
+if result=$(SFFI_ACCEPTANCE_TEST_MUTATION=source-digest sh "$runner" artifact-mismatch); then
+    echo "FAIL: generic digest failure was accepted as '$result'" >&2
+    exit 1
+fi
+test "$result" = internal-error || {
+    echo "FAIL: generic digest failure was classified as '$result'" >&2
+    exit 1
+}
+
+if result=$(sh "$runner" missing-fixture 2>/dev/null); then
+    echo "FAIL: missing fixture was accepted as '$result'" >&2
+    exit 1
+fi
+test "$result" = "" || {
+    echo "FAIL: missing fixture emitted a fabricated category '$result'" >&2
+    exit 1
+}
+
+echo 'STATUS: PASS sffi-admission-acceptance-runner'
