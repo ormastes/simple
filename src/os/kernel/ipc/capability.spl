@@ -401,7 +401,14 @@ impl CapabilityManager:
         self.records.push(record)
 
     me init_task(task: TaskId, caps: CapabilitySet):
-        """Initialize capability record for a new task."""
+        """Initialize one capability record for a new task.
+
+        Task creation can be retried by a scheduler owner after a failed
+        pre-publication path.  A second record would make later lookup order
+        security relevant, so initialization is deliberately idempotent.
+        """
+        if self._find_record(task) != nil:
+            return
         var stored_caps = caps
         if task.id != 1 and not caps.is_pledged and caps.caps.len() == 0:
             stored_caps = CapabilitySet.empty()
@@ -414,6 +421,45 @@ impl CapabilityManager:
             session_epoch: 0u64
         )
         self.records.push(record)
+
+    me install_scheduler_task_capabilities_v1(
+        task: TaskId, caps: CapabilitySet
+    ) -> bool:
+        """Install the exact pledged pouch published in a scheduler TCB.
+
+        This is the IPC half of the boot/adoption publication transaction.
+        It accepts only finite, owner-bound tokens and refuses replacement or
+        duplicate records; callers must install it before making the task
+        runnable.  It never creates root authority and never accepts the
+        ambient `CapabilitySet.full()` representation.
+        """
+        if task.id == 0u64 or not caps.is_pledged or caps.caps.len() == 0:
+            return false
+        var copied: [CapabilityToken] = []
+        var index: i64 = 0
+        while index < caps.caps.len():
+            val cap = caps.caps[index]
+            if cap.owner != task.id or cap.generation == 0u64 or
+               cap.token_id == 0u64 or cap.depth < 0:
+                return false
+            var prior: i64 = 0
+            while prior < index:
+                if caps.caps[prior].token_id == cap.token_id:
+                    return false
+                prior = prior + 1
+            copied.push(CapabilityToken(
+                kind: cap.kind, generation: cap.generation, owner: cap.owner,
+                token_id: cap.token_id, parent_token_id: cap.parent_token_id,
+                depth: cap.depth))
+            index = index + 1
+        if self._find_record(task) != nil:
+            return false
+        self.records.push(TaskCapRecord(
+            task_id: task,
+            caps: CapabilitySet(caps: copied, is_pledged: true),
+            unveil_paths: [], is_unveiled: false,
+            session_id: 0u64, session_epoch: 0u64))
+        true
 
     me install_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> bool:
         """Install lowered sandbox capabilities for a task.

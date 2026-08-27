@@ -62,6 +62,49 @@ describe "CapabilityManager":
             mgr.init_task(task, CapabilitySet.full())
             expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 
+        it "does not append a duplicate task record":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 7)
+            mgr.init_task(task, CapabilitySet.empty())
+            mgr.init_task(task, CapabilitySet(caps: [CapabilityToken(
+                kind: CapabilityKind.ProcessSpawn, generation: 1u64,
+                owner: 7u64, token_id: 7u64, parent_token_id: 0u64,
+                depth: 1)], is_pledged: true))
+            expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
+
+    describe "scheduler capability publication":
+        it "installs one exact owner-bound pledged pouch":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 8)
+            val caps = CapabilitySet(caps: [CapabilityToken(
+                kind: CapabilityKind.FileExec(path_prefix: "/SERVERS.ELF"),
+                generation: 2u64, owner: 8u64, token_id: 9u64,
+                parent_token_id: 0u64, depth: 1)], is_pledged: true)
+            expect(mgr.install_scheduler_task_capabilities_v1(task, caps)).to_be(true)
+            expect(mgr.check(task,
+                CapabilityKind.FileExec(path_prefix: "/SERVERS.ELF"))).to_be(true)
+            expect(mgr.install_scheduler_task_capabilities_v1(task, caps)).to_be(false)
+
+        it "rejects ambient, unbound, and duplicate-token pouches":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 9)
+            expect(mgr.install_scheduler_task_capabilities_v1(
+                task, CapabilitySet.full())).to_be(false)
+            expect(mgr.install_scheduler_task_capabilities_v1(
+                task, CapabilitySet.empty())).to_be(false)
+            val unbound = CapabilityToken(
+                kind: CapabilityKind.ProcessSpawn, generation: 3u64,
+                owner: 10u64, token_id: 11u64, parent_token_id: 0u64,
+                depth: 1)
+            expect(mgr.install_scheduler_task_capabilities_v1(task,
+                CapabilitySet(caps: [unbound], is_pledged: true))).to_be(false)
+            val duplicate = CapabilityToken(
+                kind: CapabilityKind.ProcessSpawn, generation: 3u64,
+                owner: 9u64, token_id: 12u64, parent_token_id: 0u64,
+                depth: 1)
+            expect(mgr.install_scheduler_task_capabilities_v1(task,
+                CapabilitySet(caps: [duplicate, duplicate], is_pledged: true))).to_be(false)
+
 
 # ============================================================================
 # Test Group 2: Check / Grant / Revoke
