@@ -155,7 +155,10 @@ a claim that SFFI v2 is complete.
 - PASS (fail closed): stale callers get
   `E-SFFI-ACTOR-LEGACY-ABI` and are directed to scheduler-owned pure-Simple
   actors rather than passing `Any` values through an incompatible runtime ABI.
-- FAIL (global admission): this removes one unsafe island only. The owned
-  source inventory still has 5,337 `rt_*` declarations, with no exact signed
-  provider artifact/evidence admission for the global set. Overall status is
-  still **FAIL**.
+- FAIL (global admission): this removes one unsafe island only. A direct
+  `extern fn rt_*` source scan finds 5,337 declarations; the broader
+  source-only ledger has 12,739 foreign rows, 3,407 unsafe-tagged, zero
+  signed-admitted, and 8,940 untouched (11,115 are `rt_*` rows). It cannot
+  observe provider language without an admitted binary. No exact signed
+  provider artifact/evidence admission exists for the global set. Overall
+  status is still **FAIL**.

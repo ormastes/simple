@@ -1650,12 +1650,16 @@ this follow-up.
 
 ### Legacy actor-hook ABI retirement (2026-08-27)
 
-The owned Simple source inventory still contains 5,337 `rt_*` declarations, so
-the repository is not globally SFFI-safe, verified, or signed. One especially
-unsafe legacy island was removed: `nogc_sync_mut.concurrent.actor_hooks` used
-an `Any` handler/message plus actor-id ABI that does not match the only Rust
-provider (`function_pointer + context`, current-inbox receive). The module now
-contains no raw actor declaration or call and fails closed with the stable
+A direct `extern fn rt_*` scan of owned `src` still finds 5,337 declarations.
+The broader source-only contract ledger records 12,739 foreign declarations
+(11,115 `rt_*` rows): 3,407 explicitly unsafe-tagged, zero signed-admitted,
+and 8,940 untouched. It observes no provider implementation language because
+it intentionally avoids loading binaries. The repository is therefore not
+globally SFFI-safe, verified, or signed. One especially unsafe legacy island
+was removed: `nogc_sync_mut.concurrent.actor_hooks` used an `Any`
+handler/message plus actor-id ABI that does not match the only Rust provider
+(`function_pointer + context`, current-inbox receive). The module now contains
+no raw actor declaration or call and fails closed with the stable
 `E-SFFI-ACTOR-LEGACY-ABI` diagnostic. Migration is to the scheduler-owned
 pure-Simple `std.actor.spawn`/`ActorRef` API.
 
