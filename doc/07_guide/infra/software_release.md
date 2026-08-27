@@ -67,6 +67,14 @@ Ratchet Gates` and `SPipe Self Review Admission` from the GitHub Actions App
 identity. The latter is an exact-head check, not an Approve review and not a
 claim that GitHub accepted self-approval.
 
+GitHub forbids a PR author from submitting an `APPROVED` review on their own
+PR. The required SPipe status is the deliberate provider-compatible mechanism:
+it records a scoped, short-lived admission without fabricating provider or
+independent approval. Ordinary code/text is eligible by default only when the
+authenticated external policy is valid and no matching deny/constrain narrows
+it. Exact scopes are `code`, `text`, `file`, `directory_files` (immediate files),
+and `directory_recursive` (descendants).
+
 After self-review with a high-capability model at `high` effort or above, Spipe
 dispatches PR number, session, model/effort, and literal `PASS:0:0`. This is
 explicit `self_attested` evidence, not an authenticated higher-model receipt or
@@ -75,6 +83,17 @@ its trusted default-branch definition it resolves protected target/ref/ruleset,
 author, head, base, merge-base, and changed paths, then re-resolves them before
 publishing a ten-minute `spipe-self-review-decision/1` check. Push, retarget,
 ruleset change, diff drift, or expiry requires a new dispatch.
+
+On rejection or invalidation, read the reported reason before retrying. State
+drift or expiry requires a fresh exact-head high-effort review with zero P0/P1
+and a new dispatch. A matching deny requires external policy-owner action or an
+eligible independent-review route. An uncovered constraint requires reducing
+the diff or a new external constraint. Secret/credential, traversal, alias,
+symlink, submodule, unsupported-type, or encoding rejection requires removing
+the unsafe material (and rotating any exposed credential) before creating and
+reviewing a new head. Missing/malformed policy or evidence must be restored at
+its external authority. Never remediate by attempting author `APPROVED`,
+reusing a stale check, or weakening candidate/release/publication controls.
 
 The checked-in `.spipe/policy/self-review-policy.sdn` is projection only and
 cannot grant or deny a session. Operator policy is external UTF-8 JSONL from

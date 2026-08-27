@@ -133,6 +133,22 @@ Codex routes SPipe development work through `$sp_dev`:
 
 **[.codex/skills/sp_dev/SKILL.md](../../.codex/skills/sp_dev/SKILL.md)**
 
+### Protected PR self-review handoff
+
+GitHub forbids PR authors from submitting an `APPROVED` review on their own PR.
+`SPipe Self Review Admission` is instead a ten-minute required status check; it
+never claims provider or independent approval. Ordinary code/text is eligible
+by default absent an external operator deny/constrain. Scopes are `code`,
+`text`, exact `file`, immediate `directory_files`, and recursive
+`directory_recursive`.
+
+Preserve the reported reason in the SPipe log. Drift or expiry needs a fresh
+exact-head high-effort review with zero P0/P1 and a new dispatch; deny needs
+external policy-owner action or an eligible independent route; uncovered scope
+needs a smaller diff or new constraint; unsafe/secret material must be removed
+and exposed credentials rotated. Never attempt author `APPROVED`, reuse a stale
+check, or weaken merge, candidate, release, signing, or publication authority.
+
 For broad SPipe lanes, split independent checks across lower-model sidecars
 when available (Codex Spark, Claude Haiku, Claude Sonnet, or **GLM** via z.ai —
 setup: [doc/07_guide/infra/model_providers/glm.md](../../doc/07_guide/infra/model_providers/glm.md)),
