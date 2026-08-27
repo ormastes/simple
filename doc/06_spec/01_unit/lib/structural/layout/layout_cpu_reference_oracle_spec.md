@@ -1,6 +1,6 @@
-# Layout Cpu Reference Oracle Specification
+# layout_cpu_reference_oracle_spec
 
-> Tests covering layout CPU reference oracle.
+> Operator-facing oracle contract for the spatial layout CPU reference lane.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,28 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Layout Cpu Reference Oracle Specification
+# layout_cpu_reference_oracle_spec
+
+Operator-facing oracle contract for the spatial layout CPU reference lane.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Operator-facing oracle contract for the spatial layout CPU reference lane.
+
+    Audience: layout-kernel authors and GPU-port engineers who must prove their
+    backend matches the serial CPU oracle byte-for-byte before it can ship.
+    Scope: the `layout_run_full` / `layout_run_incremental` execution path —
+    geometry parity, incremental island selection, bounded fixed points, and
+    honest backend-selection receipts. Out of scope: contract shapes and wave
+    scheduling (owned by `layout_framework_spec.spl`).
 
 ## Scenarios
 
@@ -577,21 +598,6 @@ expect(snapshot.island_costs.len()).to_equal(nodes.len())
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering layout CPU reference oracle.
-- layout CPU reference oracle
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -610,75 +616,66 @@ Tests covering layout CPU reference oracle.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
-- `REQ-001`
-- `REQ-004`
-- `REQ-005`
-- `REQ-007`
 - `REQ-SSPEC-LIB`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ea44df47f25e2e21a01449381c8399d170cf00fdbb9b0a63a5d09cbc7de9d88a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8185e924dbf56af13d6398eab485dfd898c7f99c3e96b53f41502fb3f6b1b746`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ea44df47f25e2e21a01449381c8399d170cf00fdbb9b0a63a5d09cbc7de9d88a`.
+Source SHA-256: `8185e924dbf56af13d6398eab485dfd898c7f99c3e96b53f41502fb3f6b1b746`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ea44df47f25e2e21a01449381c8399d170cf00fdbb9b0a63a5d09cbc7de9d88a`  
+Source SHA-256: `8185e924dbf56af13d6398eab485dfd898c7f99c3e96b53f41502fb3f6b1b746`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl
 mirror: doc/06_spec/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.md (current)
-findings: 13 blockers: 1
+findings: 12 blockers: 0
   narrative=100 structure=70 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 15 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 5 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:108:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should produce an empty converged snapshot for an empty input' describes the test rather than its outcome
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:118:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should produce an empty converged snapshot for an empty input' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should produce an empty converged snapshot for an empty input' has no retained capture or evidence
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should produce an empty converged snapshot for an empty input' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:130:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should match the CPU oracle geometry for every profile fixture' describes the test rather than its outcome
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:140:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should match the CPU oracle geometry for every profile fixture' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:130:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should match the CPU oracle geometry for every profile fixture' has no retained capture or evidence
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:140:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should match the CPU oracle geometry for every profile fixture' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:148:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should emit one principal fragment and overflow per laid-out box' describes the test rather than its outcome
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:158:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should emit one principal fragment and overflow per laid-out box' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should emit one principal fragment and overflow per laid-out box' has no retained capture or evidence
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:158:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should emit one principal fragment and overflow per laid-out box' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:164:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should be deterministic across repeated identical runs' describes the test rather than its outcome
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:174:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should be deterministic across repeated identical runs' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:176:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should yield identical geometry from incremental and full layout' describes the test rather than its outcome
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:186:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should yield identical geometry from incremental and full layout' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:193:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should visit only the invalidated island during incremental layout' describes the test rather than its outcome
+test/01_unit/lib/structural/layout/layout_cpu_reference_oracle_spec.spl:203:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should visit only the invalidated island during incremental layout' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->
