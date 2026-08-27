@@ -12,14 +12,14 @@ evidence separate from artifact admission and makes no hot-path change.
 
 | Lane | Scope | Sidecar | Status |
 |---|---|---|---|
-| A1 | modern SSpec acceptance fixture/scenario scaffold | N/A | developing |
-| A2 | fixture manifest/trust/receipt matrix and runner seam | N/A | developing |
+| A1 | modern SSpec acceptance fixture/scenario scaffold | N/A | reworked; uses A2 owner |
+| A2 | fixture manifest/trust/receipt matrix and runner seam | N/A | structured fixture commit ready |
 | A3 | loader/inventory typed-result handoff and no-hot-path gate | N/A | blocked: no immutable handle hash/load primitive |
 | A4 | direct `rt_*` backlog prioritization + exact autofix contract tests | N/A | developing |
 
 Each lane works in a separate worktree, commits only owned files, does not
 push, and returns a failing blocker rather than a fabricated PASS. A1 starts
-the executable `@tag("developing")` SSpec before any implementation promotion.
+the executable developing SSpec before any implementation promotion.
 
 ## A3 identity/admission blocker (2026-08-27)
 
@@ -43,3 +43,14 @@ hash-on-that-handle and load-from-that-same-handle semantics, plus explicit
 close-failure ownership/result handling and runtime tamper fixtures. The
 acceptance runner/inventory must then consume that typed result; it must not
 infer it from a pathname digest or a source-only ledger.
+
+## A1 acceptance fixture IDs
+
+The only supported fixture IDs are exactly `admitted`, `unsigned`,
+`artifact-mismatch`, `untrusted-signer`, `abi-mismatch`, `stale-receipt`, and
+`null-contract`. The A2 runner returns `Ok` only for that exact canonical
+category and its summary is that category unchanged, never prose. Any
+unsupported fixture returns `Err("SFFI admission fixture is blocked ...")`; the
+developing SSpec then fails rather than accepting it. Rust seed discovery sees
+`# @tag developing`; the language-level `@tag(...)` attribute and colon form
+are not discovery metadata.
