@@ -80,6 +80,10 @@ pub fn try_rt_time_now_seconds_f64() -> Option<f64> {
     (value >= 0.0).then_some(value)
 }
 #[inline(always)]
+pub fn fractional_seconds_to_millis(time_seconds: f64) -> i64 {
+    (time_seconds * 1000.0) as i64
+}
+#[inline(always)]
 pub fn rt_timestamp_get_year(micros: i64) -> i32 {
     unsafe { c_sffi::rt_timestamp_get_year(micros) }
 }
@@ -154,7 +158,7 @@ pub fn rt_progress_tls_clear() { unsafe { c_sffi::rt_progress_tls_clear() } }
 
 #[cfg(test)]
 mod tests {
-    use super::{lift_clock_value, try_rt_time_now_seconds_f64};
+    use super::{fractional_seconds_to_millis, lift_clock_value, try_rt_time_now_seconds_f64};
 
     #[test]
     fn clock_failure_sentinel_is_not_a_value() {
@@ -166,5 +170,14 @@ mod tests {
     #[test]
     fn seconds_clock_lifts_nonnegative_live_value() {
         assert!(try_rt_time_now_seconds_f64().is_some());
+    }
+
+    #[test]
+    fn fractional_seconds_to_millis_preserves_subsecond_precision() {
+        assert_eq!(
+            fractional_seconds_to_millis(1_700_000_000.125),
+            1_700_000_000_125
+        );
+        assert_eq!(fractional_seconds_to_millis(12.999), 12_999);
     }
 }

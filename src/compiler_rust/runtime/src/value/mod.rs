@@ -366,8 +366,9 @@ pub use log_sffi::{
     rt_log_set_global_level, rt_log_set_scope_level, rt_log_trace, rt_log_verbose, rt_log_warn,
 };
 
-// Re-export time SFFI functions
-pub use sffi::rt_time_now_seconds;
+// Re-export time SFFI functions used by the interpreter crate. Keep the legacy
+// integer-seconds ABI and the fractional ABI separately named.
+pub use sffi::{fractional_seconds_to_millis, rt_time_now_seconds, rt_time_now_seconds_f64};
 
 // Re-export environment & process SFFI functions
 pub use sffi::{

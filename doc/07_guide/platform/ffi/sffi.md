@@ -203,6 +203,18 @@ and `examples/10_tooling/libraries/external_compression/`.
 > missing returns, null violations, or bridge failures must never be interpreted
 > as ordinary nil/zero/empty values.
 
+The PR-75 source-authority tranche is enforced as one fail-closed aggregate:
+
+```bash
+sh scripts/check/check-sffi-v2-authority.shs
+```
+
+The aggregate runs all 46 named guards, requires the exact count, and fails if
+any child is missing or red. It is a blocking push-tier entry in
+`config/check/must_check_gates.sdn` and an independent non-advisory step in the
+repo-hygiene CI workflow; adding an opt-out or unwired baseline is not an
+accepted substitute.
+
 ### Opaque Handle Pattern
 
 Legacy external objects are commonly represented as `i64` handles in Simple.

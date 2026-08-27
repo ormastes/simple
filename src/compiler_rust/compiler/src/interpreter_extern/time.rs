@@ -50,16 +50,16 @@ pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * i64 representing milliseconds since Unix epoch
 pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    let time_seconds = simple_runtime::value::rt_time_now_seconds();
-    Ok(Value::Int(time_seconds.saturating_mul(1000)))
+    let time_seconds = simple_runtime::value::rt_time_now_seconds_f64();
+    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(time_seconds)))
 }
 
 /// Get current time in milliseconds since Unix epoch (alias for web stack)
 ///
 /// Callable from Simple as: `rt_time_now_ms()`
 pub fn rt_time_now_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    let time_seconds = simple_runtime::value::rt_time_now_seconds();
-    Ok(Value::Int(time_seconds.saturating_mul(1000)))
+    let time_seconds = simple_runtime::value::rt_time_now_seconds_f64();
+    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(time_seconds)))
 }
 
 /// Get current time as integer seconds since Unix epoch (DNS resolver)
