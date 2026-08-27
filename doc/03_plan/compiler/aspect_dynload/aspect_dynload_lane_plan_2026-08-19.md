@@ -491,7 +491,7 @@ or that any of the acceptance gates in section 6 pass.
   declares `SectionType.AspectPackDirectory` and
   `SMF_FLAG_ASPECT_PACK` in
   `src/compiler/70.backend/linker/smf_writer.spl` and
-  `src/compiler/backend/linker/smf_header.spl`; the canonical writer exposes
+  `src/compiler/70.backend/linker/smf_header.spl`; the canonical writer exposes
   `generate_aspect_pack_smf`; and
   `src/compiler/99.loader/aspect_pack_section.spl` validates and registers the
   matching section.  This corrects the older claim that those source symbols
