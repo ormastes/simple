@@ -733,7 +733,38 @@ pub class Scheduler:
     green_execution_state: GreenCarrierExecutionState
     green_parallelism_state: GreenCarrierParallelismState
 
+pub fn scheduler_current_execution_identity_matches_v1(
+    scheduler: Scheduler, task_id: u64,
+    lifecycle_generation: u64, exec_generation: u64
+) -> bool:
+    """Revalidate one exact live current-execution identity.
+
+    Long-lived leases retain these three scalar coordinates and ask the
+    scheduler owner to validate them immediately before authority release. A
+    task exit, in-place exec, current-task change, or PID reuse invalidates it.
+    """
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        exec_generation == 0u64:
+        return false
+    val slot = scheduler.current_slot
+    if slot < 0 or slot >= scheduler.tasks.len(): return false
+    val maybe_task = scheduler.tasks[slot]
+    if maybe_task == nil: return false
+    val task = maybe_task.unwrap()
+    if task.id.id != scheduler.current.id or task.id.id != task_id or
+        task.lifecycle_generation != lifecycle_generation or
+        task.exec_generation != exec_generation:
+        return false
+    val admitted = match task.state:
+        case TaskState.Ready: true
+        case TaskState.Running: true
+        case TaskState.Blocked(reason): true
+        case TaskState.PreparingExit: false
+        case TaskState.Zombie: false
+    admitted
+
 impl Scheduler:
+
     pub fn current_execution_snapshot_v1(
     ) -> SchedulerCurrentExecutionSnapshotV1?:
         """Issue a one-shot capability snapshot for the exact current TCB."""

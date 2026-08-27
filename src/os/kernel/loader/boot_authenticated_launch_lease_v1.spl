@@ -7,7 +7,9 @@ creates a root token, accepts the ambient `CapabilitySet.full()` representation,
 or substitutes an architecture-local capability set.
 """
 
-use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.scheduler_types.{
+    Scheduler, scheduler_current_execution_identity_matches_v1
+}
 use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
     scheduler_current_execution_snapshot_task_id_v1,
     scheduler_current_execution_snapshot_lifecycle_generation_v1,
@@ -54,6 +56,8 @@ struct _BootAuthenticatedLaunchLeaseSlotV1:
     nonce: u64
     state: _BootAuthenticatedLaunchLeaseStateV1
     caller: u64
+    caller_lifecycle_generation: u64
+    caller_exec_generation: u64
     coordinates: BootAuthenticatedLaunchCoordinatesV1
     caller_caps: [CapabilityToken]
 
@@ -168,10 +172,13 @@ pub fn boot_authenticated_launch_lease_issue_current_v1(
     if not execution.?: return nil
     val current = execution.unwrap()
     val caller = scheduler_current_execution_snapshot_task_id_v1(current)
+    val caller_lifecycle_generation =
+        scheduler_current_execution_snapshot_lifecycle_generation_v1(current)
+    val caller_exec_generation =
+        scheduler_current_execution_snapshot_exec_generation_v1(current)
     val pinned = scheduler_capability_snapshot_consume_once_v1(
         scheduler_current_execution_snapshot_lease_v1(current), caller,
-        scheduler_current_execution_snapshot_lifecycle_generation_v1(current),
-        scheduler_current_execution_snapshot_exec_generation_v1(current))
+        caller_lifecycle_generation, caller_exec_generation)
     if not pinned.?: return nil
     val caps = scheduler_pinned_capability_snapshot_caps_v1(pinned.unwrap())
     if not _boot_authenticated_launch_pouch_valid_v1(caller, caps, coordinates.recipe):
@@ -201,6 +208,8 @@ pub fn boot_authenticated_launch_lease_issue_current_v1(
     val slot = _BootAuthenticatedLaunchLeaseSlotV1(
         generation: generation, nonce: nonce,
         state: _BootAuthenticatedLaunchLeaseStateV1.Armed, caller: caller,
+        caller_lifecycle_generation: caller_lifecycle_generation,
+        caller_exec_generation: caller_exec_generation,
         coordinates: coordinates,
         caller_caps: _boot_authenticated_launch_copy_tokens_v1(caps))
     val target = if reusable >= 0: reusable else: _boot_authenticated_launch_slots_v1.len()
@@ -213,6 +222,7 @@ pub fn boot_authenticated_launch_lease_issue_current_v1(
         _slot: target, _generation: generation, _nonce: nonce))
 
 pub fn boot_authenticated_launch_lease_consume_once_v1(
+    scheduler: Scheduler,
     lease: BootAuthenticatedLaunchLeaseV1,
     coordinates: BootAuthenticatedLaunchCoordinatesV1
 ) -> BootAuthenticatedLaunchGrantV1?:
@@ -231,11 +241,28 @@ pub fn boot_authenticated_launch_lease_consume_once_v1(
         not _boot_authenticated_launch_same_coordinates_v1(slot.coordinates, coordinates)):
         _ = _boot_authenticated_launch_unlock_v1()
         return nil
+    # The lease is a scoped authority loan from exactly one execution. Burn it
+    # if that execution exited, re-execed, ceased to be current, or if a PID was
+    # recycled with another lifecycle generation. A later state change cannot
+    # revive the retained capability snapshot.
+    if not scheduler_current_execution_identity_matches_v1(
+        scheduler, slot.caller, slot.caller_lifecycle_generation,
+        slot.caller_exec_generation):
+        slot.state = _BootAuthenticatedLaunchLeaseStateV1.Free
+        slot.caller = 0u64
+        slot.caller_lifecycle_generation = 0u64
+        slot.caller_exec_generation = 0u64
+        slot.caller_caps = []
+        _boot_authenticated_launch_slots_v1[lease._slot] = slot
+        _ = _boot_authenticated_launch_unlock_v1()
+        return nil
     val caller = slot.caller
     val caps = CapabilitySet(caps: _boot_authenticated_launch_copy_tokens_v1(
         CapabilitySet(caps: slot.caller_caps, is_pledged: true)), is_pledged: true)
     slot.state = _BootAuthenticatedLaunchLeaseStateV1.Free
     slot.caller = 0u64
+    slot.caller_lifecycle_generation = 0u64
+    slot.caller_exec_generation = 0u64
     slot.caller_caps = []
     _boot_authenticated_launch_slots_v1[lease._slot] = slot
     if not _boot_authenticated_launch_unlock_v1(): return nil
