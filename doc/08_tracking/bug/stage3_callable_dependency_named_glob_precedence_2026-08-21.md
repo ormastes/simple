@@ -164,3 +164,21 @@ and `hir_ambig_dep_trace{,_enabled}`.
 `src/compiler/20.hir/` callable-dependency portion is addressed here. **The rest
 of that clobber has not been audited** and other landed fixes are very likely
 still reverted. That triage is out of scope for this record.
+
+### Correction to the "Reproduction" section above — NOT yet verified to fire
+
+The seed-interpreted command is a *candidate* reproduction, not a confirmed one.
+Two attempts on a loaded host were killed while still in the parse phase
+(43/124 and 40/124 modules, ~10 s per module); neither reached HIR lowering, so
+neither produced nor excluded the diagnostic. Per `.claude/rules/testing.md`, a
+run with no result line is UNKNOWN, not clean. Note also that the module-261
+failure is raised while lowering an IMPORTER of `module_build` (the sweep runs
+when an importer materializes `module_build`'s `extern fn rt_enum_payload(value:
+StmtKind) -> Expr`), so `module_import_resolution.spl` is the more faithful
+compile target than `module_build.spl`.
+
+A synthetic three-file repro (terminal declaring `Expr`/`StmtKind`, a facade
+glob-re-exporting it, a consumer globbing both plus the extern) was written and
+does not fire: mechanism (2) needs a facade surface that materializes re-exports
+into its declaration arrays, which a plain `use pkg.term.*` chain does not
+create. Building that minimal repro remains open work.
