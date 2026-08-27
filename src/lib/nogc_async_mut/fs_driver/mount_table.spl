@@ -202,6 +202,16 @@ fn _retired_dir_binding(binding: OpenDirBinding) -> OpenDirBinding:
         virtual_handle: 0u64, mount_id: binding.mount_id,
         inner_handle: binding.inner_handle)
 
+fn _mount_mutation_allowed(entry: MountEntry) -> Result<(), FsError>:
+    """Enforce the shared mount policy before every backend mutation."""
+    if entry.opts.read_only:
+        return Err(FsError.Permission)
+    Ok(())
+
+fn _open_flags_request_mutation(flags: OpenFlags) -> bool:
+    """Conservatively classify open operations that can mutate before return."""
+    flags.is_writable() or (flags.bits & (64u32 | 512u32 | 1024u32)) != 0u32
+
 struct MountTable:
     """Bounded mount and generational open-handle registry."""
     mounts:           [MountEntry]
@@ -758,8 +768,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        if self.mounts[i].opts.read_only:
-                            return Err(FsError.Permission)
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, false)?
                         val result = driver_positioned_write_bytes(
                             self.mounts[i].driver, kind, binding.inner_handle,
@@ -1113,6 +1122,8 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
+                        if _open_flags_request_mutation(flags):
+                            _mount_mutation_allowed(self.mounts[i])?
                         if (flags.bits & 64) != 0:
                             self._generation_available_at(i, true)?
                         if (flags.bits & 512) != 0:
@@ -1495,6 +1506,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, true)?
                         val result = _driver_mkdir_path(self.mounts[i].driver, relpath.raw, mode)
                         self._advance_generation_at(i, true)?
@@ -1521,6 +1533,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, false)?
                         val result = _driver_write_text_handle(self.mounts[i].driver, binding.inner_handle, content)
                         self._advance_generation_at(i, false)?
@@ -1539,6 +1552,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, false)?
                         val result = _driver_pwrite_text_handle(self.mounts[i].driver, binding.inner_handle, patch, offset)
                         self._advance_generation_at(i, false)?
@@ -1620,6 +1634,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, true)?
                         val result = _driver_unlink_path_text(self.mounts[i].driver, relpath.raw)
                         self._advance_generation_at(i, true)?
@@ -1648,8 +1663,7 @@ impl MountTable:
                                 # backend.  Keep rename aligned with ftruncate:
                                 # a read-only mount must never reach a mutating
                                 # FAT32/NVFS/DBFS driver operation.
-                                if self.mounts[i].opts.read_only:
-                                    return Err(FsError.Permission)
+                                _mount_mutation_allowed(self.mounts[i])?
                                 # An identity rename is not a namespace mutation,
                                 # but its source must still exist.  Resolve that
                                 # semantic here so backend replace algorithms
@@ -1677,8 +1691,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
-                        if self.mounts[i].opts.read_only:
-                            return Err(FsError.Permission)
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, false)?
                         val result = _driver_ftruncate_handle(self.mounts[i].driver, binding.inner_handle, new_size)
                         self._advance_generation_at(i, false)?
@@ -1697,6 +1710,7 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == binding.mount_id:
+                        _mount_mutation_allowed(self.mounts[i])?
                         self._generation_available_at(i, false)?
                         val result = _driver_mmap_shared_writable_handle(self.mounts[i].driver, binding.inner_handle, offset, length)
                         self._advance_generation_at(i, false)?
@@ -1714,6 +1728,7 @@ impl MountTable:
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             if self.mounts[i].id == target_resolved.mount_id:
+                _mount_mutation_allowed(self.mounts[i])?
                 val caps = FsCapabilitySet(bits: self.mounts[i].active_caps)
                 if not caps.has(Capability.Hardlinks):
                     return Err(FsError.Unsupported)
