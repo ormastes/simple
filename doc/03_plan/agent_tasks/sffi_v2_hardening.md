@@ -396,3 +396,8 @@ passing placeholder.
     this tree, so they may not be promoted to safe wrappers or be called
     verified. The supported integer seconds and nanosecond declarations also
     remain unsafe pending artifact-bound provider admission.
+72. Keep the interpreter environment-handle facade explicitly unsafe. Its
+    registry-backed handles, `auto` values, nil-missing-variable behavior, and
+    snapshot/release lifetime cannot be represented as an ordinary native-safe
+    ABI. The one Simple proof-of-concept caller must use a minimal lexical
+    FFI scope; no allocation, lookup, lock, copy, or call is added to it.

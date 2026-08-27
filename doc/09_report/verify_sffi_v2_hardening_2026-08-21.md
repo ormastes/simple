@@ -411,3 +411,15 @@ a claim that SFFI v2 is complete.
   allocation, copy, lookup, lock, retry, or clock read.
 - FAIL (provider): no artifact-bound provider, ABI contract, signature, or
   verification receipt is present; the entire facade remains unsafe-only.
+
+## Follow-up: interpreter environment-handle containment (2026-08-27)
+
+- PASS (static/source): all 12 exported environment-handle declarations carry
+  `unsafe(ffi)`, and the sole Simple proof-of-concept read uses the smallest
+  lexical scope. The Rust interpreter provider rejects invalid handles; `nil`
+  remains documented only as an ordinary missing-variable result.
+- PASS (performance shape): the evaluated read remains one direct provider
+  call. The guard rejects added allocation, copy, dynamic lookup, or locking
+  in the facade/consumer.
+- FAIL (global admission): the Rust interpreter provider has no artifact-bound
+  ABI/ownership receipt or trusted signature. This facade remains unsafe-only.
