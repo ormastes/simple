@@ -1787,3 +1787,17 @@ provider-language, artifact, or signature proof. The next largest unresolved
 production families are SSH session (136 missing call sites) and Torch dynamic
 operations (129); both need provider-specific ABI/ownership design rather than
 bulk annotation.
+
+### SSH AES-GCM contract defect recorded before migration (2026-08-27)
+
+The first SSH-family contract review found that
+`rt_ssh_aes256_gcm_decrypt_packet` maps invalid input and GCM authentication
+failure to an empty byte array in both the Rust native export and the Rust
+interpreter handler.  The Simple SSH wrapper then treats empty as failure.  It
+is a cross-lane fabricated-value contract and cannot be repaired by consulting
+the companion payload-length symbol: that would decrypt/authenticate every
+packet twice on the hot path.  The required one-pass status/out v2 migration,
+cross-lane owners, and performance acceptance criteria are tracked in
+`doc/08_tracking/bug/sffi_ssh_aes256_gcm_decrypt_empty_failure_2026-08-27.md`.
+No code was changed in this review, so the provider remains unsafe, unsigned,
+and unverified.
