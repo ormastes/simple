@@ -82,7 +82,11 @@ After the Stage-4 child exits, the supervisor rechecks the exact generation
 lease, source/input digest, policy hash, lineage, qualification result, Stage-2
 admission, Stage-3 provenance, and Stage-4 result. It repeats the immutable
 barrier immediately before qualifying the lease. Drift writes recursive
-invalidation evidence and never rewrites a stale lease as qualified.
+invalidation evidence and never rewrites a stale lease as qualified. A still
+current lease is atomically replaced with a tainted receipt; an externally
+tainted/stale lease is preserved. The qualified lineage is moved to revoked
+evidence and replaced by an invalidated receipt, while `failure-manifest.env`
+and `current.env` both report failure, leaving no reusable qualified state.
 
 No provisional child may update `bin/simple`, protected checks, release state,
 or trusted shared publication records.

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Typed, side-effect-light helpers for the compatibility bootstrap scheduler.
-# This file never starts a compiler and is safe to source from contract tests.
+# Typed helpers for the compatibility bootstrap scheduler. This file never
+# starts a compiler; state-changing helpers only retire scheduler-owned trust.
 
 bootstrap_scheduler_hash_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -339,6 +339,113 @@ bootstrap_scheduler_verify_promotion_barrier() {
         "$bootstrap_scheduler_promotion_generation" \
         "$bootstrap_scheduler_promotion_lease_sha" \
         "$bootstrap_scheduler_promotion_output" quarantined || return 1
+}
+
+bootstrap_scheduler_retire_generation() {
+    bootstrap_scheduler_retire_dir=$1
+    bootstrap_scheduler_retire_output=$2
+    bootstrap_scheduler_retire_generation=$3
+    bootstrap_scheduler_retire_lease=$4
+    bootstrap_scheduler_retire_lease_sha=$5
+    bootstrap_scheduler_retire_lineage=$6
+    bootstrap_scheduler_retire_lineage_sha=$7
+    bootstrap_scheduler_retire_reason=$8
+    bootstrap_scheduler_retire_expected_input=$9
+    shift 9
+    bootstrap_scheduler_retire_actual_input=$1
+    bootstrap_scheduler_retire_expected_policy=$2
+    bootstrap_scheduler_retire_actual_policy=$3
+
+    # Only replace the exact lease this supervisor admitted. If another actor
+    # already made it stale/tainted, preserve that stronger state verbatim.
+    if bootstrap_scheduler_lease_current "$bootstrap_scheduler_retire_lease" \
+        "$bootstrap_scheduler_retire_generation" \
+        "$bootstrap_scheduler_retire_lease_sha"; then
+        bootstrap_scheduler_retire_lease_tmp=\
+"$bootstrap_scheduler_retire_lease.tmp.$$"
+        {
+            echo schema=simple-bootstrap-generation-lease-v1
+            echo generation="$bootstrap_scheduler_retire_generation"
+            echo status=tainted
+            echo previous_lease_sha256="$bootstrap_scheduler_retire_lease_sha"
+            echo reason="$bootstrap_scheduler_retire_reason"
+            echo tainted_epoch_seconds="$(date +%s)"
+        } >"$bootstrap_scheduler_retire_lease_tmp" || return 1
+        bootstrap_scheduler_atomic_replace \
+            "$bootstrap_scheduler_retire_lease_tmp" \
+            "$bootstrap_scheduler_retire_lease" || return 1
+    fi
+
+    bootstrap_scheduler_retire_lineage_status=$(bootstrap_scheduler_manifest_value \
+        status "$bootstrap_scheduler_retire_lineage" 2>/dev/null || true)
+    if [ "$bootstrap_scheduler_retire_lineage_status" = qualified ]; then
+        bootstrap_scheduler_retire_revoked=\
+"$bootstrap_scheduler_retire_dir/lineage-admission.revoked.env"
+        [ ! -e "$bootstrap_scheduler_retire_revoked" ] &&
+            [ ! -L "$bootstrap_scheduler_retire_revoked" ] || return 1
+        mv "$bootstrap_scheduler_retire_lineage" \
+            "$bootstrap_scheduler_retire_revoked" || return 1
+        bootstrap_scheduler_retire_lineage_tmp=\
+"$bootstrap_scheduler_retire_lineage.tmp.$$"
+        {
+            echo schema=simple-bootstrap-lineage-admission-v1
+            echo generation="$bootstrap_scheduler_retire_generation"
+            echo status=invalidated
+            echo previous_lineage_sha256="$bootstrap_scheduler_retire_lineage_sha"
+            echo revoked_evidence_path="$bootstrap_scheduler_retire_revoked"
+            echo reason="$bootstrap_scheduler_retire_reason"
+        } >"$bootstrap_scheduler_retire_lineage_tmp" || return 1
+        bootstrap_scheduler_atomic_replace \
+            "$bootstrap_scheduler_retire_lineage_tmp" \
+            "$bootstrap_scheduler_retire_lineage" || return 1
+    fi
+
+    bootstrap_scheduler_write_invalidation \
+        "$bootstrap_scheduler_retire_dir/invalidations" \
+        "$bootstrap_scheduler_retire_generation" stage4 \
+        "$bootstrap_scheduler_retire_reason" \
+        "$bootstrap_scheduler_retire_lease_sha" || return 1
+    bootstrap_scheduler_retire_failure=\
+"$bootstrap_scheduler_retire_dir/failure-manifest.env"
+    bootstrap_scheduler_retire_failure_tmp=\
+"$bootstrap_scheduler_retire_failure.tmp.$$"
+    {
+        echo schema=simple-bootstrap-failure-manifest-v1
+        echo generation="$bootstrap_scheduler_retire_generation"
+        echo status=failed
+        echo failure_root=stage4
+        echo failure_reason="$bootstrap_scheduler_retire_reason"
+        echo expected_input_sha256="$bootstrap_scheduler_retire_expected_input"
+        echo actual_input_sha256="$bootstrap_scheduler_retire_actual_input"
+        echo expected_policy_sha256="$bootstrap_scheduler_retire_expected_policy"
+        echo actual_policy_sha256="$bootstrap_scheduler_retire_actual_policy"
+        echo original_lease_sha256="$bootstrap_scheduler_retire_lease_sha"
+        echo current_lease_sha256="$(bootstrap_scheduler_hash_file \
+            "$bootstrap_scheduler_retire_lease")"
+        echo lineage_status=invalidated
+        echo descendants=recursively-invalidated
+        echo artifacts=preserved-tainted
+    } >"$bootstrap_scheduler_retire_failure_tmp" || return 1
+    bootstrap_scheduler_atomic_replace \
+        "$bootstrap_scheduler_retire_failure_tmp" \
+        "$bootstrap_scheduler_retire_failure" || return 1
+    bootstrap_scheduler_retire_current=\
+"$bootstrap_scheduler_retire_output/scheduler/current.env"
+    bootstrap_scheduler_retire_current_tmp=\
+"$bootstrap_scheduler_retire_current.tmp.$$"
+    {
+        echo schema=simple-bootstrap-current-generation-v1
+        echo generation="$bootstrap_scheduler_retire_generation"
+        echo generation_dir="$bootstrap_scheduler_retire_dir"
+        echo lease_sha256="$(bootstrap_scheduler_hash_file \
+            "$bootstrap_scheduler_retire_lease")"
+        echo status=failed
+        echo failure_manifest="$bootstrap_scheduler_retire_failure"
+        echo lineage_admission="$bootstrap_scheduler_retire_lineage"
+    } >"$bootstrap_scheduler_retire_current_tmp" || return 1
+    bootstrap_scheduler_atomic_replace \
+        "$bootstrap_scheduler_retire_current_tmp" \
+        "$bootstrap_scheduler_retire_current"
 }
 
 bootstrap_scheduler_write_invalidation() {

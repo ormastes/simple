@@ -192,6 +192,42 @@ for node in stage2 stage3 stage4 deploy release; do
         "$generation_dir/invalidations/$node.env")" = invalidated
 done
 
+# End-to-end retirement: barrier drift leaves no qualified/reusable trust state.
+check bootstrap_scheduler_retire_generation "$generation_dir" "$output" g1 \
+    "$lease" "$lease_sha" "$lineage" "$lineage_sha" \
+    final-promotion-barrier-stale input-v1 source-raced policy-v1 policy-raced
+check test "$(bootstrap_scheduler_manifest_value status "$lease")" = tainted
+check test "$(bootstrap_scheduler_manifest_value status "$lineage")" = invalidated
+check test "$(hash "$generation_dir/lineage-admission.revoked.env")" = "$lineage_sha"
+check test "$(bootstrap_scheduler_manifest_value status \
+    "$generation_dir/failure-manifest.env")" = failed
+check test "$(bootstrap_scheduler_manifest_value status \
+    "$output/scheduler/current.env")" = failed
+reject bootstrap_scheduler_verify_lineage_admission "$lineage" g1 \
+    "$lease_sha" "$output"
+reject bootstrap_scheduler_verify_promotion_barrier "$lease" g1 "$lease_sha" \
+    input-v1 input-v1 "$lineage" "$lineage_sha" "$output" \
+    "$qualification" "$stage3_result" "$continuation_result"
+reject grep -Eq '^status=qualified' "$lineage" "$output/scheduler/current.env"
+
+# An externally tainted lease is stronger than this supervisor's old current
+# hash and must be preserved byte-for-byte while the lineage is still revoked.
+external_output="$scratch/external"; external_dir="$external_output/scheduler/g2"
+mkdir -p "$external_dir/invalidations"
+external_lease="$external_dir/generation.lease.env"
+printf 'schema=simple-bootstrap-generation-lease-v1\ngeneration=g2\nstatus=tainted\nreason=external-race\n' >"$external_lease"
+external_lease_before=$(hash "$external_lease")
+external_lineage="$external_dir/lineage-admission.env"
+printf 'schema=simple-bootstrap-lineage-admission-v1\ngeneration=g2\nstatus=qualified\n' >"$external_lineage"
+external_lineage_sha=$(hash "$external_lineage")
+check bootstrap_scheduler_retire_generation "$external_dir" "$external_output" \
+    g2 "$external_lease" stale-old-current-hash "$external_lineage" \
+    "$external_lineage_sha" final-promotion-barrier-stale a b c d
+check test "$(hash "$external_lease")" = "$external_lease_before"
+check test "$(bootstrap_scheduler_manifest_value status "$external_lineage")" = invalidated
+check test "$(bootstrap_scheduler_manifest_value status \
+    "$external_output/scheduler/current.env")" = failed
+
 # A shipped-entry override is inert: an invalid real-engine option must fail,
 # and the attacker-controlled executable must never run.
 fake_engine="$scratch/fake-engine.sh"; marker="$scratch/override-ran"

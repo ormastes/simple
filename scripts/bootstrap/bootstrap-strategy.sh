@@ -771,36 +771,10 @@ if [ "$wants_full_cli" -eq 1 ]; then
     fi
     if [ "$promotion_barrier_status" != verified ]; then
         failure_reason=post-stage4-promotion-barrier-invalid
-        tainted_tmp="$lease.tmp.$$"
-        {
-            echo schema=simple-bootstrap-generation-lease-v1
-            echo generation="$generation"
-            echo status=tainted
-            echo previous_lease_sha256="$lease_sha"
-            echo reason="$failure_reason"
-            echo tainted_epoch_seconds="$(date +%s)"
-        } >"$tainted_tmp"
-        bootstrap_scheduler_atomic_replace "$tainted_tmp" "$lease"
-        bootstrap_scheduler_write_invalidation \
-            "$generation_dir/invalidations" "$generation" stage4 \
-            "$failure_reason" "$lease_sha"
-        failure_tmp="$generation_dir/failure-manifest.env.tmp.$$"
-        {
-            echo schema=simple-bootstrap-failure-manifest-v1
-            echo generation="$generation"
-            echo status=failed
-            echo failure_root=stage4
-            echo failure_reason="$failure_reason"
-            echo expected_input_sha256="$source_digest"
-            echo actual_input_sha256="$actual_input_digest"
-            echo expected_policy_sha256="$policy_sha"
-            echo actual_policy_sha256="$policy_sha_now"
-            echo lease_sha256="$lease_sha"
-            echo descendants=recursively-invalidated
-            echo artifacts=preserved-tainted
-        } >"$failure_tmp"
-        bootstrap_scheduler_atomic_replace "$failure_tmp" \
-            "$generation_dir/failure-manifest.env"
+        bootstrap_scheduler_retire_generation "$generation_dir" "$output" \
+            "$generation" "$lease" "$lease_sha" "$lineage" \
+            "$lineage_sha" "$failure_reason" "$source_digest" \
+            "$actual_input_digest" "$policy_sha" "$policy_sha_now" || exit 1
         echo 'bootstrap-scheduler-error: post-Stage4 promotion barrier failed; publication denied' >&2
         exit 1
     fi
@@ -833,16 +807,18 @@ if [ "$wants_full_cli" -eq 1 ]; then
     [ ! -f "$root/.spipe/policy/vcs.sdn" ] ||
         final_policy_sha=$(bootstrap_scheduler_hash_file \
             "$root/.spipe/policy/vcs.sdn")
+    final_input_digest=$(input_digest)
     if [ "$final_policy_sha" != "$policy_sha" ] ||
        ! bootstrap_scheduler_verify_promotion_barrier \
         "$lease" "$generation" "$lease_sha" "$source_digest" \
-        "$(input_digest)" "$lineage" "$lineage_sha" "$output" \
+        "$final_input_digest" "$lineage" "$lineage_sha" "$output" \
         "$qualification_result" "$stage3_result" \
         "$generation_dir/stage4.result.env"; then
-        bootstrap_scheduler_write_invalidation \
-            "$generation_dir/invalidations" "$generation" stage4 \
-            final-promotion-barrier-stale "$lease_sha"
-        echo 'bootstrap-scheduler-error: generation became stale before qualification; stale lease was not overwritten' >&2
+        bootstrap_scheduler_retire_generation "$generation_dir" "$output" \
+            "$generation" "$lease" "$lease_sha" "$lineage" \
+            "$lineage_sha" final-promotion-barrier-stale "$source_digest" \
+            "$final_input_digest" "$policy_sha" "$final_policy_sha" || exit 1
+        echo 'bootstrap-scheduler-error: generation became stale before qualification; trust state retired' >&2
         exit 1
     fi
 fi
