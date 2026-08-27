@@ -98,3 +98,20 @@ Blocked with reason (left at 49, no weakening):
 - `test/05_perf/db/db_ram_vs_persistent_bench_spec.spl`, `.spipe_wrapped_entry_db_ram_vs_persistent_bench_spec.spl` — perf bench scaffolds needing the deployed embedded-DB timing harness.
 - `test/05_perf/rust_vs_simple_comparison_spec.spl` — needs a Rust toolchain build + timing lane.
 - Deliberate test-infra fixtures (unfixable by design, do not touch): `test/fixtures/_accept_run/{crash,pass_a,pass_b}_spec.spl`, `test/fixtures/pure_simple_tooling/sibling_describe_{green,red}_spec.spl`, `test/fixtures/test_infra/timeout_verdict_probe_spec.spl`, `test/fixtures/unstable_mode/fail_spec.spl`, `test/fixtures/visibility_test/case_spec.spl`, `test/feature/mode_filter/skip_native_spec.spl` (mode-filter probe, `@skip_mode: native`).
+
+## Batch resid7_part_02 (2026-08-27): 108 specs <=80 — 4 fixed, 104 blocked
+
+Fixed (before -> after, all dual-checked green/mutation-FAIL/revert-green; mirrors regenerated):
+- `test/01_unit/lib/gc_async_mut/processing/metal_msl_backend_spec.spl` 79 -> 91
+- `test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl` 79 -> 87 (TRC-003 req binding)
+- `test/01_unit/compiler/parser/desugaring_spec.spl` 49 -> 93 (24 filler scenarios replaced by
+  real compile-and-run fixtures via process_run; async/await IS host-observable on the seed,
+  actor method calls are NOT — JIT `Function 'i64.<m>' not found`, interpreter `method not
+  found on type actor`; generic actor declarations are a parse error on the seed)
+- `test/01_unit/compiler/parser/parser_actor_spec.spl` 49 -> 93 (same pattern)
+
+Blocked: remainder of the batch is source-grep contracts over pure-Simple compiler internals,
+pending/KAT scaffolds, GPU-device evidence, and SimpleOS/QEMU/board lanes — full per-spec list
+with one-line reasons in /tmp/sspec_census/p02_log.txt. New evidence: pre-existing RED
+`test/01_unit/multi_mode_test_runner_spec.spl` (34/34 fail, TestExecutionMode unresolvable from
+test/01_unit, API drift vs std.nogc_sync_mut.test_runner).
