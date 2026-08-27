@@ -54,6 +54,8 @@ mod multiline_shapes_test;
 mod unsafe_inline_body_test;
 #[cfg(test)]
 mod coalesce_diverging_fallback_test;
+#[cfg(test)]
+mod multiline_condition_self_body_test;
 mod rejoined_continuation_test;
 mod trailing_operator_single_line_body_test;
 mod try_probe_test;

@@ -1149,6 +1149,22 @@ impl<'a> Parser<'a> {
                 | TokenKind::Examples
                 | TokenKind::AndThen
                 | TokenKind::Identifier { .. }
+                // `self` and `_` start a statement just as an identifier does
+                // (`self.slots[i].state = X`, `_ = f()`), but were missing from
+                // this list. Both callers ask "can a statement start here?":
+                // `parse_block_after_newline` (flat-body shape) and
+                // `header_continuation_is_equal_column`. The second is what made
+                // this visible: an `if`/`while` whose condition used a
+                // multi-line operator continuation at the SAME column as the
+                // body emits no fresh Indent for the body, so the parser must
+                // recognise the body's first token as a statement start. With
+                // `self` missing it fell through to `expect(Indent)` and failed
+                // with "expected Indent, found Self_" — the exact error in
+                // src/os/kernel/loader/authenticated_fs_exec_submission_service_v1.spl.
+                // Item 23 of doc/08_tracking/bug/
+                // unit_sweep_language_and_interpreter_gaps_2026-08-26.md.
+                | TokenKind::Self_
+                | TokenKind::Underscore
         )
     }
 
