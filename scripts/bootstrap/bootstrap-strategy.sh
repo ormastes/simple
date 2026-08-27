@@ -609,7 +609,6 @@ verify_continuation_evidence() {
         "$continuation_receipt") || return 1
     case "$publication_status" in
         quarantined)
-            [ "$wants_deploy" -eq 0 ] || return 1
             [ "$(bootstrap_scheduler_manifest_value deploy_receipt_path \
                 "$continuation_receipt")" = not-published ] || return 1
             [ "$(bootstrap_scheduler_manifest_value deploy_receipt_sha256 \
@@ -670,12 +669,10 @@ if [ "$wants_full_cli" -eq 1 ]; then
         --bootstrap-receipt="$receipt" --backend="$backend" \
         --mode=dynload --jobs="$critical_cpu" --full-cli
     [ "$no_mcp" -eq 0 ] || set -- "$@" --no-mcp
+    # Stage 4 is always a build-only quarantine invocation. Publication cannot
+    # occur inside this long-running child because the supervisor must recheck
+    # the lease and every bound input after the child exits.
     continuation_quarantine=1
-    if [ "$wants_deploy" -eq 1 ]; then
-        set -- "$@" --deploy
-        continuation_quarantine=0
-    fi
-    [ "$wants_release" -eq 0 ] || set -- "$@" --release
     set +e
     env SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
         SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE="$continuation_quarantine" \
@@ -694,7 +691,6 @@ if [ "$wants_full_cli" -eq 1 ]; then
             >>"$generation_dir/stage4-continuation.log"
     fi
     continuation_output_class=quarantined
-    [ "$wants_deploy" -eq 0 ] || continuation_output_class=protected-publication
     write_task_receipt stage4-continuation "$continuation_status" \
         "$continuation_rc" "$continuation_started" "$continuation_finished" \
         "$continuation_output_class"
@@ -752,11 +748,114 @@ if [ "$wants_full_cli" -eq 1 ]; then
     fi
 fi
 
+if [ "$wants_full_cli" -eq 1 ]; then
+    promotion_barrier_status=invalid
+    policy_sha_now=absent
+    [ ! -f "$root/.spipe/policy/vcs.sdn" ] ||
+        policy_sha_now=$(bootstrap_scheduler_hash_file \
+            "$root/.spipe/policy/vcs.sdn")
+    actual_input_digest=$(input_digest)
+    if [ "$policy_sha_now" = "$policy_sha" ] &&
+       bootstrap_scheduler_verify_promotion_barrier \
+        "$lease" "$generation" "$lease_sha" "$source_digest" \
+        "$actual_input_digest" "$lineage" "$lineage_sha" "$output" \
+        "$qualification_result" "$stage3_result" \
+        "$generation_dir/stage4.result.env" &&
+       bootstrap_stage3_verify_stage2_admission_receipt \
+        "$qualification_admission" "$qualification_candidate" \
+        "$admission_source" "$admission_runtime" "$admission_tool" \
+        "$admission_args" "$admission_sanity" "$admission_receiver" "$root" &&
+       bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" \
+        "$stage3_candidate"; then
+        promotion_barrier_status=verified
+    fi
+    if [ "$promotion_barrier_status" != verified ]; then
+        failure_reason=post-stage4-promotion-barrier-invalid
+        tainted_tmp="$lease.tmp.$$"
+        {
+            echo schema=simple-bootstrap-generation-lease-v1
+            echo generation="$generation"
+            echo status=tainted
+            echo previous_lease_sha256="$lease_sha"
+            echo reason="$failure_reason"
+            echo tainted_epoch_seconds="$(date +%s)"
+        } >"$tainted_tmp"
+        bootstrap_scheduler_atomic_replace "$tainted_tmp" "$lease"
+        bootstrap_scheduler_write_invalidation \
+            "$generation_dir/invalidations" "$generation" stage4 \
+            "$failure_reason" "$lease_sha"
+        failure_tmp="$generation_dir/failure-manifest.env.tmp.$$"
+        {
+            echo schema=simple-bootstrap-failure-manifest-v1
+            echo generation="$generation"
+            echo status=failed
+            echo failure_root=stage4
+            echo failure_reason="$failure_reason"
+            echo expected_input_sha256="$source_digest"
+            echo actual_input_sha256="$actual_input_digest"
+            echo expected_policy_sha256="$policy_sha"
+            echo actual_policy_sha256="$policy_sha_now"
+            echo lease_sha256="$lease_sha"
+            echo descendants=recursively-invalidated
+            echo artifacts=preserved-tainted
+        } >"$failure_tmp"
+        bootstrap_scheduler_atomic_replace "$failure_tmp" \
+            "$generation_dir/failure-manifest.env"
+        echo 'bootstrap-scheduler-error: post-Stage4 promotion barrier failed; publication denied' >&2
+        exit 1
+    fi
+fi
+
+promotion_required=0
+if [ "$wants_deploy" -eq 1 ]; then
+    promotion_required=1
+    promotion_tmp="$generation_dir/promotion-required.env.tmp.$$"
+    {
+        echo schema=simple-bootstrap-promotion-required-v1
+        echo generation="$generation"
+        echo status=blocked-pending-explicit-continuation
+        echo lineage_path="$lineage"
+        echo lineage_sha256="$lineage_sha"
+        echo stage4_result_path="$generation_dir/stage4.result.env"
+        echo stage4_result_sha256="$(bootstrap_scheduler_hash_file "$generation_dir/stage4.result.env")"
+        echo requested_deploy=true
+        echo requested_release="$wants_release"
+        echo reason=automatic-publication-after-long-stage4-is-forbidden
+    } >"$promotion_tmp"
+    bootstrap_scheduler_atomic_replace "$promotion_tmp" \
+        "$generation_dir/promotion-required.env"
+fi
+
+# Close the interval spent writing the promotion decision. A generation that
+# became stale is never rewritten as qualified.
+if [ "$wants_full_cli" -eq 1 ]; then
+    final_policy_sha=absent
+    [ ! -f "$root/.spipe/policy/vcs.sdn" ] ||
+        final_policy_sha=$(bootstrap_scheduler_hash_file \
+            "$root/.spipe/policy/vcs.sdn")
+    if [ "$final_policy_sha" != "$policy_sha" ] ||
+       ! bootstrap_scheduler_verify_promotion_barrier \
+        "$lease" "$generation" "$lease_sha" "$source_digest" \
+        "$(input_digest)" "$lineage" "$lineage_sha" "$output" \
+        "$qualification_result" "$stage3_result" \
+        "$generation_dir/stage4.result.env"; then
+        bootstrap_scheduler_write_invalidation \
+            "$generation_dir/invalidations" "$generation" stage4 \
+            final-promotion-barrier-stale "$lease_sha"
+        echo 'bootstrap-scheduler-error: generation became stale before qualification; stale lease was not overwritten' >&2
+        exit 1
+    fi
+fi
+
 qualified_tmp="$lease.tmp.$$"
 {
     echo schema=simple-bootstrap-generation-lease-v1
     echo generation="$generation"
-    echo status=qualified
+    if [ "$promotion_required" -eq 1 ]; then
+        echo status=qualified-awaiting-explicit-promotion
+    else
+        echo status=qualified
+    fi
     echo previous_lease_sha256="$lease_sha"
     echo lineage_admission_sha256="$(bootstrap_scheduler_hash_file "$generation_dir/lineage-admission.env")"
     echo completed_epoch_seconds="$(date +%s)"
@@ -774,5 +873,9 @@ qualified_current_tmp="$output/scheduler/current.env.tmp.$$"
 bootstrap_scheduler_atomic_replace "$qualified_current_tmp" \
     "$output/scheduler/current.env"
 event generation-qualified lineage qualified
+if [ "$promotion_required" -eq 1 ]; then
+    echo "bootstrap-scheduler-error: Stage 4 is qualified and quarantined, but normal/full deploy and release fail closed until an explicit post-admitted promotion command is implemented; evidence: $generation_dir/promotion-required.env" >&2
+    exit 78
+fi
 echo "bootstrap scheduler: PASS generation=$generation overlap=$overlap_observed schedule=$schedule_mode"
 echo "bootstrap scheduler receipt: $generation_dir/lineage-admission.env"

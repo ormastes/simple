@@ -26,6 +26,8 @@ check grep -Fq bootstrap_scheduler_verify_lineage_admission "$entrypoint"
 check grep -Fq 'ulimit -v' "$supervisor"
 reject grep -Eq 'SIMPLE_BOOTSTRAP_SCHEDULER_(SELFTEST|ENGINE|QUALIFIER)' "$supervisor"
 reject grep -Fq SIMPLE_BOOTSTRAP_SCHEDULER_RELEASE_ADMITTED "$entrypoint"
+reject grep -Eq 'set -- .*--(deploy|release)' "$supervisor"
+check grep -Fq simple-bootstrap-promotion-required-v1 "$supervisor"
 
 output="$scratch/output"; generation_dir="$output/scheduler/g1"
 mkdir -p "$generation_dir" "$output/stage3/platform/stage2-admitted" \
@@ -150,6 +152,19 @@ stage4_provenance_sha256=$(hash "$stage4_provenance")
 EOF
 check bootstrap_scheduler_verify_continuation_result "$continuation_result" g1 \
     "$lease_sha" "$output" quarantined
+check bootstrap_scheduler_verify_promotion_barrier "$lease" g1 "$lease_sha" \
+    input-v1 input-v1 "$lineage" "$lineage_sha" "$output" \
+    "$qualification" "$stage3_result" "$continuation_result"
+reject bootstrap_scheduler_verify_promotion_barrier "$lease" g1 "$lease_sha" \
+    input-v1 source-mutated-during-stage4 "$lineage" "$lineage_sha" "$output" \
+    "$qualification" "$stage3_result" "$continuation_result"
+cp "$lease" "$scratch/lease.before-race"
+sed 's/^status=current$/status=tainted/' "$lease" >"$scratch/lease.raced"
+mv "$scratch/lease.raced" "$lease"
+reject bootstrap_scheduler_verify_promotion_barrier "$lease" g1 "$lease_sha" \
+    input-v1 input-v1 "$lineage" "$lineage_sha" "$output" \
+    "$qualification" "$stage3_result" "$continuation_result"
+cp "$scratch/lease.before-race" "$lease"
 deployed="$output/release/simple"; mkdir -p "$(dirname -- "$deployed")"
 cp "$stage4" "$deployed"; stage4_sha=$(hash "$stage4")
 deploy_receipt="$output/release/bootstrap-deploy-receipt.env"

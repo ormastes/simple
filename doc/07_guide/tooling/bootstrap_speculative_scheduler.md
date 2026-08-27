@@ -72,8 +72,17 @@ booleans and alternate engine/qualifier paths are not authority.
 
 - `--full-cli` uses the admitted Stage-3 continuation and records
   `publication_status=quarantined` without touching `bin/release`.
-- `--deploy` uses the existing exclusive deploy gate after lineage admission.
-- `--release` additionally runs the existing whole-test gate after deployment.
+- `--deploy` and `--release` build and verify Stage 4 in quarantine, then return
+  fail-closed with `promotion-required.env`. The current engine cannot yet
+  separate its deploy/release mutation from its long Stage-4 build, so the
+  supervisor will not pretend that an early admission remains current. A future
+  explicit post-admitted promotion command must consume that receipt.
+
+After the Stage-4 child exits, the supervisor rechecks the exact generation
+lease, source/input digest, policy hash, lineage, qualification result, Stage-2
+admission, Stage-3 provenance, and Stage-4 result. It repeats the immutable
+barrier immediately before qualifying the lease. Drift writes recursive
+invalidation evidence and never rewrites a stale lease as qualified.
 
 No provisional child may update `bin/simple`, protected checks, release state,
 or trusted shared publication records.
