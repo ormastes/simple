@@ -492,3 +492,7 @@ passing placeholder.
     empty-view fallback and has no typed I/O error channel. Preserve its one
     direct read with no retry, extra I/O, copy, lookup, lock, or duplicate
     rendering; a result-typed rendering design is required before safe lifting.
+93. Keep benchmark report persistence on `read_file_text_result`. If an
+    existing metrics table cannot be read, block the append instead of writing
+    a fabricated empty replacement. Preserve one normal read/write per table
+    with no retry, extra I/O, copies, lookup, locks, or report-generation pass.

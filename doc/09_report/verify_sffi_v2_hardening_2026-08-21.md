@@ -660,3 +660,15 @@ a claim that SFFI v2 is complete.
   ownership, verification, and trusted-signature evidence. A result-typed
   rendering API is required before unreadable templates can be safely distinct
   from intentional empty-view fallback.
+
+## Follow-up: benchmark report file-read migration (2026-08-27)
+
+- PASS (static/source): benchmark report persistence no longer declares/calls
+  raw `rt_file_read_text`; both append paths use `read_file_text_result`.
+- PASS (semantics/performance shape): a failed existing-table read blocks the
+  append rather than overwriting historical metrics with an empty replacement.
+  Normal operation retains one read and write per table with no retry, extra
+  I/O, copy, lookup, lock, or report-generation pass. No runtime benchmark was
+  run.
+- FAIL (global admission): the canonical file-read provider remains outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.
