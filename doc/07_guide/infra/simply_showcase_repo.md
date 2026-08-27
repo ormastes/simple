@@ -22,9 +22,28 @@ capability-registry repo — Wave 0 of
 - **Never vendor simply here.** `.gitignore` blocks `examples/simply/` and
   `simply/`; simply's generator fails on any nested `.git` — the two guards
   together prevent recursive checkouts.
-- **`examples/` here is frozen.** New example work goes to ormastes/simply.
-  Deleting the 2,613 files here is deferred until a deliberate
-  `--expect-files` landing through the tree-size push guards.
+- **`examples/` here is partly retired (2026-08-27).** New example work goes to
+  ormastes/simply. Migration was verified file-by-file before any deletion:
+  1,798 of 1,799 tracked entries are byte-identical between the two repos after
+  simply sync commit `9dca83d` (102 files that simple had moved forward on
+  after the 2026-08-25 import — the freeze was violated by commits on 08-26 and
+  08-27); the remaining entry is the `simple_cuda_example` gitlink, already
+  vendored in simply as 96 real files.
+- **Full retirement is BLOCKED, and this is a finding, not a schedule.** A
+  reference census found **732 non-doc files** (364 `test/`, 182 `scripts/`,
+  132 `src/`, plus `.github/`, `.spipe/`, `config/`, `tools/`) that build, test
+  or execute `examples/**`. `examples/09_embedded/` is SimpleOS boot/arch
+  **product code** (per-arch `crt0.S`, baremetal stubs, entry `.spl`) consumed
+  by `scripts/os/`, `scripts/fpga/` and the baremetal system lanes;
+  `examples/05_stdlib/spipe/` is the SPipe source mirror; chunks of
+  `10_tooling/`, `06_io/` and `12_business/` are check-script fixtures. Only
+  **118** files were genuinely unreferenced and deleted. Retiring the rest is a
+  *move* task (relocate that code out of `examples/`, update its referrers),
+  not a deletion. The keep-set is directory-granular — one directory-level
+  reference keeps a whole subtree — so the truly retirable count is likely
+  higher than 118 pending per-reference triage.
+- Historical references under `doc/08_tracking/` and `doc/09_report/` are
+  deliberately **not** rewritten: they are records of what was true at the time.
 ## Producing the dashboard data (native, 2026-08-26)
 
 ```bash
