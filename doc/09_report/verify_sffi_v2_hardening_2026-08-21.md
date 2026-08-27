@@ -190,3 +190,19 @@ a claim that SFFI v2 is complete.
   this is recorded for a dedicated CAS workload, not treated as fixed.
 - FAIL (global admission): no artifact-bound signature or semantic provider
   evidence has been added. Global SFFI verification remains **FAIL**.
+
+## Follow-up: compiler fast-GC raw-owner consolidation (2026-08-27)
+
+- PASS (static/source): twelve raw filesystem/directory/time contracts are
+  unsafe-tagged and reachable only through twelve private always-inline lexical
+  owners. The focused authority audit and source check pass.
+- PASS (performance shape): no retry, allocation, copy, lock, lookup, or
+  dispatch was added; inlining preserves one direct ABI call per owner.
+- WARN (test): `cache_v2/gc_spec.spl` runs nine functional examples, then its
+  unrelated lease-source-text example fails with `semantic: variable dir not
+  found`. It does not import or invoke `fast_gc.spl`, so this is not counted as
+  a regression or PASS.
+- WARN (optimizer): 58 existing fast-GC opportunities remain, including the
+  current selection sweep. No benchmark supports a performance claim.
+- FAIL (global admission): no exact artifact/provider signature or semantic
+  evidence exists. Global SFFI verification remains **FAIL**.

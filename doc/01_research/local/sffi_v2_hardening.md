@@ -1696,3 +1696,22 @@ the wrapper consolidation, whose diff adds no collection or loop. They remain a
 separate cache-performance backlog and must be measured against a representative
 CAS workload before an optimization claim is made. This containment does not
 provide provider signing or global verification.
+
+### Compiler fast-GC raw-owner consolidation (2026-08-27)
+
+The cache fast-GC owner now isolates its twelve filesystem/directory/time raw
+contracts in private `@always_inline` lexical wrappers. The raw calls were
+previously spread through expiry, trash, traversal, and eviction paths. Their
+nullable size, boolean status, and runtime-owned list/walk representations are
+unchanged, while direct callers retain one ABI call after inlining. The static
+authority guard and source check pass; no retry, allocation, copy, lock,
+lookup, or dispatch was added.
+
+The focused GC spec executes nine functional examples successfully but its
+tenth, `Lease nullable-read facade ownership`, fails with
+`semantic: variable dir not found`. That test reads `lease.spl` source text and
+does not import or call `fast_gc.spl`; its failure is an existing test/compiler
+semantic issue, not evidence for this patch. It is recorded as WARN, not PASS.
+Optimizer analysis reports 58 existing fast-GC opportunities (including the
+pre-existing selection sweep); no throughput claim is made without a bounded
+CAS benchmark. This remains unsigned boundary containment.
