@@ -49,7 +49,7 @@ use os.kernel.scheduler.scheduler_types.{
     Scheduler, TaskControlBlock, TIME_SLICE_TICKS,
     SchedulerExecutableAdoptionOwnerStateV1,
     _address_space_can_map, _map_user_process_image,
-    _initial_user_task_context, scheduler_next_task_id_take
+    _initial_user_task_context, scheduler_next_task_lifecycle_identity_take_v1
 }
 use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
 use os.kernel.scheduler.process_execution_observation.{
@@ -259,7 +259,18 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
 
-        val id = TaskId(id: scheduler_next_task_id_take())
+        # Reserve the complete TCB lifetime before any observer or publication
+        # step. A failed attempt burns the identity instead of allowing a later
+        # admitted executable to inherit a stale lifecycle generation.
+        val identity = scheduler_next_task_lifecycle_identity_take_v1()
+        if not identity.?:
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
+        val id = TaskId(id: identity.unwrap().task_id)
         # Reserve command-bound evidence from the exact launch object that
         # passed image/stack validation above.  No post-handoff adapter is
         # allowed to reconstruct or replace this command identity.
@@ -286,7 +297,9 @@ impl Scheduler:
             schedule: default_task_schedule(priority),
             isolation: default_task_isolation(space.id),
             assigned_cpu: 0u32, exit_code: 0,
-            ticks_remaining: TIME_SLICE_TICKS)
+            ticks_remaining: TIME_SLICE_TICKS,
+            lifecycle_generation: identity.unwrap().lifecycle_generation,
+            exec_generation: 1u64)
         self.tasks[slot] = tcb
         register_task_vmspace(
             id.id.to_u32(),
