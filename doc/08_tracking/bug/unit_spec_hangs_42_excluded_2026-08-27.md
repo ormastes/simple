@@ -1,9 +1,12 @@
-# 42 unit specs excluded from the `test/01_unit` sweep as hangs (2026-08-27)
+# Partial optimization and diagnosis of 42 unit-spec exclusions (2026-08-27)
 
-Status: OPEN. Diagnosis complete for the JS/browser cluster; one mechanical
-fix landed; the spec-level blockers are recorded below and are NOT closed.
+Status: OPEN. This change removes one COW alias hot path in the
+`nogc_sync_mut` JS interpreter. It does not resolve or close the excluded
+specs. The 4096-handle timer workload still has an O(total²) property scan,
+and 28 real specs still lack a 900-second measurement.
 
-Binary under test (identical for every measurement in this record):
+Historical evidence binary (identical for every measurement from the
+2026-08-27 sweep recorded below):
 `bin/release/x86_64-unknown-linux-gnu/simple`, size `60744944`,
 mtime `2026-08-26 01:16:25 +0000`. Re-stat before comparing to these numbers —
 the symlink target is replaced by other agents mid-session.
@@ -70,7 +73,17 @@ per-file test output until the verdict, so these logs cannot discriminate an
 import-time hang from an in-test hang. Anyone continuing this work should
 re-run one spec with per-step output forced before drawing that conclusion.
 
-### 2c. NOT YET MEASURED
+### 2c. PREVIOUSLY EVIDENCED TIMEOUT — not rerun in this sweep
+
+`test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl` previously reached
+the 900-second child timeout in a clean checkout, with the process consuming a
+core after an unresolved `SpirvBuilder_dot_create` JIT symbol dropped the whole
+module to the interpreter. That evidence is retained in
+`spirv_builder_module_drops_to_interpreter_via_unresolved_jit_symbol_2026-08-11.md`.
+It is not counted among the 28 unmeasured rows below, and this PR does not
+address its blocker.
+
+### 2d. NOT YET MEASURED (28)
 
 The sweep was still running when this record was written (it measures 4
 specs concurrently at 900s each, ~30 min per batch on a loaded box). These
@@ -86,8 +99,7 @@ are recorded as unmeasured, not as hangs:
 `scram_sha512`, `hda_controller`, `fb_driver`,
 `virtio_input_mmio_contract`, `mmio_test_backend`, `timer_test`,
 `qemu_systest_contract`, `virtio_snd_service_contract`,
-`p256_ecdhe_handshake_secret`, `text_tool_artifact_contract`,
-`spirv_khronos_validation`.
+`p256_ecdhe_handshake_secret`, `text_tool_artifact_contract`.
 
 Live results land in `/mnt/data/tmp/claude-1000/hang_out/times.tsv`
 (`<seconds>\t<rc>\t<spec>`; rc=124 is a timeout). Given 2a, each of these
@@ -117,7 +129,7 @@ run. **This is the spec-level blocker and it is NOT fixed.** Closing it needs
 an `obj_id`-keyed index (or per-object property lists) in `ObjectStore` —
 a design change, deliberately not attempted here.
 
-## 4. Root cause B (FIXED) — COW alias deep-copy in the same function
+## 4. Root cause B — COW alias removed in one family (partial optimization)
 
 Layered on top of the scan, the same function took seven aliases out of
 `self.object_store` and stored all seven back:
@@ -135,11 +147,13 @@ deep-copies a whole parallel array, so every property write copied seven
 arrays of length = total property count. `create_object()` had the same shape
 and deep-copied the **entire object store** per object creation.
 
-Fixed by mutating through the single owner (`self.object_store.<field>`), per
-`.claude/rules/code-style.md`. Correctness re-verified (a 64-timer script
-still yields `pending=64`, rc=0); wall time at n=64 is unchanged at 41s→44s
-because that size is dominated by ~28s of fixed startup, and the surviving
-O(n²) scan of §3 still governs at n=4096.
+The alias round trip is removed from the `nogc_sync_mut` family by mutating
+through the single owner (`self.object_store.<field>`), per
+`.claude/rules/code-style.md`. A bounded semantic regression covers object-id
+allocation plus property insert, isolation, and update behavior. Historical
+64-timer evidence still yields `pending=64`, rc=0; its 41s→44s wall time is
+noise, not evidence of a speedup. The surviving O(n²) scan of §3 still governs
+at n=4096, so no timer timeout or hang is claimed resolved.
 
 **The same defect is still present in the other two stdlib families** and is
 deliberately left for a change that can validate them:
