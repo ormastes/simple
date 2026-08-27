@@ -8,6 +8,7 @@
 use std.spec.step
 
 use std.spec
+use std.common.spec.scenario_evidence.{scenario_api_evidence}
 use std.nogc_sync_mut.engine.render.graph_ir3d.{
     GraphIr3D, GraphIr3DResourceKind, graph_ir3d_optimize_for_3d,
     graph_ir3d_execute
@@ -152,13 +153,16 @@ impl RenderBackend3D for RecordingRenderBackend3D:
         self.shutdown_count = self.shutdown_count + 1
 
 describe "Graph IR 3D":
+    """
+    Purpose and audience: render-graph engineers on the engine team who rely on
+    the backend-neutral 3D graph (record -> optimize for state locality ->
+    replay through RenderBackend3D) staying observable and deterministic
+    without a live GPU device.
+    """
     # @manual scenario evidence
     describe "REQ-3D-GRAPH-001: records backend-neutral 3D passes and draws":
         it "tracks pass, draw, and deduped resource counts":
-        # @req REQ-3D-GRAPH-001
-        # @req REQ-3D-GRAPH-002
-        # @req REQ-3D-GRAPH-003
-    # @req REQ-3D-GRAPH-001
+            # @req REQ-3D-GRAPH-001
             # @req REQ-SSPEC-LIB
             step("tracks pass, draw, and deduped resource counts")
             var graph = GraphIr3D.new()
@@ -167,10 +171,15 @@ describe "Graph IR 3D":
             graph.add_draw(pass_id, mesh, BufferHandle(id: 12), PipelineHandle(id: 20))
             graph.add_draw(pass_id, mesh, BufferHandle(id: 12), PipelineHandle(id: 20))
 
+            # resource_count 6 = deduped set {color tex 1, depth tex 2, mesh 10,
+            # index buffer 11, vertex buffer 12, pipeline 20}: the second draw
+            # reuses every resource, so it deduplicates to nothing new.
             val stats = graph.stats()
             expect(stats.pass_count).to_equal(1)
             expect(stats.draw_count).to_equal(2)
             expect(stats.resource_count).to_equal(6)
+            val stats_evidence = scenario_api_evidence("graph ir3d stats", "GET", "render/graph-ir3d/stats", 200, "passes={stats.pass_count} draws={stats.draw_count} resources={stats.resource_count}", "graph-ir3d", "stats")
+            expect(stats_evidence.body).to_contain("passes=1 draws=2 resources=6")
 
         it "ignores invalid mesh and pipeline handles":
             # @req REQ-SSPEC-LIB
@@ -184,6 +193,7 @@ describe "Graph IR 3D":
 
     describe "REQ-3D-GRAPH-002: optimizes draw order for 3D backend state locality":
         it "sorts draws inside each pass by pipeline then texture then mesh":
+            # @req REQ-3D-GRAPH-002
             # @req REQ-SSPEC-LIB
             step("sorts draws inside each pass by pipeline then texture then mesh")
             var graph = GraphIr3D.new()
@@ -201,6 +211,7 @@ describe "Graph IR 3D":
             expect(optimized.draws[2].pipeline_id).to_equal(9)
 
         it "preserves pass boundaries while batching":
+            # @req REQ-3D-GRAPH-002
             # @req REQ-SSPEC-LIB
             step("preserves pass boundaries while batching")
             var graph = GraphIr3D.new()
@@ -219,6 +230,7 @@ describe "Graph IR 3D":
 
     describe "REQ-3D-GRAPH-003: replays optimized graph through RenderBackend3D":
         it "executes graph draws through a RenderBackend3D implementation":
+            # @req REQ-3D-GRAPH-003
             # @req REQ-SSPEC-LIB
             step("executes graph draws through a RenderBackend3D implementation")
             var backend = RecordingRenderBackend3D.create()
@@ -260,6 +272,7 @@ describe "Graph IR 3D":
             expect(backend.last_index_count).to_equal(3)
 
         it "executes graph draws through the software 3D backend":
+            # @req REQ-3D-GRAPH-003
             # @req REQ-SSPEC-LIB
             step("executes graph draws through the software 3D backend")
             var backend = SoftwareRenderBackend3D.create()
