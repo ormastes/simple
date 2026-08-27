@@ -556,6 +556,32 @@ fn run_convergence_admission(args: [text], as_json: bool) -> i64:
         error("release", receipt.reason)
     if receipt.valid: 0 else: 1
 
+fn _self_review_remediation(reason: text) -> text:
+    if reason.contains("operator policy explicitly denies"):
+        return "stop; the external policy owner must replace or expire the exact deny, or use an eligible independent-review route"
+    if reason.contains("constraint deny scope") or reason.contains("constraint does not allow"):
+        return "reduce the diff to the allowed scope or obtain a new exact external constraint, then review the new head and dispatch again"
+    if reason.contains("restricted path") or reason.contains("semantic restriction") or
+       reason.contains("traversal") or reason.contains("symlink") or
+       reason.contains("submodule") or reason.contains("encoding") or
+       reason.contains("unsupported"):
+        return "remove the unsafe material or object, rotate any exposed credential, create a clean head, then review and dispatch again"
+    if reason.contains("policy") or reason.contains("hash chain") or
+       reason.contains("authentication evidence") or reason.contains("evidence mode"):
+        return "restore authenticated external policy/evidence with its exact digest and TTL, then rerun from a fresh provider snapshot"
+    if reason.contains("author and reviewer") or reason.contains("high-capability") or
+       reason.contains("zero P0/P1") or reason.contains("request identity"):
+        return "use the exact PR author, high-capability review at high effort or above, and honest exact-head PASS with zero P0/P1; otherwise use an eligible independent reviewer"
+    "resolve the current head/base/diff/ruleset, perform a new high-effort exact-head review with zero P0/P1, then dispatch SPipe Self Review Admission again"
+
+fn _print_self_review_precondition(reason: text, as_json: bool) -> i64:
+    val remediation = _self_review_remediation(reason)
+    if as_json:
+        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release self-review-plan\",\"status\":\"rejected\",\"mutation\":\"none\",\"reason\":\"{_json_escape(reason)}\",\"status_semantics\":\"required_check_not_github_author_approved_review\",\"github_author_approved_review_available\":false,\"remediation\":\"{_json_escape(remediation)}\"}"
+    else:
+        error("release", reason + "; remediation: " + remediation + "; GitHub forbids a PR author APPROVED review")
+    1
+
 fn run_self_review_plan(args: [text], as_json: bool) -> i64:
     val keys = [
         "policy-db", "changed-manifest", "repository-provider", "repository-id",
@@ -575,14 +601,14 @@ fn run_self_review_plan(args: [text], as_json: bool) -> i64:
     ]
     val args_check = _validate_command_args(args, keys, flags)
     if not args_check.valid:
-        return _print_release_check("self-review-plan", args_check, as_json)
+        return _print_self_review_precondition(args_check.reason, as_json)
     val configured_policy_path = env_get("SPIPE_SELF_REVIEW_POLICY_DB")
     val requested_policy_path = arg_value(args, "policy-db")
     if configured_policy_path == "" or requested_policy_path != configured_policy_path:
-        return _print_release_check("self-review-plan", ReleaseCheck(
-            valid: false,
-            reason: "self-review policy must come from SPIPE_SELF_REVIEW_POLICY_DB, not the PR worktree"
-        ), as_json)
+        return _print_self_review_precondition(
+            "self-review policy must come from SPIPE_SELF_REVIEW_POLICY_DB, not the PR worktree",
+            as_json
+        )
     val policy = load_self_review_policy_db(requested_policy_path)
     val manifest = load_self_review_changed_manifest(arg_value(args, "changed-manifest"))
     val request = SelfReviewRequest(
@@ -638,15 +664,22 @@ fn run_self_review_plan(args: [text], as_json: bool) -> i64:
         val allowed = if decision_current: "true" else: "false"
         val strict = if decision.strict_up_to_date: "true" else: "false"
         val protected = if decision.protected_target: "true" else: "false"
-        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release self-review-plan\",\"status\":\"{status}\",\"mutation\":\"none\",\"decision_schema\":\"{decision.schema}\",\"allowed\":{allowed},\"reason\":\"{_json_escape(decision.reason)}\",\"repository\":\"{_json_escape(decision.repository)}\",\"pull_request_number\":{decision.pull_request_number},\"head_sha\":\"{decision.head_sha}\",\"base_sha\":\"{decision.base_sha}\",\"merge_base_sha\":\"{decision.merge_base_sha}\",\"diff_sha256\":\"{decision.diff_sha256}\",\"target_repository_id\":{decision.target_repository_id},\"target_ref\":\"{_json_escape(decision.target_ref)}\",\"target_ruleset_id\":\"{_json_escape(decision.target_ruleset_id)}\",\"target_ruleset_version\":\"{decision.target_ruleset_version}\",\"target_ruleset_sha256\":\"{decision.target_ruleset_sha256}\",\"strict_up_to_date\":{strict},\"protected_target\":{protected},\"session_id\":\"{_json_escape(decision.session_id)}\",\"reviewer_identity\":\"{_json_escape(decision.reviewer_identity)}\",\"issued_at_unix\":{decision.issued_at_unix},\"expires_at_unix\":{decision.expires_at_unix},\"policy_db_sha256\":\"{decision.policy_db_sha256}\",\"changed_manifest_sha256\":\"{decision.changed_manifest_sha256}\",\"review_evidence_mode\":\"{decision.review_evidence_mode}\",\"review_evidence_sha256\":\"{decision.review_evidence_sha256}\",\"matched_constraint_record_ids\":[{record_json.join(",")}],\"provider_action\":\"{decision.provider_action}\",\"provider_approval_claimed\":false}"
+        val remediation = if decision_current:
+            "none; if provider state changes or the check expires, review the new exact head and dispatch again"
+        else:
+            _self_review_remediation(decision.reason)
+        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release self-review-plan\",\"status\":\"{status}\",\"mutation\":\"none\",\"decision_schema\":\"{decision.schema}\",\"allowed\":{allowed},\"reason\":\"{_json_escape(decision.reason)}\",\"repository\":\"{_json_escape(decision.repository)}\",\"pull_request_number\":{decision.pull_request_number},\"head_sha\":\"{decision.head_sha}\",\"base_sha\":\"{decision.base_sha}\",\"merge_base_sha\":\"{decision.merge_base_sha}\",\"diff_sha256\":\"{decision.diff_sha256}\",\"target_repository_id\":{decision.target_repository_id},\"target_ref\":\"{_json_escape(decision.target_ref)}\",\"target_ruleset_id\":\"{_json_escape(decision.target_ruleset_id)}\",\"target_ruleset_version\":\"{decision.target_ruleset_version}\",\"target_ruleset_sha256\":\"{decision.target_ruleset_sha256}\",\"strict_up_to_date\":{strict},\"protected_target\":{protected},\"session_id\":\"{_json_escape(decision.session_id)}\",\"reviewer_identity\":\"{_json_escape(decision.reviewer_identity)}\",\"issued_at_unix\":{decision.issued_at_unix},\"expires_at_unix\":{decision.expires_at_unix},\"policy_db_sha256\":\"{decision.policy_db_sha256}\",\"changed_manifest_sha256\":\"{decision.changed_manifest_sha256}\",\"review_evidence_mode\":\"{decision.review_evidence_mode}\",\"review_evidence_sha256\":\"{decision.review_evidence_sha256}\",\"matched_constraint_record_ids\":[{record_json.join(",")}],\"provider_action\":\"{decision.provider_action}\",\"provider_approval_claimed\":false,\"status_semantics\":\"required_check_not_github_author_approved_review\",\"github_author_approved_review_available\":false,\"default_eligibility\":\"ordinary_code_text_absent_operator_deny_or_constraint\",\"remediation\":\"{_json_escape(remediation)}\"}"
     elif decision_current:
         print "Release self-review-plan: PASS"
         print "  exact head: {decision.head_sha}"
         print "  changed manifest: {decision.changed_manifest_sha256}"
         print "  provider action: {decision.provider_action}"
         print "  provider approval claimed: false"
+        print "  status meaning: required check only; GitHub forbids a PR author APPROVED review"
+        print "  default eligibility: ordinary code/text absent an operator deny or constraint"
+        print "  if invalidated: review the new exact head and dispatch again"
     else:
-        error("release", decision.reason)
+        error("release", decision.reason + "; remediation: " + _self_review_remediation(decision.reason) + "; do not attempt an author APPROVED review")
     if decision_current: 0 else: 1
 
 fn _candidate_from_args(args: [text]) -> CandidateManifest:

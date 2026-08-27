@@ -16,6 +16,12 @@ requirements relative to `/sp_dev`.
 This alias runs the same SPipe phases and completion gates as `/sp_dev`; it is
 not a reduced-evidence shortcut.
 
+If the lane reaches protected PR self-review, preserve the `/sp_dev` handoff:
+GitHub forbids an author `APPROVED` review, so `SPipe Self Review Admission` is
+a required status check rather than provider/independent approval. Log the
+exact rejection/invalidation reason and use its scoped remediation; never reuse
+a stale check or weaken merge, candidate, release, or publication authority.
+
 "Lightweight" means fewer PHASES, not a lower bar for landing. Anything that
 reaches `main` carries the same knowledge and evidence obligations as work that
 went through the full pipeline — see the final step check below.
