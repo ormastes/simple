@@ -55,6 +55,15 @@ pub fn io_write_completion_has_progress_v1(result: i64) -> bool:
     """
     result > 0
 
+pub fn io_sendfile_chunk_truncated_v1(requested_remaining: i64, chunk_len: i64) -> bool:
+    """Detect a file body shorter than the bytes promised to transport.
+
+    A zero-length requested transfer is valid and is handled by the Worker.
+    A positive remaining length with no materialized file bytes can never make
+    progress, so keeping that operation pending would spin indefinitely.
+    """
+    requested_remaining > 0 and chunk_len == 0
+
 @unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 @unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
@@ -756,6 +765,11 @@ class IoDriver:
                     if end_pos > content.len():
                         end_pos = content.len()
                     val chunk = content.slice(off, end_pos)
+                    if io_sendfile_chunk_truncated_v1(self._p_length[i], chunk.len()):
+                        self._ev_complete_fd_interest(fd, oid)
+                        self._complete_fd(oid, -1, 0, "", fd)
+                        i = i + 1
+                        continue
                     val res = unsafe(capabilities: [ffi]):
                         rt_io_tcp_write_text(fd, chunk)
                     # The Worker owns offset/remaining progress and will

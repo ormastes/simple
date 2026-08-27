@@ -30,9 +30,11 @@ High-effort reviewer `/root/web_transport_review`; merge owner `/root`; shared i
 
 ## Phase
 
-impl-done-pending-review
+impl-done-unverified-runtime
 
 ## Log
 
 - impl: Replaced readiness-derived completion in text, byte, and sendfile operations with one positive-progress predicate.
-- evidence: `bin/simple test test/01_unit/lib/nogc_async_mut/io/driver_write_completion_spec.spl --mode=interpreter` passed 3/3. The runner emitted the bootstrap-seed warning, so this is focused diagnostic evidence, not release evidence.
+- review: High-effort transport review accepted the one-owner retry design and required an empty-chunk sendfile terminal error; no API or parallel-send change is needed.
+- impl: Added the terminal sendfile-truncation guard so a positive requested body with no available bytes cannot wait indefinitely.
+- evidence: `bin/simple test test/01_unit/lib/nogc_async_mut/io/driver_write_completion_spec.spl --mode=interpreter` passed 5/5 after the final change. The runner emitted the bootstrap-seed warning, so this is focused diagnostic evidence, not release evidence.
