@@ -248,19 +248,25 @@ Use `simple release withdraw-check`. Redeployment may select a prior valid relea
 
 ## Current verification boundary
 
-The live GitHub configuration baseline passes
-`scripts/release/github-policy.shs verify-live ormastes/simple`: all seven
-declared rulesets match their projections, the protected-integration, release,
-and npm-release environments exist with the declared policy, and immutable
-releases are enabled. This is configuration evidence, not release admission.
+The prior live GitHub configuration baseline covered all seven declared
+rulesets, the protected-integration, release, and npm-release environments, and
+immutable releases. The complete privileged self-review projection additionally
+requires read-only repository Actions defaults and the declared
+`self-review-admission` environment; `verify-live` now checks those surfaces and
+prints a normalized projection SHA-256 only after every comparison passes. This
+is configuration evidence, not release admission.
 The declared environment reviewer is also the sole repository owner, so GitHub
 `prevent_self_review` still makes the release-environment path circular. The
 candidate/release `SPipe Review Admission` App projection is not configured and
-`github-policy.shs apply-live` consequently remains fail-closed. The separate
-PR `SPipe Self Review Admission` source projection now exists, but it is not
-live evidence until the one-time bootstrap plan is executed, the external
-policy DB secret is configured, the workflow is present on the default branch,
-both protected rulesets are CAS-applied, and live parity is reverified.
+its future `broker_signed` lane remains fail-closed. `github-policy.shs
+apply-live --yes` supports only the separately configured, explicitly
+user-accepted `self_attested` generic-Actions lane: it sets read-only workflow
+defaults, declares the `self-review-admission` environment, applies the `main`
+and `release/*` rulesets with zero provider approvals and exact `SPipe Self
+Review Admission`, then runs live parity verification and emits its digest. The
+source projection is not live evidence until the repository policy owner runs
+that command after configuring the external policy DB secret and retains its
+post-apply receipt.
 
 The exact release lineage still lacks admitted Stage 3 and Stage 4 receipts and
 one clean release-grade `bin/simple test test --whole --mode=interpreter` PASS.

@@ -87,6 +87,42 @@ default is read-only and the intended emitter is gated by the
 App into a distinct broker identity. Replace it with a dedicated App if an
 independent security boundary is required.
 
+## Applying the GitHub projection
+
+After the workflow is present on the trusted default branch and the external
+policy DB secret is configured, the repository policy owner may run:
+
+```sh
+sh scripts/release/github-policy.shs apply-live --yes ormastes/simple
+```
+
+Live apply is intentionally limited to the configured `self_attested` generic
+Actions mode. Its preflight requires the explicit generic-App trust acceptance,
+App ID, zero provider approvals, exact `SPipe Self Review Admission` status
+check, read-only repository workflow defaults, and the protected-branch-only
+`self-review-admission` execution environment. It then applies only the `main`
+and `release/*` self-review rulesets together with those workflow defaults and
+environment. An unconfigured `broker_signed` mode fails closed; the dedicated
+candidate/release broker remains a separate unsupported lane.
+
+The mutating command must run from a clean checkout whose `HEAD` is the exact
+provider-resolved `main` head. It does not derive check names or App IDs from
+mutable broker JSON. Instead it generates the complete canonical normalized
+`main` and `release/*` rulesets with literal protected-ref conditions,
+deletion/non-fast-forward guards, review-thread and create-time enforcement,
+merge methods, and the exact `Code Idiom & Structural Ratchet Gates` and
+`SPipe Self Review Admission` checks from GitHub Actions App ID 15368. Generated
+bytes must match the pinned normalized SHA-256 values and the checked-in
+manifests before any API write.
+
+The command finishes by reading the live rulesets, environments, workflow
+defaults, and immutable-release setting back from GitHub. PUT payloads and
+post-apply comparisons use the same frozen canonical snapshot, so concurrent
+local projection drift cannot redefine success. Every normalized projection
+must match before it prints the deterministic live projection SHA-256. A digest
+is post-apply configuration evidence, not review, candidate, or release
+admission. Run `verify-live` separately for read-only inspection.
+
 Immediately before success, the workflow re-resolves the PR/base/ruleset and
 regenerates the merge-base diff and compares the normalized active-ruleset
 digest. PR edit/retarget/synchronize/close events, protected-base pushes, and

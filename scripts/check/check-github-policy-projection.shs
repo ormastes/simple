@@ -61,6 +61,11 @@ jq -e '
   .privileged_self_review.workflow == ".github/workflows/review-admission.yml" and
   .privileged_self_review.trusted_default_branch == "main" and
   .privileged_self_review.environment == "self-review-admission" and
+  .privileged_self_review.repository_actions_default_permissions == "read" and
+  .privileged_self_review.workflow_permissions_projection == ".github/actions-workflow-permissions.json" and
+  .privileged_self_review.environment_projection == ".github/self-review-admission-environment.json" and
+  .privileged_self_review.apply_live == true and
+  .privileged_self_review.apply_live_mode == "self_attested_generic_actions" and
   .privileged_self_review.generic_actions_app_trust_accepted == true and
   .privileged_self_review.generic_actions_app_is_independent_security_identity == false and
   .privileged_self_review.server_resolved_head_base_merge_base_diff_and_ruleset == true and
@@ -79,8 +84,17 @@ jq -e '
   .github/review-admission-broker.json >/dev/null ||
     fail "unconfigured dedicated review broker plan is not fail-closed"
 
-[ "$(find .github -maxdepth 1 -name '*-environment.json' | wc -l)" -eq 3 ] ||
-    fail "expected protected-integration, release, and npm-release environments"
+[ "$(find .github -maxdepth 1 -name '*-environment.json' | wc -l)" -eq 4 ] ||
+    fail "expected protected-integration, release, npm-release, and self-review-admission environments"
+jq -e '.default_workflow_permissions == "read" and
+       .can_approve_pull_request_reviews == false' \
+    .github/actions-workflow-permissions.json >/dev/null ||
+    fail "repository Actions workflow permissions are not read-only"
+jq -e '.wait_timer == 0 and .prevent_self_review == false and
+       .reviewers == [] and .deployment_branch_policy ==
+         {protected_branches:true,custom_branch_policies:false}' \
+    .github/self-review-admission-environment.json >/dev/null ||
+    fail "self-review-admission environment projection is stale"
 
 rendered=$(scripts/release/github-policy.shs render)
 [ "$(printf '%s' "$rendered" | jq 'length')" -eq 7 ] || fail "expected seven rulesets"
@@ -162,6 +176,10 @@ rg -q 'admin_bypass: deny' .spipe/policy/vcs.sdn ||
     fail "review admission permits an admin bypass"
 rg -q 'live_apply: unsupported_until_external_signed_broker' .spipe/policy/vcs.sdn ||
     fail "unconfigured review broker does not block live apply"
+rg -q 'live_apply: self_attested_generic_actions_only' .spipe/policy/vcs.sdn ||
+    fail "privileged self-review generic Actions live apply is missing"
+rg -q 'broker_signed_live_apply: require_configured_external_signed_broker' .spipe/policy/vcs.sdn ||
+    fail "broker-signed self-review does not fail closed"
 rg -q 'required_status_context: SPipe Self Review Admission' .spipe/policy/vcs.sdn ||
     fail "privileged self-review status context is missing"
 rg -q 'default_allow: true' .spipe/policy/self-review-policy.sdn ||
