@@ -20,7 +20,7 @@ Checks shared task store subscription, hide, polling, and collapse behavior.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks shared task store subscription, hide, polling, and collapse behavior.
@@ -40,6 +40,53 @@ shipped CLI/TUI reachability or live process behavior.
 ### supporting hook and store lifecycle parts-bin behavior
 
 #### should subscribe lazily and stop on last unsubscribe
+
+- should subscribe lazily and stop on last unsubscribe
+- Store starts on first subscriber and stops at zero
+   - Expected: store.started is true
+   - Expected: store.subscriberCount equals `2`
+   - Expected: store.started is true
+   - Expected: store.subscriberCount equals `1`
+   - Expected: store.watcherActive is true
+   - Expected: store.debounceTimerActive is true
+   - Expected: store.started is false
+   - Expected: store.subscriberCount equals `0`
+   - Expected: store.watcherActive is false
+   - Expected: store.debounceTimerActive is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-LLM-CARET-HIDDEN-008
+step("should subscribe lazily and stop on last unsubscribe")
+step("Store starts on first subscriber and stops at zero")
+val store = TasksV2Store.new()
+store.subscribe()
+store.subscribe()
+expect(store.started).to_equal(true)
+expect(store.subscriberCount).to_equal(2)
+store.rewatch("/tmp/tasks", true)
+store.debouncedFetch()
+store.unsubscribe()
+expect(store.started).to_equal(true)
+expect(store.subscriberCount).to_equal(1)
+expect(store.watcherActive).to_equal(true)
+expect(store.debounceTimerActive).to_equal(true)
+store.unsubscribe()
+expect(store.started).to_equal(false)
+expect(store.subscriberCount).to_equal(0)
+expect(store.watcherActive).to_equal(false)
+expect(store.debounceTimerActive).to_equal(false)
+```
+
+</details>
+
 #### should share one store across hook subscribers
 
 - should share one store across hook subscribers
@@ -406,45 +453,41 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `51aaff6d6bdeb48363b59391cc7c242d8e79eaaf6fd4c5107b0eb3a2452cdc56`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `3d7bc4dc22b900cbd5bae92001183c0e31e317e9d769ad4e726ff80b58ccab14`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `51aaff6d6bdeb48363b59391cc7c242d8e79eaaf6fd4c5107b0eb3a2452cdc56`.
+Source SHA-256: `3d7bc4dc22b900cbd5bae92001183c0e31e317e9d769ad4e726ff80b58ccab14`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `51aaff6d6bdeb48363b59391cc7c242d8e79eaaf6fd4c5107b0eb3a2452cdc56`  
+Source SHA-256: `3d7bc4dc22b900cbd5bae92001183c0e31e317e9d769ad4e726ff80b58ccab14`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl
 mirror: doc/06_spec/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
 doc/06_spec/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
+test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 21 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:28:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should subscribe lazily and stop on last unsubscribe' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:28:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should subscribe lazily and stop on last unsubscribe' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should subscribe lazily and stop on last unsubscribe' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:51:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should share one store across hook subscribers' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
@@ -460,9 +503,6 @@ test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:71:1: warning SSD
 test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:86:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fetch visible tasks and schedule timers' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should fetch visible tasks and schedule timers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl:99:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should hide empty and completed task lists' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.

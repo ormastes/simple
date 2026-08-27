@@ -20,7 +20,7 @@
 | Category | Tooling |
 | Status | Implemented |
 | Source | `test/unit/app/replay/replay_no_self_spawn_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and Audience
@@ -116,7 +116,6 @@ expect_terminating_diagnostic(source, "log file not found")
 - carries no invocation of its own subcommand
 - Read the replay entrypoint source
 - No `bin/simple replay ...` self-invocation remains
-   - Expected: spawns_own_subcommand(source, "replay") is false
 
 
 <details>
@@ -131,7 +130,7 @@ step("carries no invocation of its own subcommand")
 step("Read the replay entrypoint source")
 val source = read_cli_source("src/app/replay/main.spl")
 step("No `bin/simple replay ...` self-invocation remains")
-expect(spawns_own_subcommand(source, "replay")).to_equal(false)
+assert_equal(spawns_own_subcommand(source, "replay"), false)
 ```
 
 </details>
@@ -141,7 +140,6 @@ expect(spawns_own_subcommand(source, "replay")).to_equal(false)
 - keeps the incident rationale attached to the fixed branch
 - Read the replay entrypoint source
 - The bug record is cited where the self-spawn used to be
-   - Expected: source contains `simple_replay_self_spawns_unbounded_process_chain`
 
 
 <details>
@@ -156,7 +154,7 @@ step("keeps the incident rationale attached to the fixed branch")
 step("Read the replay entrypoint source")
 val source = read_cli_source("src/app/replay/main.spl")
 step("The bug record is cited where the self-spawn used to be")
-expect(source.contains("simple_replay_self_spawns_unbounded_process_chain")).to_equal(true)
+assert_equal(source.contains("simple_replay_self_spawns_unbounded_process_chain"), true)
 ```
 
 </details>
@@ -166,13 +164,9 @@ expect(source.contains("simple_replay_self_spawns_unbounded_process_chain")).to_
 - the self-spawn detector actually detects a self-spawn
 - Construct source that does delegate to its own subcommand
 - The detector reports it
-   - Expected: spawns_own_subcommand(bad, "replay") is true
 - And a same-shaped call to a DIFFERENT subcommand is not a self-spawn
-   - Expected: spawns_own_subcommand(bad, "build") is false
 - A COMMENT quoting the old invocation is not a self-spawn
-   - Expected: spawns_own_subcommand(commented, "replay") is false
 - A help/usage string naming the subcommand is not a self-spawn
-   - Expected: spawns_own_subcommand(usage, "replay") is false
 
 
 <details>
@@ -187,15 +181,15 @@ step("the self-spawn detector actually detects a self-spawn")
 step("Construct source that does delegate to its own subcommand")
 val bad = "fn delegate(): shell(\"./bin/simple replay \" + target)"
 step("The detector reports it")
-expect(spawns_own_subcommand(bad, "replay")).to_equal(true)
+assert_equal(spawns_own_subcommand(bad, "replay"), true)
 step("And a same-shaped call to a DIFFERENT subcommand is not a self-spawn")
-expect(spawns_own_subcommand(bad, "build")).to_equal(false)
+assert_equal(spawns_own_subcommand(bad, "build"), false)
 step("A COMMENT quoting the old invocation is not a self-spawn")
 val commented = "# never do: shell(\"./bin/simple replay \" + target)"
-expect(spawns_own_subcommand(commented, "replay")).to_equal(false)
+assert_equal(spawns_own_subcommand(commented, "replay"), false)
 step("A help/usage string naming the subcommand is not a self-spawn")
 val usage = "    print \"Usage: simple replay [options] <trace.srr>\""
-expect(spawns_own_subcommand(usage, "replay")).to_equal(false)
+assert_equal(spawns_own_subcommand(usage, "replay"), false)
 ```
 
 </details>
@@ -207,9 +201,7 @@ expect(spawns_own_subcommand(usage, "replay")).to_equal(false)
 - holds for every entrypoint known to have had the hazard
 - Check each entrypoint against its own subcommand name
 - No entrypoint self-delegates
-   - Expected: offenders.len() equals `0`
 - The sweep examined a non-empty set (non-vacuity control)
-   - Expected: entries.len() equals `1`
 
 
 <details>
@@ -235,9 +227,9 @@ while i < entries.len():
         offenders.push(path)
     i = i + 1
 step("No entrypoint self-delegates")
-expect(offenders.len()).to_equal(0)
+assert_equal(offenders.len(), 0)
 step("The sweep examined a non-empty set (non-vacuity control)")
-expect(entries.len()).to_equal(1)
+assert_equal(entries.len(), 1)
 ```
 
 </details>
@@ -266,33 +258,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `bf10a7ec95e7c4c770b9ad30e1a33d26a7f041e3bd169a1d3693362330e8cecd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8d290725de83cb39c31c201ffd79c942aaccd447c2a484a7886a48e42e4bd465`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `bf10a7ec95e7c4c770b9ad30e1a33d26a7f041e3bd169a1d3693362330e8cecd`.
+Source SHA-256: `8d290725de83cb39c31c201ffd79c942aaccd447c2a484a7886a48e42e4bd465`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `bf10a7ec95e7c4c770b9ad30e1a33d26a7f041e3bd169a1d3693362330e8cecd`  
+Source SHA-256: `8d290725de83cb39c31c201ffd79c942aaccd447c2a484a7886a48e42e4bd465`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **81/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 95/100
 source: test/unit/app/replay/replay_no_self_spawn_spec.spl
 mirror: doc/06_spec/unit/app/replay/replay_no_self_spawn_spec.md (current)
-findings: 5 blockers: 1
-  narrative=100 structure=100 oracle=30
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=81; blocker cap makes effective=49
-test/unit/app/replay/replay_no_self_spawn_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/app/replay/replay_no_self_spawn_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
 test/unit/app/replay/replay_no_self_spawn_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'the build-log branch reports instead of delegating to itself' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.

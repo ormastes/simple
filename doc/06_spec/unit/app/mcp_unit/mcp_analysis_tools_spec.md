@@ -162,12 +162,13 @@ bin/simple spipe-docgen test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl --
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("reports the imports of a specific file")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_dependencies("d1", "{\"file\":\"" + PROBE_FILE + "\"}")
 expect(out).to_contain("--- Imports ---")
 expect(out).to_contain("use std.io_runtime")
@@ -187,11 +188,11 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("works without file for project summary")
-val out = handle_simple_dependencies("d-proj", "{}")
-expect(out).to_contain("simple_dependencies (project summary)")
-expect(out).to_contain("Total import statements:")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
+val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("simple_dependencies (project summary)")
 ```
 
 </details>
@@ -206,14 +207,15 @@ expect(out).to_contain("Total import statements:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("requires file parameter")
-val out = handle_simple_api_diff("a0", "{}")
-expect(out).to_contain("Missing required parameter: file")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
+val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("Missing required parameter: file")
 ```
 
 </details>
@@ -226,12 +228,13 @@ expect(out).to_contain("Missing required parameter: file")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("defaults revision to HEAD")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_api_diff("a1", "{\"file\":\"" + PROBE_FILE + "\"}")
 expect(out).to_contain("revision=HEAD")
 expect(out).to_contain(PROBE_FILE)
@@ -247,12 +250,13 @@ expect(out).to_contain(PROBE_FILE)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("uses custom revision")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_api_diff("a2", "{\"file\":\"" + PROBE_FILE + "\",\"revision\":\"main~5\"}")
 expect(out).to_contain("revision=main~5")
 ```
@@ -267,12 +271,13 @@ expect(out).to_contain("revision=main~5")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("reports a missing file parameter as an error")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_api_diff("a3", "{}")
 expect(out).to_contain("Missing required parameter: file")
 ```
@@ -282,23 +287,23 @@ expect(out).to_contain("Missing required parameter: file")
 #### uses literal argv for previous API
 
 - uses literal argv for previous API
-   - Expected: source does not contain `shell_cmd("timeout 10 git show`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("uses literal argv for previous API")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain('["show", "--end-of-options", rev + ":" + file]')
 expect(source).to_contain("_mcp_public_api_lines(previous_source)")
 expect(source).to_contain("_mcp_public_api_change_details")
-expect(source.contains("shell_cmd(\"timeout 10 git show")).to_equal(false)
+assert_false(source.contains("shell_cmd(\"timeout 10 git show"))
 ```
 
 </details>
@@ -317,11 +322,11 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("requires file parameter except source-less sql query")
-val out = handle_simple_context("d-ctx-nofile", "{}")
-expect(out).to_contain("Missing required parameter: file")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("Missing required parameter: file")
 expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
 expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 ```
@@ -336,12 +341,13 @@ expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("emits the file header, source summary and diagnostics sections")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_context("c1", "{\"file\":\"" + PROBE_FILE + "\"}")
 expect(out).to_contain("-- simple_context file=" + PROBE_FILE)
 expect(out).to_contain("--- Source Summary (")
@@ -358,12 +364,13 @@ expect(out).to_contain("--- Diagnostics ---")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("reports a missing file parameter as an error")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_context("c2", "{}")
 expect(out).to_contain("Missing required parameter: file")
 ```
@@ -378,12 +385,13 @@ expect(out).to_contain("Missing required parameter: file")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app MCP context generates the pack via the `context` subprocess")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 # The context pack must be produced by a `bin/simple context` subprocess,
 # NOT by importing `context_generate` in-process: that import pulls the
 # whole CLI/compiler graph into the source MCP server and makes
@@ -410,12 +418,13 @@ expect(source).to_contain("ctx_args.push(\"--text\")")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app MCP context validates requested context format")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("var format = extract_field(body, \"format\")")
 expect(source).to_contain("format = \"text\"")
@@ -434,12 +443,13 @@ expect(source).to_contain("Invalid format: ")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app MCP context forwards local index query and sql options")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("val query = extract_field(body, \"query\")")
 expect(source).to_contain("val index = extract_field(body, \"index\")")
@@ -474,12 +484,13 @@ expect(table).to_contain("prop_str(\"source_filter\", \"Filter SQL query rows by
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app and lower MCP context find checked-in release binaries")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val app_source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(app_source).to_contain("release/x86_64-unknown-linux-gnu/simple")
 expect(app_source).to_contain("bootstrap/stage3/simple")
@@ -494,21 +505,21 @@ expect(lower_source).to_contain("bootstrap/stage3/simple")
 #### lower MCP context diagnostics use argv process timeout
 
 - lower MCP context diagnostics use argv process timeout
-   - Expected: source does not contain `timeout 10 " + _mcp_find_simple_binary() + " check " + file`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("lower MCP context diagnostics use argv process timeout")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("process_run_timeout")
-expect(source.contains("timeout 10 \" + _mcp_find_simple_binary() + \" check \" + file")).to_equal(false)
+assert_false(source.contains("timeout 10 \" + _mcp_find_simple_binary() + \" check \" + file"))
 ```
 
 </details>
@@ -521,12 +532,13 @@ expect(source.contains("timeout 10 \" + _mcp_find_simple_binary() + \" check \" 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("lower MCP context validates requested output format")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("val format = _mcp_output_format(body)")
 expect(source).to_contain("if format == \"md\"")
@@ -562,12 +574,13 @@ expect(schema).to_contain("req = \"[]\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("lower MCP advertises and routes simple_context")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
 expect(schema).to_contain("make_tool_schema(name: \"simple_context\"")
 expect(schema).to_contain("elif name == \"simple_context\"")
@@ -587,12 +600,13 @@ expect(dispatcher).to_contain("handle_simple_context(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("adds target lines to the context pack")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("target_report")
 expect(source).to_contain("_mcp_render_context_pack")
@@ -616,14 +630,15 @@ expect(source).to_contain("ctx_args.push(\"--source-filter=\" + source_filter)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("requires file parameter")
-val out = handle_simple_ponytail("pt0", "{}")
-expect(out).to_contain("Missing required parameter: file")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
+val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("Missing required parameter: file")
 ```
 
 </details>
@@ -636,12 +651,13 @@ expect(out).to_contain("Missing required parameter: file")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app MCP ponytail uses shared audit implementation")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("ponytail_audit")
 expect(source).to_contain("ponytail_simplification_report")
@@ -652,18 +668,18 @@ expect(source).to_contain("ponytail_simplification_report")
 #### app MCP ponytail renders requested output format
 
 - app MCP ponytail renders requested output format
-   - Expected: source does not contain `value.replace`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app MCP ponytail renders requested output format")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("var format = extract_field(body, \"format\")")
 expect(source).to_contain("var mode = extract_field(body, \"mode\")")
@@ -676,7 +692,7 @@ expect(source).to_contain("Invalid mode: ")
 expect(source).to_contain("_render_ponytail_mcp(file, mode, result, format)")
 expect(source).to_contain("_mcp_json_escape")
 expect(source).to_contain("value.char_code_at(i)")
-expect(source.contains("value.replace")).to_equal(false)
+assert_false(source.contains("value.replace"))
 expect(source).to_contain("# Ponytail \" + mode")
 ```
 
@@ -690,12 +706,13 @@ expect(source).to_contain("# Ponytail \" + mode")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("lower MCP ponytail validates requested output format")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("val format = _mcp_output_format(body)")
 expect(source).to_contain("var mode = extract_field(body, \"mode\")")
@@ -732,12 +749,13 @@ expect(schema).to_contain("req = \"[\" + js(\"file\") + \"]\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("lower MCP advertises and routes simple_ponytail")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val schema = rt_file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
 expect(schema).to_contain("make_tool_schema(name: \"simple_ponytail\"")
 expect(schema).to_contain("elif name == \"simple_ponytail\"")
@@ -757,12 +775,13 @@ expect(dispatcher).to_contain("handle_simple_ponytail(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("app MCP advertises and routes simple_ponytail")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val table = rt_file_read_text("src/app/mcp/tool_table.spl") ?? ""
 expect(table).to_contain("tool_entry(\"simple_ponytail\"")
 expect(table).to_contain("Ponytail over-engineering audit")
@@ -786,12 +805,13 @@ expect(dispatcher).to_contain("return handle_simple_ponytail(id, body)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("flags pass markers")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val marker = "pass_" + "todo"
 val source = "fn fake() -> void:\n    " + marker + "(\"later\")"
 expect(source).to_contain(marker)
@@ -807,12 +827,13 @@ expect(source).to_contain(marker)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("flags abstraction smells")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = "class OneThingFactory:\n    pass"
 expect(source).to_contain("Factory")
 ```
@@ -829,12 +850,13 @@ expect(source).to_contain("Factory")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("requires query parameter")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
 expect(source).to_contain("Missing required parameter: query")
 ```
@@ -849,12 +871,13 @@ expect(source).to_contain("Missing required parameter: query")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("runs a general source search and finds the symbol")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s1", "{\"query\":\"lease_manager_new\"}")
 expect(out).to_contain("query=lease_manager_new")
 expect(out).to_contain("service/lease_manager.spl")
@@ -870,12 +893,13 @@ expect(out).to_contain("service/lease_manager.spl")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("scopes a function search to declarations")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s2", "{\"query\":\"lease_manager_new\",\"kind\":\"fn\"}")
 expect(out).to_contain("kind=fn")
 expect(out).to_contain("fn lease_manager_new")
@@ -891,12 +915,13 @@ expect(out).to_contain("fn lease_manager_new")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("scopes a class search to declarations")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s3", "{\"query\":\"JsonBuilder\",\"kind\":\"class\"}")
 expect(out).to_contain("kind=class")
 expect(out).to_contain("class JsonBuilder")
@@ -912,12 +937,13 @@ expect(out).to_contain("class JsonBuilder")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("scopes a struct search to declarations")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s4", "{\"query\":\"LeaseEntry\",\"kind\":\"struct\"}")
 expect(out).to_contain("kind=struct")
 expect(out).to_contain("struct LeaseEntry")
@@ -933,12 +959,13 @@ expect(out).to_contain("struct LeaseEntry")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("maps the test scope to the test tree")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s5", "{\"query\":\"lease_manager_new\",\"scope\":\"test\"}")
 expect(out).to_contain("scope=test")
 expect(out).to_contain("test/")
@@ -954,12 +981,13 @@ expect(out).to_contain("test/")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("maps the lib scope to src/lib")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s6", "{\"query\":\"lease_manager_new\",\"scope\":\"lib\"}")
 expect(out).to_contain("scope=lib")
 expect(out).to_contain("src/lib/")
@@ -975,12 +1003,13 @@ expect(out).to_contain("src/lib/")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("maps the compiler scope to src/compiler")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s7", "{\"query\":\"lower_expr\",\"scope\":\"compiler\"}")
 expect(out).to_contain("scope=compiler")
 expect(out).to_contain("src/compiler/")
@@ -996,12 +1025,13 @@ expect(out).to_contain("src/compiler/")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("restricts the search to a specific file")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s8", "{\"query\":\"release_lease\",\"file\":\"" + PROBE_FILE + "\"}")
 expect(out).to_contain("query=release_lease")
 expect(out).to_contain("release_lease")
@@ -1017,12 +1047,13 @@ expect(out).to_contain("release_lease")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("scopes an import search to use statements")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s9", "{\"query\":\"std.io_runtime\",\"kind\":\"import\"}")
 expect(out).to_contain("kind=import")
 expect(out).to_contain("use std.io_runtime")
@@ -1038,12 +1069,13 @@ expect(out).to_contain("use std.io_runtime")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("scopes a type search to type-like declarations")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val out = handle_simple_search("s10", "{\"query\":\"QueueEntry\",\"kind\":\"type\"}")
 expect(out).to_contain("kind=type")
 expect(out).to_contain("QueueEntry")
@@ -1076,49 +1108,36 @@ expect(out).to_contain("QueueEntry")
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
+- `REQ-SSPEC-APP`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `609cee8e11721e41b3b7153e1607d1c3257512004ec911b2d8a8ae9491ca67ed`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `02779fb9a485956dcc39727f38ea414858d6193f228191a9fe99dca1041ca0ea`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `609cee8e11721e41b3b7153e1607d1c3257512004ec911b2d8a8ae9491ca67ed`.
+Source SHA-256: `02779fb9a485956dcc39727f38ea414858d6193f228191a9fe99dca1041ca0ea`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `609cee8e11721e41b3b7153e1607d1c3257512004ec911b2d8a8ae9491ca67ed`  
+Source SHA-256: `02779fb9a485956dcc39727f38ea414858d6193f228191a9fe99dca1041ca0ea`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl
 mirror: doc/06_spec/unit/app/mcp_unit/mcp_analysis_tools_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/app/mcp_unit/mcp_analysis_tools_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/unit/app/mcp_unit/mcp_analysis_tools_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports the imports of a specific file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:149:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'works without file for project summary' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:161:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires file parameter' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

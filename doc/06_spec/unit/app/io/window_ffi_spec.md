@@ -1,6 +1,6 @@
-# Window Ffi Specification
+# window_ffi_spec
 
-> Tests covering window FFI compatibility facade.
+> Purpose: this manual pins the behavior named "window FFI compatibility facade" for the owning engineering team.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,22 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Window Ffi Specification
+# window_ffi_spec
+
+Purpose: this manual pins the behavior named "window FFI compatibility facade" for the owning engineering team.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/unit/app/io/window_ffi_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose: this manual pins the behavior named "window FFI compatibility facade" for the owning engineering team.
+    Audience: engineers verifying regressions in this area; steps below are executable evidence.
 
 ## Scenarios
 
@@ -22,22 +37,21 @@
 
 
 - contains no duplicate foreign declarations
-   - Expected: source does not contain `extern fn `
-   - Expected: source does not contain `@extern(`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("contains no duplicate foreign declarations")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/io/window_ffi.spl")
-expect(source.contains("extern fn ")).to_equal(false)
-expect(source.contains("@extern(")).to_equal(false)
+assert_false(source.contains("extern fn "))
+assert_false(source.contains("@extern("))
 ```
 
 </details>
@@ -45,25 +59,23 @@ expect(source.contains("@extern(")).to_equal(false)
 #### delegates to the canonical SFFI owner with explicit exports
 
 - delegates to the canonical SFFI owner with explicit exports
-   - Expected: source contains `window_create_event_loop`
-   - Expected: source contains `window_clipboard_set`
-   - Expected: source does not contain `window_sffi.*`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("delegates to the canonical SFFI owner with explicit exports")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/io/window_ffi.spl")
 expect(source).to_contain("export use app.io.window_sffi.{{")
-expect(source.contains("window_create_event_loop")).to_equal(true)
-expect(source.contains("window_clipboard_set")).to_equal(true)
-expect(source.contains("window_sffi.*")).to_equal(false)
+expect(source).to_contain("window_create_event_loop")
+expect(source).to_contain("window_clipboard_set")
+assert_false(source.contains("window_sffi.*"))
 ```
 
 </details>
@@ -71,40 +83,24 @@ expect(source.contains("window_sffi.*")).to_equal(false)
 #### does not re-export raw runtime symbols
 
 - does not re-export raw runtime symbols
-   - Expected: source does not contain `rt_sdl2_`
-   - Expected: source does not contain `rt_winit_`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("does not re-export raw runtime symbols")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/io/window_ffi.spl")
-expect(source.contains("rt_sdl2_")).to_equal(false)
-expect(source.contains("rt_winit_")).to_equal(false)
+assert_false(source.contains("rt_sdl2_"))
+assert_false(source.contains("rt_winit_"))
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/unit/app/io/window_ffi_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering window FFI compatibility facade.
-- window FFI compatibility facade
 
 ## Scenario Summary
 
@@ -124,49 +120,36 @@ Tests covering window FFI compatibility facade.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
+- `REQ-SSPEC-APP`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `4cd7681dbb44a48aac0b89439b23b1d6ff9220ecc99702165138428f281df728`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `05925d4382388f5d79d517105ad3b2a8a79841c4ce1d34ead61ae034c6cc21ad`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `4cd7681dbb44a48aac0b89439b23b1d6ff9220ecc99702165138428f281df728`.
+Source SHA-256: `05925d4382388f5d79d517105ad3b2a8a79841c4ce1d34ead61ae034c6cc21ad`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `4cd7681dbb44a48aac0b89439b23b1d6ff9220ecc99702165138428f281df728`  
+Source SHA-256: `05925d4382388f5d79d517105ad3b2a8a79841c4ce1d34ead61ae034c6cc21ad`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/unit/app/io/window_ffi_spec.spl
 mirror: doc/06_spec/unit/app/io/window_ffi_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/app/io/window_ffi_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/app/io/window_ffi_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/unit/app/io/window_ffi_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/app/io/window_ffi_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/app/io/window_ffi_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'contains no duplicate foreign declarations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/io/window_ffi_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'delegates to the canonical SFFI owner with explicit exports' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/io/window_ffi_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not re-export raw runtime symbols' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

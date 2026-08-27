@@ -1,6 +1,6 @@
-# Formula Forecast Pivot Specification
+# formula_forecast_pivot_spec
 
-> Tests covering FORECAST.ETS, FORECAST.ETS.CONFINT, FORECAST.ETS.SEASONALITY, FORECAST.ETS.STAT, GETPIVOTDATA.
+> Purpose and audience: spreadsheet-engine evidence for Office Calc
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,24 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Formula Forecast Pivot Specification
+# formula_forecast_pivot_spec
+
+Purpose and audience: spreadsheet-engine evidence for Office Calc
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose and audience: spreadsheet-engine evidence for Office Calc
+engineers covering FORECAST.ETS seasonality detection, TREND/LINEST
+prediction, and GETPIVOTDATA intersection lookups over rendered pivot
+tables, including error propagation into cell display text.
 
 ## Scenarios
 
@@ -49,7 +66,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS(8, A1:A6, B1:B6)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("24")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("24")
 ```
 
 </details>
@@ -83,7 +100,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS(8, A1:A6, B1:B6)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("24")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("24")
 ```
 
 </details>
@@ -122,7 +139,7 @@ sh.set_value("B7", "7")
 sh.set_value("B8", "8")
 sh.set_value("Z1", '=FORECAST.ETS(9, A1:A8, B1:B8)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("5")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("5")
 ```
 
 </details>
@@ -160,7 +177,7 @@ sh.set_value("B7", "7")
 sh.set_value("B8", "8")
 sh.set_value("Z1", '=FORECAST.ETS(9, A1:A8, B1:B8, 2)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("5")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("5")
 ```
 
 </details>
@@ -189,7 +206,7 @@ sh.set_value("B3", "3")
 sh.set_value("B4", "4")
 sh.set_value("Z1", '=FORECAST.ETS(8, A1:A3, B1:B4)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
+expect(cell_display_text(sh.get_cell("Z1"))).to_contain("#ERR")
 ```
 
 </details>
@@ -213,7 +230,7 @@ sh.set_value("A1", "10")
 sh.set_value("B1", "1")
 sh.set_value("Z1", '=FORECAST.ETS(5, A1:A1, B1:B1)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
+expect(cell_display_text(sh.get_cell("Z1"))).to_contain("#ERR")
 ```
 
 </details>
@@ -250,7 +267,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.CONFINT(8, A1:A6, B1:B6, 0.95)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("0")
 ```
 
 </details>
@@ -284,7 +301,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.CONFINT(8, A1:A6, B1:B6, 0.90)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("0")
 ```
 
 </details>
@@ -312,7 +329,7 @@ sh.set_value("B2", "2")
 sh.set_value("B3", "3")
 sh.set_value("Z1", '=FORECAST.ETS.CONFINT(8, A1:A3, B1:B3, 0.85)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
+expect(cell_display_text(sh.get_cell("Z1"))).to_contain("#ERR")
 ```
 
 </details>
@@ -346,7 +363,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.CONFINT(8, A1:A6, B1:B6)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("0")
 ```
 
 </details>
@@ -356,6 +373,7 @@ cell_display_text(sh.get_cell("Z1")).to_start_with("0")
 #### returns 0 for linear data
 
 - returns 0 for linear data
+   - Expected: cell_display_text(sh.get_cell("Z1")) equals `0`
 
 
 <details>
@@ -383,7 +401,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.SEASONALITY(A1:A6, B1:B6)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_equal("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_equal("0")
 ```
 
 </details>
@@ -391,6 +409,7 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 #### detects period=2 in alternating pattern
 
 - detects period=2 in alternating pattern
+   - Expected: cell_display_text(sh.get_cell("Z1")) equals `2`
 
 
 <details>
@@ -422,7 +441,7 @@ sh.set_value("B7", "7")
 sh.set_value("B8", "8")
 sh.set_value("Z1", '=FORECAST.ETS.SEASONALITY(A1:A8, B1:B8)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_equal("2")
+expect(cell_display_text(sh.get_cell("Z1"))).to_equal("2")
 ```
 
 </details>
@@ -448,7 +467,7 @@ sh.set_value("B1", "1")
 sh.set_value("B2", "2")
 sh.set_value("Z1", '=FORECAST.ETS.SEASONALITY(A1:A2, B1:B2)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
+expect(cell_display_text(sh.get_cell("Z1"))).to_contain("#ERR")
 ```
 
 </details>
@@ -458,6 +477,7 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 #### returns 0 for alpha parameter (type 1)
 
 - returns 0 for alpha parameter (type 1)
+   - Expected: cell_display_text(sh.get_cell("Z1")) equals `0`
 
 
 <details>
@@ -484,7 +504,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A6, B1:B6, 1)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_equal("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_equal("0")
 ```
 
 </details>
@@ -492,6 +512,7 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 #### returns 0 for beta parameter (type 2)
 
 - returns 0 for beta parameter (type 2)
+   - Expected: cell_display_text(sh.get_cell("Z1")) equals `0`
 
 
 <details>
@@ -518,7 +539,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A6, B1:B6, 2)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_equal("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_equal("0")
 ```
 
 </details>
@@ -526,6 +547,7 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 #### returns 0 for gamma parameter (type 3)
 
 - returns 0 for gamma parameter (type 3)
+   - Expected: cell_display_text(sh.get_cell("Z1")) equals `0`
 
 
 <details>
@@ -552,7 +574,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A6, B1:B6, 3)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_equal("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_equal("0")
 ```
 
 </details>
@@ -560,6 +582,7 @@ cell_display_text(sh.get_cell("Z1")).to_equal("0")
 #### returns step size (type 8)
 
 - returns step size (type 8)
+   - Expected: cell_display_text(sh.get_cell("Z1")) equals `1`
 
 
 <details>
@@ -586,7 +609,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A6, B1:B6, 8)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_equal("1")
+expect(cell_display_text(sh.get_cell("Z1"))).to_equal("1")
 ```
 
 </details>
@@ -620,7 +643,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A6, B1:B6, 7)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("0")
 ```
 
 </details>
@@ -654,7 +677,7 @@ sh.set_value("B5", "5")
 sh.set_value("B6", "6")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A6, B1:B6, 6)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_start_with("0")
+expect(cell_display_text(sh.get_cell("Z1"))).to_start_with("0")
 ```
 
 </details>
@@ -682,7 +705,7 @@ sh.set_value("B2", "2")
 sh.set_value("B3", "3")
 sh.set_value("Z1", '=FORECAST.ETS.STAT(A1:A3, B1:B3, 99)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
+expect(cell_display_text(sh.get_cell("Z1"))).to_contain("#ERR")
 ```
 
 </details>
@@ -692,6 +715,7 @@ cell_display_text(sh.get_cell("Z1")).to_contain("#ERR")
 #### returns grand total with no field/item pairs
 
 - returns grand total with no field/item pairs
+   - Expected: cell_display_text(sh.get_cell("D1")) equals `100`
 
 
 <details>
@@ -747,7 +771,7 @@ while pr < pivot_grid.len():
 # Now test GETPIVOTDATA on the rendered pivot
 sh.set_value("D1", '=GETPIVOTDATA("Amount", E1)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D1")).to_equal("100")
+expect(cell_display_text(sh.get_cell("D1"))).to_equal("100")
 ```
 
 </details>
@@ -755,6 +779,7 @@ cell_display_text(sh.get_cell("D1")).to_equal("100")
 #### returns row total for one field/item pair
 
 - returns row total for one field/item pair
+   - Expected: cell_display_text(sh.get_cell("D1")) equals `30`
 
 
 <details>
@@ -802,7 +827,7 @@ while pr < pivot_grid.len():
 # East row total should be 30
 sh.set_value("D1", '=GETPIVOTDATA("Amount", E1, "Region", "East")')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D1")).to_equal("30")
+expect(cell_display_text(sh.get_cell("D1"))).to_equal("30")
 ```
 
 </details>
@@ -810,6 +835,7 @@ cell_display_text(sh.get_cell("D1")).to_equal("30")
 #### returns intersection for two field/item pairs
 
 - returns intersection for two field/item pairs
+   - Expected: cell_display_text(sh.get_cell("D1")) equals `10`
 
 
 <details>
@@ -857,7 +883,7 @@ while pr < pivot_grid.len():
 # East + A intersection should be 10
 sh.set_value("D1", '=GETPIVOTDATA("Amount", E1, "Region", "East", "Product", "A")')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D1")).to_equal("10")
+expect(cell_display_text(sh.get_cell("D1"))).to_equal("10")
 ```
 
 </details>
@@ -903,7 +929,7 @@ while pr < pivot_grid.len():
 # Request non-existent region
 sh.set_value("D1", '=GETPIVOTDATA("Amount", E1, "Region", "North")')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D1")).to_contain("#ERR")
+expect(cell_display_text(sh.get_cell("D1"))).to_contain("#ERR")
 ```
 
 </details>
@@ -911,12 +937,13 @@ cell_display_text(sh.get_cell("D1")).to_contain("#ERR")
 #### errors on unknown data_field instead of returning the grand total
 
 - errors on unknown data_field instead of returning the grand total
+   - Expected: cell_display_text(sh.get_cell("D2")) equals `100`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -955,12 +982,11 @@ while pr < pivot_grid.len():
 # pivot's value field -- must #ERR, never silently fall back to it.
 sh.set_value("D1", '=GETPIVOTDATA("NoSuchField", E1)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D1")).to_contain("#ERR")
-
+expect(cell_display_text(sh.get_cell("D1"))).to_contain("#ERR")
 # A case-insensitive match on the real field still works.
 sh.set_value("D2", '=GETPIVOTDATA("amount", E1)')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D2")).to_equal("100")
+expect(cell_display_text(sh.get_cell("D2"))).to_equal("100")
 ```
 
 </details>
@@ -968,12 +994,14 @@ cell_display_text(sh.get_cell("D2")).to_equal("100")
 #### returns intersection on the second value column of a wider cross-tab
 
 - returns intersection on the second value column of a wider cross-tab
+   - Expected: cell_display_text(sh.get_cell("D1")) equals `20`
+   - Expected: cell_display_text(sh.get_cell("D2")) equals `40`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1020,35 +1048,15 @@ while pr < pivot_grid.len():
 # column (Product B) intersected with East = 20.
 sh.set_value("D1", '=GETPIVOTDATA("Amount", E1, "Region", "East", "Product", "B")')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D1")).to_equal("20")
-
+expect(cell_display_text(sh.get_cell("D1"))).to_equal("20")
 # And West/B = 40, to pin down the column isn't just falling
 # through to the first data column.
 sh.set_value("D2", '=GETPIVOTDATA("Amount", E1, "Region", "West", "Product", "B")')
 sh = recalculate_formula_cells(sh)
-cell_display_text(sh.get_cell("D2")).to_equal("40")
+expect(cell_display_text(sh.get_cell("D2"))).to_equal("40")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering FORECAST.ETS, FORECAST.ETS.CONFINT, FORECAST.ETS.SEASONALITY, FORECAST.ETS.STAT, GETPIVOTDATA.
-- FORECAST.ETS
-- FORECAST.ETS.CONFINT
-- FORECAST.ETS.SEASONALITY
-- FORECAST.ETS.STAT
-- GETPIVOTDATA
 
 ## Scenario Summary
 
@@ -1068,53 +1076,45 @@ Tests covering FORECAST.ETS, FORECAST.ETS.CONFINT, FORECAST.ETS.SEASONALITY, FOR
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-APP`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `c4dd45f7693d537bcb398a5d3a6aa31ae66eea6369fcc8bbe2e33962855642c4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `f661bd74cb94b481f509f86452da9ab8fa5e7a4a3fbe9638c5a5f4dab508700f`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `c4dd45f7693d537bcb398a5d3a6aa31ae66eea6369fcc8bbe2e33962855642c4`.
+Source SHA-256: `f661bd74cb94b481f509f86452da9ab8fa5e7a4a3fbe9638c5a5f4dab508700f`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `c4dd45f7693d537bcb398a5d3a6aa31ae66eea6369fcc8bbe2e33962855642c4`  
+Source SHA-256: `f661bd74cb94b481f509f86452da9ab8fa5e7a4a3fbe9638c5a5f4dab508700f`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl
 mirror: doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md (current)
-findings: 7 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+doc/06_spec/01_unit/app/office/sheets/formula_forecast_pivot_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects no seasonality in linear trend' has no retained capture or evidence
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects no seasonality in linear trend' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'predicts with zero residuals at t=8' has no retained capture or evidence
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'predicts with zero residuals at t=8' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects seasonality period=2 in alternating pattern' has no retained capture or evidence
+test/01_unit/app/office/sheets/formula_forecast_pivot_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects seasonality period=2 in alternating pattern' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

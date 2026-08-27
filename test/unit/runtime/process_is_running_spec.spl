@@ -14,7 +14,7 @@ Audience: compiler and tooling engineers who maintain this spec
 
 # @req: REQ-RUNTIME-ProcIsRunn-001
 
-use std.io.{file_read, process_run_timeout, process_spawn_async, process_is_running, process_wait, process_kill}
+use app.io.mod.{process_spawn_async, process_is_running, process_wait, process_kill, process_is_alive}
 
 use std.spec.step
 describe "rt_process_is_running with async-spawned children":
@@ -29,8 +29,12 @@ describe "rt_process_is_running with async-spawned children":
         val running = process_is_running(pid)
         expect(running).to_equal(true)
 
-        # Clean up: kill child and reap it
+        # Clean up: a short wait is only a poll for this long-lived child.
         process_wait(pid, 100)
+        if process_is_running(pid):
+            process_kill(pid)
+            process_wait(pid, 2000)
+        expect(process_is_running(pid)).to_equal(false)
 
     it "reports async-spawned child as not running after it exits":
         step("Verify: reports async-spawned child as not running after it exits")
@@ -47,6 +51,20 @@ describe "rt_process_is_running with async-spawned children":
         val running = process_is_running(pid)
         expect(running).to_equal(false)
 
+    it "treats repeated terminal cleanup as a safe no-op":
+        step("Verify: treats repeated terminal cleanup as a safe no-op")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
+        val pid = process_spawn_async("true", [])
+        expect(pid > 0).to_equal(true)
+
+        val first_wait = process_wait(pid, 2000)
+        expect(first_wait >= 0).to_equal(true)
+        expect(process_is_running(pid)).to_equal(false)
+
+        expect(process_wait(pid, 100)).to_equal(-1)  # oracle: value fixed by the spec contract
+        expect(process_kill(pid)).to_equal(false)
+        expect(process_is_running(pid)).to_equal(false)
+
     it "returns false for invalid pid zero":
         step("Verify: returns false for invalid pid zero")
         # @req: REQ-RUNTIME-ProcIsRunn-001
@@ -59,35 +77,21 @@ describe "rt_process_is_running with async-spawned children":
         val running = process_is_running(-1)
         expect(running).to_equal(false)
 
-    it "keeps invalid wait and kill pids behind facade guards":
-        step("Verify: keeps invalid wait and kill pids behind facade guards")
+    it "returns false for invalid alive pids":
+        step("Verify: returns false for invalid alive pids")
         # @req: REQ-RUNTIME-ProcIsRunn-001
-        val src = file_read("src/lib/nogc_sync_mut/io/process_ops.spl")
-        expect(src).to_contain("fn process_wait(pid: i64, timeout_ms: i64) -> i64:")
-        expect(src).to_contain("if pid <= 0:")
-        expect(src).to_contain("return -1")
-        expect(src).to_contain("fn process_kill(pid: i64) -> bool:")
-        expect(src).to_contain("if pid <= 1:")
-        expect(src).to_contain("return false")
+        expect(process_is_alive(-1)).to_equal(false)
+        expect(process_is_alive(0)).to_equal(false)
 
-        val wait_code = process_wait(0, 1)
-        expect(wait_code).to_equal(-1)  # oracle: value fixed by the spec contract
+    it "refuses to kill invalid or reserved pids":
+        step("Verify: refuses to kill invalid or reserved pids")
+        # @req: REQ-RUNTIME-ProcIsRunn-001
+        expect(process_kill(-1)).to_equal(false)
         expect(process_kill(0)).to_equal(false)
+        expect(process_kill(1)).to_equal(false)
 
-    it "times out without the external GNU timeout command":
-        step("Verify: times out without the external GNU timeout command")
+    it "returns error for invalid wait pids":
+        step("Verify: returns error for invalid wait pids")
         # @req: REQ-RUNTIME-ProcIsRunn-001
-        val src = file_read("src/lib/nogc_sync_mut/io/process_ops.spl")
-        val c_runtime = file_read("src/runtime/platform/unix_common.h")
-        val rust_runtime = file_read("src/compiler_rust/runtime/src/value/sffi/env_process.rs")
-        expect(src.contains("rt_process_run(\"timeout\"")).to_equal(false)
-        expect(src).to_contain("rt_process_spawn_async(\"/bin/sh\"")
-        expect(src).to_contain("rt_process_wait(pid, effective_timeout)")
-        expect(c_runtime).to_contain("if (kill((pid_t)pid, SIGKILL) != 0) return false")
-        expect(c_runtime).to_contain("waitpid((pid_t)pid, &status, 0)")
-        expect(c_runtime).to_contain("if (errno == ECHILD) break")
-        expect(rust_runtime).to_contain("let reaped = child.wait().is_ok()")
-
-        val (_stdout, stderr, exit_code) = process_run_timeout("sleep", ["2"], 50)
-        expect(exit_code).to_equal(-1)  # oracle: value fixed by the spec contract
-        expect(stderr).to_contain("[TIMEOUT:")
+        expect(process_wait(-1, 100)).to_equal(-1)  # oracle: value fixed by the spec contract
+        expect(process_wait(0, 100)).to_equal(-1)  # oracle: value fixed by the spec contract

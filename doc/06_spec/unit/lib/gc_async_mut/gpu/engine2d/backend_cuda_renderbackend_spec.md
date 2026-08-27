@@ -34,9 +34,9 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("fences the atlas cache with CUDA target and session identity")
 val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
-expect(source).to_contain("font_atlas_composite_cache_identity(")
-expect(source).to_contain("font_render_batch_atlas_owner_identity(batch), \"cuda\", device_features")
-expect(source).to_contain("self.session.font_module_identity, dependency_identity")
+assert_contains(source, "font_atlas_composite_cache_identity(")
+assert_contains(source, "font_render_batch_atlas_owner_identity(batch), \"cuda\", device_features")
+assert_contains(source, "self.session.font_module_identity, dependency_identity")
 ```
 
 </details>
@@ -56,14 +56,14 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("declares explicit CUDA device and mirror authority")
 val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
-expect(source).to_contain("device_current: bool")
-expect(source).to_contain("mirror_current: bool")
-expect(source).to_contain("device_current: false,\n            mirror_current: true")
-expect(source).to_contain("me _ensure_device_current() -> bool:")
-expect(source).to_contain("me _ensure_mirror_current() -> bool:")
-expect(source).to_contain("me _begin_cpu_path() -> bool:")
-expect(source).to_contain("me _finish_cpu_path():")
-expect(source).to_contain("me _mark_device_mutation():")
+assert_contains(source, "device_current: bool")
+assert_contains(source, "mirror_current: bool")
+assert_contains(source, "device_current: false,\n            mirror_current: true")
+assert_contains(source, "me _ensure_device_current() -> bool:")
+assert_contains(source, "me _ensure_mirror_current() -> bool:")
+assert_contains(source, "me _begin_cpu_path() -> bool:")
+assert_contains(source, "me _finish_cpu_path():")
+assert_contains(source, "me _mark_device_mutation():")
 ```
 
 </details>
@@ -71,7 +71,6 @@ expect(source).to_contain("me _mark_device_mutation():")
 #### keeps GPU success and CPU fallback authority transitions explicit
 
 - keeps GPU success and CPU fallback authority transitions explicit
-   - Expected: source does not contain `if rc == CUDA_SUCCESS:\n                self.mirror.`
 
 
 <details>
@@ -84,10 +83,10 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("keeps GPU success and CPU fallback authority transitions explicit")
 val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
-expect(source).to_contain("self._mark_device_mutation()")
-expect(source).to_contain("self._begin_cpu_path()")
-expect(source).to_contain("self._finish_cpu_path()")
-expect(source.contains("if rc == CUDA_SUCCESS:\n                self.mirror.")).to_equal(false)
+assert_contains(source, "self._mark_device_mutation()")
+assert_contains(source, "self._begin_cpu_path()")
+assert_contains(source, "self._finish_cpu_path()")
+assert_equal(source.contains("if rc == CUDA_SUCCESS:\n                self.mirror."), false)
 expect(source).to_contain(
     "me _finish_cpu_path():\n" +
     "        self.cpu_fallback_used = true\n" +
@@ -106,7 +105,6 @@ expect(source).to_contain(
 #### does not fall through to a stale mirror on readback
 
 - does not fall through to a stale mirror on readback
-   - Expected: source does not contain `engine2d_readback(self.mirror.read_pixels(), "cpu_mirror")`
 
 
 <details>
@@ -119,9 +117,9 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("does not fall through to a stale mirror on readback")
 val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
-expect(source).to_contain("if self.mirror_current:")
-expect(source).to_contain("engine2d_readback([], \"readback_failed\")")
-expect(source.contains("engine2d_readback(self.mirror.read_pixels(), \"cpu_mirror\")")).to_equal(false)
+assert_contains(source, "if self.mirror_current:")
+assert_contains(source, "engine2d_readback([], \"readback_failed\")")
+assert_equal(source.contains("engine2d_readback(self.mirror.read_pixels(), \"cpu_mirror\")"), false)
 ```
 
 </details>
@@ -187,13 +185,6 @@ expect(source).to_contain(
 #### never labels CPU-rendered fallback pixels as device readback
 
 - never labels CPU-rendered fallback pixels as device readback
-   - Expected: device_readback.source equals `device_readback`
-   - Expected: stable_readback.device_identity equals `device_readback.device_identity`
-   - Expected: readback.source equals `cpu_fallback`
-   - Expected: readback.backend_handle equals `0`
-   - Expected: readback.device_identity equals `0`
-   - Expected: readback.pixels.len() equals `16`
-   - Expected: backend.initialized is false
 
 
 <details>
@@ -209,19 +200,19 @@ var backend = CudaBackend.create()
 if backend.init(4, 4):
     backend.clear(0xff010203u32)
     val device_readback = backend.read_pixels_with_source()
-    expect(device_readback.source).to_equal("device_readback")
+    assert_equal(device_readback.source, "device_readback")
     expect(device_readback.backend_handle).to_be_greater_than(0)
     expect(device_readback.device_identity).to_be_greater_than(0)
     val stable_readback = backend.read_pixels_with_source()
-    expect(stable_readback.device_identity).to_equal(device_readback.device_identity)
+    assert_equal(stable_readback.device_identity, device_readback.device_identity)
     backend.cpu_fallback_used = true
     val readback = backend.read_pixels_with_source()
-    expect(readback.source).to_equal("cpu_fallback")
-    expect(readback.backend_handle).to_equal(0)
-    expect(readback.device_identity).to_equal(0)
-    expect(readback.pixels.len()).to_equal(16)
+    assert_equal(readback.source, "cpu_fallback")
+    assert_equal(readback.backend_handle, 0)
+    assert_equal(readback.device_identity, 0)
+    assert_equal(readback.pixels.len(), 16)
 else:
-    expect(backend.initialized).to_equal(false)
+    assert_equal(backend.initialized, false)
 backend.shutdown()
 ```
 
@@ -230,10 +221,6 @@ backend.shutdown()
 #### keeps CUDA completion failure sticky across readbacks
 
 - keeps CUDA completion failure sticky across readbacks
-   - Expected: first.source equals `completion_unknown`
-   - Expected: second.source equals `completion_unknown`
-   - Expected: first.pixels.len() equals `0`
-   - Expected: second.pixels.len() equals `0`
 
 
 <details>
@@ -249,10 +236,10 @@ var backend = CudaBackend.create()
 backend.completion_unknown = true
 val first = backend.read_pixels_with_source()
 val second = backend.read_pixels_with_source()
-expect(first.source).to_equal("completion_unknown")
-expect(second.source).to_equal("completion_unknown")
-expect(first.pixels.len()).to_equal(0)
-expect(second.pixels.len()).to_equal(0)
+assert_equal(first.source, "completion_unknown")
+assert_equal(second.source, "completion_unknown")
+assert_equal(first.pixels.len(), 0)
+assert_equal(second.pixels.len(), 0)
 ```
 
 </details>
@@ -334,7 +321,6 @@ expect(engine).to_contain(
 #### reports the cuda backend name
 
 - reports the cuda backend name
-   - Expected: backend.name() equals `cuda`
 
 
 <details>
@@ -347,7 +333,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("reports the cuda backend name")
 val backend = CudaBackend.create()
-expect(backend.name()).to_equal("cuda")
+assert_equal(backend.name(), "cuda")
 ```
 
 </details>
@@ -355,10 +341,6 @@ expect(backend.name()).to_equal("cuda")
 #### returns a typed probe result
 
 - returns a typed probe result
-   - Expected: probe.requested_name equals `cuda`
-   - Expected: probe.api_name equals `cuda`
-   - Expected: probe.shader_format equals `ptx`
-   - Expected: valid_status is true
 
 
 <details>
@@ -372,10 +354,10 @@ Reproduction: this block contains the complete executable scenario source.
 step("returns a typed probe result")
 val probe = probe_cuda_2d()
 val valid_status = probe.status == BackendStatus.Initialized or probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed
-expect(probe.requested_name).to_equal("cuda")
-expect(probe.api_name).to_equal("cuda")
-expect(probe.shader_format).to_equal("ptx")
-expect(valid_status).to_equal(true)
+assert_equal(probe.requested_name, "cuda")
+assert_equal(probe.api_name, "cuda")
+assert_equal(probe.shader_format, "ptx")
+assert_equal(valid_status, true)
 ```
 
 </details>
@@ -383,10 +365,6 @@ expect(valid_status).to_equal(true)
 #### exports probe_cuda with the same typed result
 
 - exports probe_cuda with the same typed result
-   - Expected: probe.requested_name equals `cuda`
-   - Expected: probe.api_name equals `cuda`
-   - Expected: probe.shader_format equals `ptx`
-   - Expected: valid_status is true
 
 
 <details>
@@ -400,10 +378,10 @@ Reproduction: this block contains the complete executable scenario source.
 step("exports probe_cuda with the same typed result")
 val probe = probe_cuda()
 val valid_status = probe.status == BackendStatus.Initialized or probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed
-expect(probe.requested_name).to_equal("cuda")
-expect(probe.api_name).to_equal("cuda")
-expect(probe.shader_format).to_equal("ptx")
-expect(valid_status).to_equal(true)
+assert_equal(probe.requested_name, "cuda")
+assert_equal(probe.api_name, "cuda")
+assert_equal(probe.shader_format, "ptx")
+assert_equal(valid_status, true)
 ```
 
 </details>
@@ -424,11 +402,11 @@ Reproduction: this block contains the complete executable scenario source.
 step("exports generated fill and image blend entries in CUDA PTX module source")
 val source = cuda_2d_ptx_source()
 
-expect(source).to_contain("simple_2d_fill_u32")
-expect(source).to_contain("kernel_draw_image_nonzero")
-expect(source).to_contain("kernel_draw_image_blend")
-expect(source).to_contain("param_width")
-expect(source).to_contain("param_height")
+assert_contains(source, "simple_2d_fill_u32")
+assert_contains(source, "kernel_draw_image_nonzero")
+assert_contains(source, "kernel_draw_image_blend")
+assert_contains(source, "param_width")
+assert_contains(source, "param_height")
 ```
 
 </details>
@@ -449,9 +427,9 @@ Reproduction: this block contains the complete executable scenario source.
 step("routes both CUDA image blend interfaces through the native kernel")
 val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
 val extended = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda_ext.spl")
-expect(backend).to_contain("self._draw_image_kernel(\"kernel_draw_image_blend\"")
-expect(backend).to_contain("self._draw_image_blend_or_fallback(x, y, w, h, pixels)")
-expect(extended).to_contain("self._draw_image_blend_or_fallback(x, y, w, h, pixels)")
+assert_contains(backend, "self._draw_image_kernel(\"kernel_draw_image_blend\"")
+assert_contains(backend, "self._draw_image_blend_or_fallback(x, y, w, h, pixels)")
+assert_contains(extended, "self._draw_image_blend_or_fallback(x, y, w, h, pixels)")
 ```
 
 </details>
@@ -459,7 +437,6 @@ expect(extended).to_contain("self._draw_image_blend_or_fallback(x, y, w, h, pixe
 #### keeps the generated font entry out of the default CUDA module
 
 - keeps the generated font entry out of the default CUDA module
-   - Expected: source does not contain `FONT_ATLAS_COMPOSITE_ENTRY`
 
 
 <details>
@@ -472,7 +449,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("keeps the generated font entry out of the default CUDA module")
 val source = cuda_2d_ptx_source()
-expect(source.contains(FONT_ATLAS_COMPOSITE_ENTRY)).to_equal(false)
+assert_equal(source.contains(FONT_ATLAS_COMPOSITE_ENTRY), false)
 ```
 
 </details>
@@ -480,16 +457,6 @@ expect(source.contains(FONT_ATLAS_COMPOSITE_ENTRY)).to_equal(false)
 #### pins an installed generated font companion by exact PTX identity
 
 - pins an installed generated font companion by exact PTX identity
-   - Expected: session.install_font_module("") is false
-   - Expected: session.install_font_module(".version 8.0\n") is false
-   - Expected: session.install_font_module(".version 8.0\n.entry simple_font_atlas_composite_v1_u32_suffix() { ret; }\n") is false
-   - Expected: session.launch_font_kernel_args(1, 1, 1, 1, 1, 1, 1) equals `1`
-   - Expected: session.install_font_module(ptx) is true
-   - Expected: session.install_font_module(ptx + " ") is false
-   - Expected: backend.install_font_atlas_ptx(ptx) is true
-   - Expected: backend.font_atlas_generation equals `9`
-   - Expected: backend.install_font_atlas_ptx(ptx + " ") is false
-   - Expected: backend.font_atlas_generation equals `9`
 
 
 <details>
@@ -503,24 +470,24 @@ Reproduction: this block contains the complete executable scenario source.
 step("pins an installed generated font companion by exact PTX identity")
 val ptx = ".version 8.0\n.visible .entry simple_font_atlas_composite_v1_u32() { ret; }\n"
 var session = CudaSession.create()
-expect(session.install_font_module("")).to_equal(false)
-expect(session.install_font_module(".version 8.0\n")).to_equal(false)
-expect(session.install_font_module(".version 8.0\n.entry simple_font_atlas_composite_v1_u32_suffix() { ret; }\n")).to_equal(false)
+assert_equal(session.install_font_module(""), false)
+assert_equal(session.install_font_module(".version 8.0\n"), false)
+assert_equal(session.install_font_module(".version 8.0\n.entry simple_font_atlas_composite_v1_u32_suffix() { ret; }\n"), false)
 session.module_cache = 9
-expect(session.launch_font_kernel_args(1, 1, 1, 1, 1, 1, 1)).to_equal(1)
+assert_equal(session.launch_font_kernel_args(1, 1, 1, 1, 1, 1, 1), 1)
 session.font_module_cache = 17
 session.font_module_identity = "generated-ptx:" + sha256_text(ptx)
-expect(session.install_font_module(ptx)).to_equal(true)
-expect(session.install_font_module(ptx + " ")).to_equal(false)
+assert_equal(session.install_font_module(ptx), true)
+assert_equal(session.install_font_module(ptx + " "), false)
 
 var backend = CudaBackend.create()
 backend.initialized = true
 backend.font_atlas_generation = 9
 backend.session = session
-expect(backend.install_font_atlas_ptx(ptx)).to_equal(true)
-expect(backend.font_atlas_generation).to_equal(9)
-expect(backend.install_font_atlas_ptx(ptx + " ")).to_equal(false)
-expect(backend.font_atlas_generation).to_equal(9)
+assert_equal(backend.install_font_atlas_ptx(ptx), true)
+assert_equal(backend.font_atlas_generation, 9)
+assert_equal(backend.install_font_atlas_ptx(ptx + " "), false)
+assert_equal(backend.font_atlas_generation, 9)
 ```
 
 </details>
@@ -528,14 +495,6 @@ expect(backend.font_atlas_generation).to_equal(9)
 #### rejects inconsistent caller-provided font artifacts without mutation
 
 - rejects inconsistent caller-provided font artifacts without mutation
-   - Expected: engine.install_cuda_font_artifact("", sha256_text(""), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION) is false
-   - Expected: engine.install_cuda_font_artifact(ptx, "0000000000000000000000000000000000000000000000000000000000000000", FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION) is false
-   - Expected: engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION) is false
-   - Expected: engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION - 1) is false
-   - Expected: engine.install_cuda_font_artifact(wrong_entry, sha256_text(wrong_entry), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION) is false
-   - Expected: engine.cuda_backend.?.session.font_module_cache equals `17`
-   - Expected: engine.cuda_backend.?.session.font_module_identity equals `"generated-ptx:" + artifact_sha256`
-   - Expected: engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION) is true
 
 
 <details>
@@ -559,14 +518,14 @@ var engine = Engine2D.create_with_backend(1, 1, "software")
 engine.cuda_backend = cuda
 
 val wrong_entry = ".version 8.0\n.visible .entry wrong_font_entry() { ret; }\n"
-expect(engine.install_cuda_font_artifact("", sha256_text(""), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
-expect(engine.install_cuda_font_artifact(ptx, "0000000000000000000000000000000000000000000000000000000000000000", FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
-expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
-expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION - 1)).to_equal(false)
-expect(engine.install_cuda_font_artifact(wrong_entry, sha256_text(wrong_entry), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
-expect(engine.cuda_backend.?.session.font_module_cache).to_equal(17)
-expect(engine.cuda_backend.?.session.font_module_identity).to_equal("generated-ptx:" + artifact_sha256)
-expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(true)
+assert_equal(engine.install_cuda_font_artifact("", sha256_text(""), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION), false)
+assert_equal(engine.install_cuda_font_artifact(ptx, "0000000000000000000000000000000000000000000000000000000000000000", FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION), false)
+assert_equal(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION), false)
+assert_equal(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION - 1), false)
+assert_equal(engine.install_cuda_font_artifact(wrong_entry, sha256_text(wrong_entry), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION), false)
+assert_equal(engine.cuda_backend.?.session.font_module_cache, 17)
+assert_equal(engine.cuda_backend.?.session.font_module_identity, "generated-ptx:" + artifact_sha256)
+assert_equal(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION), true)
 engine.cuda_backend = nil
 engine.shutdown()
 ```
@@ -576,11 +535,6 @@ engine.shutdown()
 #### rejects the stale tracked CUDA font semantics without a device load
 
 - rejects the stale tracked CUDA font semantics without a device load
-   - Expected: FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256 equals `sha256_text(ptx)`
-   - Expected: FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION equals `FONT_ATLAS_COMPOSITE_PROGRAM_VERSION`
-   - Expected: cuda_font_atlas_composite_ptx_trusted(ptx) is false
-   - Expected: cuda_font_atlas_composite_ptx_trusted(ptx + " ") is false
-   - Expected: engine.install_pinned_cuda_font_artifact() is false
 
 
 <details>
@@ -593,11 +547,11 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("rejects the stale tracked CUDA font semantics without a device load")
 val ptx = cuda_font_atlas_composite_ptx()
-expect(FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256).to_equal(sha256_text(ptx))
-expect(FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION).to_equal(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)
+assert_equal(FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, sha256_text(ptx))
+assert_equal(FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)
 assert_not_equal(FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)
-expect(cuda_font_atlas_composite_ptx_trusted(ptx)).to_equal(false)
-expect(cuda_font_atlas_composite_ptx_trusted(ptx + " ")).to_equal(false)
+assert_equal(cuda_font_atlas_composite_ptx_trusted(ptx), false)
+assert_equal(cuda_font_atlas_composite_ptx_trusted(ptx + " "), false)
 
 var session = CudaSession.create()
 session.font_module_cache = 17
@@ -607,7 +561,7 @@ cuda.initialized = true
 cuda.session = session
 var engine = Engine2D.create_with_backend(1, 1, "software")
 engine.cuda_backend = cuda
-expect(engine.install_pinned_cuda_font_artifact()).to_equal(false)
+assert_equal(engine.install_pinned_cuda_font_artifact(), false)
 engine.cuda_backend = nil
 engine.shutdown()
 ```
@@ -617,9 +571,6 @@ engine.shutdown()
 #### fails closed for invalid font batches and invalidates atlas generations
 
 - fails closed for invalid font batches and invalidates atlas generations
-   - Expected: backend.draw_font_batch(0, 0, invalid) equals `0`
-   - Expected: backend.font_atlas_generation equals `-1`
-   - Expected: backend.font_atlas_owner_identity equals ``
 
 
 <details>
@@ -634,12 +585,12 @@ step("fails closed for invalid font batches and invalidates atlas generations")
 var backend = CudaBackend.create()
 val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
 
-expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
+assert_equal(backend.draw_font_batch(0, 0, invalid), 0)
 backend.font_atlas_generation = 7
 backend.font_atlas_owner_identity = "stale-owner"
 backend.invalidate_font_atlas()
-expect(backend.font_atlas_generation).to_equal(-1)
-expect(backend.font_atlas_owner_identity).to_equal("")
+assert_equal(backend.font_atlas_generation, -1)
+assert_equal(backend.font_atlas_owner_identity, "")
 ```
 
 </details>
@@ -647,9 +598,6 @@ expect(backend.font_atlas_owner_identity).to_equal("")
 #### rejects unsupported font programs before CUDA atlas mutation
 
 - rejects unsupported font programs before CUDA atlas mutation
-   - Expected: backend.draw_font_batch(0, 0, batch) equals `0`
-   - Expected: backend.font_atlas_generation equals `7`
-   - Expected: backend.font_atlas_owner_identity equals `stable-owner`
 
 
 <details>
@@ -667,9 +615,9 @@ backend.font_atlas_owner_identity = "stable-owner"
 for version in [0, -1, 2]:
     val batch = FontRenderBatch(program_version: version, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 1, atlas_height: 1,
         atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
-    expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
-    expect(backend.font_atlas_generation).to_equal(7)
-    expect(backend.font_atlas_owner_identity).to_equal("stable-owner")
+    assert_equal(backend.draw_font_batch(0, 0, batch), 0)
+    assert_equal(backend.font_atlas_generation, 7)
+    assert_equal(backend.font_atlas_owner_identity, "stable-owner")
 ```
 
 </details>
@@ -677,11 +625,6 @@ for version in [0, -1, 2]:
 #### requires the generated companion before CUDA font dispatch
 
 - requires the generated companion before CUDA font dispatch
-   - Expected: backend.session.font_module_cache equals `0`
-   - Expected: backend.draw_font_batch(0, 0, batch) equals `0`
-   - Expected: backend.font_atlas_generation equals `-1`
-   - Expected: backend.font_atlas_owner_identity equals ``
-   - Expected: backend.initialized is false
 
 
 <details>
@@ -704,12 +647,12 @@ if ok:
         quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
         atlas_generation: 1, dirty_rects: []
     )
-    expect(backend.session.font_module_cache).to_equal(0)
-    expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
-    expect(backend.font_atlas_generation).to_equal(-1)
-    expect(backend.font_atlas_owner_identity).to_equal("")
+    assert_equal(backend.session.font_module_cache, 0)
+    assert_equal(backend.draw_font_batch(0, 0, batch), 0)
+    assert_equal(backend.font_atlas_generation, -1)
+    assert_equal(backend.font_atlas_owner_identity, "")
 else:
-    expect(backend.initialized).to_equal(false)
+    assert_equal(backend.initialized, false)
 backend.shutdown()
 ```
 
@@ -718,10 +661,6 @@ backend.shutdown()
 #### does not claim initialized when init fails
 
 - does not claim initialized when init fails
-   - Expected: backend.width() equals `4`
-   - Expected: backend.height() equals `4`
-   - Expected: backend.initialized is false
-   - Expected: backend.owns_session is false
 
 
 <details>
@@ -736,12 +675,12 @@ step("does not claim initialized when init fails")
 var backend = CudaBackend.create()
 val ok = backend.init(4, 4)
 if ok:
-    expect(backend.width()).to_equal(4)
-    expect(backend.height()).to_equal(4)
+    assert_equal(backend.width(), 4)
+    assert_equal(backend.height(), 4)
     backend.shutdown()
 else:
-    expect(backend.initialized).to_equal(false)
-    expect(backend.owns_session).to_equal(false)
+    assert_equal(backend.initialized, false)
+    assert_equal(backend.owns_session, false)
 ```
 
 </details>
@@ -749,11 +688,6 @@ else:
 #### routes draw_text_bg through the shared text image path without CUDA hardware
 
 - routes draw_text_bg through the shared text image path without CUDA hardware
-   - Expected: backend.mirror.init(4, 4) is true
-   - Expected: text_bg[0] equals `expected[0]`
-   - Expected: text_bg[1] equals `expected[1]`
-   - Expected: text_bg[2] equals `expected[2]`
-   - Expected: text_bg[3] equals `expected[3]`
 
 
 <details>
@@ -766,16 +700,16 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("routes draw_text_bg through the shared text image path without CUDA hardware")
 var backend = CudaBackend.create()
-expect(backend.mirror.init(4, 4)).to_equal(true)
+assert_equal(backend.mirror.init(4, 4), true)
 
 backend.draw_text_bg(0, 0, "I", 0xff111111u32, 0xff222222u32, 7)
 val text_bg = backend.read_pixels()
 val expected = text_render_to_buf("I", 0xff111111u32, 0xff222222u32, 7)
 
-expect(text_bg[0]).to_equal(expected[0])
-expect(text_bg[1]).to_equal(expected[1])
-expect(text_bg[2]).to_equal(expected[2])
-expect(text_bg[3]).to_equal(expected[3])
+assert_equal(text_bg[0], expected[0])
+assert_equal(text_bg[1], expected[1])
+assert_equal(text_bg[2], expected[2])
+assert_equal(text_bg[3], expected[3])
 backend.shutdown()
 ```
 
@@ -784,10 +718,6 @@ backend.shutdown()
 #### routes foreground draw_text through transparent text image semantics without CUDA hardware
 
 - routes foreground draw_text through transparent text image semantics without CUDA hardware
-   - Expected: backend.mirror.init(4, 4) is true
-   - Expected: fg_count > 0 is true
-   - Expected: bg_count > 0 is true
-   - Expected: transparent_count > 0 is true
 
 
 <details>
@@ -801,7 +731,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("routes foreground draw_text through transparent text image semantics without CUDA hardware")
 var backend = CudaBackend.create()
 val bg = 0xff333333u32
-expect(backend.mirror.init(4, 4)).to_equal(true)
+assert_equal(backend.mirror.init(4, 4), true)
 backend.mirror.clear(bg)
 
 backend.draw_text(0, 0, "I", 0xff111111u32, 7)
@@ -820,9 +750,9 @@ while idx < 16:
         transparent_count = transparent_count + 1
     idx = idx + 1
 
-expect(fg_count > 0).to_equal(true)
-expect(bg_count > 0).to_equal(true)
-expect(transparent_count > 0).to_equal(true)
+assert_equal(fg_count > 0, true)
+assert_equal(bg_count > 0, true)
+assert_equal(transparent_count > 0, true)
 backend.shutdown()
 ```
 
@@ -831,13 +761,6 @@ backend.shutdown()
 #### rejects an invalid shared CUDA session with typed context diagnostics
 
 - rejects an invalid shared CUDA session with typed context diagnostics
-   - Expected: ok is false
-   - Expected: backend.initialized is false
-   - Expected: backend.owns_session is false
-   - Expected: backend.last_probe.requested_name equals `cuda`
-   - Expected: backend.last_probe.api_name equals `cuda`
-   - Expected: backend.last_probe.feature_gate equals `cuda_context`
-   - Expected: backend.last_probe.status equals `BackendStatus.Failed`
 
 
 <details>
@@ -852,13 +775,13 @@ step("rejects an invalid shared CUDA session with typed context diagnostics")
 var backend = CudaBackend.create()
 var session = CudaSession.create()
 val ok = backend.init_with_session(4, 4, session)
-expect(ok).to_equal(false)
-expect(backend.initialized).to_equal(false)
-expect(backend.owns_session).to_equal(false)
-expect(backend.last_probe.requested_name).to_equal("cuda")
-expect(backend.last_probe.api_name).to_equal("cuda")
-expect(backend.last_probe.feature_gate).to_equal("cuda_context")
-expect(backend.last_probe.status).to_equal(BackendStatus.Failed)
+assert_equal(ok, false)
+assert_equal(backend.initialized, false)
+assert_equal(backend.owns_session, false)
+assert_equal(backend.last_probe.requested_name, "cuda")
+assert_equal(backend.last_probe.api_name, "cuda")
+assert_equal(backend.last_probe.feature_gate, "cuda_context")
+assert_equal(backend.last_probe.status, BackendStatus.Failed)
 ```
 
 </details>
@@ -866,17 +789,6 @@ expect(backend.last_probe.status).to_equal(BackendStatus.Failed)
 #### rejects active CUDA session replacement without mutating atlas ownership
 
 - rejects active CUDA session replacement without mutating atlas ownership
-   - Expected: backend.init_with_session(4, 4, incoming) is false
-   - Expected: incoming.ref_count equals `2`
-   - Expected: backend.d_font_atlas equals `77`
-   - Expected: backend.font_atlas_generation equals `9`
-   - Expected: backend.font_atlas_owner_identity equals `old`
-   - Expected: backend.owns_session is true
-   - Expected: backend.init_with_session(0, 4, invalid) is false
-   - Expected: backend.initialized is true
-   - Expected: backend.owns_session is true
-   - Expected: backend.d_font_atlas equals `77`
-   - Expected: invalid.ref_count equals `0`
 
 
 <details>
@@ -898,18 +810,18 @@ var incoming = CudaSession.create()
 incoming.is_initialized = true
 incoming.ctx = 1
 incoming.ref_count = 2
-expect(backend.init_with_session(4, 4, incoming)).to_equal(false)
-expect(incoming.ref_count).to_equal(2)
-expect(backend.d_font_atlas).to_equal(77)
-expect(backend.font_atlas_generation).to_equal(9)
-expect(backend.font_atlas_owner_identity).to_equal("old")
-expect(backend.owns_session).to_equal(true)
+assert_equal(backend.init_with_session(4, 4, incoming), false)
+assert_equal(incoming.ref_count, 2)
+assert_equal(backend.d_font_atlas, 77)
+assert_equal(backend.font_atlas_generation, 9)
+assert_equal(backend.font_atlas_owner_identity, "old")
+assert_equal(backend.owns_session, true)
 var invalid = CudaSession.create()
-expect(backend.init_with_session(0, 4, invalid)).to_equal(false)
-expect(backend.initialized).to_equal(true)
-expect(backend.owns_session).to_equal(true)
-expect(backend.d_font_atlas).to_equal(77)
-expect(invalid.ref_count).to_equal(0)
+assert_equal(backend.init_with_session(0, 4, invalid), false)
+assert_equal(backend.initialized, true)
+assert_equal(backend.owns_session, true)
+assert_equal(backend.d_font_atlas, 77)
+assert_equal(invalid.ref_count, 0)
 ```
 
 </details>
@@ -917,16 +829,6 @@ expect(invalid.ref_count).to_equal(0)
 #### reports CUDA 2D kernel readiness or the real kernel gap
 
 - reports CUDA 2D kernel readiness or the real kernel gap
-   - Expected: probe.is_usable() is true
-   - Expected: probe.has_compute is true
-   - Expected: probe.has_graphics is true
-   - Expected: probe.has_present is true
-   - Expected: probe.status equals `BackendStatus.Failed`
-   - Expected: probe.is_usable() is false
-   - Expected: probe.has_compute is true
-   - Expected: probe.has_graphics is false
-   - Expected: probe.has_present is false
-   - Expected: probe.is_usable() equals `probe.status == BackendStatus.Initialized`
 
 
 <details>
@@ -940,29 +842,29 @@ Reproduction: this block contains the complete executable scenario source.
 step("reports CUDA 2D kernel readiness or the real kernel gap")
 val probe = probe_cuda_2d()
 if probe.status == BackendStatus.Initialized:
-    expect(probe.is_usable()).to_equal(true)
-    expect(probe.has_compute).to_equal(true)
-    expect(probe.has_graphics).to_equal(true)
-    expect(probe.has_present).to_equal(true)
+    assert_equal(probe.is_usable(), true)
+    assert_equal(probe.has_compute, true)
+    assert_equal(probe.has_graphics, true)
+    assert_equal(probe.has_present, true)
 else if probe.feature_gate == "cuda_2d_render":
-    expect(probe.status).to_equal(BackendStatus.Failed)
-    expect(probe.is_usable()).to_equal(false)
-    expect(probe.has_compute).to_equal(true)
-    expect(probe.has_graphics).to_equal(false)
-    expect(probe.has_present).to_equal(false)
-    expect(probe.fallback_reason).to_contain("simple_2d_fill_u32")
-    expect(probe.fallback_reason).to_contain("kernel_clear")
-    expect(probe.fallback_reason).to_contain("kernel_draw_rect_filled")
-    expect(probe.fallback_reason).to_contain("kernel_draw_rect_outline")
-    expect(probe.fallback_reason).to_contain("kernel_draw_image")
-    expect(probe.fallback_reason).to_contain("kernel_draw_gradient_rect")
-    expect(probe.fallback_reason).to_contain("kernel_draw_line")
+    assert_equal(probe.status, BackendStatus.Failed)
+    assert_equal(probe.is_usable(), false)
+    assert_equal(probe.has_compute, true)
+    assert_equal(probe.has_graphics, false)
+    assert_equal(probe.has_present, false)
+    assert_contains(probe.fallback_reason, "simple_2d_fill_u32")
+    assert_contains(probe.fallback_reason, "kernel_clear")
+    assert_contains(probe.fallback_reason, "kernel_draw_rect_filled")
+    assert_contains(probe.fallback_reason, "kernel_draw_rect_outline")
+    assert_contains(probe.fallback_reason, "kernel_draw_image")
+    assert_contains(probe.fallback_reason, "kernel_draw_gradient_rect")
+    assert_contains(probe.fallback_reason, "kernel_draw_line")
 else:
     # Neither recognised shape. Both branches above are claims about the
     # probe OBJECT (self-consistency), not predictions about a later
     # create, so they stay hard assertions — but a probe that matches
     # neither must not slip through as a silent pass.
-    expect(probe.is_usable()).to_equal(probe.status == BackendStatus.Initialized)
+    assert_equal(probe.is_usable(), probe.status == BackendStatus.Initialized)
     print "[cuda-2d] cuda-2d-readiness: NEITHER SHAPE MATCHED — status is not Initialized and feature_gate is '{probe.feature_gate}', not 'cuda_2d_render'; this example proves NOTHING about the 2D kernel gap"
 ```
 
@@ -971,12 +873,6 @@ else:
 #### does not mark CUDA usable when the PTX self-test fails
 
 - does not mark CUDA usable when the PTX self-test fails
-   - Expected: probe.status equals `BackendStatus.Failed`
-   - Expected: probe.is_usable() is false
-   - Expected: probe.has_compute is true
-   - Expected: probe.has_graphics is false
-   - Expected: probe.has_present is false
-   - Expected: probe.is_usable() equals `probe.status == BackendStatus.Initialized`
 
 
 <details>
@@ -990,16 +886,16 @@ Reproduction: this block contains the complete executable scenario source.
 step("does not mark CUDA usable when the PTX self-test fails")
 val probe = probe_cuda_2d()
 if probe.feature_gate == "cuda_2d_render_self_test":
-    expect(probe.status).to_equal(BackendStatus.Failed)
-    expect(probe.is_usable()).to_equal(false)
-    expect(probe.has_compute).to_equal(true)
-    expect(probe.has_graphics).to_equal(false)
-    expect(probe.has_present).to_equal(false)
-    expect(probe.fallback_reason).to_contain("self-test")
+    assert_equal(probe.status, BackendStatus.Failed)
+    assert_equal(probe.is_usable(), false)
+    assert_equal(probe.has_compute, true)
+    assert_equal(probe.has_graphics, false)
+    assert_equal(probe.has_present, false)
+    assert_contains(probe.fallback_reason, "self-test")
 else:
     # The self-test gate was not the one that fired, so the body above
     # never ran. Disclose it instead of reporting a silent pass.
-    expect(probe.is_usable()).to_equal(probe.status == BackendStatus.Initialized)
+    assert_equal(probe.is_usable(), probe.status == BackendStatus.Initialized)
     print "[cuda-2d] cuda-2d-self-test: SELF-TEST GATE NOT EXERCISED — feature_gate is '{probe.feature_gate}', not 'cuda_2d_render_self_test'; this example proves NOTHING about the PTX self-test path"
 ```
 
@@ -1008,11 +904,6 @@ else:
 #### strict Engine2D cuda creation returns typed cuda failure instead of fallback
 
 - strict Engine2D cuda creation returns typed cuda failure instead of fallback
-   - Expected: diag.requested_name equals `cuda`
-   - Expected: diag.selected_name equals `cuda`
-   - Expected: diag.backend_name equals `cuda`
-   - Expected: diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed is true
-   - Expected: engine.backend_name() equals `cuda`
 
 
 <details>
@@ -1050,16 +941,16 @@ if not created:
     # terminal status, the cuda name preserved on every field, and never
     # a silent cpu/software substitute or a Fallback demotion.
     val diag = result.unwrap_err()
-    expect(diag.requested_name).to_equal("cuda")
-    expect(diag.selected_name).to_equal("cuda")
-    expect(diag.backend_name).to_equal("cuda")
-    expect(diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed).to_equal(true)
+    assert_equal(diag.requested_name, "cuda")
+    assert_equal(diag.selected_name, "cuda")
+    assert_equal(diag.backend_name, "cuda")
+    assert_equal(diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed, true)
     expect(diag.status).to_not_equal(BackendStatus.Fallback)
 else:
     # The strictness claim still holds on the success path, so this
     # branch is not a silent skip either.
     var engine = result.unwrap()
-    expect(engine.backend_name()).to_equal("cuda")
+    assert_equal(engine.backend_name(), "cuda")
     engine.shutdown()
     print "[cuda-2d] cuda-strict-typed-failure: FAILURE PATH NOT EXERCISED — the strict cuda create succeeded, so this example proves NOTHING about the typed-failure path"
 ```
@@ -1073,7 +964,7 @@ else:
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1105,39 +996,35 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `d255117775cd6947e2083c131c65872ecef111590920d4f8c39128bb924621e9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `e533b59c6967d08cbbcf57b44c23d14f4c40d1dcf3a476fc80ab62a1aaad376d`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `d255117775cd6947e2083c131c65872ecef111590920d4f8c39128bb924621e9`.
+Source SHA-256: `e533b59c6967d08cbbcf57b44c23d14f4c40d1dcf3a476fc80ab62a1aaad376d`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `d255117775cd6947e2083c131c65872ecef111590920d4f8c39128bb924621e9`  
+Source SHA-256: `e533b59c6967d08cbbcf57b44c23d14f4c40d1dcf3a476fc80ab62a1aaad376d`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl
 mirror: doc/06_spec/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=20
+findings: 6 blockers: 0
+  narrative=80 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 23 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
 test/unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fences the atlas cache with CUDA target and session identity' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
