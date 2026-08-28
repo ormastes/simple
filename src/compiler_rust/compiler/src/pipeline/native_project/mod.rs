@@ -721,6 +721,7 @@ impl NativeProjectBuilder {
         }
 
         // 1. Discover files
+        let step_start = Instant::now();
         let (files, file_sources) = if self.config.entry_closure {
             let entry_file = self
                 .entry_file
@@ -777,7 +778,11 @@ impl NativeProjectBuilder {
         }
 
         if rust_trace {
-            eprintln!("[native-rust-trace] discovered {} file(s)", files.len());
+            eprintln!(
+                "[native-rust-trace] step 1 discover: {} file(s) in {:.3}s",
+                files.len(),
+                step_start.elapsed().as_secs_f64()
+            );
             for (idx, path) in files.iter().take(12).enumerate() {
                 eprintln!("  discovered[{idx}]={}", path.display());
             }
@@ -785,11 +790,21 @@ impl NativeProjectBuilder {
                 eprintln!("  discovered_more={}", files.len() - 12);
             }
         }
+        if let Ok(list_path) = std::env::var("SIMPLE_DEBUG_DISCOVERY_LIST") {
+            // Full ordered discovery list, one path per line: discovery order
+            // feeds cache keys and link order, so this is the artifact to diff
+            // when touching the discovery walk.
+            let listing: String = files.iter().map(|p| format!("{}\n", p.display())).collect();
+            if let Err(e) = std::fs::write(&list_path, listing) {
+                eprintln!("warning: could not write SIMPLE_DEBUG_DISCOVERY_LIST {list_path}: {e}");
+            }
+        }
         if self.config.verbose {
             eprintln!("Found {0} .spl files", files.len());
         }
 
         // 2. Set up incremental state
+        let step_start = Instant::now();
         let cache_base_dir = self.cache_base_dir();
         let cache_dir = self.cache_dir();
         let objects_dir = cache_dir.join("objects");
@@ -809,15 +824,25 @@ impl NativeProjectBuilder {
             std::fs::create_dir_all(&objects_dir).map_err(|e| format!("create cache dir: {e}"))?;
         }
 
+        if rust_trace {
+            eprintln!("[native-rust-trace] step 2 incremental state: {:.3}s", step_start.elapsed().as_secs_f64());
+        }
+
         // 3. Stage .o files beside the cache so system-temp and cache cleanup cannot remove them.
+        let step_start = Instant::now();
         let mut temp_dir = Some(native_object_staging_dir(&cache_base_dir, &cache_dir)?);
         let temp_dir_path = temp_dir
             .as_ref()
             .map(|dir| dir.path().to_path_buf())
             .ok_or_else(|| "tempdir unexpectedly missing".to_string())?;
 
+        if rust_trace {
+            eprintln!("[native-rust-trace] step 3 stage dir: {:.3}s", step_start.elapsed().as_secs_f64());
+        }
+
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();
+        let step_start = Instant::now();
         // 4b. Discovery phase (hoisted above the dirty-set determination so the
         // opt-in safe-incremental object cache key can fold in every cross-module
         // codegen input): build the import map for cross-module function
@@ -826,6 +851,12 @@ impl NativeProjectBuilder {
         let incr_hardening = incremental_hardening_requested(self.config.incremental_hardening);
         let mut layout_fp: u64 = 0;
         let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 4b build_import_map: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
         if let Some(collision) = &result.enum_runtime_collision {
             return Err(collision.clone());
         }
@@ -952,6 +983,13 @@ impl NativeProjectBuilder {
             None
         };
         let global_fp_combined: u64 = global_fp.as_ref().map(GlobalBuildFingerprint::combined).unwrap_or(0);
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 4b import map + fingerprint: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+        let step_start = Instant::now();
 
         let effective_backend = self.config.backend.as_str();
 
@@ -1019,10 +1057,11 @@ impl NativeProjectBuilder {
         let cached_count = cached_objects.len();
         if rust_trace {
             eprintln!(
-                "[native-rust-trace] dirty set: cached={} to_compile={} use_incremental={}",
+                "[native-rust-trace] step 4 dirty set: cached={} to_compile={} use_incremental={} in {:.3}s",
                 cached_count,
                 to_compile.len(),
-                use_incremental
+                use_incremental,
+                step_start.elapsed().as_secs_f64()
             );
             for (idx, path, _, _) in to_compile.iter().take(12) {
                 eprintln!("  compile[{idx}]={}", path.display());
@@ -1053,6 +1092,9 @@ impl NativeProjectBuilder {
             self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
         let compile_time = compile_start.elapsed();
+        if rust_trace {
+            eprintln!("[native-rust-trace] step 5 compile: {:.3}s", compile_time.as_secs_f64());
+        }
 
         // Collect results
         let mut object_paths_with_indices: Vec<(usize, PathBuf)> = cached_objects;
