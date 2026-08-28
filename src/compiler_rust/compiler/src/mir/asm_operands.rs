@@ -21,6 +21,20 @@ pub fn asm_constraint_for(reg: &str) -> String {
 /// operand's index in the constraint list (outputs first, then inputs).
 /// Unnamed placeholders `{0}`, `{1}` index operands positionally in the same
 /// order. Text that is not a known placeholder is left untouched.
+/// Design A.3.1: raw `asm { }` text is opaque, so every `$` the author wrote
+/// must reach LLVM as a literal `$$` (LLVM's template engine reads a bare
+/// `$N` as an operand reference and aborts with "Bad $ operand number").
+///
+/// This MUST run BEFORE `rewrite_asm_placeholders`: that function INSERTS the
+/// `$N` references, and escaping afterwards would rewrite them to `$$N` and
+/// silently unbind every operand.
+pub fn escape_raw_asm_dollars(line: &str) -> String {
+    if !line.contains('$') {
+        return line.to_string();
+    }
+    line.replace('$', "$$")
+}
+
 pub fn rewrite_asm_placeholders(line: &str, index: &[(Option<String>, usize)]) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
@@ -81,5 +95,21 @@ mod tests {
         assert_eq!(asm_constraint_for("reg"), "r");
         assert_eq!(asm_constraint_for("eax"), "{eax}");
         assert_eq!(asm_constraint_for("a0"), "{a0}");
+    }
+
+    #[test]
+    fn dollar_is_doubled_before_placeholder_rewriting() {
+        assert_eq!(escape_raw_asm_dollars("and $~0xF, %rsp"), "and $$~0xF, %rsp");
+        assert_eq!(escape_raw_asm_dollars("xor %rbp, %rbp"), "xor %rbp, %rbp");
+    }
+
+    #[test]
+    fn escaping_then_rewriting_keeps_placeholders_unescaped() {
+        // The ordering contract: a literal `$` in operand-bound text is
+        // escaped, while the `$0` the rewriter inserts stays a live operand.
+        let index = vec![(Some("out".to_string()), 0usize)];
+        let escaped = escape_raw_asm_dollars("mov $1, {out}");
+        assert_eq!(escaped, "mov $$1, {out}");
+        assert_eq!(rewrite_asm_placeholders(&escaped, &index), "mov $$1, $0");
     }
 }

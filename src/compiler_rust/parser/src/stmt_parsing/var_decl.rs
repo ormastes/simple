@@ -746,6 +746,7 @@ impl Parser<'_> {
             ty,
             value,
             visibility: Visibility::Private,
+            attributes: vec![],
         }))
     }
 
@@ -778,6 +779,7 @@ impl Parser<'_> {
             value,
             mutability,
             visibility: Visibility::Private,
+            attributes: vec![],
         }))
     }
 

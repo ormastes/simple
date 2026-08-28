@@ -71,6 +71,7 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "interrupt",
     "boot",
     "align",
+    "global",
     "export",
     // Driver framework (FR-DRIVER-0001): @driver(...) / @native_lib(...)
     // routed through the attribute (not decorator) path so named args like

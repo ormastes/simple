@@ -159,6 +159,28 @@ pub struct HirGlobalStructInit {
     pub fields: Vec<HirGlobalFieldInit>,
 }
 
+/// Design A.5 raw data item: a `const`/`static` carrying `@section`,
+/// `@align` or `@global` is emitted as a raw byte image (an LLVM constant
+/// array with the requested placement), NOT as a tagged heap value. It has
+/// no Simple-side reader; it exists for linker scripts, boot firmware and
+/// other asm (multiboot header, GDT, page-table reservations).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirRawDataItem {
+    pub name: String,
+    pub section: Option<String>,
+    /// 0 = natural alignment of the element type.
+    pub align: u32,
+    pub is_global: bool,
+    pub is_const: bool,
+    /// Element width in bits (8/16/32/64).
+    pub element_bits: u32,
+    /// Element count (from the `[T; N]` type, or the initializer length).
+    pub count: usize,
+    /// Initializer values; empty with `zeroed = true` for `.bss`-eligible items.
+    pub values: Vec<i64>,
+    pub zeroed: bool,
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
@@ -166,6 +188,8 @@ pub struct HirModule {
     pub types: TypeRegistry,
     pub functions: Vec<HirFunction>,
     pub globals: Vec<(String, TypeId)>,
+    /// Design A.5 `@section/@align/@global` data items (raw byte images).
+    pub raw_data_items: Vec<HirRawDataItem>,
     /// Compile-time constant initial values for module-level `val` declarations.
     /// Maps global name to its integer initial value (extracted from literal initializers).
     pub global_init_values: HashMap<String, i64>,
@@ -270,6 +294,7 @@ impl HirModule {
             types: TypeRegistry::new(),
             functions: Vec::new(),
             globals: Vec::new(),
+            raw_data_items: Vec::new(),
             global_init_values: HashMap::new(),
             global_init_strings: HashMap::new(),
             global_init_arrays: HashMap::new(),

@@ -672,6 +672,7 @@ fn append_flattened_import_binding_markers(
             ty: None,
             value: Expr::Nil,
             visibility: Visibility::Private,
+            attributes: vec![],
         }));
     };
     match &use_stmt.target {
@@ -766,6 +767,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         ty: None,
                         value: Expr::Nil,
                         visibility: Visibility::Private,
+                        attributes: vec![],
                     }));
                 }
                 items.push(declaration);

@@ -199,7 +199,12 @@ pub(crate) fn mangle_mir(
         if !has_body {
             continue;
         }
-        let keeps_abi_name = func.attributes.iter().any(|attr| attr == "export")
+        // `@global` (design A.2): the symbol keeps its unmangled Simple name
+        // so `.S`-era labels (`_start`, `vector_table`) survive to the linker.
+        let keeps_abi_name = func
+            .attributes
+            .iter()
+            .any(|attr| attr == "export" || attr == "global")
             || extern_fns.contains(&func.name)
             || func.name.starts_with("__simple_")
             || func.name.starts_with("__module_init_")

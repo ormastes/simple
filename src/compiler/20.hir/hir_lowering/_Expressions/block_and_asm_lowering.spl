@@ -4,6 +4,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{raw_asm_rejected_directive, is_known_asm_clobber}
 use compiler.hir.hir_lowering.types.HirLowering
 
 impl HirLowering:
@@ -163,6 +164,16 @@ impl HirLowering:
         HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 
     me lower_asm(asm_node: AsmExpr) -> HirAsm:
+        # Design A.3.4 / A.4: raw blocks (no operand constraints) may not
+        # carry the directives the item attributes express, and every
+        # clobbers(...) name must be a known register or pseudo-register.
+        if asm_node.constraints.len() == 0:
+            val rejected = raw_asm_rejected_directive(asm_node.asm_template)
+            if rejected != "":
+                self.error("E-ASM-DIRECTIVE: `{rejected}` is not allowed inside a raw asm block; use @section/@global/@align on the item instead", asm_node.span)
+        for clobber_name in asm_node.clobbers:
+            if not is_known_asm_clobber(clobber_name):
+                self.error("E-ASM-CLOBBER: unknown clobber name `{clobber_name}` in clobbers(...)", asm_node.span)
         # Lower all constraint value expressions
         var hir_constraints: [HirAsmConstraint] = []
         for constraint in asm_node.constraints:

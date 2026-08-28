@@ -35,6 +35,69 @@ const OPTION_ENUM_ID: i64 = 1;
 /// along (`interpreter/node_exec.rs`, `exec_augmented_assignment`), where the
 /// `is_suspend` await decision is computed independently of `bin_op` — so this
 /// makes the JIT match the reference behaviour rather than inventing one.
+/// Design A.3.4: assembler directives a raw `asm { }` block may NOT carry
+/// because the item attributes (`@section`, `@global`, `@align`) express
+/// them. `.code32`/`.code64`, `.option`, `.arch`, `.cfi_*` stay allowed.
+/// Returns the offending directive for the E-ASM-DIRECTIVE message.
+pub(crate) fn raw_asm_rejected_directive(instructions: &[String]) -> Option<&'static str> {
+    const REJECTED: [&str; 8] = [
+        ".section", ".global", ".globl", ".type", ".size", ".align", ".p2align", ".balign",
+    ];
+    for instruction in instructions {
+        let text = instruction.trim_start();
+        for directive in REJECTED {
+            if let Some(rest) = text.strip_prefix(directive) {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    return Some(directive);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Design A.4: `clobbers(...)` accepts arch register names plus the pseudo
+/// names `memory` and `flags`/`cc`. The list is the union over the targets
+/// the seed can emit for (x86_64, aarch64, riscv, arm32); an unknown name is
+/// E-ASM-CLOBBER at lowering time.
+pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
+    match name {
+        "memory" | "cc" | "flags" => return true,
+        _ => {}
+    }
+    const X86: [&str; 24] = [
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
+        "r14", "r15", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+    ];
+    if X86.contains(&name) {
+        return true;
+    }
+    let bytes = name.as_bytes();
+    let numbered = |prefix: u8, max: u32| -> bool {
+        bytes.len() >= 2
+            && bytes[0] == prefix
+            && name[1..].bytes().all(|b| b.is_ascii_digit())
+            && name[1..].parse::<u32>().is_ok_and(|n| n <= max)
+    };
+    // aarch64 x0..x30 / w0..w30 / v0..v31 / q,d,s registers; arm32 r0..r15;
+    // riscv x0..x31, f0..f31, a0..a7, t0..t6, s0..s11.
+    numbered(b'x', 31)
+        || numbered(b'w', 30)
+        || numbered(b'v', 31)
+        || numbered(b'q', 31)
+        || numbered(b'd', 31)
+        || numbered(b's', 31)
+        || numbered(b'r', 15)
+        || numbered(b'f', 31)
+        || numbered(b'a', 7)
+        || numbered(b't', 6)
+        || matches!(name, "lr" | "sp" | "fp" | "pc" | "ra" | "gp" | "tp" | "zero")
+        || name.starts_with("xmm")
+        || name.starts_with("ymm")
+        || name.starts_with("zmm")
+        || name.starts_with("st")
+}
+
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
         ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
@@ -1080,6 +1143,18 @@ impl Lowerer {
                     }
                     return Ok(vec![]);
                 }
+                // Design A.3.4: a raw block (no operand constraints) must not
+                // carry directives the item attributes express (`.section`,
+                // `.global`, `.type`, `.size`, `.align`) — letting them through
+                // would silently split a function across sections.
+                if asm_stmt.constraints.is_empty() {
+                    if let Some(directive) = raw_asm_rejected_directive(&asm_stmt.instructions) {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-DIRECTIVE: `{directive}` is not allowed inside a raw asm block; \
+                             use @section/@global/@align on the item instead"
+                        )));
+                    }
+                }
                 use simple_parser::ast::AsmConstraintKind;
                 let mut operands = Vec::new();
                 let mut clobbers: Vec<String> = asm_stmt.clobbers.clone();
@@ -1107,6 +1182,16 @@ impl Lowerer {
                         reg: c.reg_class.clone().unwrap_or_else(|| "reg".to_string()),
                         expr,
                     });
+                }
+                // Design A.4: an unknown clobber name would be emitted into
+                // the LLVM constraint string verbatim and fail deep inside the
+                // assembler; reject it here with a source-level error.
+                for clobber in &clobbers {
+                    if !is_known_asm_clobber(clobber) {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-CLOBBER: unknown clobber name `{clobber}` in clobbers(...)"
+                        )));
+                    }
                 }
                 Ok(vec![HirStmt::InlineAsm {
                     instructions: asm_stmt.instructions.clone(),

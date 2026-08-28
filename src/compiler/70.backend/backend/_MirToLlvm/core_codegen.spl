@@ -261,6 +261,25 @@ impl MirTextCodegen for MirToLlvm:
             # be translated before the callee's own definition.
             if fn_owner.export_name != "":
                 self.export_symbol_names[fn_owner.name] = fn_owner.export_name
+            # Asm-embedding contract (design A.2): record placement BEFORE any
+            # body is emitted -- llvm_function_symbol_name consults fn_global
+            # at call sites, and translate_function reads the rest on the
+            # `define` line / at the terminator.
+            if fn_owner.is_global:
+                self.fn_global[fn_owner.name] = true
+            if fn_owner.is_naked or fn_owner.section != "" or fn_owner.align > 0:
+                # translate_function receives the emitted SYMBOL, so key the
+                # placement tables by both the MIR name and that symbol.
+                val placement_symbol = self.llvm_function_symbol_name(fn_owner.name)
+                if fn_owner.is_naked:
+                    self.fn_naked[fn_owner.name] = true
+                    self.fn_naked[placement_symbol] = true
+                if fn_owner.section != "":
+                    self.fn_section[fn_owner.name] = fn_owner.section
+                    self.fn_section[placement_symbol] = fn_owner.section
+                if fn_owner.align > 0:
+                    self.fn_align[fn_owner.name] = fn_owner.align
+                    self.fn_align[placement_symbol] = fn_owner.align
 
         # mutglobal lane (module-level `var` mutation storage, see
         # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
@@ -624,22 +643,39 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_di_subprogram(sub_id, name, dbg_line)
             dbg_id = Some(sub_id)
 
-        if ir_handle >= 0:
+        # Asm-embedding contract (design A.2): `@naked` -> `naked noinline`
+        # (never alwaysinline), `@section` -> `section "..."`, `@align` ->
+        # `align n`, `@global` -> `dso_local` external symbol. Keyed by the
+        # MIR name; the loop in translate_module fills these before any body.
+        val placement_naked = self.fn_naked.has(name)
+        var placement_attrs = ""
+        if placement_naked:
+            placement_attrs = " naked noinline"
+        var placement_suffix = ""
+        if self.fn_section.has(name):
+            placement_suffix = placement_suffix + " section \"" + self.fn_section[name] + "\""
+        if self.fn_align.has(name):
+            placement_suffix = placement_suffix + " align {self.fn_align[name]}"
+        val placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
-            var attrs = " nounwind"
-            if is_readonly:
+            var attrs = " nounwind" + placement_attrs
+            if is_readonly and not placement_naked:
                 attrs = attrs + " readonly"
-            if is_small:
+            if is_small and not placement_naked:
                 attrs = attrs + " alwaysinline"
             var dbg_suffix = ""
             match dbg_id:
                 Some(id): dbg_suffix = " !dbg !{id}"
                 nil: ()
-            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
-            if _sffi_string_builder_len(ir_handle) > 0:
-                val newline = "\n"
-                _sffi_string_builder_push(ir_handle, newline)
-            _sffi_string_builder_push(ir_handle, opening)
+            val opening = "{placement_prefix} {effective_ret_ty} @{fn_name}({param_str}){attrs}{placement_suffix}{dbg_suffix} {{"
+            if ir_handle >= 0:
+                if _sffi_string_builder_len(ir_handle) > 0:
+                    val newline = "\n"
+                    _sffi_string_builder_push(ir_handle, newline)
+                _sffi_string_builder_push(ir_handle, opening)
+            else:
+                self.builder.emit(opening)
         else:
             self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
         if bootstrap_debug:
@@ -1175,7 +1211,12 @@ impl MirTextCodegen for MirToLlvm:
                     print "[mir-to-llvm] terminator:ret-scalar-kind index={block_index} kind={ret_kind}"
                     print "[mir-to-llvm] terminator:ret-threaded-type index={block_index} type={return_type_text}"
                     print "[mir-to-llvm] terminator:ret-threaded-status index={block_index} start={is_start} return_slot={return_slot_id}"
-                if ret_kind == 0:
+                if self.fn_naked.has(self.current_function_name):
+                    # Design A.2 `@naked`: `unreachable`, never `ret`, so LLVM
+                    # synthesises no epilogue (the measured trailing `c3` is
+                    # fatal for stubs ending in jmp/iret/mret).
+                    self.builder.emit("  unreachable")
+                elif ret_kind == 0:
                     if return_type_text == "void":
                         self.builder.emit_ret_void()
                     else:

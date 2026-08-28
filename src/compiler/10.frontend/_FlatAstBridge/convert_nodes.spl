@@ -15,7 +15,7 @@ use compiler.frontend.core.string_interpolation_expand.{
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
-use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_hal_flags}
+use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_hal_flags, decl_get_asm_placement}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output}
@@ -2145,6 +2145,34 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         proof_uses: contract_proof_uses
     )
     var fn_attributes: [Attribute] = []
+    # Asm-embedding contract (design A.2): rebuild the placement attributes
+    # the parser recorded as raw spellings ("naked|section(.text.boot)|align(16)|global").
+    val asm_placement = decl_get_asm_placement(idx)
+    if asm_placement != "":
+        for spelling in asm_placement.split("|"):
+            if spelling == "":
+                continue
+            val paren = spelling.index_of("(")
+            if paren < 0:
+                fn_attributes.push(Attribute(name: spelling, args: [], span: span))
+                continue
+            val attr_name = spelling[0:paren]
+            val raw_arg = spelling[paren + 1:spelling.len() - 1]
+            if attr_name == "align":
+                var n: i64 = 0
+                var digit_i = 0
+                var all_digits = raw_arg.len() > 0
+                while digit_i < raw_arg.len():
+                    val b = raw_arg.byte_at(digit_i)
+                    if b < 48 or b > 57:
+                        all_digits = false
+                        break
+                    n = n * 10 + (b - 48)
+                    digit_i = digit_i + 1
+                val align_arg = if all_digits: Expr(kind: ExprKind.IntLit(n), span: span) else: Expr(kind: ExprKind.Ident(raw_arg), span: span)
+                fn_attributes.push(Attribute(name: attr_name, args: [align_arg], span: span))
+            else:
+                fn_attributes.push(Attribute(name: attr_name, args: [Expr(kind: ExprKind.StringLit(raw_arg, nil), span: span)], span: span))
     val rt_hal_flags = decl_get_rt_hal_flags(idx)
     if (rt_hal_flags & 1) != 0:
         var rt_args: [Expr] = [Expr(kind: ExprKind.Ident("hal"), span: span)]

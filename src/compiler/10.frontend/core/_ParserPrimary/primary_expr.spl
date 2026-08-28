@@ -296,6 +296,24 @@ fn parse_primary_expr() -> i64:
         if par_kind_get() == 6 and par_text_get() == "volatile":
             parser_advance()
 
+        # Design A.4: `asm [volatile] clobbers(rax, rcx, memory) { ... }`.
+        # Names travel as "clobber:<name>" so the flat bridge routes them to
+        # AsmExpr.clobbers exactly like the legacy `clobber(...)` directive.
+        var raw_clobbers: [text] = []
+        if par_kind_get() == 6 and par_text_get() == "clobbers":
+            parser_advance()
+            parser_expect(140)
+            while par_kind_get() != 141 and par_kind_get() != 190:
+                if par_kind_get() == 6:
+                    raw_clobbers.push("clobber:" + par_text_get())
+                    parser_advance()
+                else:
+                    parser_error("expected register name in clobbers(...)")
+                    break
+                if par_kind_get() == 160:
+                    parser_advance()
+            parser_expect(141)
+
         if par_kind_get() == 140:
             return parse_legacy_parenthesized_asm()
 
@@ -337,6 +355,8 @@ fn parse_primary_expr() -> i64:
 
         if par_kind_get() == 142:
             val raw_asm = parse_raw_asm_braced_payload()
+            if raw_clobbers.len() > 0:
+                return expr_asm_operands(raw_asm, [], [], [], [], [], raw_clobbers, 0)
             return expr_asm(raw_asm, 0)
 
         if par_kind_get() == 164:

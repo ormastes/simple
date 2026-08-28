@@ -33,6 +33,9 @@ pub struct ConstStmt {
     pub ty: Option<Type>,
     pub value: Expr, // Required - must be evaluable at compile time
     pub visibility: Visibility,
+    /// Item attributes (`@section`, `@align`, `@global`, ...) — design A.5
+    /// data items. Empty for the ordinary `const`.
+    pub attributes: Vec<Attribute>,
 }
 
 /// Static variable declaration (global, initialized once)
@@ -46,6 +49,9 @@ pub struct StaticStmt {
     pub value: Expr, // Required
     pub mutability: Mutability,
     pub visibility: Visibility,
+    /// Item attributes (`@section`, `@align`, `@global`, ...) — design A.5
+    /// data items. Empty for the ordinary `static`.
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

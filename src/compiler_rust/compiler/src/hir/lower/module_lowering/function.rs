@@ -74,6 +74,38 @@ fn gpu_attr_string_value(expr: &ast::Expr) -> Option<&str> {
     }
 }
 
+/// Asm-embedding contract (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md
+/// A.2): `@section("name")` and `@align(n)` carry an argument that the plain
+/// name list drops. Encode them as `section=<name>` / `align=<n>` so the LLVM
+/// backend can place the symbol without a new MIR field (same convention as
+/// `gpu_target_<backend>` above).
+pub(crate) fn append_asm_placement_attribute_metadata(attrs: &mut Vec<String>, attr: &ast::Attribute) {
+    match attr.name.as_str() {
+        "section" => {
+            // A double-quoted literal may parse as a one-part FString.
+            let name = match attr.args.as_ref().and_then(|args| args.first()) {
+                Some(ast::Expr::String(s)) | Some(ast::Expr::Identifier(s)) => Some(s.clone()),
+                Some(ast::Expr::FString { parts, .. }) if parts.len() == 1 => match &parts[0] {
+                    ast::FStringPart::Literal(s) => Some(s.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(name) = name {
+                if !name.is_empty() {
+                    attrs.push(format!("section={name}"));
+                }
+            }
+        }
+        "align" => {
+            if let Some(ast::Expr::Integer(n)) = attr.args.as_ref().and_then(|args| args.first()) {
+                attrs.push(format!("align={n}"));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn append_gpu_attribute_metadata(attrs: &mut Vec<String>, attr: &ast::Attribute) {
     if attr.name != "gpu" {
         return;
@@ -748,6 +780,7 @@ impl Lowerer {
         let mut attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
         for attr in &f.attributes {
             append_gpu_attribute_metadata(&mut attributes, attr);
+            append_asm_placement_attribute_metadata(&mut attributes, attr);
         }
         for dec in &f.decorators {
             if let ast::Expr::Identifier(name) = &dec.name {

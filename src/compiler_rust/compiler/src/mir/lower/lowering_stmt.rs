@@ -2053,7 +2053,7 @@ impl<'a> MirLowerer<'a> {
                 clobbers,
             } => {
                 use crate::hir::HirAsmOperandKind;
-                use crate::mir::asm_operands::{asm_constraint_for, rewrite_asm_placeholders};
+                use crate::mir::asm_operands::{asm_constraint_for, escape_raw_asm_dollars, rewrite_asm_placeholders};
 
                 // Outputs first (LLVM numbers outputs before inputs), then
                 // inputs. An `inout` operand contributes one output slot and
@@ -2102,7 +2102,13 @@ impl<'a> MirLowerer<'a> {
                     constraint_parts.push("~{memory}".to_string());
                 }
                 let constraints = constraint_parts.join(",");
-                let rewritten: Vec<String> = instructions
+                // Design A.3.1: the author's raw text is opaque — every `$`
+                // must reach LLVM as a literal `$$`. This MUST run BEFORE the
+                // `{name}` -> `$N` rewriter below, otherwise the placeholders
+                // the rewriter inserts would themselves be escaped to `$$N`.
+                let escaped: Vec<String> =
+                    instructions.iter().map(|line| escape_raw_asm_dollars(line)).collect();
+                let rewritten: Vec<String> = escaped
                     .iter()
                     .map(|line| rewrite_asm_placeholders(line, &placeholder_index))
                     .collect();

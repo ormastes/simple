@@ -1706,6 +1706,7 @@ impl<'a> MirLowerer<'a> {
         module.global_init_values = hir.global_init_values.clone();
         module.global_init_strings = hir.global_init_strings.clone();
         module.global_init_arrays = hir.global_init_arrays.clone();
+        module.raw_data_items = hir.raw_data_items.clone();
         module.global_init_structs = hir.global_init_structs.clone();
         module.global_init_functions = hir.global_init_functions.clone();
         module.dynamic_init_globals = hir.dynamic_init_globals.clone();

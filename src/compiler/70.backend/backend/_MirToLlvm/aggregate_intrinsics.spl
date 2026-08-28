@@ -45,6 +45,16 @@ fn llvm_inline_asm_rewrite_template(
         operand_index = operand_index + 1
     rewritten
 
+fn llvm_raw_asm_escape_template(asm_template: text) -> text:
+    """Design A.3.1 raw-block text contract: `$` -> `$$` so LLVM's inline-asm
+    template engine emits a literal `$` (AT&T immediates, `$$`-free `.S`
+    bodies pasted verbatim). Braces need no escaping in an LLVM IR asm string.
+    Fast path: no `$` -> the input text is returned untouched (one scan, no
+    per-character concatenation)."""
+    if not asm_template.contains("$"):
+        return asm_template
+    asm_template.split("$").join("$$")
+
 fn llvm_c_abi_clobbers(arch: text) -> [text]:
     """LLVM register clobbers for the platform C calling convention."""
     if arch == "x86_64":
@@ -573,15 +583,24 @@ impl MirToLlvm:
         val preserves_flags = options.contains("preserves_flags")
         for clobber in clobbers:
             if not (no_memory and clobber == "memory") and not (preserves_flags and clobber == "cc"):
-                constraint_parts.push("~{{clobber}}")
+                val clobber_reg = if clobber == "flags": "cc" else: clobber
+                constraint_parts.push("~{{" + clobber_reg + "}}")
 
         for clobber_abi in clobber_abis:
             if clobber_abi == "C" or clobber_abi == "C-unwind":
                 for register in llvm_c_abi_clobbers(self.target_arch):
-                    constraint_parts.push("~{{register}}")
+                    constraint_parts.push("~{{" + register + "}}")
 
         val constraints = constraint_parts.join(",")
-        val llvm_asm_template = llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)
+        # Design A.3.1: a RAW block (no operands) is opaque assembler text --
+        # every `$` must reach LLVM's template engine as `$$`, or an AT&T
+        # immediate like `and $~0xF, %rsp` aborts llc with
+        # `Bad $ operand number in inline asm string`. Operand-bound blocks
+        # keep `{name}` -> `$N` substitution and the author writes `$$`.
+        val llvm_asm_template = if inputs.len() == 0 and outputs.len() == 0:
+            llvm_raw_asm_escape_template(asm_template)
+        else:
+            llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)
 
         var arg_list_parts: [text] = []
         for i in 0..arg_values.len():
