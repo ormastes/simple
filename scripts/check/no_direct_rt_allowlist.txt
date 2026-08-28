@@ -98,3 +98,117 @@ src/lib/common/ui/window_scene_draw_ir.spl
 src/app/provider_cli/native_provider_v1.spl
 src/app/simpleos_audio_host/daemon_runner.spl
 src/app/io/feature_registry.spl
+# Gate-lane ruling (2026-08-28, roots-widening adjudication): two common/
+# boundary files that wrap a single class of raw rt_* primitive with no
+# deeper Simple layer to delegate to (clock/time syscalls, raw binary byte
+# I/O) — same provider criterion as the loader mmap/ptr entries above.
+# Owner: gate lane. Record: doc/08_tracking/rt_boundary/provider_classification_2026-08-28.md
+src/lib/common/time_utils.spl
+src/lib/common/binary_io.spl
+# By-kind heap-dump provider (2026-08-28): thin typed wrappers over
+# rt_heap_* introspection externs, no deeper Simple layer underneath.
+# Flagged by the compiler migration lane as provider-shaped, not migratable.
+# Owner: gate lane. Record: doc/08_tracking/rt_boundary/provider_classification_2026-08-28.md
+src/lib/nogc_sync_mut/mem/dump.spl
+# Bundled/staged stdlib snapshot inside the simple-term-io / compiler_rust
+# crate (2026-08-28, gate-lane roots-widening adjudication): 724 .spl files
+# under src/compiler_rust/lib/ with a DIFFERENT directory layout than
+# src/lib/ (std/src/, std/examples/, std/shaders/, std/report/ vs src/lib's
+# common/nogc_sync_mut/gc_async_mut/... layers) and no sync script found
+# under scripts/ referencing it. Excluded from the ratchet as
+# derived/bundled crate content, same class as the vendor/** exclusions in
+# CLAUDE.md's Owned-Code Scope — NOT verified as either a live sync target
+# or a stale fork; see the bug record for the open question.
+# Record: doc/08_tracking/bug/compiler_rust_lib_stdlib_snapshot_provenance_unknown_2026-08-28.md
+src/compiler_rust/lib/
+# Minimal-runtime-import contract boundary (2026-08-28): this exact file
+# must keep a LITERAL rt_exit(1) — the worker must not pull std (no
+# std.process.exit or similar), enforced by
+# test/01_unit/app/native_build_worker_minimal_runtime_import_contract_spec.spl.
+# Classified provider, not a migration target: the contract IS "call rt_*
+# directly, never std".
+src/app/cli/native_build_worker.spl
+# ---- lib-lane residual-scope adjudication (2026-08-28, gate-lane ruling) ----
+# Category (a): already-typed 1:1 wrapper modules sitting outside ffi/sffi/
+# by filename convention only (each declares its own rt_* extern once and
+# wraps it in a typed fn/class method — structurally identical to a sffi/
+# provider file). Allowlisted IN PLACE, not relocated: relocation into
+# ffi/sffi/ needs a cross-tree import-path audit (every absolute/relative
+# importer across src/ and test/) that is out of scope for this pass and
+# risks breaking working code for a purely cosmetic move. Owner: gate lane.
+# Record: doc/08_tracking/rt_boundary/provider_classification_2026-08-28.md
+src/lib/nogc_sync_mut/atomic.spl
+src/lib/nogc_sync_mut/concurrent/
+# rt_hal/ is a DIFFERENT case from the two entries above and is NOT a typed
+# 1:1 extern wrapper module. Verified 2026-08-28: 9 files, exactly ONE
+# `extern fn rt_*` in the whole directory, and ~160 regex matches that are
+# the module's OWN pure-Simple functions named `rt_hal_*` (rt_hal_report,
+# rt_hal_dispatch_one, rt_hal_digest256_equal, ...). Those are scanner
+# false positives from `\brt_[a-z0-9_]*\(` colliding with the module's
+# naming convention — not runtime calls. Exempted on that basis only.
+# Known cost of the blanket entry: a genuine future rt_* runtime call added
+# under rt_hal/ would also be excused. Preferred permanent fix is a scanner
+# rule that excludes the `rt_hal_` prefix, after which this entry should be
+# deleted. Dropping the entry today costs 160 forbidden sites
+# (6685 -> 6845, still under baseline 7775).
+src/lib/nogc_sync_mut/rt_hal/
+src/lib/nogc_sync_mut/io/stderr_ops.spl
+src/lib/nogc_sync_mut/io/env_ops.spl
+src/lib/nogc_sync_mut/io/time_ops.spl
+src/lib/nogc_sync_mut/io/file_ops.spl
+src/lib/nogc_sync_mut/io/dir_ops.spl
+src/lib/nogc_sync_mut/io/process_ops.spl
+src/lib/nogc_sync_mut/io/sysinfo_ops.spl
+src/lib/nogc_sync_mut/io/volatile_ops.spl
+src/lib/nogc_sync_mut/io/debug_stubs.spl
+src/lib/nogc_sync_mut/io/tls_common_hooks.spl
+# Category (b): boundary-category rulings on the lib lane's residual list.
+# GENUINE PROVIDERS (hardware/driver ABI, codegen-emitted names, or
+# device-write primitives with no deeper Simple layer — same criterion as
+# the pre-existing vulkan/metal/loader/baremetal-log entries above):
+#   - GPU/graphics backend dispatch surfaces not already covered by the
+#     existing src/lib/nogc_sync_mut/gpu/ and .../engine/audio/ entries:
+src/lib/nogc_sync_mut/engine/render/
+src/lib/nogc_sync_mut/engine/physics/backend_gpu/
+src/lib/nogc_sync_mut/gpu_driver/
+src/lib/nogc_sync_mut/gpu_runtime/
+src/lib/nogc_sync_mut/gpu_profile/
+src/lib/nogc_sync_mut/io/window_winit.spl
+src/lib/nogc_sync_mut/io/simple_glfw.spl
+src/lib/nogc_sync_mut/io/simple_sdl3.spl
+src/lib/nogc_sync_mut/io/metal_ptr.spl
+src/lib/nogc_sync_mut/desktop/display.spl
+#   - ML/tensor: CUDA driver ABI under nogc_sync_mut/ (async-side
+#     nogc_async_mut/cuda/ was already allowlisted; sync-side was not):
+src/lib/nogc_sync_mut/cuda/
+#     (linalg/ BLAS/LAPACK/CUDA-BLAS FFI files were already covered by the
+#     pre-existing src/lib/nogc_sync_mut/linalg/ entry — no change needed.)
+#   - JIT codegen: emits/consumes codegen symbol names, rule-3 boundary:
+src/lib/nogc_sync_mut/jit/
+#   - Baremetal device config/terminal/transport primitives, rule-3
+#     boundary (same class as the existing noalloc log-boundary entry):
+src/lib/nogc_sync_mut/baremetal/
+#   - Debug/remote protocol: process-level debug primitives (ptrace, DWARF
+#     unwinding consumed by a debugger, ST-Link/OpenOCD wire protocols).
+#     Scoped to remote/ plus the two named agent files ONLY — NOT the whole
+#     debug/ tree (see PRODUCT CODE below for two files deliberately
+#     excluded):
+src/lib/nogc_sync_mut/debug/remote/
+src/lib/nogc_sync_mut/debug/native_agent.spl
+src/lib/nogc_sync_mut/debug/smf_agent.spl
+#
+# PRODUCT CODE — NOT allowlisted, left forbidden (migration targets for a
+# future lane), because each does real dispatch/parsing logic beyond the
+# raw extern call and is not itself the boundary:
+#   - src/lib/nogc_sync_mut/debug/interpreter_backend.spl (interpreter
+#     command dispatch logic, not a raw primitive)
+#   - src/lib/nogc_sync_mut/debug/formats/dsym_resolver.spl (dSYM format
+#     parsing/lookup logic, not a raw primitive)
+#   - src/lib/nogc_sync_mut/database/{core,mod,atomic,todo,checker,
+#     nosql_offload}.spl, database/server/capability.spl,
+#     database/sql/statement.spl, database/vector/distance.spl — DB engine
+#     internals: storage/query logic that CALLS a raw rt_* primitive is not
+#     the same thing as BEING the primitive; per two-kinds-of-simple-db-
+#     naming these are the embedded-DB engine layer and should route
+#     through a typed std.database wrapper like everything else, not be
+#     exempted wholesale.
