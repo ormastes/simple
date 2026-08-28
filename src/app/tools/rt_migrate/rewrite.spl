@@ -1,0 +1,578 @@
+# Pure text rewrite for rt_migrate: no I/O, so every rule is unit-testable.
+#
+# Contract (see test/01_unit/app/tools/rt_migrate_spec.spl):
+#   - only `sig: same` map entries are rewritten, and only when the file's own
+#     `extern fn rt_x(...)` declaration (if any) matches the alias signature
+#     (param names / unit-vs-void ignored) or one of the entry's variants;
+#   - string literals, comments and docstrings are never touched;
+#   - `extern fn rt_x` declarations (with their attached `@attr` lines) are
+#     deleted once nothing in the file references rt_x any more;
+#   - the alias import is merged into an existing `use <module>.{...}` /
+#     `use <module> (...)` line, or added after the last top-level `use`;
+#   - a symbol the file cannot migrate is reported as a residual with a reason
+#     and the file is otherwise still migrated as far as possible;
+#   - running the rewrite on its own output changes nothing.
+
+use app.tools.rt_migrate.alias_map.{AliasEntry, AliasVariant, normalize_decl}
+
+pub struct Residual:
+    sym: text
+    reason: text
+
+pub struct MigrateResult:
+    output: text
+    changed: bool
+    rewritten: i64
+    imports_added: [text]
+    decls_removed: i64
+    no_decl_rewrites: i64
+    residuals: [Residual]
+
+pub struct FileContext:
+    path: text
+    strict: bool
+
+fn _is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+# Count `"""` occurrences on a line (docstring boundaries).
+fn _triple_quotes(line: text) -> i64:
+    var count = 0
+    var i = 0
+    val n = line.len()
+    while i + 2 < n:
+        if line.char_at(i) == "\"" and line.char_at(i + 1) == "\"" and line.char_at(i + 2) == "\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+# Mask string literals and the trailing comment of one code line: every masked
+# character becomes a space, so identifier scans on the mask cannot see them.
+pub fn mask_code(line: text) -> text:
+    var out = ""
+    var in_str = false
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val c = line.char_at(i)
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                out = out + "  "
+                i = i + 2
+                continue
+            if c == "\"":
+                in_str = false
+            out = out + " "
+            i = i + 1
+            continue
+        if c == "\"":
+            in_str = true
+            out = out + " "
+            i = i + 1
+            continue
+        if c == "#":
+            while i < n:
+                out = out + " "
+                i = i + 1
+            break
+        out = out + c
+        i = i + 1
+    out
+
+# Every direct call position `rt_x(` on a masked line: [(start, sym)].
+pub fn call_sites(masked: text) -> [(i64, text)]:
+    var out: [(i64, text)] = []
+    var i = 0
+    val n = masked.len()
+    while i + 3 <= n:
+        if masked.substring(i, i + 3) == "rt_" and (i == 0 or not _is_ident_char(masked.char_at(i - 1))) and (i == 0 or masked.char_at(i - 1) != "."):
+            var j = i + 3
+            while j < n and _is_ident_char(masked.char_at(j)):
+                j = j + 1
+            if j < n and masked.char_at(j) == "(":
+                val sym = masked.substring(i, j)
+                if sym.len() > 3 and (sym.substring(3, 4) >= "a" and sym.substring(3, 4) <= "z"):
+                    out.push((i, sym))
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn _is_extern_decl_line(masked: text) -> bool:
+    val t = masked.trim()
+    t.starts_with("extern fn rt_") or t.starts_with("extern fn ")
+
+fn _is_fn_def_line(masked: text) -> bool:
+    val t = masked.trim()
+    t.starts_with("fn ") or t.starts_with("pub fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+# Parse `extern fn rt_x(params) -> ret` from a masked line: (sym, normalized decl).
+fn _parse_extern_decl(masked: text) -> (text, text):
+    val t = masked.trim()
+    if not t.starts_with("extern fn "):
+        return ("", "")
+    val rest = t.substring(10, t.len()).trim()
+    val paren = rest.find("(")
+    if paren < 0:
+        return ("", "")
+    val sym = rest.substring(0, paren)
+    if not sym.starts_with("rt_"):
+        return ("", "")
+    (sym, normalize_decl(rest.substring(paren, rest.len())))
+
+fn _module_family(path: text) -> text:
+    val marker = "src/lib/"
+    val at = path.find(marker)
+    if at < 0:
+        return ""
+    val rest = path.substring(at + marker.len(), path.len())
+    val slash = rest.find("/")
+    if slash < 0:
+        return ""
+    rest.substring(0, slash)
+
+fn _module_target_family(module: text) -> text:
+    if module.starts_with("std.nogc_sync_mut."):
+        return "nogc_sync_mut"
+    if module.starts_with("std.nogc_async_mut."):
+        return "nogc_async_mut"
+    if module.starts_with("std.gc_async_mut."):
+        return "gc_async_mut"
+    if module.starts_with("std.gc_sync_mut."):
+        return "gc_sync_mut"
+    if module.starts_with("std.nogc_async_mut_noalloc."):
+        return "nogc_async_mut_noalloc"
+    ""
+
+# Which names does `use <module>.{a, b}` / `use <module> (a, b)` / `use <module>.a` bind?
+# Returns (module, [names]) or ("", []) when the line is not an import.
+pub fn parse_use_line(line: text) -> (text, [text]):
+    val t = line.trim()
+    var body = ""
+    if t.starts_with("use "):
+        body = t.substring(4, t.len()).trim()
+    elif t.starts_with("pub use "):
+        body = t.substring(8, t.len()).trim()
+    elif t.starts_with("export use "):
+        body = t.substring(11, t.len()).trim()
+    else:
+        return ("", [])
+    val brace = body.find("{")
+    val paren = body.find("(")
+    if brace >= 0 and (paren < 0 or brace < paren):
+        val close = body.rfind("}")
+        if close < 0:
+            return (_strip_dot(body.substring(0, brace)), [])
+        return (_strip_dot(body.substring(0, brace)), _split_names(body.substring(brace + 1, close)))
+    if paren >= 0:
+        val close = body.rfind(")")
+        if close < 0:
+            return (body.substring(0, paren).trim(), [])
+        return (body.substring(0, paren).trim(), _split_names(body.substring(paren + 1, close)))
+    if body.ends_with("*"):
+        return (_strip_dot(body.substring(0, body.len() - 1)), ["*"])
+    val dot = body.rfind(".")
+    if dot < 0:
+        return (body, [])
+    (body.substring(0, dot), [body.substring(dot + 1, body.len())])
+
+fn _strip_dot(s: text) -> text:
+    val t = s.trim()
+    if t.ends_with("."):
+        return t.substring(0, t.len() - 1)
+    t
+
+fn _split_names(s: text) -> [text]:
+    var out: [text] = []
+    for part in s.split(","):
+        var p = part.trim()
+        val alias_at = p.find(" as ")
+        if alias_at >= 0:
+            p = p.substring(alias_at + 4, p.len()).trim()
+        if p != "":
+            out.push(p)
+    out
+
+fn _has_name(xs: [text], name: text) -> bool:
+    for x in xs:
+        if x == name:
+            return true
+    false
+
+fn _count_ident(masked: text, ident: text) -> i64:
+    var count = 0
+    var from = 0
+    while true:
+        val at = masked.substring(from, masked.len()).find(ident)
+        if at < 0:
+            break
+        val start = from + at
+        val end = start + ident.len()
+        val before_ok = start == 0 or not _is_ident_char(masked.char_at(start - 1))
+        val after_ok = end >= masked.len() or not _is_ident_char(masked.char_at(end))
+        if before_ok and after_ok:
+            count = count + 1
+        from = end
+    count
+
+fn _reason_of(entry: AliasEntry) -> text:
+    if entry.cls == "provider":
+        return "provider"
+    if entry.cls == "adapted":
+        return "adapted"
+    if entry.cls == "missing":
+        return "missing"
+    "class=" + entry.cls
+
+# Decide alias (module, fn) for one symbol in this file. Returns ("", "", reason)
+# on residual; third element "" on success, "no-decl" when no local decl exists.
+fn _resolve(entry: AliasEntry, local_decl: text, has_decl: bool, ctx: FileContext) -> (text, text, text):
+    if entry.cls != "same":
+        return ("", "", _reason_of(entry))
+    if not has_decl:
+        if ctx.strict:
+            return ("", "", "strict:no-decl")
+        return (entry.module, entry.fn_name, "no-decl")
+    if local_decl == "!unparseable":
+        return ("", "", "decl-mismatch:multi-line-or-unparseable-decl")
+    if entry.decl == "!unparseable":
+        return ("", "", "decl-mismatch:map-decl-unparseable")
+    if local_decl == entry.decl:
+        return (entry.module, entry.fn_name, "")
+    for v in entry.variants:
+        if v.decl == local_decl:
+            return (v.module, v.fn_name, "")
+    ("", "", "decl-mismatch:" + local_decl)
+
+fn _layering_block(ctx: FileContext, module: text) -> text:
+    val fam = _module_family(ctx.path)
+    val target = _module_target_family(module)
+    if target == "":
+        return ""
+    if fam == "common":
+        return "layering:common-cannot-import-" + target
+    if fam != "" and fam != target and fam != "common":
+        return "family-mismatch:" + fam + "->" + target
+    ""
+
+pub fn migrate_source(ctx: FileContext, source: text, map: Dict<text, AliasEntry>) -> MigrateResult:
+    val lines: [text] = source.split("\n")
+    val n = lines.len()
+    # pass 1: classify lines (docstring / code), build masks, collect decls, uses, defs
+    var masks: [text] = []
+    var is_code: [bool] = []
+    var in_doc = false
+    var decl_sig: Dict<text, text> = {}
+    var decl_line: Dict<text, i64> = {}
+    var imported_from: Dict<text, text> = {}
+    var use_line_of_module: Dict<text, i64> = {}
+    var use_block_close: Dict<text, i64> = {}
+    var defined_names: Dict<text, bool> = {}
+    var brace_style = 0
+    var paren_style = 0
+    var last_use_line = -1
+    var li = 0
+    while li < n:
+        val raw: text = lines[li]
+        val q = _triple_quotes(raw)
+        if in_doc:
+            masks.push("")
+            is_code.push(false)
+            if q > 0:
+                in_doc = false
+            li = li + 1
+            continue
+        if q == 1:
+            in_doc = true
+            masks.push("")
+            is_code.push(false)
+            li = li + 1
+            continue
+        val m = mask_code(raw)
+        masks.push(m)
+        is_code.push(true)
+        val (dsym, dsig) = _parse_extern_decl(m)
+        if dsym != "":
+            decl_sig[dsym] = dsig
+            decl_line[dsym] = li
+        if _is_fn_def_line(m):
+            val t = m.trim()
+            val fn_at = t.find("fn ")
+            if fn_at >= 0:
+                val after = t.substring(fn_at + 3, t.len())
+                val paren = after.find("(")
+                if paren > 0:
+                    defined_names[after.substring(0, paren).trim()] = true
+        if not raw.starts_with(" ") and not raw.starts_with("\t"):
+            val (umod, unames) = parse_use_line(m)
+            if umod != "":
+                last_use_line = li
+                if m.contains("{"):
+                    brace_style = brace_style + 1
+                elif m.contains("("):
+                    paren_style = paren_style + 1
+                if not use_line_of_module.contains_key(umod):
+                    use_line_of_module[umod] = li
+                for nm in unames:
+                    imported_from[nm] = umod
+                # multi-line `use m.{` ... `}` block: names live on the following lines
+                if m.contains("{") and not m.contains("}"):
+                    var k = li + 1
+                    while k < n:
+                        val inner: text = lines[k]
+                        val close_at = inner.find("}")
+                        val body = if close_at >= 0: inner.substring(0, close_at) else: inner
+                        for nm in _split_names(body):
+                            imported_from[nm] = umod
+                        if close_at >= 0:
+                            break
+                        k = k + 1
+                    if k < n:
+                        use_block_close[umod] = k
+                        last_use_line = k
+        li = li + 1
+    # pass 2: resolve every called symbol once per file
+    var alias_of: Dict<text, text> = {}
+    var alias_mod: Dict<text, text> = {}
+    var residuals: [Residual] = []
+    var seen: Dict<text, bool> = {}
+    var no_decl_syms: Dict<text, bool> = {}
+    li = 0
+    while li < n:
+        if is_code[li] and not _is_extern_decl_line(masks[li]):
+            for site in call_sites(masks[li]):
+                val (pos, sym) = site
+                if seen.contains_key(sym):
+                    continue
+                seen[sym] = true
+                if not map.contains_key(sym):
+                    residuals.push(Residual(sym: sym, reason: "unmapped"))
+                    continue
+                val entry = map[sym]
+                val has_decl = decl_sig.contains_key(sym)
+                val local = if has_decl: decl_sig[sym] else: ""
+                val (mod, fname, why) = _resolve(entry, local, has_decl, ctx)
+                if mod == "":
+                    residuals.push(Residual(sym: sym, reason: why))
+                    continue
+                val block = _layering_block(ctx, mod)
+                if block != "":
+                    residuals.push(Residual(sym: sym, reason: block))
+                    continue
+                if defined_names.contains_key(fname):
+                    residuals.push(Residual(sym: sym, reason: "name-collision:local-fn-" + fname))
+                    continue
+                if imported_from.contains_key(fname) and imported_from[fname] != mod:
+                    residuals.push(Residual(sym: sym, reason: "name-collision:imported-" + fname + "-from-" + imported_from[fname]))
+                    continue
+                alias_of[sym] = fname
+                alias_mod[sym] = mod
+                if why == "no-decl":
+                    no_decl_syms[sym] = true
+        li = li + 1
+    # pass 3: rewrite call sites
+    var out_lines: [text] = []
+    var rewritten = 0
+    var no_decl_rewrites = 0
+    li = 0
+    while li < n:
+        val raw: text = lines[li]
+        if not is_code[li] or _is_extern_decl_line(masks[li]):
+            out_lines.push(raw)
+            li = li + 1
+            continue
+        val sites = call_sites(masks[li])
+        if sites.len() == 0:
+            out_lines.push(raw)
+            li = li + 1
+            continue
+        var rebuilt = ""
+        var cursor = 0
+        for site in sites:
+            val (pos, sym) = site
+            if not alias_of.contains_key(sym):
+                continue
+            val fname = alias_of[sym]
+            val mod = alias_mod[sym]
+            rebuilt = rebuilt + raw.substring(cursor, pos) + fname
+            cursor = pos + sym.len()
+            rewritten = rewritten + 1
+            if no_decl_syms.contains_key(sym):
+                no_decl_rewrites = no_decl_rewrites + 1
+        rebuilt = rebuilt + raw.substring(cursor, raw.len())
+        out_lines.push(rebuilt)
+        li = li + 1
+    # pass 4: drop extern decls whose symbol is no longer referenced anywhere in code
+    var remaining_masks: [text] = []
+    li = 0
+    while li < n:
+        if is_code[li]:
+            remaining_masks.push(mask_code(out_lines[li]))
+        else:
+            remaining_masks.push("")
+        li = li + 1
+    var drop: Dict<text, bool> = {}
+    var decls_removed = 0
+    for sym in alias_of.keys():
+        if not decl_line.contains_key(sym):
+            continue
+        val dl = decl_line[sym]
+        var refs = 0
+        li = 0
+        while li < n:
+            if li != dl and is_code[li]:
+                refs = refs + _count_ident(remaining_masks[li], sym)
+            li = li + 1
+        if refs > 0:
+            continue
+        drop[dl.to_text()] = true
+        decls_removed = decls_removed + 1
+        # attached attribute lines directly above
+        var k = dl - 1
+        while k >= 0 and is_code[k] and out_lines[k].trim().starts_with("@"):
+            drop[k.to_text()] = true
+            k = k - 1
+        # collapse the blank line that followed the decl when one also precedes it
+        if dl + 1 < n and out_lines[dl + 1].trim() == "" and k >= 0 and out_lines[k].trim() == "":
+            drop[(dl + 1).to_text()] = true
+    # pass 5: imports
+    var needed: Dict<text, [text]> = {}
+    var needed_order: [text] = []
+    var imports_added: [text] = []
+    for sym in alias_of.keys():
+        val fname = alias_of[sym]
+        val mod = alias_mod[sym]
+        if imported_from.contains_key(fname) and imported_from[fname] == mod:
+            continue
+        if not needed.contains_key(mod):
+            needed[mod] = []
+            needed_order.push(mod)
+        if not _has_name(needed[mod], fname):
+            var arr = needed[mod]
+            arr.push(fname)
+            needed[mod] = arr
+    var final_lines: [text] = []
+    var insert_after = last_use_line
+    var inline_add: Dict<text, text> = {}
+    var block_add: Dict<text, text> = {}
+    var new_lines: [text] = []
+    for mod in needed_order:
+        var names = needed[mod]
+        names = _sorted(names)
+        for nm in names:
+            imports_added.push(mod + "." + nm)
+        if use_block_close.contains_key(mod):
+            val cl = use_block_close[mod]
+            val existing = block_add.contains_key(cl.to_text())
+            val prev = if existing: block_add[cl.to_text()] else: ""
+            block_add[cl.to_text()] = prev + (if prev == "": "" else: ", ") + names.join(", ")
+        elif use_line_of_module.contains_key(mod):
+            val ul = use_line_of_module[mod]
+            val existing = inline_add.contains_key(ul.to_text())
+            val prev = if existing: inline_add[ul.to_text()] else: ""
+            inline_add[ul.to_text()] = prev + (if prev == "": "" else: ", ") + names.join(", ")
+        else:
+            if paren_style > brace_style:
+                new_lines.push("use " + mod + " (" + names.join(", ") + ")")
+            else:
+                new_lines.push("use " + mod + ".{" + names.join(", ") + "}")
+    if insert_after < 0 and new_lines.len() > 0:
+        insert_after = _first_code_line(lines, is_code) - 1
+    li = 0
+    while li < n:
+        if drop.contains_key(li.to_text()):
+            li = li + 1
+            continue
+        var line = out_lines[li]
+        if inline_add.contains_key(li.to_text()):
+            line = _merge_into_use(line, inline_add[li.to_text()])
+        if block_add.contains_key(li.to_text()):
+            val names = block_add[li.to_text()]
+            if line.trim() == "}":
+                # closing brace on its own line: add a member line, keep the block shape
+                val last = final_lines.len() - 1
+                val prev_line: text = final_lines[last]
+                val prev_t = prev_line.trim()
+                if prev_t != "" and not prev_t.ends_with(",") and not prev_t.ends_with("{"):
+                    final_lines[last] = prev_line + ","
+                final_lines.push(_indent_prefix(prev_line) + names)
+            else:
+                line = _merge_into_use(line, names)
+        final_lines.push(line)
+        if li == insert_after:
+            for nl in new_lines:
+                final_lines.push(nl)
+        li = li + 1
+    if insert_after < 0 and new_lines.len() > 0:
+        var prefixed: [text] = []
+        for nl in new_lines:
+            prefixed.push(nl)
+        for fl in final_lines:
+            prefixed.push(fl)
+        final_lines = prefixed
+    val output = final_lines.join("\n")
+    MigrateResult(output: output, changed: output != source, rewritten: rewritten, imports_added: imports_added, decls_removed: decls_removed, no_decl_rewrites: no_decl_rewrites, residuals: residuals)
+
+# A file that opts out of mechanical migration carries the marker comment
+# `# rt-migrate: skip` on a line of its own (e.g. contract specs that lock the
+# literal `rt_*` source text of the file).
+pub fn has_skip_marker(source: text) -> bool:
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#") and t.substring(1, t.len()).trim().starts_with("rt-migrate: skip"):
+            return true
+    false
+
+fn _indent_prefix(line: text) -> text:
+    var i = 0
+    while i < line.len() and (line.char_at(i) == " " or line.char_at(i) == "\t"):
+        i = i + 1
+    line.substring(0, i)
+
+fn _sorted(xs: [text]) -> [text]:
+    var out: [text] = []
+    for x in xs:
+        out.push(x)
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            j = j + 1
+        i = i + 1
+    out
+
+# First non-blank, non-comment, non-docstring line index (where a new import block may start).
+fn _first_code_line(lines: [text], is_code: [bool]) -> i64:
+    var li = 0
+    while li < lines.len():
+        val t = lines[li].trim()
+        if is_code[li] and t != "" and not t.starts_with("#"):
+            return li
+        li = li + 1
+    lines.len()
+
+# Merge `names` into an existing `use m.{...}` / `use m (...)` / `use m.x` line.
+fn _merge_into_use(line: text, names: text) -> text:
+    val close_brace = line.rfind("}")
+    if line.contains("{") and close_brace >= 0:
+        val head = line.substring(0, close_brace)
+        val sep = if head.trim().ends_with("{"): "" else: ", "
+        return head + sep + names + line.substring(close_brace, line.len())
+    if line.contains("{"):
+        return line
+    val close_paren = line.rfind(")")
+    if line.contains("(") and close_paren >= 0:
+        val head = line.substring(0, close_paren)
+        val sep = if head.trim().ends_with("("): "" else: ", "
+        return head + sep + names + line.substring(close_paren, line.len())
+    # single-name form `use m.x` -> `use m.{x, names}`
+    val (mod, existing) = parse_use_line(line)
+    if mod != "" and existing.len() == 1 and existing[0] != "*":
+        return "use " + mod + ".{" + existing[0] + ", " + names + "}"
+    line
