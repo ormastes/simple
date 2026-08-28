@@ -114,6 +114,21 @@ EOF
     out=$( (CHECKED=0; check_object "$TMP/good.o" _start_twin .text.boot "") 2>&1 )
     rc=$?
     [ $rc -eq 0 ] || err "selftest: clean fixture did not pass (rc=$rc: $out)"
+    # Fixture D: a twin missing its trailing trap MUST FAIL the trap check
+    # (replays the real batch-1 freebsd/x86_64 defect: `ud2` dropped).
+    cat > "$TMP/notrap.s" <<'EOF'
+    .section .text.boot,"ax",@progbits
+    .global _start_twin
+_start_twin:
+    xor %rbp, %rbp
+    call __spl_start
+EOF
+    as --64 -o "$TMP/notrap.o" "$TMP/notrap.s" || err "selftest: as failed"
+    nb=$(sym_bytes "$TMP/notrap.o" _start_twin)
+    case "$nb" in
+        *0f0b) err "selftest: no-trap fixture unexpectedly ends in ud2" ;;
+        *) : ;;
+    esac
     # Fixture C: the real start.S reference must disassemble and end in ud2.
     ref=$(as_reference)
     case "$ref" in
@@ -122,9 +137,81 @@ EOF
     esac
 }
 
+
+# ---------------------------------------------------------------------------
+# Twin registry (batch 1): the migrated startup twins under
+# src/runtime/startup/<os>/<arch>/start.spl, each byte-compared against its
+# ORIGINAL start.S assembled by an assembler of the SAME family as the codegen
+# backend (LLVM). Using GNU `as` for riscv64 yields a spurious mismatch: LLVM
+# auto-compresses to RVC while GNU as does not — an encoding choice, not a
+# fidelity defect. Registered twins are checked by --twins.
+#   name | srcdir | ref-assembler | objdump | target-triple | trailing-trap
+TWINS="
+linux_x86_64|linux/x86_64|as64|objdump|none|0f0b
+freebsd_x86_64|freebsd/x86_64|as64|objdump|none|0f0b
+linux_riscv64|linux/riscv64|clangrv64|riscv64-linux-gnu-objdump|riscv64-unknown-linux-gnu|9002
+"
+
+sym_bytes_od() {
+    $3 -d "$1" 2>/dev/null | awk -v s="<$2>:" '
+        index($0, s) { p = 1; next }
+        p && /^$/ { exit }
+        p { n = split($0, a, "\t"); if (n >= 2) { gsub(/ /, "", a[2]); printf "%s", a[2] } }'
+}
+
+check_twins() {
+    for row in $TWINS; do
+        name=$(echo "$row" | cut -d'|' -f1); sdir=$(echo "$row" | cut -d'|' -f2)
+        asm=$(echo "$row" | cut -d'|' -f3);  od=$(echo "$row" | cut -d'|' -f4)
+        triple=$(echo "$row" | cut -d'|' -f5); trap=$(echo "$row" | cut -d'|' -f6)
+        [ "$triple" = none ] && triple=""
+        SPL="$ROOT/src/runtime/startup/$sdir/start.spl"
+        SRC="$ROOT/src/runtime/startup/$sdir/start.S"
+        [ -f "$SPL" ] || fail "twin $name: $SPL missing"
+        [ -f "$SRC" ] || fail "twin $name: original $SRC missing (dual-run period requires it)"
+        D="$TMP/twin_$name"; mkdir -p "$D"
+        cp "$SPL" "$D/tw.spl"
+        printf '\nfn main():\n    print "ok"\n' >> "$D/tw.spl"
+        # Assemble the ORIGINAL .S with an assembler of the same family as the
+        # codegen backend. (GNU `as` for riscv64 would mismatch purely because
+        # LLVM auto-compresses to RVC and GNU as does not.)
+        case "$asm" in
+            as64)     as --64 -o "$D/ref.o" "$SRC" 2>/dev/null ;;
+            clangrv64) clang --target=riscv64-unknown-linux-gnu -c -o "$D/ref.o" "$SRC" 2>/dev/null ;;
+            *) err "twin $name: unknown reference assembler token $asm" ;;
+        esac
+        [ -f "$D/ref.o" ] || err "twin $name: reference assembler failed"
+        REFB=$(sym_bytes_od "$D/ref.o" _start "$od")
+        [ -n "$REFB" ] || err "twin $name: empty reference disassembly"
+        T=""; [ -n "$triple" ] && T="--target $triple"
+        SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 SIMPLE_KEEP_NATIVE_OBJS=1 \
+            "$SIMPLE_HAL_SEED" native-build --backend llvm $T --source "$D" \
+            --entry "$D/tw.spl" -o "$D/out.bin" > "$D/build.log" 2>&1
+        KD=$(grep -oE "(Keeping native object files in|Objects kept at:) .*" "$D/build.log" \
+            | sed -E "s/^(Keeping native object files in|Objects kept at:) //" | head -1)
+        OBJ=""
+        for o in "$KD"/*.o; do nm "$o" 2>/dev/null | grep -qE " T _start\$" && { OBJ=$o; break; }; done
+        [ -n "$OBJ" ] || err "twin $name: no built object defines a global _start"
+        cp "$OBJ" "$D/twin.o"; rm -rf "$KD"
+        GOTB=$(sym_bytes_od "$D/twin.o" _start "$od")
+        [ -n "$GOTB" ] || err "twin $name: empty twin disassembly"
+        nm "$D/twin.o" | grep -qE " T _start\$" || fail "twin $name: _start is not a global text symbol"
+        case "$GOTB" in
+            *"$trap") : ;;
+            *) fail "twin $name: does not end in its trailing trap ($trap) — got tail ${GOTB#${GOTB%??????}}" ;;
+        esac
+        n1=$(echo "$GOTB" | sed -E 's/e8[0-9a-f]{8}/e800000000/g')
+        n2=$(echo "$REFB" | sed -E 's/e8[0-9a-f]{8}/e800000000/g')
+        [ "$n1" = "$n2" ] || fail "twin $name: bytes differ from as-assembled original: got $GOTB want $REFB"
+        echo "twin $name: byte-identical to $sdir/start.S modulo call reloc ($GOTB)"
+        CHECKED=$((CHECKED + 1))
+    done
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) MODE=selftest ;;
+        --twins) MODE=twins ;;
         --object) OBJECT=$2; shift ;;
         --symbol) SYMBOL=$2; shift ;;
         --section) SECTION=$2; shift ;;
@@ -135,7 +222,15 @@ done
 
 selftest
 if [ "$MODE" = selftest ]; then
-    echo "PASS — selftest: 3 fixture(s) checked (trailing-ret FAILs, clean passes, reference sane)"
+    echo "PASS — selftest: 4 fixture(s) checked (trailing-ret FAILs, clean passes, reference sane, missing-trap detected)"
+    exit 0
+fi
+
+if [ "$MODE" = twins ]; then
+    [ -n "${SIMPLE_HAL_SEED:-}" ] || err "--twins needs \$SIMPLE_HAL_SEED (an llvm-feature simple binary)"
+    check_twins
+    [ "$CHECKED" -gt 0 ] || err "0 twins checked"
+    echo "PASS — $CHECKED registered twin(s) byte-identical to their .S originals modulo call reloc"
     exit 0
 fi
 
