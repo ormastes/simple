@@ -9,6 +9,8 @@
 #   simple_ctx_batch_execute(commands[], queries[], source?) -> run+index+search
 #   simple_ctx_fetch_and_index(url, source, max_bytes?) -> capped GET, tags stripped
 #   simple_ctx_stats()                                -> counts + bytes saved
+#   simple_ctx_doctor()                               -> self-check checklist
+#   simple_ctx_upgrade()                              -> re-index/compact the store
 #
 # Store: `.simple/ctx/` (override: SIMPLE_CTX_DIR). Two SDN tables written
 # atomically (tmp + rename) so a killed session never leaves a torn store:
@@ -27,7 +29,7 @@
 use .main_lazy_json.{extract_field, extract_field_raw, make_tool_error, make_tool_result}
 use .main_lazy_node_tools.{require_external_tool}
 
-use std.io_runtime.{env_get, file_read, file_write, file_exists, file_move_cross_device, dir_create, time_now_unix_micros}
+use std.io_runtime.{env_get, file_read, file_write, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
 use std.nogc_sync_mut.io.http_sffi.{http_get}
@@ -44,6 +46,7 @@ const _CTX_MAX_TIMEOUT_MS: i64 = 120000
 const _CTX_MAX_OUTPUT_BYTES: i64 = 1048576
 const _CTX_FETCH_DEFAULT_MAX_BYTES: i64 = 262144
 const _CTX_FETCH_HARD_MAX_BYTES: i64 = 2097152
+const _CTX_SCHEMA_VERSION: i64 = 1
 
 # ---------------------------------------------------------------------------
 # Store location + SDN cell escaping
@@ -763,10 +766,120 @@ fn ctx_stats_text() -> text:
 fn handle_simple_ctx_stats(id: text, body: text) -> text:
     make_tool_result(id, ctx_stats_text())
 
+# ---------------------------------------------------------------------------
+# Doctor: self-check of the ctx store
+# ---------------------------------------------------------------------------
+
+const _CTX_HOOK_FILES: [text] = [
+    ".claude/hooks/bash_net_blocker.shs",
+    ".claude/hooks/bash_output_hint.shs",
+    ".claude/hooks/webfetch_deny.shs",
+    ".claude/hooks/read_analysis_hint.shs",
+    ".claude/hooks/ctx_common.shs",
+]
+
+fn _ctx_check_line(ok: bool, label: text) -> text:
+    if ok:
+        return "[ok] " + label
+    "[FAIL] " + label
+
+# Chunks whose stored body is empty/whitespace-only — nothing a search can
+# ever rank, left behind by an interrupted write or a since-fixed bug.
+fn _ctx_count_orphans(chunks: [CtxChunk]) -> i64:
+    var n: i64 = 0
+    for c in chunks:
+        if c.body.trim() == "":
+            n = n + 1
+    n
+
+fn ctx_doctor_text() -> text:
+    var lines: [text] = []
+    val dir = ctx_store_dir()
+    val dir_existed = file_exists(dir)
+    val dir_ok = dir_existed or _ctx_ensure_dir()
+    lines.push(_ctx_check_line(dir_ok, "store dir '" + dir + "' exists"))
+
+    # Writable: round-trip a probe file through the atomic-write path, then
+    # remove it — never leaves scratch state behind.
+    val probe = dir + "/.doctor_probe"
+    val write_ok = _ctx_write_atomic(probe, "probe")
+    val read_ok = write_ok and file_exists(probe) and file_read(probe) == "probe"
+    if file_exists(probe):
+        file_delete(probe)
+    lines.push(_ctx_check_line(read_ok, "store dir is writable (probe write+read+cleanup)"))
+
+    val chunks = _ctx_load_chunks()
+    lines.push("[ok] index row count: " + str(chunks.len()))
+
+    val orphans = _ctx_count_orphans(chunks)
+    lines.push(_ctx_check_line(orphans == 0, "orphan chunks (empty body): " + str(orphans)))
+
+    val schema_ok = _ctx_detect_schema_version() == _CTX_SCHEMA_VERSION
+    lines.push(_ctx_check_line(schema_ok, "chunk store schema is current (v" + str(_CTX_SCHEMA_VERSION) + "; run simple_ctx_upgrade if not)"))
+
+    for hf in _CTX_HOOK_FILES:
+        lines.push(_ctx_check_line(file_exists(hf), "hook file present: " + hf))
+
+    lines.join("\n")
+
+fn handle_simple_ctx_doctor(id: text, body: text) -> text:
+    make_tool_result(id, ctx_doctor_text())
+
+# ---------------------------------------------------------------------------
+# Upgrade: re-index/compact the store
+# ---------------------------------------------------------------------------
+
+# The chunk file's schema is stamped in a header comment. A store written
+# before this stamp existed (or by an older schema version) reads back as
+# version 0 and gets rewritten below.
+fn _ctx_detect_schema_version() -> i64:
+    val path = _ctx_chunks_path()
+    if not file_exists(path):
+        return _CTX_SCHEMA_VERSION
+    val content = file_read(path)
+    if content.contains("# ctx_schema_version: " + str(_CTX_SCHEMA_VERSION)):
+        return _CTX_SCHEMA_VERSION
+    0
+
+# Public accessor for specs — mirrors _ctx_detect_schema_version.
+fn ctx_schema_version() -> i64:
+    _ctx_detect_schema_version()
+
+# Rewrites the chunk store under the current schema: drops orphan (empty-body)
+# rows and re-stamps the schema header. Returns (before_count, after_count,
+# before_version).
+fn ctx_upgrade_store() -> (i64, i64, i64):
+    val before = _ctx_load_chunks()
+    val before_version = _ctx_detect_schema_version()
+    val before_count = before.len()
+    var kept: [CtxChunk] = []
+    for c in before:
+        if c.body.trim() != "":
+            kept.push(c)
+    _ctx_ensure_dir()
+    var lines: [text] = []
+    lines.push("# ctx chunk store — written by simple_ctx_* MCP tools. Do not edit by hand.\n")
+    lines.push("# ctx_schema_version: " + str(_CTX_SCHEMA_VERSION) + "\n")
+    lines.push("ctx_chunks | id, source, ts, bytes, text |\n")
+    for c in kept:
+        lines.push(_ctx_chunk_line(c))
+    _ctx_write_atomic(_ctx_chunks_path(), lines.join(""))
+    (before_count, kept.len(), before_version)
+
+fn handle_simple_ctx_upgrade(id: text, body: text) -> text:
+    val (before_count, after_count, before_version) = ctx_upgrade_store()
+    var msg = "ctx upgrade: schema v" + str(before_version) + " -> v" + str(_CTX_SCHEMA_VERSION) + ", chunks " + str(before_count) + " -> " + str(after_count)
+    if before_count != after_count:
+        msg = msg + " (" + str(before_count - after_count) + " orphan/empty chunk(s) dropped)"
+    _ctx_stats_bump("upgrade_calls", 1)
+    make_tool_result(id, msg)
+
 export handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute
 export handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute
 export handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats
+export handle_simple_ctx_doctor, handle_simple_ctx_upgrade
 export ctx_store_dir, ctx_index_text, ctx_bm25_search, ctx_tokenize, ctx_chunk_text
 export ctx_escape_cell, ctx_unescape_cell, ctx_parse_string_array, ctx_unescape_json
 export ctx_execute_code, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text
+export ctx_doctor_text, ctx_upgrade_store, ctx_schema_version
 export CtxChunk, CtxHit, CtxExecResult

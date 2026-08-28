@@ -8,8 +8,9 @@
 Guards the repo-native replacement for the user-level "context-mode" plugin:
 `simple_ctx_index` / `simple_ctx_search` / `simple_ctx_execute` /
 `simple_ctx_execute_file` / `simple_ctx_batch_execute` /
-`simple_ctx_fetch_and_index` / `simple_ctx_stats` in
-`app.mcp.main_lazy_ctx_tools`, and their registration in the dispatcher.
+`simple_ctx_fetch_and_index` / `simple_ctx_stats` / `simple_ctx_doctor` /
+`simple_ctx_upgrade` in `app.mcp.main_lazy_ctx_tools`, and their registration
+in the dispatcher.
 
 Every store-touching scenario points `SIMPLE_CTX_DIR` at a scratch directory
 so the repo's own `.simple/ctx/` is never written by a test run.
@@ -23,7 +24,11 @@ so the repo's own `.simple/ctx/` is never written by a test run.
   wall timeout.
 - Fetch refuses non-http URLs, caps the body, strips tags, and reports an
   unreachable host as a tool error rather than a crash — no network needed.
-- All seven tools are routed by `dispatch_tool`.
+- Doctor reports the store dir, index row count, orphan chunks, schema
+  version and hook-file presence as a pass/fail checklist.
+- Upgrade rewrites the chunk store under the current schema, dropping any
+  orphan (empty-body) rows and reporting before/after counts.
+- All nine tools are routed by `dispatch_tool`.
 """
 
 # @feature mcp_ctx_tools
@@ -32,7 +37,7 @@ so the repo's own `.simple/ctx/` is never written by a test run.
 use std.spec
 use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_write, time_now_unix_micros}
 use app.mcp.main_lazy_ctx_tools.{ctx_escape_cell, ctx_unescape_cell, ctx_chunk_text, ctx_tokenize, ctx_parse_string_array, ctx_unescape_json, ctx_index_text, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text, ctx_store_dir}
-use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute, handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute, handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats}
+use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute, handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute, handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats, handle_simple_ctx_doctor, handle_simple_ctx_upgrade, ctx_doctor_text, ctx_upgrade_store, ctx_schema_version}
 use app.mcp.main_dispatch.{dispatch_tool}
 
 fn _fresh_store() -> text:
@@ -180,10 +185,44 @@ describe "simple_ctx_fetch_and_index":
         assert_contains(down, "simple_ctx_fetch_and_index")
         assert_false(down.contains("Fetched http://127.0.0.1:1/nothing"))
 
+describe "simple_ctx_doctor":
+    it "reports a pass/fail checklist covering dir, rows, orphans, schema and hooks":
+        _fresh_store()
+        ctx_index_text("alpha bravo charlie", "s1")
+        val r = handle_simple_ctx_doctor("15", "{}")
+        assert_contains(r, "[ok] store dir")
+        assert_contains(r, "store dir is writable")
+        assert_contains(r, "index row count: 1")
+        assert_contains(r, "orphan chunks (empty body): 0")
+        assert_contains(r, "hook file present: .claude/hooks/ctx_common.shs")
+        assert_contains(ctx_doctor_text(), "index row count: 1")
+
+    it "flags a store written before the schema stamp existed":
+        val dir = _fresh_store()
+        file_write(dir + "/chunks.sdn", "ctx_chunks | id, source, ts, bytes, text |\n    1, legacy, 1, 5, hello\n")
+        assert_equal(ctx_schema_version(), 0)
+        val r = handle_simple_ctx_doctor("16", "{}")
+        assert_contains(r, "[FAIL] chunk store schema is current")
+
+describe "simple_ctx_upgrade":
+    it "re-stamps the schema and reports before/after counts, dropping orphans":
+        val dir = _fresh_store()
+        file_write(dir + "/chunks.sdn", "ctx_chunks | id, source, ts, bytes, text |\n    1, legacy, 1, 5, hello\n    2, legacy, 1, 0, \n")
+        assert_equal(ctx_schema_version(), 0)
+        val r = handle_simple_ctx_upgrade("17", "{}")
+        assert_contains(r, "schema v0 -> v1")
+        assert_contains(r, "chunks 2 -> 1")
+        assert_contains(r, "1 orphan/empty chunk(s) dropped")
+        assert_equal(ctx_schema_version(), 1)
+        # Idempotent: a second run on an already-upgraded store changes nothing.
+        val r2 = handle_simple_ctx_upgrade("18", "{}")
+        assert_contains(r2, "schema v1 -> v1")
+        assert_contains(r2, "chunks 1 -> 1")
+
 describe "dispatcher registration":
     it "routes every simple_ctx_* tool instead of returning Unknown tool":
         _fresh_store()
-        val names = ["simple_ctx_index", "simple_ctx_search", "simple_ctx_execute", "simple_ctx_execute_file", "simple_ctx_batch_execute", "simple_ctx_fetch_and_index", "simple_ctx_stats"]
+        val names = ["simple_ctx_index", "simple_ctx_search", "simple_ctx_execute", "simple_ctx_execute_file", "simple_ctx_batch_execute", "simple_ctx_fetch_and_index", "simple_ctx_stats", "simple_ctx_doctor", "simple_ctx_upgrade"]
         for n in names:
             val r = dispatch_tool("20", n, "{}")
             assert_not_equal(r, "")
