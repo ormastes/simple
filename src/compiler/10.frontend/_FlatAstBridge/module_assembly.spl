@@ -44,7 +44,7 @@ use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind,
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
 use compiler.common.diagnostics.span.{Span}
-use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lex_tokenize_all}
 use compiler.frontend.resource_registry.{resource_registry_declare}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
 use compiler.frontend.effect_registry.{effect_registry_declare}
@@ -69,6 +69,17 @@ fn fab_phase_prof_enabled() -> bool:
     if _fab_phase_prof_cached < 0:
         _fab_phase_prof_cached = if (_sffi_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
     _fab_phase_prof_cached == 1
+
+# Lexer-only attribution probe (2026-08-28, default off): SIMPLE_LEX_PHASE_PROFILE=1
+# runs a standalone tokenize pass over the module BEFORE the real parse and
+# prints one LEXPHASE line per file, so the parse_module_body term of PARSEPHASE
+# can be split into "lexer" and "parser" halves. The extra pass doubles lexer
+# work in profile mode only. Level-gated perf probe -- do not delete.
+var _fab_lex_prof_cached: i64 = -1
+fn fab_lex_prof_enabled() -> bool:
+    if _fab_lex_prof_cached < 0:
+        _fab_lex_prof_cached = if (_sffi_env_get("SIMPLE_LEX_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    _fab_lex_prof_cached == 1
 @unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
 @unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
@@ -1300,6 +1311,11 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    if fab_lex_prof_enabled():
+        val _lx_t0 = _sffi_time_now_unix_micros()
+        val _lx_tokens = lex_tokenize_all(source)
+        val _lx_t1 = _sffi_time_now_unix_micros()
+        print("LEXPHASE\ttokenize_all\t{_lx_t1 - _lx_t0}\ttokens\t{_lx_tokens}\tchars\t{source.len()}\tpath\t{path}")
     reset_all_pools()
     parser_init_with_path(source, path)
     val _rt_zero = if flat_roundtrip_enabled(): flat_pools_dump_all() else: ""

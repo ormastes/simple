@@ -18,20 +18,25 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
 
-var _llvm_bootstrap_string_global_text: text = ""
+# One decl per element; joined with "\n" ONCE at emission. The previous
+# `text = "{text}\n{decl}"` accumulator copied the whole accumulated text on
+# every add: O(n^2) bytes over the whole-program bootstrap IR (one IR for all
+# functions, so n = every string literal in the closure). Measured on the
+# stage2 binary (_perf_mb_text, load 38): 2k decls 414ms, 4k 2294ms, 8k
+# 10335ms vs 7-20ms for push+join at the same n. The joined text is
+# byte-identical to the old accumulator (decls are never empty).
+# Straight-line `g = g.push(x)` reassign, as in bootstrap_globals.spl: bare
+# `.push()` on a module global drops elements under the seed (rMCP17).
+var _llvm_bootstrap_string_global_decls: [text] = []
 
 fn llvm_bootstrap_string_globals_reset():
-    _llvm_bootstrap_string_global_text = ""
+    _llvm_bootstrap_string_global_decls = []
 
 fn llvm_bootstrap_string_globals_text() -> text:
-    _llvm_bootstrap_string_global_text ?? ""
+    _llvm_bootstrap_string_global_decls.join("\n")
 
 fn llvm_bootstrap_string_globals_add(decl: text):
-    val current = _llvm_bootstrap_string_global_text ?? ""
-    if current == "":
-        _llvm_bootstrap_string_global_text = decl
-    else:
-        _llvm_bootstrap_string_global_text = "{current}\n{decl}"
+    _llvm_bootstrap_string_global_decls = _llvm_bootstrap_string_global_decls.push(decl)
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -407,11 +412,10 @@ impl MirToLlvm:
         val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
         if self.bootstrap_mode_enabled():
             llvm_bootstrap_string_globals_add(decl)
+        # `string_global_text` is no longer accumulated eagerly (O(n^2) copy
+        # per add, see llvm_bootstrap_string_globals_add); readers join
+        # `string_globals` once at emission.
         self.string_globals = self.string_globals.push(decl)
-        if self.string_global_text.len() == 0:
-            self.string_global_text = decl
-        else:
-            self.string_global_text = "{self.string_global_text}\n{decl}"
         global_name
 
     me emit_unsupported_panic(message: text):

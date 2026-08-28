@@ -427,13 +427,32 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
     # cause a safe cache miss.
     var rows: [text] = []
     var fp_idx = 0
+    # PERF (2026-08-28): `sources` carries one entry per LOGICAL module name,
+    # and symlinked layouts (src/std -> lib, src/compiler/frontend ->
+    # 10.frontend, ...) alias the same physical file under several names
+    # (1012 logical / 717 physical in the bootstrap closure). The interface
+    # extraction + hash depends only on `source.content`, so memoise it per
+    # (path, content length) and reuse the row tail for every alias. The
+    # emitted manifest is byte-identical to the unmemoised form: a hit
+    # requires the same path AND the same content length, and within one
+    # build a path's content is read exactly once (_driver_cached_entry_source_scan).
+    # contains_key + index read, never `.get()`.
+    # See doc/07_guide/language/dict_native_pitfalls.md
+    var iface_memo: Dict<text, text> = {}
     for source in sources:
         if fp_idx % 32 == 0:
             log_phase("phase1:fingerprint:source idx={fp_idx} of={sources.len()} path={source.path} bytes={source.content.len()}")
         fp_idx = fp_idx + 1
-        val interface_text = driver_native_source_interface_text(source.content)
-        val content_hash = _sffi_hash_text(interface_text)
-        rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{interface_text.len()}:{content_hash}")
+        val memo_key = "{source.content.len()}:{source.path}"
+        var row_tail = ""
+        if iface_memo.contains_key(memo_key):
+            row_tail = iface_memo[memo_key]
+        else:
+            val interface_text = driver_native_source_interface_text(source.content)
+            val content_hash = _sffi_hash_text(interface_text)
+            row_tail = "{interface_text.len()}:{content_hash}"
+            iface_memo[memo_key] = row_tail
+        rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{row_tail}")
     val manifest = rows.join("\n")
     "{_sffi_hash_text(manifest)}n{sources.len()}"
 
