@@ -1,0 +1,54 @@
+use std.spec
+use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_worker_budget_kb}
+
+# Mechanism pin for the MemAvailable-derived shard concurrency clamp.
+# Pre-fix the clamp did not exist: the thread count came from host_cpus/2 alone,
+# so 16 workers x ~2.5-3.3 GB asked for ~40 GB and the worker group was
+# OOM-reaped mid-HIR (run17, rc=255 after 12,643 s / 3 attempts).
+# doc/08_tracking/bug/shard_threads_no_memavailable_clamp_2026-08-23.md
+#
+# NOTE ON WHAT THIS SPEC CANNOT DO. The first landing of this clamp
+# (ff095d31591) shipped with this spec GREEN while every native-build aborted
+# with rc=134 -- because the crash was in file_read on the *call path*, and a
+# unit spec exercises the clamp FUNCTION only. The end-to-end bar therefore
+# lives in scripts/check/check-native-build-not-crashing.shs, which runs a real
+# native-build. Do not treat this file as sufficient evidence on its own.
+# doc/09_report/build_parallelism_memory_audit_2026-08-23.md
+describe "shard memory clamp":
+
+    it "parses MemAvailable out of a real /proc/meminfo":
+        val kb = shard_mem_available_kb()
+        # This spec runs on Linux hosts; a plausible non-zero value proves the
+        # reader is live rather than silently returning the no-clamp sentinel.
+        expect(kb > 0).to_be_true()
+
+    it "returns 0 for a missing or junk MemAvailable field, so the clamp is skipped":
+        expect(shard_mem_available_kb_from_field("")).to_equal(0)
+        expect(shard_mem_available_kb_from_field("not-a-number")).to_equal(0)
+        expect(shard_mem_available_kb_from_field("  16000000  ")).to_equal(16000000)
+
+    it "clamps 16 requested workers down when memory is short":
+        # 16 GB available, 3 GB HIR worker: 0.6 * 16 / 3 = 3 workers.
+        expect(shard_threads_cap_for(16, 3000000, 16000000)).to_equal(3)
+        # The exact shape of the run17 OOM: 16 requested on a box with 16 GB.
+        expect(shard_threads_cap_for(16, 3000000, 16000000) < 16).to_be_true()
+
+    it "never raises the requested count":
+        expect(shard_threads_cap_for(8, 1650000, 125000000)).to_equal(8)
+        expect(shard_threads_cap_for(2, 1650000, 125000000)).to_equal(2)
+
+    it "never returns 0 workers, and never clamps when memory is unknown":
+        expect(shard_threads_cap_for(16, 3000000, 1000)).to_equal(1)
+        expect(shard_threads_cap_for(16, 3000000, 0)).to_equal(16)
+        expect(shard_threads_cap_for(16, 0, 16000000)).to_equal(16)
+
+    it "clamps HIR shards harder than parse shards at the same memory":
+        # HIR children still spawn the full worker closure; parse children run
+        # the slim entry. Same MemAvailable, different budget, different cap.
+        val avail = 24000000
+        val parse_cap = shard_threads_cap_for(16, 1650000, avail)
+        val hir_cap = shard_threads_cap_for(16, 3000000, avail)
+        expect(hir_cap < parse_cap).to_be_true()
+
+    it "takes the per-phase budget default when no env override is set":
+        expect(shard_worker_budget_kb("SIMPLE_SHARD_BUDGET_UNSET_XYZ", 1650000)).to_equal(1650000)

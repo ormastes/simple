@@ -794,6 +794,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
     };
 
     let mut method_resolution_error: Option<String> = None;
+    // Candidates of an ambiguous bare method on an erased receiver, kept so
+    // the vtable-identity type switch below can dispatch them at runtime.
+    let mut vtable_switch_candidates: Option<Vec<(String, FuncId)>> = None;
     let func_id = resolve_unique_module_qualified_func(ctx, lookup_name)
         .or_else(|| resolve_unique_module_qualified_func(ctx, &sanitized_name))
         .or_else(|| ctx
@@ -995,7 +998,18 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     candidates.len(),
                     cand_names.join(", ")
                 );
-                eprintln!("{message}");
+                // Before giving up: if every candidate's owner carries a trait
+                // vtable, the receiver's vtable pointer IS its runtime type
+                // identity, so dispatch can be decided at runtime (see
+                // `try_emit_vtable_type_switch`). Record the candidates; the
+                // diagnostic fires only if that switch cannot be built.
+                let mut uniq: Vec<(String, FuncId)> = Vec::new();
+                for (k, id) in &candidates {
+                    if !uniq.iter().any(|(_, u)| u == *id) {
+                        uniq.push(((*k).clone(), **id));
+                    }
+                }
+                vtable_switch_candidates = Some(uniq);
                 method_resolution_error = Some(message);
                 return None;
             }
@@ -1019,6 +1033,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
         });
 
     if let Some(error) = method_resolution_error {
+        if let Some(cands) = vtable_switch_candidates.take() {
+            let method_part = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+            if try_emit_vtable_type_switch(ctx, builder, dest, receiver, args, method_part, &cands)? {
+                return Ok(());
+            }
+        }
+        eprintln!("{error}");
         return Err(error);
     }
 
@@ -2475,4 +2496,170 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     }
 
     indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);
+}
+
+/// Owner struct name of a `Type_dot_method` / `Type.method` candidate key
+/// (`"mod__Type_dot_kind"` -> `"Type"`).
+fn candidate_owner_type(key: &str, method: &str) -> Option<String> {
+    let dot = format!("_dot_{method}");
+    let raw = format!(".{method}");
+    let prefix = key
+        .strip_suffix(dot.as_str())
+        .or_else(|| key.strip_suffix(raw.as_str()))?;
+    let owner = prefix.rsplit("__").next().unwrap_or(prefix);
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
+}
+
+/// Runtime dispatch for a bare method on an ERASED receiver (`x: Any`, a
+/// trait-typed parameter) whose candidates are ambiguous by name.
+///
+/// A struct that implements a trait carries that trait's vtable pointer at
+/// offset 0 (`compile_struct_init`, keyed on `ctx.vtable_data_ids`). That
+/// pointer is a per-struct constant address, i.e. a runtime type identity.
+/// When EVERY candidate's owner has such a vtable, emit
+///
+/// ```text
+/// vt = load [recv & !7]
+/// if vt == &__vtable__A -> A.method(recv, args)
+/// if vt == &__vtable__B -> B.method(recv, args)
+/// else                  -> rt_method_not_found (aborts, like the interpreter)
+/// ```
+///
+/// This is exactly what the interpreter does by class name, expressed on the
+/// JIT's object layout. Nothing is guessed: a receiver of an unlisted type
+/// reaches `rt_method_not_found` instead of a silently wrong candidate.
+/// Returns `Ok(false)` (emit nothing) when any candidate has no vtable, so
+/// the caller's `[CODEGEN-AMBIGUOUS-METHOD]` refusal stays in force.
+fn try_emit_vtable_type_switch<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    receiver: VReg,
+    args: &[VReg],
+    method: &str,
+    candidates: &[(String, FuncId)],
+) -> InstrResult<bool> {
+    let mut arms: Vec<(cranelift_module::DataId, FuncId)> = Vec::new();
+    let dbg = std::env::var_os("SIMPLE_DEBUG_METHOD_DISPATCH").is_some();
+    if dbg {
+        eprintln!(
+            "[CODEGEN-VTABLE-SWITCH] in '{}' method '{}' candidates={:?} vtable_owners={:?}",
+            ctx.func.name,
+            method,
+            candidates.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            ctx.vtable_data_ids.keys().collect::<Vec<_>>()
+        );
+    }
+    for (key, func_id) in candidates {
+        let Some(owner) = candidate_owner_type(key, method) else {
+            return Ok(false);
+        };
+        let Some(&data_id) = ctx.vtable_data_ids.get(&owner) else {
+            return Ok(false);
+        };
+        if arms.iter().any(|(d, _)| *d == data_id) {
+            // Two candidates stamped with the same vtable cannot be told
+            // apart at runtime; refuse rather than pick.
+            return Ok(false);
+        }
+        arms.push((data_id, *func_id));
+    }
+    if arms.is_empty() {
+        return Ok(false);
+    }
+
+    let recv = get_vreg_or_default(ctx, builder, &receiver);
+    let arg_vals: Vec<cranelift_codegen::ir::Value> =
+        args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+
+    let untag = builder.ins().iconst(types::I64, !7i64);
+    let ptr = builder.ins().band(recv, untag);
+    let merge = builder.create_block();
+    builder.append_block_param(merge, types::I64);
+    let miss = builder.create_block();
+    let probe = builder.create_block();
+    let nonnull = builder.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
+    builder.ins().brif(nonnull, probe, &[], miss, &[]);
+
+    builder.switch_to_block(probe);
+    builder.seal_block(probe);
+    let vt = builder.ins().load(types::I64, MemFlags::new(), ptr, 0);
+    for (data_id, func_id) in &arms {
+        let global = ctx.module.declare_data_in_func(*data_id, builder.func);
+        let expected = builder.ins().global_value(types::I64, global);
+        let hit = builder.ins().icmp(IntCC::Equal, vt, expected);
+        let call_block = builder.create_block();
+        let next = builder.create_block();
+        builder.ins().brif(hit, call_block, &[], next, &[]);
+
+        builder.switch_to_block(call_block);
+        builder.seal_block(call_block);
+        let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+        let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
+        let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
+        let mut call_args = if sig_params == arg_vals.len() { vec![] } else { vec![recv] };
+        call_args.extend(arg_vals.iter().copied());
+        let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
+        let call = adapted_call(builder, func_ref, &call_args);
+        let results = builder.inst_results(call).to_vec();
+        let result = match results.first() {
+            None => builder.ins().iconst(types::I64, 0),
+            Some(&r) => {
+                let ty = builder.func.dfg.value_type(r);
+                if ty == types::I64 {
+                    r
+                } else if ty == types::F64 {
+                    builder.ins().bitcast(types::I64, MemFlags::new(), r)
+                } else if ty.is_int() {
+                    builder.ins().uextend(types::I64, r)
+                } else {
+                    r
+                }
+            }
+        };
+        builder.ins().jump(merge, &[result]);
+
+        builder.switch_to_block(next);
+        builder.seal_block(next);
+    }
+    // No arm matched: fall into the abort path.
+    builder.ins().jump(miss, &[]);
+
+    builder.switch_to_block(miss);
+    builder.seal_block(miss);
+    let type_bytes = b"<erased receiver>";
+    let type_data = super::helpers::declare_named_bytes(ctx, type_bytes)?;
+    let type_global = ctx.module.declare_data_in_func(type_data, builder.func);
+    let type_ptr = builder.ins().global_value(types::I64, type_global);
+    let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
+    let method_bytes = method.as_bytes();
+    let method_data = super::helpers::declare_named_bytes(ctx, method_bytes)?;
+    let method_global = ctx.module.declare_data_in_func(method_data, builder.func);
+    let method_ptr = builder.ins().global_value(types::I64, method_global);
+    let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
+    let not_found_id = ctx.runtime_funcs["rt_method_not_found"];
+    let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
+    let nf = adapted_call(builder, not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
+    let nf_val = builder.inst_results(nf)[0];
+    builder.ins().jump(merge, &[nf_val]);
+
+    builder.switch_to_block(merge);
+    builder.seal_block(merge);
+    let out = builder.block_params(merge)[0];
+    if let Some(d) = dest {
+        ctx.vreg_values.insert(*d, out);
+    }
+    if std::env::var_os("SIMPLE_DEBUG_METHOD_DISPATCH").is_some() {
+        eprintln!(
+            "[CODEGEN-VTABLE-SWITCH] in '{}' bare method '{}' dispatched at runtime over {} vtable arm(s)",
+            ctx.func.name,
+            method,
+            arms.len()
+        );
+    }
+    Ok(true)
 }

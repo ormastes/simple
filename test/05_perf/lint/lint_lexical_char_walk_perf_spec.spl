@@ -1,0 +1,219 @@
+# Lint per-character text walks must not pay per-char interpreted work on the
+# characters that carry no lexical meaning.
+#
+# MECHANISM. `raw_rt_lexical_code_lines` blanks comments and string literals
+# while preserving columns. Before the 2026-08-23 fix it walked EVERY character
+# of EVERY line, taking two interpreted `substring` allocations per character
+# (a 1-char slice, plus an unconditional 3-char slice to test for `"""`) and
+# pushing one 1-char element into a `pieces` array per character. Ordinary code
+# characters -- the overwhelming majority -- were copied one at a time even
+# though nothing in the scanner can act on them. `count_triple_quotes` had the
+# same shape: an interpreted 3-char `slice` per character of every line, on
+# lines that hold no `"""` at all.
+#
+# Both functions dominated an interpreted lint run: the SIGPROF sampler
+# (SIMPLE_INTERP_SAMPLE=1, landed 8c6bfaca127) put `count_triple_quotes` at
+# 5.8% and `raw_rt_lexical_code_lines` at 5.5% of self time -- the two largest
+# frames.
+#
+# THE FIX is a run-based scan, not an algorithm change: skip a line outright
+# when it holds no `"` and no `#`; inside a line copy the whole run up to the
+# next `"` or `#` with ONE slice; blank a comment tail or a triple-quoted span
+# with ONE `repeat`. Output is byte-identical -- verified on a 150-file corpus
+# of real `src/**` sources (57,385 emitted lines, `diff` clean) and on the
+# adversarial fixtures below.
+#
+# Measured 2026-08-23, one tree, one binary, fix reverted and restored with
+# `git stash`, nothing else changed (150 real .spl files, interpreted seed):
+#   ARR_MUT_CALLS (SIMPLE_PERF_COUNTERS=1)  1,267,276 -> 218,684   5.8x
+#   wall                                    30.88s    -> 8.19s     3.8x
+# Against the later upstream base, where a concurrent lane had already landed
+# the whole-line skip, the in-line run scanning alone still gives:
+#   ARR_MUT_CALLS                             740,481 -> 218,684   3.4x
+#   wall                                       28.89s -> 12.04s    2.4x
+#
+# The specs below pin the mechanism as a RATIO inside a single run, because
+# absolute seconds on this shared box move 2x between runs of identical code.
+#
+# See doc/08_tracking/bug/lint_per_char_lexical_walk_2026-08-23.md
+
+use compiler.semantics.lint.raw_rt_access.{raw_rt_lexical_code_lines}
+use compiler.semantics.lint.lint_text.{iter_code_lines, count_triple_quotes}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# Reference implementation: the exact pre-fix per-character walk. Kept here so
+# any future change to the fast paths is checked against the original
+# semantics rather than against itself.
+fn reference_lexical_code_lines(source: text) -> [text]:
+    var result: [text] = []
+    var in_string = false
+    var in_triple = false
+    var escaped = false
+    for raw_line in source.split("\n"):
+        var pieces: [text] = []
+        var i = 0
+        while i < raw_line.len():
+            val ch = raw_line.substring(i, i + 1)
+            val triple = i + 2 < raw_line.len() and raw_line.substring(i, i + 3) == "\"\"\""
+            if in_triple:
+                if triple:
+                    pieces.push(" ")
+                    pieces.push(" ")
+                    pieces.push(" ")
+                    i = i + 3
+                    in_triple = false
+                else:
+                    pieces.push(" ")
+                    i = i + 1
+                continue
+            if in_string:
+                pieces.push(" ")
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == "\"":
+                    in_string = false
+                i = i + 1
+                continue
+            if ch == "#":
+                while i < raw_line.len():
+                    pieces.push(" ")
+                    i = i + 1
+                break
+            if triple:
+                pieces.push(" ")
+                pieces.push(" ")
+                pieces.push(" ")
+                i = i + 3
+                in_triple = true
+                continue
+            if ch == "\"":
+                pieces.push(" ")
+                i = i + 1
+                in_string = true
+                continue
+            pieces.push(ch)
+            i = i + 1
+        result.push(pieces.join(""))
+    result
+
+fn reference_count_triple_quotes(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        if line.slice(i, i + 3) == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+# Every shape the scanner has a branch for, plus the ones that trip naive
+# fast-rejects: `#` inside a string, a quote inside a comment, an escaped
+# quote, four consecutive quotes, an unterminated string carrying state across
+# a line boundary, and a triple-quoted block spanning several lines.
+fn adversarial_source() -> text:
+    var l: [text] = []
+    l.push("plain code line with no specials at all")
+    l.push("    indented plain continuation")
+    l.push("x = \"a#b\" # trailing \"\"\" inside a comment")
+    l.push("\"\"\"doc start")
+    l.push("inside # not a comment and \"quoted\" too")
+    l.push("end doc\"\"\" then code = 1")
+    l.push("y = \"esc \\\" still in string\" # tail")
+    l.push("z = \"\"\"\" four quotes")
+    l.push("w = \"\"\"a\"\"\" + \"\"\"b\"\"\"")
+    l.push("tail_quote = \"")
+    l.push("still in string until here\" ; done = 2")
+    l.push("hash#at#end")
+    l.push("\"\"\"")
+    l.push("\"\"\"")
+    l.push("a = 1")
+    l.push("")
+    l.join("\n")
+
+fn repeat_lines(unit: text, times: i64) -> text:
+    var out: [text] = []
+    var i = 0
+    while i < times:
+        out.push(unit)
+        i = i + 1
+    out.join("\n")
+
+describe "lint lexical char walk":
+    it "blanking is byte-identical to the per-character reference walk":
+        val src = adversarial_source()
+        val got = raw_rt_lexical_code_lines(src)
+        val want = reference_lexical_code_lines(src)
+        expect(got.len()).to_equal(want.len())
+        var i = 0
+        while i < want.len():
+            expect(got[i]).to_equal(want[i])
+            i = i + 1
+        # Non-vacuity: the fixture must actually exercise the blanking.
+        expect(got.len() > 10).to_equal(true)
+
+    it "triple-quote counting matches the per-character reference":
+        for line in adversarial_source().split("\n"):
+            expect(count_triple_quotes(line)).to_equal(reference_count_triple_quotes(line))
+
+    it "a long ordinary run inside a quoted line is copied, not walked":
+        # RATIO PIN for the in-line run scanning specifically.
+        #
+        # Both inputs are 400 lines of the SAME length and BOTH contain quotes,
+        # so the whole-line skip (a line with no `"` and no `#` is returned
+        # as-is) cannot fire on either side -- that fast path is a separate,
+        # earlier fix and this pin must not be satisfied by it. The only
+        # difference is run LENGTH: one long identifier run before the quote,
+        # versus the same characters broken up by quotes every few columns.
+        #
+        # Pre-fix both were walked one interpreted character at a time and the
+        # ratio was ~1. Post-fix the long run collapses into a couple of
+        # slices while the dense line still pays per character.
+        # One long identifier run before a single short literal, versus the
+        # same byte count broken into 1-char runs by a quote every 3 columns.
+        var long_ident = "    val "
+        while long_ident.len() < 108:
+            long_ident = long_ident + "z"
+        var choppy = "    val q="
+        while choppy.len() < 112:
+            choppy = choppy + "\"a\""
+        while choppy.len() < 114:
+            choppy = choppy + "z"
+        val runs = repeat_lines(long_ident + " = \"x\"", 400)
+        val dense = repeat_lines(choppy, 400)
+        # Guard the guard: neither side may take the whole-line fast path, and
+        # the two must be the same size, or the ratio means nothing.
+        expect(runs.index_of("\"") >= 0).to_equal(true)
+        expect(dense.index_of("\"") >= 0).to_equal(true)
+        expect(runs.len()).to_equal(dense.len())
+        val t0 = rt_time_now_unix_micros()
+        val a = raw_rt_lexical_code_lines(runs)
+        val t1 = rt_time_now_unix_micros()
+        val b = raw_rt_lexical_code_lines(dense)
+        val t2 = rt_time_now_unix_micros()
+        val runs_us = t1 - t0
+        val dense_us = t2 - t1
+        print "[perf] lexical_runs: runs={runs_us}us dense={dense_us}us"
+        expect(a.len()).to_equal(400)
+        expect(b.len()).to_equal(400)
+        expect(dense_us > 0).to_equal(true)
+        expect(runs_us * 3 < dense_us).to_equal(true)
+
+    it "docstring tracking skips lines that hold no triple quote":
+        # Same ratio pin for `count_triple_quotes` via its only caller.
+        val clean = repeat_lines("    val alpha_beta = gamma_delta + epsilon_zeta_eta_theta_iota", 400)
+        val tripled = repeat_lines("    \"\"\"gamma\"\"\" + \"\"\"delta\"\"\" + \"\"\"epsilon zeta\"\"\"", 400)
+        val t0 = rt_time_now_unix_micros()
+        val a = iter_code_lines(clean)
+        val t1 = rt_time_now_unix_micros()
+        val b = iter_code_lines(tripled)
+        val t2 = rt_time_now_unix_micros()
+        val clean_us = t1 - t0
+        val trip_us = t2 - t1
+        print "[perf] triple_quote_scan: clean={clean_us}us tripled={trip_us}us"
+        expect(a.len()).to_equal(400)
+        expect(trip_us > 0).to_equal(true)
+        expect(clean_us * 3 < trip_us).to_equal(true)

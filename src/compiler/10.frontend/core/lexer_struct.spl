@@ -26,12 +26,14 @@ var core_token_text_intern: {i64: text} = {}
 fn core_token_text_intern_reset():
     core_token_text_intern = {}
 
-# The token-span compare is `CoreLexer.chars_match` (a method reading
-# `self.source_chars` in place). It was a free function taking the whole
-# char array as an argument until 2026-08-22; the release tree had regressed
-# to that form and it is restored here -- pinned by
+# NOTE: intentionally NOT a free function taking `chars: [text]`. Under the seed
+# interpreter every array argument is scanned element-by-element at bind time
+# (value-type copy check), so passing the whole `source_chars` array here cost
+# O(file) per TOKEN -- quadratic per file. As a method `CoreLexer.chars_match`
+# reads `self.source_chars` in place: O(span). Restored 2026-08-28; pinned by
 # test/01_unit/compiler/frontend/lexer_source_chars_not_passed_per_token_spec.spl
 # and check-perf-regression-tests.shs ("lexer source_chars not an argument").
+# doc/08_tracking/bug/lexer_source_chars_arg_scan_per_token_2026-08-22.md
 
 # Digit-value helpers for string escape decoding (\NNN octal, \xNN hex,
 # \u{...} unicode). Return -1 for non-digits so callers can stop consuming.
@@ -338,6 +340,16 @@ impl CoreLexer:
         if indent_level <= current_indent:
             return false
         self.line_starts_binary_op(p)
+
+    fn chars_match(start: i64, end: i64, value: text) -> bool:
+        if value.len() != end - start:
+            return false
+        var i = start
+        while i < end:
+            if self.source_chars[i] != value[i - start:i - start + 1]:
+                return false
+            i = i + 1
+        true
 
     # Token-text extraction over a [start,end) char range: O(span) via indexed
     # collection + one join, replacing `source[start:end]` which was O(N) per call.

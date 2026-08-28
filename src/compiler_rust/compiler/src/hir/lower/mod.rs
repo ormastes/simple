@@ -2,7 +2,7 @@ mod context;
 pub mod deprecation_warning;
 mod error;
 pub(crate) mod expr;
-mod import_loader;
+pub(crate) mod import_loader;
 pub mod lenient_global_diag;
 mod lowerer;
 mod memory_check;

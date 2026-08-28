@@ -166,6 +166,7 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     clear_probe_source_cache();
+    crate::hir::lower::import_loader::clear_imported_module_ast_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
