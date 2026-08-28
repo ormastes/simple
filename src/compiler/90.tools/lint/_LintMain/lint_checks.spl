@@ -5,6 +5,7 @@ use compiler.tools.lint.main.*
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
 # See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
 use compiler.tools.lint._LintMain.name_lints.{lint_accessor_and_parent_names}
+use compiler.tools.lint._LintMain.nonexistent_type_lints.{lint_nonexistent_types}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -27,6 +28,7 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
 use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines, raw_rt_wrapper_replacement}
+use compiler.semantics.lint.cow_alias_hotpath.{check_cow_alias_hotpath}
 use compiler.semantics.lint.silent_default.{check_silent_default}
 use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
 use std.critical.capability_manifest.{load_critical_mode_config}
@@ -249,6 +251,27 @@ impl Linter:
             manifest_dir_cache: {}, manifest_dir_cache_count: 0,
             prepared_config_path: "")
     
+    # Lint a source buffer while RETAINING the combined lexical view that
+    # `lint_source` otherwise releases on exit. `entry_and_fixes` calls this so
+    # the follow-up fix pass can read `last_source_*` without re-resolving.
+    # Callers must pair it with `release_combined_lint_view()`.
+    me lint_source_for_parsed_append(
+        path: String, content: String
+    ) -> [LintRunResult]:
+        self.retain_combined_view = true
+        val results = self.lint_source(path, content)
+        self.retain_combined_view = false
+        results
+
+    me release_combined_lint_view():
+        self.last_resolved_path = ""
+        self.last_resolved_config = nil
+        self.last_source_locations_valid = false
+        self.last_source_function_lines = {}
+        self.last_source_collection_fix_lines = {}
+        self.last_source_export_star_lines = {}
+        self.last_option_me_warnings = []
+
     me lint_source(path: String, content: String) -> [LintRunResult]:
         self.results = []
 
@@ -274,7 +297,9 @@ impl Linter:
         self.check_accessor_and_parent_names(path, content)
         self.check_llvm_backend_type_safety(path, content)
         self.check_os_freestanding_patterns(path, content)
+        self.check_nonexistent_types(path, content)
         self.check_module_init_literal_spl(path, content)
+        self.check_cow_alias_hotpath_spl(path, content)
         self.check_raw_rt_access_spl(path, content)
         self.check_dynamic_capability_acquire_spl(path, content)
         self.check_silent_default_spl(path, content)
@@ -385,6 +410,22 @@ impl Linter:
             val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
                 .with_fix(warning.hint)
             self.results.push(LintRunResult.new(path, warning.line_num, 0, lint))
+
+    # TYPE001/TYPE002: casts and globals naming types that do not exist.
+    me check_nonexistent_types(path: String, content: String):
+        val warnings = lint_nonexistent_types(path, content)
+        for warning in warnings:
+            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
+                .with_fix(warning.hint)
+            self.results.push(LintRunResult.new(path, warning.line, 0, lint))
+
+    # COW-alias hot-path lint — see
+    # doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md
+    me check_cow_alias_hotpath_spl(path: String, content: String):
+        for finding in check_cow_alias_hotpath(content, path):
+            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
+                .with_fix(finding.hint)
+            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
 
     me check_module_init_literal_spl(path: String, content: String):
         val warnings = check_module_init_literal(content, path)
