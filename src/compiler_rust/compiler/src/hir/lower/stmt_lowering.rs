@@ -1068,20 +1068,52 @@ impl Lowerer {
             }
 
             Node::InlineAsm(asm_stmt) => {
-                if asm_stmt.constraints.is_empty() && asm_stmt.target_match.is_empty() && asm_stmt.clobbers.is_empty() {
-                    Ok(vec![HirStmt::InlineAsm {
-                        instructions: asm_stmt.instructions.clone(),
-                        volatile: asm_stmt.volatile,
-                    }])
-                } else {
+                // `asm match` target arms are still not lowered here (the arm
+                // selection needs the build target, which HIR lowering does not
+                // see). Operand-bound blocks ARE lowered now: until 2026-08-28
+                // they were silently dropped, so every `csrr {r}, sstatus`
+                // style site compiled to `return 0` (see
+                // doc/03_plan/os/hal/asm_to_simple_migration_plan.md, 1.1).
+                if !asm_stmt.target_match.is_empty() {
                     if std::env::var("SIMPLE_DEBUG_ASM").as_deref() == Ok("1") {
-                        eprintln!(
-                            "[asm] skipping operand-bound or target-matched asm block at {:?}",
-                            asm_stmt.span
-                        );
+                        eprintln!("[asm] skipping target-matched asm block at {:?}", asm_stmt.span);
                     }
-                    Ok(vec![])
+                    return Ok(vec![]);
                 }
+                use simple_parser::ast::AsmConstraintKind;
+                let mut operands = Vec::new();
+                let mut clobbers: Vec<String> = asm_stmt.clobbers.clone();
+                for c in &asm_stmt.constraints {
+                    let kind = match &c.kind {
+                        AsmConstraintKind::In => crate::hir::HirAsmOperandKind::In,
+                        AsmConstraintKind::Out | AsmConstraintKind::LateOut => crate::hir::HirAsmOperandKind::Out,
+                        AsmConstraintKind::InOut => crate::hir::HirAsmOperandKind::InOut,
+                        AsmConstraintKind::Clobber => {
+                            if let Some(reg) = &c.reg_class {
+                                clobbers.push(reg.clone());
+                            }
+                            continue;
+                        }
+                        // clobber_abi / options: no codegen support yet; the
+                        // block still lowers with a `memory` clobber, which is
+                        // the conservative side.
+                        AsmConstraintKind::ClobberAbi(_) | AsmConstraintKind::Options(_) => continue,
+                    };
+                    let Some(operand_expr) = &c.operand else { continue };
+                    let expr = self.lower_expr(operand_expr, ctx)?;
+                    operands.push(crate::hir::HirAsmOperand {
+                        name: c.name.clone(),
+                        kind,
+                        reg: c.reg_class.clone().unwrap_or_else(|| "reg".to_string()),
+                        expr,
+                    });
+                }
+                Ok(vec![HirStmt::InlineAsm {
+                    instructions: asm_stmt.instructions.clone(),
+                    volatile: asm_stmt.volatile,
+                    operands,
+                    clobbers,
+                }])
             }
 
             // Context statement: context obj: body

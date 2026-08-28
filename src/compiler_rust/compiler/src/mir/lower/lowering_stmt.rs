@@ -2046,14 +2046,91 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::InlineAsm { instructions, volatile } => {
+            HirStmt::InlineAsm {
+                instructions,
+                volatile,
+                operands,
+                clobbers,
+            } => {
+                use crate::hir::HirAsmOperandKind;
+                use crate::mir::asm_operands::{asm_constraint_for, rewrite_asm_placeholders};
+
+                // Outputs first (LLVM numbers outputs before inputs), then
+                // inputs. An `inout` operand contributes one output slot and
+                // one input slot tied to it with a numeric constraint.
+                let mut constraint_parts: Vec<String> = Vec::new();
+                let mut placeholder_index: Vec<(Option<String>, usize)> = Vec::new();
+                let mut outputs: Vec<(VReg, TypeId)> = Vec::new();
+                let mut output_places: Vec<(VReg, &HirExpr)> = Vec::new();
+                for op in operands {
+                    if matches!(op.kind, HirAsmOperandKind::Out | HirAsmOperandKind::InOut) {
+                        let out_vreg = self.with_func(|func, _| func.new_vreg())?;
+                        placeholder_index.push((op.name.clone(), constraint_parts.len()));
+                        constraint_parts.push(format!("={}", asm_constraint_for(&op.reg)));
+                        outputs.push((out_vreg, op.expr.ty));
+                        output_places.push((out_vreg, &op.expr));
+                    }
+                }
+                let mut inputs: Vec<VReg> = Vec::new();
+                let mut out_slot = 0usize;
+                for op in operands {
+                    match op.kind {
+                        HirAsmOperandKind::In => {
+                            let v = self.lower_expr(&op.expr)?;
+                            placeholder_index.push((op.name.clone(), constraint_parts.len()));
+                            constraint_parts.push(asm_constraint_for(&op.reg));
+                            inputs.push(v);
+                        }
+                        HirAsmOperandKind::InOut => {
+                            let v = self.lower_expr(&op.expr)?;
+                            constraint_parts.push(out_slot.to_string());
+                            inputs.push(v);
+                            out_slot += 1;
+                        }
+                        HirAsmOperandKind::Out => out_slot += 1,
+                    }
+                }
+                // Every asm block is a compiler barrier for memory: a fence
+                // intrinsic without `~{memory}` could be reordered against
+                // ordinary loads/stores, which defeats its purpose.
+                for c in clobbers {
+                    if c != "memory" {
+                        constraint_parts.push(format!("~{{{}}}", c));
+                    }
+                }
+                if *volatile || !operands.is_empty() || !clobbers.is_empty() {
+                    constraint_parts.push("~{memory}".to_string());
+                }
+                let constraints = constraint_parts.join(",");
+                let rewritten: Vec<String> = instructions
+                    .iter()
+                    .map(|line| rewrite_asm_placeholders(line, &placeholder_index))
+                    .collect();
+
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::InlineAsm {
-                        instructions: instructions.clone(),
+                        instructions: rewritten,
                         volatile: *volatile,
+                        constraints,
+                        inputs,
+                        outputs,
                     });
                 })?;
+                // Write each output back to its place (same address+store
+                // pattern as local assignment).
+                for (out_vreg, place) in output_places {
+                    let addr_reg = self.lower_lvalue(place)?;
+                    let ty = place.ty;
+                    self.with_func(|func, current_block| {
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Store {
+                            addr: addr_reg,
+                            value: out_vreg,
+                            ty,
+                        });
+                    })?;
+                }
                 Ok(())
             }
 

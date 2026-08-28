@@ -667,7 +667,13 @@ pub fn compile_instruction<M: Module>(
             }
         }
 
-        MirInst::InlineAsm { instructions, volatile } => {
+        MirInst::InlineAsm {
+            instructions, volatile, ..
+        } => {
+            // Cranelift has no inline asm: blocks go to a C sidecar TU with no
+            // operand binding (inline_asm_emit.rs). Operand-bound blocks keep
+            // their `$N` placeholders and are skipped there exactly as the
+            // `{name}` form was before; only `--backend llvm` binds operands.
             let symbol = crate::codegen::inline_asm::register_inline_asm(instructions, *volatile);
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id

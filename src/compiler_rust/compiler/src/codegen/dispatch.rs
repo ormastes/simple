@@ -66,7 +66,9 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             boxed_result,
         } => emitter.emit_interp_call(dest, func_name, args, *boxed_result),
         MirInst::InterpEval { dest, expr_index } => emitter.emit_interp_eval(*dest, *expr_index as usize),
-        MirInst::InlineAsm { instructions, volatile } => emitter.emit_inline_asm(instructions, *volatile),
+        MirInst::InlineAsm {
+            instructions, volatile, ..
+        } => emitter.emit_inline_asm(instructions, *volatile),
         MirInst::IndirectCall {
             dest,
             callee,

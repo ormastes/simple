@@ -67,8 +67,16 @@ fn has_unresolved_simple_operand(instruction: &str) -> bool {
                 .is_some_and(|rest| rest.trim_start().starts_with('('))
         });
 
+    // `$N` is the LLVM operand reference the MIR lowering rewrites `{name}`
+    // into (mir/asm_operands.rs); the C sidecar cannot bind operands, so such
+    // a line is skipped here exactly like the `{name}` form was.
+    let has_llvm_operand_ref = instruction
+        .char_indices()
+        .any(|(i, c)| c == '$' && instruction[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
+
     instruction.contains('{')
         || instruction.contains('}')
+        || has_llvm_operand_ref
         || is_simple_operand_directive
         // Unresolved Simple asm operands leak as the Rust `{:?}` of the AST
         // operand node, e.g. `li t0, Identifier("mstatus_mie")` or

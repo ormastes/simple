@@ -20,6 +20,7 @@ mod casts;
 mod collections;
 mod consts;
 mod memory;
+mod inline_asm;
 mod objects;
 
 /// Type alias for vreg map
@@ -450,6 +451,11 @@ impl LlvmBackend {
                 .map(|needle| func.name.contains(needle))
                 .unwrap_or_else(|| func.name.contains("native_build"));
 
+        // `@volatile` / `@no_reorder` memory-order mode for this function
+        // (read by compile_load / compile_store / compile_inline_asm).
+        self.mem_order_mode
+            .set(inline_asm::mem_order_mode_for(&func.attributes));
+
         // Debug: dump MIR for selected functions when SIMPLE_DUMP_IR is set.
         if should_dump {
             eprintln!("=== MIR for {} ===", func.name);
@@ -533,7 +539,7 @@ impl LlvmBackend {
         }
         for block in &func.blocks {
             for inst in &block.instructions {
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     all_vregs.insert(d);
                 }
                 for u in inst.uses() {
@@ -722,7 +728,7 @@ impl LlvmBackend {
                             live_in.insert(u);
                         }
                     }
-                    if let Some(d) = inst.dest() {
+                    for d in inst.defs() {
                         seen_defs.insert(d);
                     }
                 }
@@ -778,7 +784,7 @@ impl LlvmBackend {
                 self.compile_instruction(inst, &mut vreg_map, &local_allocas, &vreg_types, builder, module)?;
 
                 // Store any newly defined vreg to its alloca (for cross-block access)
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
                         let rv_type = self.runtime_int_type();
                         let i64_val = self
@@ -986,20 +992,15 @@ impl LlvmBackend {
             MirInst::Call { dest, target, args } => {
                 self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
-            MirInst::InlineAsm { instructions, .. } => {
-                let fn_type = self.context_ref().void_type().fn_type(&[], false);
-                let asm = self.context_ref().create_inline_asm(
-                    fn_type,
-                    instructions.join("\n"),
-                    String::new(),
-                    true,
-                    false,
-                    Some(InlineAsmDialect::ATT),
-                    false,
-                );
-                builder
-                    .build_indirect_call(fn_type, asm, &[], "")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+            MirInst::InlineAsm {
+                instructions,
+                volatile,
+                constraints,
+                inputs,
+                outputs,
+            } => {
+                self.compile_inline_asm(instructions, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
+                self.emit_no_reorder_fence(builder)?;
             }
             MirInst::IndirectCall {
                 dest,

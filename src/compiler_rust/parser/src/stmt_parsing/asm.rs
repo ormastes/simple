@@ -536,11 +536,21 @@ impl<'a> Parser<'a> {
                 for part in parts {
                     match part {
                         crate::token::FStringToken::Literal(s) => text.push_str(s),
-                        crate::token::FStringToken::Expr(e) => text.push_str(e),
+                        // `{name}` in an asm template is an OPERAND placeholder,
+                        // not an interpolation: keep the braces so MIR lowering
+                        // can rewrite it to LLVM's `$N` (mir/asm_operands.rs).
+                        // Flattening to the bare name emitted `csrr result, sstatus`.
+                        crate::token::FStringToken::Expr(e) => {
+                            text.push('{');
+                            text.push_str(e);
+                            text.push('}');
+                        }
                         crate::token::FStringToken::ExprWithFormat(e, spec) => {
+                            text.push('{');
                             text.push_str(e);
                             text.push(':');
                             text.push_str(spec);
+                            text.push('}');
                         }
                     }
                 }

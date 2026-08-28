@@ -694,6 +694,12 @@ struct FunctionAttr:
     rt_hal_compare_c: bool
     rt_hal_compare_rust: bool
     rt_hal_error: text
+    # Memory-order directives (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md A.2):
+    # @volatile — every load/store in the fn is volatile (never elided/merged/reordered
+    # against another volatile access); @no_reorder — additionally a compiler fence
+    # (`fence syncscope("singlethread") seq_cst`) around every access and asm block.
+    is_volatile: bool
+    is_no_reorder: bool
 
 impl FunctionAttr:
     static fn default() -> FunctionAttr:
@@ -722,7 +728,9 @@ impl FunctionAttr:
             is_rt_hal: false,
             rt_hal_compare_c: false,
             rt_hal_compare_rust: false,
-            rt_hal_error: ""
+            rt_hal_error: "",
+            is_volatile: false,
+            is_no_reorder: false
         )
 
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
@@ -751,6 +759,8 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var rt_hal_compare_c = false
     var rt_hal_compare_rust = false
     var rt_hal_error = ""
+    var is_volatile = false
+    var is_no_reorder = false
 
     for attr in attrs:
         if attr.name == "entry":
@@ -759,6 +769,11 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
             is_naked = true
         elif attr.name == "noreturn":
             is_noreturn = true
+        elif attr.name == "volatile":
+            is_volatile = true
+        elif attr.name == "no_reorder":
+            is_no_reorder = true
+            is_volatile = true   # a fence around an elidable access protects nothing
         elif attr.name == "section":
             if attr.args.len() > 0:
                 val section_name = extract_string_arg(attr.args[0])
@@ -855,7 +870,9 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         is_rt_hal: is_rt_hal,
         rt_hal_compare_c: rt_hal_compare_c,
         rt_hal_compare_rust: rt_hal_compare_rust,
-        rt_hal_error: rt_hal_error
+        rt_hal_error: rt_hal_error,
+        is_volatile: is_volatile,
+        is_no_reorder: is_no_reorder
     )
 
 struct GpuFunctionAttrArgs:

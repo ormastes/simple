@@ -39,6 +39,13 @@ pub struct LlvmBackend {
     pub(super) cpu: TargetCpu,
     /// Enable coverage instrumentation
     pub(super) coverage_enabled: bool,
+    /// Memory-order mode of the function currently being compiled, set from
+    /// its `@volatile` / `@no_reorder` attributes at the top of
+    /// `compile_function` (design A.2, `asm_embedded_hal_and_dual_run.md`):
+    /// bit 0 = every Load/Store is `volatile`; bit 1 = a
+    /// `fence syncscope("singlethread") seq_cst` follows every Load/Store and
+    /// inline-asm call (compiler barrier only — no hardware fence).
+    pub(super) mem_order_mode: std::cell::Cell<u8>,
     // --- borrowing fields first (dropped before context) ---
     #[cfg(feature = "llvm")]
     pub(super) module: RefCell<Option<Module<'static>>>,
@@ -265,6 +272,7 @@ impl LlvmBackend {
                 opt_level,
                 cpu,
                 coverage_enabled: false,
+                mem_order_mode: std::cell::Cell::new(0),
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
