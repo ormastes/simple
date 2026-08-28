@@ -28,10 +28,9 @@
 # FFI — works in interpreter (hosted) mode
 # ============================================================================
 
-extern fn rt_file_write_text(path: text, content: text)
-extern fn rt_file_remove(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{ file_exists, process_run }
+use std.nogc_sync_mut.env.variables.{env_get}
+use std.nogc_sync_mut.file_system.file_ops.{file_write_text}
 
 # ============================================================================
 # Helpers
@@ -39,14 +38,14 @@ extern fn rt_env_get(key: text) -> text
 
 fn file_read(path: text) -> text:
     """Read file via cat (works in interpreter — rt_file_read_text returns Option)."""
-    val (out, _, code) = rt_process_run("cat", [path])
+    val (out, _, code) = process_run("cat", [path])
     if code == 0:
         return out
     ""
 
 fn file_list(dir: text) -> [text]:
     """List files in directory."""
-    val (out, _, code) = rt_process_run("ls", ["-1", dir])
+    val (out, _, code) = process_run("ls", ["-1", dir])
     if code != 0:
         return []
     val trimmed = out.trim()
@@ -55,18 +54,18 @@ fn file_list(dir: text) -> [text]:
     trimmed.split("\n")
 
 fn file_copy(src: text, dst: text) -> bool:
-    val (_, _, code) = rt_process_run("cp", [src, dst])
+    val (_, _, code) = process_run("cp", [src, dst])
     code == 0
 
 fn dir_create(path: text):
-    rt_process_run("mkdir", ["-p", [path]])
+    process_run("mkdir", ["-p", [path]])
 
 fn dir_remove(path: text):
-    rt_process_run("rm", ["-rf", [path]])
+    process_run("rm", ["-rf", [path]])
 
 fn timestamp_now() -> text:
     """Get current timestamp via date."""
-    val (out, _, code) = rt_process_run("date", ["+%Y-%m-%dT%H:%M:%S"])
+    val (out, _, code) = process_run("date", ["+%Y-%m-%dT%H:%M:%S"])
     if code == 0:
         return out.trim()
     "unknown"
@@ -175,9 +174,9 @@ fn vcs_init(e: VcsEngine) -> bool:
     dir_create(e.vcs_dir + "/commits")
     dir_create(e.vcs_dir + "/staging")
     dir_create(e.vcs_dir + "/objects")
-    rt_file_write_text(e.vcs_dir + "/HEAD", "")
-    rt_file_write_text(e.vcs_dir + "/staging.manifest", "")
-    rt_file_write_text(e.vcs_dir + "/config", "author: user\n")
+    file_write_text(e.vcs_dir + "/HEAD", "")
+    file_write_text(e.vcs_dir + "/staging.manifest", "")
+    file_write_text(e.vcs_dir + "/config", "author: user\n")
     true
 
 # --- add ---
@@ -187,7 +186,7 @@ fn vcs_add(e: VcsEngine, files: [text]) -> i64:
     var count: i64 = 0
     for f in files:
         val src = e.root + "/" + f
-        if not rt_file_exists(src):
+        if not file_exists(src):
             print "vcs: file not found: {f}"
             continue
         val dst = e.vcs_dir + "/staging/" + f
@@ -207,7 +206,7 @@ fn vcs_add(e: VcsEngine, files: [text]) -> i64:
                 manifest = manifest + "\n"
             manifest = manifest + f + "\n"
         count = count + 1
-    rt_file_write_text(e.vcs_dir + "/staging.manifest", manifest)
+    file_write_text(e.vcs_dir + "/staging.manifest", manifest)
     count
 
 # --- commit ---
@@ -242,15 +241,15 @@ fn vcs_commit(e: VcsEngine, message: text) -> text:
 
     # Write commit metadata
     val commit = VcsCommit(hash: hash, parent: head, message: message, timestamp: ts, files: files)
-    rt_file_write_text(e.vcs_dir + "/commits/" + hash + ".txt", serialize_commit(commit))
+    file_write_text(e.vcs_dir + "/commits/" + hash + ".txt", serialize_commit(commit))
 
     # Update HEAD
-    rt_file_write_text(e.vcs_dir + "/HEAD", hash)
+    file_write_text(e.vcs_dir + "/HEAD", hash)
 
     # Clear staging
     dir_remove(e.vcs_dir + "/staging")
     dir_create(e.vcs_dir + "/staging")
-    rt_file_write_text(e.vcs_dir + "/staging.manifest", "")
+    file_write_text(e.vcs_dir + "/staging.manifest", "")
 
     hash
 
@@ -261,7 +260,7 @@ fn vcs_log(e: VcsEngine) -> [VcsCommit]:
     var current = file_read(e.vcs_dir + "/HEAD").trim()
     while current != "":
         val path = e.vcs_dir + "/commits/" + current + ".txt"
-        if not rt_file_exists(path):
+        if not file_exists(path):
             break
         val data = file_read(path)
         val commit = parse_commit(data)
@@ -302,11 +301,11 @@ fn vcs_diff(e: VcsEngine, file: text) -> text:
         return "vcs: no commits yet"
 
     val committed_path = e.vcs_dir + "/objects/" + head + "/" + file
-    if not rt_file_exists(committed_path):
+    if not file_exists(committed_path):
         return "vcs: file '{file}' not in commit {head}"
 
     val working_path = e.root + "/" + file
-    if not rt_file_exists(working_path):
+    if not file_exists(working_path):
         return "vcs: file '{file}' deleted from working directory"
 
     val old = file_read(committed_path)
@@ -344,7 +343,7 @@ fn vcs_diff(e: VcsEngine, file: text) -> text:
 fn vcs_show(e: VcsEngine, hash: text) -> text:
     """Show commit details."""
     val path = e.vcs_dir + "/commits/" + hash + ".txt"
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return "vcs: commit '{hash}' not found"
     val data = file_read(path)
     val commit = parse_commit(data)
@@ -364,7 +363,7 @@ fn vcs_show(e: VcsEngine, hash: text) -> text:
 fn vcs_checkout(e: VcsEngine, hash: text) -> bool:
     """Restore files from a commit."""
     val path = e.vcs_dir + "/commits/" + hash + ".txt"
-    if not rt_file_exists(path):
+    if not file_exists(path):
         print "vcs: commit '{hash}' not found"
         return false
     val data = file_read(path)
@@ -382,7 +381,7 @@ fn vcs_checkout(e: VcsEngine, hash: text) -> bool:
                 dir_create(parent_path)
                 pi = pi + 1
         file_copy(src, dst)
-    rt_file_write_text(e.vcs_dir + "/HEAD", hash)
+    file_write_text(e.vcs_dir + "/HEAD", hash)
     true
 
 # ============================================================================
@@ -404,7 +403,7 @@ fn vcs_run(cwd: text, args: [text]) -> i64:
         return 0
 
     # All other commands require an initialized repo
-    if not rt_file_exists(e.vcs_dir + "/HEAD"):
+    if not file_exists(e.vcs_dir + "/HEAD"):
         print "vcs: not a vcs repository (run 'vcs init' first)"
         return 1
 
@@ -511,9 +510,9 @@ fn vcs_help_text() -> text:
 # ============================================================================
 
 fn main() -> i64:
-    val cwd = rt_env_get("PWD")
+    val cwd = env_get("PWD")
     # Skip first arg if it's "vcs"
-    val args = rt_env_get("VCS_ARGS")
+    val args = env_get("VCS_ARGS")
     if args != "":
         val parts = args.split(" ")
         return vcs_run(cwd, parts)
