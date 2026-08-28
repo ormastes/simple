@@ -57,3 +57,9 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 4. **Fix**: one file at a time
 5. **Verify**: tests after each change
 6. **Report**: before/after metrics
+
+## Implementation Language Policy
+
+When refactoring runtime/HAL code, migrate toward pure Simple, never toward C;
+keep/add the Simple twin for bootstrap-required C, and reduce inline asm per
+the preference ladder in `doc/07_guide/os/hal/pure_simple_hal.md`.

@@ -4,6 +4,7 @@ alwaysApply: true
 # Code Style
 
 - **NEVER over-engineer** - only make requested changes
+- **Pure Simple first / C boundary / asm-minimization** — see `doc/07_guide/os/hal/pure_simple_hal.md` (dual-run twin gate: `scripts/check/check-dual-run-shadow.shs`)
 - **NEVER add unused code** - delete completely
 - **DO NOT ADD REPORT TO GIT** unless requested
 - **NEVER convert TODO/FIXME to NOTE** - implement or delete entirely

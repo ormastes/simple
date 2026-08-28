@@ -129,3 +129,11 @@ hash-bound to the admitted archive and Stage-3 identity. A missing symbol,
 hosted provider, generated stub, or fallback marker fails before link. Run the
 built tool's bounded `--help`/`--version` only after link success and validated
 `ToolingLinkReceiptV1`.
+
+## Implementation Language Policy
+
+Pure Simple first — never implement in C what pure Simple can do; bootstrap C
+keeps a pure-Simple twin (`scripts/check/check-dual-run-shadow.shs`); HAL code
+minimizes asm (typed register views > optimization-restraining tags >
+intrinsics > inline asm for irreplaceable ops only). Full policy:
+`doc/07_guide/os/hal/pure_simple_hal.md`.

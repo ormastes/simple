@@ -32,3 +32,9 @@ The remaining optional bounded fields are `trace_operations`, `trace_bytes`,
 `environment_schema`. Runtime configuration cannot widen these compile-time
 caps. Provider arrival order never grants commit authority; the parent compares
 validated normalized I/O and owns the sole commit.
+
+## Related policy
+
+Provider choice follows the pure-Simple-first policy (Simple first, C boundary
+with a Simple twin, asm only for architecturally irreplaceable ops):
+`doc/07_guide/os/hal/pure_simple_hal.md`.

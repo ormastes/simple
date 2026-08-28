@@ -20,6 +20,10 @@ Maintain process knowledge for the `os` layer: owned source, architecture links,
 - [Design docs](../../05_design/)
 - [Specs](../../06_spec/)
 
+## Boundary Rules
+
+- Pure Simple first: never a C implementation where pure Simple can do it; the C runtime is a boundary, not a place for logic. Bootstrap-required C keeps a pure-Simple twin (`scripts/check/check-dual-run-shadow.shs`). HAL code minimizes inline asm (typed register views > optimization-restraining tags > intrinsics > asm for irreplaceable ops only). Full policy: [pure_simple_hal.md](../../../07_guide/os/hal/pure_simple_hal.md).
+
 ## Update Rule
 
 When project work changes this layer's public contract, source ownership, tests, architecture, or verification requirements, update this skill with current links and handoff notes.

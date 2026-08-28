@@ -342,3 +342,18 @@ use lib.common.text            # Also works (std -> lib internally)
 - NEVER over-engineer — only make requested changes
 - NEVER add unused code — delete completely
 - STUB001 = hard fail — no `pass_todo` in production code
+
+## Implementation Language Policy (Pure Simple First)
+
+- Never write a C version of a fix/feature when pure Simple can do it. Only the
+  Rust seed and the 3 bootstrap scripts are sanctioned non-Simple code; the C
+  runtime is a boundary, not a place for logic.
+- Bootstrap-required C keeps a pure-Simple twin, verified by the dual-run
+  shadow gate `scripts/check/check-dual-run-shadow.shs`.
+- HAL/low-level code minimizes asm: typed bitfield register views + MMIO-typed
+  access > no-reorder/no-elide/exact-layout tags or strict mode > compiler
+  intrinsics > inline asm only for architecturally irreplaceable ops (boot
+  entry, CSR/MSR, context switch, interrupt entry, ISA-required
+  barriers/atomics).
+
+Full policy: `doc/07_guide/os/hal/pure_simple_hal.md`.

@@ -138,3 +138,11 @@ active.
 - Avoid full-tree scans and per-request subprocesses in hot request handlers unless explicitly designed and justified
 - When adding caches or indexes tied to writable files, add invalidation on all relevant mutation paths
 - Add perf smoke checks for startup and representative tool requests when touching performance-sensitive tooling
+
+## Implementation Language Policy
+
+Pure Simple first — never implement in C what pure Simple can do; bootstrap C
+keeps a pure-Simple twin (`scripts/check/check-dual-run-shadow.shs`); HAL code
+minimizes asm (typed register views > no-reorder/no-elide tags > intrinsics >
+inline asm for irreplaceable ops only). Full policy:
+`doc/07_guide/os/hal/pure_simple_hal.md`.
