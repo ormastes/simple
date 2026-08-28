@@ -1,0 +1,49 @@
+# Kernel + Pluggable Migration Plan
+
+Status: PROPOSED (2026-08-28). Ordered so the bootstrap fixpoint
+(`scripts/bootstrap/bootstrap-from-scratch.sh`, stage2/3 entry
+`src/app/cli/bootstrap_main.spl` `:2085,2169,2212,2244`) stays green at every
+phase. Phase 0-1 touch no kernel hot path. Every phase: an sspec that passes
+AND fails under an injected bug (mutation-red), per
+`.claude/memory` rule "SSpec dual check".
+Architecture: `doc/04_architecture/compiler/plugin_arch/kernel_pluggable_partition.md`.
+Design: `doc/05_design/compiler/plugin_arch/versioned_param_objects_and_interfaces.md`.
+
+| Phase | Scope (files) | Kernel hot path touched? | Acceptance | Proof (sspec) |
+|---|---|---|---|---|
+| **0. Declare the partition** | New `doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn` listing K0/K1 directories/files (from partition §3); new `scripts/check/check-kernel-closure.shs` (fail-closed, `--selftest`) that FAILs if a K0 path imports a P path (`use` scan) or if a file under `src/compiler` is in neither list. Correct the stale "zero callers" text in `.claude/rules/commands.md` and `src/lib/scv/build_invalidation.spl:12,38,172`. | no | Verdict `PASS — n file(s) classified, 0 unclassified, 0 K0->P imports`; initial run may be RED (record baseline like `unbacked_extern_baseline.txt`). | `test/01_unit/compiler/plugin_arch/kernel_closure_spec.spl`: fixture tree with one K0 file importing a P file must FAIL; clean fixture PASS; empty fixture ERROR. |
+| **1. Real ABI digest, compute-and-log** | `src/compiler/35.semantics/interface/compile_interface.spl` (+ `simple/abi-interface/v1` domain, field-ordinal encoder), `module_identity.spl:24-31` (`abi_interface_digest` real; others unchanged), new `src/lib/common/plugin/iface_id.spl` (`IfaceId`, `ParamHeader`, `ParamExt`). Digest is logged only; no build decision reads it (same posture as `module_identity.spl:3` today). | no (semantics layer, off the decision path) | Digest changes when a struct field is added/renamed/reordered; unchanged when a fn body changes. Existing `compile_interface_spec.spl` still green. | Extend `test/01_unit/compiler/interface_compat/compile_interface_spec.spl`: field-append changes abi digest but not compile-interface digest of callers; field-rename changes both; mutation: encoder dropping field type must be caught. |
+| **2. Param-object convention + lint** | `PARAM-001..003`, `PLUG-001` in `src/compiler/90.tools/lint/` (P-static); `scripts/check/check-param-object-evolution.shs` (diffs `V<n>` vs `V<n+1>` ordinals between `main@origin` and tip). First adopters: `AspectParamsV1` (design §2.3) fed by the existing env vars at `driver_pipeline_aop.spl:68-80`; `McdcPolicy` already typed (`mcdc/dynamic_aspect.spl:128-163`). | weaver reads a record instead of env (one-time read at driver boundary; not per-node) | Env vars still work (front-end); `driver_pipeline_aop.spl` has zero `env_get`; lint FAILs a `V2` that reorders a `V1` field. | `test/01_unit/compiler/plugin_arch/param_object_lint_spec.spl` (each rule: clean PASS, dirty FAIL); `test/01_unit/compiler/aop/aspect_params_spec.spl` (env->record round-trip; presence bit set only when env set). |
+| **3. Manifests carry identity, fail-closed** | `watcher/smf_manifest.spl`: `abi_digest`, `provides`, `requires` columns; `SmfManifest.version` 3->4 with reader rejection of unknown versions (`:220,231-233`); `smf_manifest_entry_iface_verdict :163-188` becomes rejection on the interpret path (`driver_api_interpret.spl:55` already fails closed on row mismatch). `simple.sdn` `provides:/requires:/link:` parsed in `package_pins.spl:343-356` (extend `DepEdge :121`). | manifest read at startup: one extra column compare, no hashing | A stale `.smf` with a mismatched `abi_digest` is rejected with a named code, not silently re-interpreted; unknown manifest version rejected. Startup stays within `startup_perf_check_2026-08-17.md:22` budget (+<2 ms). | `test/01_unit/compiler/driver/smf_manifest_gate_spec.spl`: v3 file -> rejected; v4 with wrong digest -> rejected with code; matching -> accepted; mutation: reader defaulting to 1 must be caught. |
+| **4. First P-static seam: lint rules as a table** | `90.tools/lint/_LintMain/lint_checks.spl:71,198,503,617,658` + sibling rule files -> `trait LintRule { fn iface; fn id; fn check(params: LintParamsV1, unit) }` and a static table; `src/app/lint/main.spl` unchanged. `simple.sdn` for `src/compiler/90.tools/lint` gains `provides: simple.lint.LintRule@1`. | no (lint is off the compile path) | Adding a rule = one new file + one table row; `check-kernel-closure.shs` proves no K0 file changed; bootstrap receipt for the lint unit shows `negotiate: Ok`. | `test/01_unit/compiler/lint/lint_rule_table_spec.spl`: a fixture rule registered via the table fires; removing it from the table silences it; a rule whose `iface.major` != host's is refused with `PLUG-E-MAJOR`. |
+| **5. Backend port typed; non-bootstrap backends P-static** | `70.backend/backend_port.spl:15-25` -> `trait BackendPlugin` + `BackendPortV1` (design §4); `backend_factory_full.spl:113-137`, `codegen_factory.spl:37-41` dispatch via table; enum stays for cache ids (`compile_options_hash.spl:239,251`) but is derived from `BackendDescV1.name`. LLVM + Cranelift remain K1 (linked always); Wasm/Cuda/Hip/OpenCl/Vhdl/IrTc/Lean/Byl/Vulkan/LlvmLib/C become table entries under `src/plugins/backend_*/`. | one indirect call per compile (not per node) | Bootstrap with `--backend=llvm` and `--backend=cranelift` both green; `bootstrap_wide_inputs_hash` no longer includes `src/plugins/**`; editing a Wasm backend file does not change stage3's receipt hash. | `test/01_unit/compiler/backend/backend_port_negotiate_spec.spl`: each table entry negotiates Ok; a fixture plugin with `major: 2` is refused; `test/02_integration/bootstrap/plugin_edit_no_rebuild_spec.spl`: touch a P-static file, assert kernel object cache keys (`native_build_cache_scope_key`) unchanged. |
+| **6. P-dyn negotiation on the APK gate and SFFI loader** | `aspect_pack.spl:2125-2205`: replace opt-in `required_core_*` (`:2196-2205`) by mandatory `negotiate(HostOfferV1, PluginAnswerV1)`; `sffi/dynamic_versioned.spl:170-187` reads `spl_plugin_entry_v1` via `spl_dlsym_checked` (`runtime_dynload.c:474`) and negotiates before returning a handle; `SIMPLE_ABI_VERSION` added to `runtime.h` and to `native_build_producer_identity` (`incremental.spl:250-252`). Remove `@unsafe(reason: "loads an unverified ...")` annotations only where negotiation now runs. | load path only (first facet use) | A pack/`.so` built against a different major is refused with `PLUG-E-MAJOR`; a pack built against an older accepted minor loads; `apk_try_facet` (resident) unchanged in cost. | `test/01_unit/lib/aspect_pack/negotiate_spec.spl` (reuse existing APK fixtures; mutation: skipping the digest compare must fail); `test/01_unit/lib/sffi/dynamic_versioned_negotiate_spec.spl`. |
+| **7. Aspects as packs; bootstrap closure = kernel** | Coverage/MCDC wrapper (`test_executor_parsing.spl:792-869`) -> APK `STARTUP` aspect carrying `AspectParamsV1`; logging aspect likewise; bootstrap lane uses `APK_ACT_STATIC`, test lane `LAZY_FACET`. `bootstrap_wide_inputs_hash` (`bootstrap-from-scratch.sh:1018-1028`) hashes `kernel_closure.sdn` files + sorted `provides` digests. Startup gate `scripts/check/check-startup-budget.shs` pins the §6 budget. | weaver: none new; startup: table walk | Changing a log-level default or a lint rule does not change the bootstrap inputs hash; changing a K0 file does; `--mode=one-binary` and `dynload` both green; startup within budget. | `test/02_integration/bootstrap/inputs_hash_partition_spec.spl` (edit P file -> hash equal; edit K0 file -> hash differs); `test/02_integration/aop/coverage_aspect_pack_spec.spl` (coverage evidence identical to the source-rewrite path on a fixture). |
+| **8. Package ranges (optional, after 7)** | Wire `src/app/pkg` into `src/app/cli/command_registry.spl:86-89,142` (`update`, `lock` handlers are empty today); use `semver_old.spl:257-267` `satisfies_caret/tilde` for `requires.range`; no backtracking solver (does not exist; out of scope). | no | `simple lock` writes `provides/requires` resolutions; a `requires` range with no satisfying `provides` is a lock error. | `test/01_unit/app/pkg/requires_range_spec.spl`. |
+
+## Ordering rationale
+- 0-1 are documentation + compute-and-log; bootstrap unaffected.
+- 2-3 make the identity *recorded* before anything *depends* on it.
+- 4 proves the pattern on a seam with no ABI surface and no hot path.
+- 5 needs both K1 backends green before any backend moves out.
+- 6 is the first change to a load path; it lands after the static path has
+  exercised `negotiate` for two phases.
+- 7 is the payoff: narrows the kernel rebuild trigger. It is last because it
+  changes what the bootstrap script hashes.
+
+## Non-goals
+Patchpoints (`patchpoint_and_signing_prerequisites_2026-08-19.md:26-30`),
+typed `facet<T>` (`typed_facet_witness_transaction_2026-08-26_tldr.md:3`),
+`AspectRuntimeRegistry`, a shared `libsimple_runtime.so`, ECS in kernel/drivers
+(`mdsoc_architecture_tobe.md:372-378`), a version-range solver.
+
+## Open questions for the user
+1. Bootstrap backend: keep LLVM as the default K1 (`bootstrap-from-scratch.sh:112`)
+   with Cranelift as the alternative, or make Cranelift the sole K1 and LLVM
+   P-static (smaller kernel, but the script default changes)?
+2. Should `SIMPLE_ABI_VERSION` (new global) start at 1 now, or wait until
+   `array_value_abi_contract.md` reports GREEN (it declares partial RED)?
+3. Is `simple.sdn` the right home for `provides/requires/link`, or should
+   plugin manifests be separate `plugin.sdn` files under `src/plugins/`?
+4. Phase 7 moves coverage injection from source rewriting to an APK aspect;
+   accept the interim period where both paths exist?
