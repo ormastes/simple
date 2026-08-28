@@ -203,12 +203,33 @@ impl<'a> Parser<'a> {
             // "expected Indent, found Dedent", so `val x = if <multi-line
             // cond>:` could not be written at all.
             self.drain_available_deferred_dedents();
+            let deferred_before = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
 
             // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
+                // Nothing was consumed on behalf of the pending dedent(s);
+                // put them back for whatever parses the else/elif next.
+                self.deferred_dedent_count = deferred_before;
                 Expr::Tuple(vec![]) // unit value
             } else {
-                self.expect(&TokenKind::Indent)?;
+                // Equal-column shape (see `parse_condition_block` /
+                // `header_continuation_is_equal_column`): when the
+                // condition's trailing-operator continuation line sits at
+                // the SAME column as this body, the lexer emits no fresh
+                // `Indent` here — the continuation's pseudo-INDENT already
+                // opened this level. `expect(Indent)` then failed outright
+                // ("expected Indent, found <first body token>"), so
+                // `val x = if <multi-line cond>:\n    body` (continuation
+                // and body columns equal) could never be written as an
+                // if-EXPRESSION even though the equivalent `if` STATEMENT
+                // already handles this shape via `parse_condition_block`.
+                // See doc/08_tracking/bug/
+                // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+                let equal_column = self.header_continuation_is_equal_column(deferred_before);
+                if !equal_column {
+                    self.expect(&TokenKind::Indent)?;
+                }
 
                 let mut statements = Vec::new();
                 while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
@@ -232,6 +253,18 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
 
+                // Equal-column shape: the terminating Dedent just consumed
+                // above IS the continuation's compensating one, so it must
+                // not be counted again — mirrors
+                // `header_continuation_dedents_to_reconcile`'s
+                // `saturating_sub(1)`.
+                let deferred = if equal_column {
+                    deferred_before.saturating_sub(1)
+                } else {
+                    deferred_before
+                };
+                self.deferred_dedent_count += deferred;
+
                 Expr::DoBlock(statements)
             } // close else for empty-then-branch check
         } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
@@ -240,7 +273,21 @@ impl<'a> Parser<'a> {
             Expr::DoBlock(vec![stmt])
         } else {
             // Inline form: parse as expression
-            self.parse_expression()?
+            let expr = self.parse_expression()?;
+            // A multi-line CONDITION's trailing-operator continuation
+            // (`if a == x and\n    b == y: ...`) can leave a compensating
+            // pseudo-DEDENT queued in `deferred_dedent_count` (see
+            // `drain_available_deferred_dedents` above). The block-form
+            // then-branch drains it via that call; an INLINE then-branch
+            // never introduces a competing Indent of its own, so the
+            // deferred dedent is still pending right here and must be
+            // reconciled the same way `parse_inline_or_block` does for the
+            // statement-form `if`, or the next thing this expression-form
+            // `if` returns to sees an orphaned Dedent it never expects.
+            // See doc/08_tracking/bug/
+            // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+            self.reconcile_inline_body_deferred_dedents();
+            expr
         };
 
         // Peek through newlines/indents to check for elif/else continuation.
@@ -322,7 +369,18 @@ impl<'a> Parser<'a> {
                     Expr::DoBlock(vec![stmt])
                 } else {
                     // Inline form: parse as expression
-                    self.parse_expression()?
+                    let e = self.parse_expression()?;
+                    // Same reconciliation as the inline then-branch above: the
+                    // condition's deferred pseudo-dedent may still be pending
+                    // here (an inline then-branch followed immediately by
+                    // `else:` on the same source line never gave the earlier
+                    // reconcile call a Dedent to consume — `else` was the
+                    // next token, not a Newline/Dedent). Reconcile again now
+                    // that the whole inline if/else expression is done, or
+                    // the leftover dedent surfaces as an orphaned Dedent in
+                    // whatever follows this expression.
+                    self.reconcile_inline_body_deferred_dedents();
+                    e
                 };
 
                 Some(Box::new(else_expr))
@@ -817,9 +875,23 @@ impl<'a> Parser<'a> {
             self.lexer.disable_forced_indentation();
             Expr::DoBlock(statements)
         } else {
-            // Inline expression - disable forced indentation after parsing
-            let expr = self.parse_expression()?;
+            // Inline expression (body starts on the same line as the colon, e.g.
+            // `\row: row == 1 and\n    row == 2`). Forced indentation was enabled
+            // above only so a genuine block body gets real Indent/Dedent tokens;
+            // an inline expression that merely *continues* onto later lines (a
+            // trailing binary operator such as `and`/`or`) is not a block and
+            // must NOT see Indent/Dedent tokens for its continuation lines --
+            // normal bracket-depth newline suppression already keeps it on one
+            // logical line. Disabling forced indentation must happen BEFORE
+            // parsing, not after: parse_expression() itself consumes the
+            // continuation lines, so disabling afterward is too late and the
+            // lexer emits an Indent/Dedent pair mid-expression, which
+            // parse_expression() cannot consume, surfacing as "Unexpected
+            // token: expected expression, found Dedent" at the caller's
+            // closing bracket. See doc/08_tracking/bug/
+            // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md
             self.lexer.disable_forced_indentation();
+            let expr = self.parse_expression()?;
             expr
         };
 

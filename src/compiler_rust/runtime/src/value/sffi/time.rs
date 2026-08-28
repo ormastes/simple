@@ -158,7 +158,7 @@ pub fn rt_progress_tls_clear() { unsafe { c_sffi::rt_progress_tls_clear() } }
 
 #[cfg(test)]
 mod tests {
-    use super::{fractional_seconds_to_millis, lift_clock_value, try_rt_time_now_seconds_f64};
+    use super::{fractional_seconds_to_millis, lift_clock_value, rt_time_now_seconds, try_rt_time_now_seconds_f64};
 
     #[test]
     fn clock_failure_sentinel_is_not_a_value() {
@@ -170,6 +170,30 @@ mod tests {
     #[test]
     fn seconds_clock_lifts_nonnegative_live_value() {
         assert!(try_rt_time_now_seconds_f64().is_some());
+    }
+
+    /// Direct link+call regression for the i64 `rt_time_now_seconds` FFI
+    /// symbol: `runtime/src/value/sffi/time.rs` declares it as `extern "C"`
+    /// but no C source compiled by this crate's `build.rs` ever defined it
+    /// (only `runtime.c`, deliberately excluded, did) -- a from-scratch link
+    /// failed outright. Now defined in `runtime_time.c`, which IS compiled
+    /// here. A real Unix timestamp is comfortably >= 1_600_000_000
+    /// (2020-09-13) on any host this test runs on, and must roughly match
+    /// the existing f64 clock so both aren't drifting relative to each
+    /// other. See doc/08_tracking/bug/
+    /// seed_rt_time_now_seconds_unlinkable_2026-08-28.md.
+    #[test]
+    fn rt_time_now_seconds_links_and_returns_a_real_unix_timestamp() {
+        let secs = rt_time_now_seconds();
+        assert!(
+            secs >= 1_600_000_000,
+            "rt_time_now_seconds() returned {secs}, not a plausible Unix timestamp"
+        );
+        let secs_f64 = try_rt_time_now_seconds_f64().expect("f64 clock must also succeed");
+        assert!(
+            (secs as f64 - secs_f64).abs() < 5.0,
+            "rt_time_now_seconds() ({secs}) and the f64 clock ({secs_f64}) disagree by more than 5s"
+        );
     }
 
     #[test]

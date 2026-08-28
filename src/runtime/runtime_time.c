@@ -55,6 +55,24 @@ static int64_t win_monotonic_nanos(void) {
 }
 #endif
 
+/* ---- Wall clock: Unix timestamp in whole seconds ----
+ * Matches runtime.c's rt_time_now_seconds exactly (same body, `time(NULL)`
+ * cast to int64_t): that definition lives in runtime.c, which this crate's
+ * build.rs deliberately excludes from compilation ("reimplemented in
+ * Rust" -- see the exclusion note near line 264), yet
+ * runtime/src/value/sffi/time.rs still declares and calls it as an
+ * `extern "C"` symbol with no other definition anywhere in this crate's
+ * compiled C sources, so a from-scratch `cargo build --release --bin
+ * simple` fails to link with an undefined-symbol error. This is the real
+ * fix: rt_time_now_seconds belongs alongside its sibling clock functions in
+ * this file (the designated C companion to time.rs, per the header comment
+ * above), not a link-only stub. See doc/08_tracking/bug/
+ * seed_rt_time_now_seconds_unlinkable_2026-08-28.md.
+ */
+int64_t rt_time_now_seconds(void) {
+    return (int64_t)time(NULL);
+}
+
 /* ---- Wall clock: microseconds since Unix epoch ---- */
 int64_t rt_time_now_unix_micros(void) {
 #ifdef _WIN32

@@ -1165,6 +1165,33 @@ impl<'a> Parser<'a> {
                 // unit_sweep_language_and_interpreter_gaps_2026-08-26.md.
                 | TokenKind::Self_
                 | TokenKind::Underscore
+                // Literal-expression body starts (`"completion_" + field[0]`,
+                // `1 + 2`, `[a, b]`, ...): a block body's first statement is
+                // frequently a bare expression statement, and the same "self
+                // was missing" gap applies to every literal/expression-start
+                // token kind, not just identifiers and `self`. Found via
+                // `riscv_scalar_csr_owner.spl`'s equal-column
+                // `if <multi-line cond>:\n    "completion_" + field[0]`
+                // shape, which fell through to `expect(Indent)` and failed
+                // with "expected Indent, found FString(...)" even after the
+                // `self`/`_` fix above. See doc/08_tracking/bug/
+                // backslash_lambda_multiline_inline_body_dedent_2026-08-28.md.
+                | TokenKind::Integer(_)
+                | TokenKind::Float(_)
+                | TokenKind::TypedInteger(_, _)
+                | TokenKind::TypedFloat(_, _)
+                | TokenKind::String(_)
+                | TokenKind::FString(_)
+                | TokenKind::RawString(_)
+                | TokenKind::TypedString(_, _)
+                | TokenKind::TypedRawString(_, _)
+                | TokenKind::Bool(_)
+                | TokenKind::Nil
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Minus
+                | TokenKind::Not
+                | TokenKind::Backslash
         )
     }
 
