@@ -64,3 +64,19 @@ Not proven to fire (frames are short-lived); listed so a future hit is recognisa
 Frame-local vs. cross-module global collision by bare name in `function_exec.rs` publish/refresh.
 The seed should key bound globals by `(owner, name)` from the frame's actual import bindings and
 never treat a `val`/`var` declared in the frame as a global copy.
+
+## Addendum (verifier neighbour)
+
+# Addendum to doc/08_tracking/bug/seed_interpreter_bare_name_global_publish_clobber_2026-08-28.md
+
+Verifier-noted omission (post-ACCEPT): the defect-class neighbour list should also include
+
+- `src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl:47` —
+  `val decl_span = Span.empty()`, reused across the `self.symbols.define(...)` calls in that
+  lowering pass. Same hazard shape: a local sharing the bare name of the `compiler.core.ast`
+  arena global `decl_span` in a frame that calls back into decl_nodes-owned code. Holds a
+  `Span` struct (not the `[i64]` arena), so a publish-back would type-clobber rather than
+  truncate; not proven to fire, recorded for recognisability.
+
+The accepted patch's bug record lists only `module_lowering.spl:363` and `eval_decls.spl:26`;
+fold this entry into the record when the patch lands (patch itself already accepted, unchanged).
