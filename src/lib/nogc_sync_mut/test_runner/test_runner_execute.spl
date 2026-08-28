@@ -850,15 +850,23 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
     cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
     cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
 
-# Graceful MC/DC-on degradation path: run the spec directly via the
-# interpreter (no coverage/MC/DC wrapper, no native SMF compile) when the
-# governance-mandated always-on MC/DC mode cannot instrument this spec
-# because it contains interpreter-only constructs. The verdict below is a
-# REAL pass/fail from actually executing the spec -- this never fabricates a
-# pass and never silently swallows a real failure. `mcdc_skip_reason` is
-# always populated so callers/reporters can surface that MC/DC coverage was
-# not collected for this spec, per-spec, rather than implying it was.
-fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, compile_output: text) -> TestFileResult:
+# Graceful MC/DC-on / coverage-on degradation path: run the spec directly via
+# the interpreter (no coverage/MC/DC wrapper, no native SMF compile) when the
+# governance-mandated always-on MC/DC mode -- or the coverage instrumentation
+# wrapper (build_coverage_wrapper) -- cannot get this spec through a
+# standalone compile. This covers BOTH the original "interpreter-only
+# constructs" case (TryOperator, PatternMatch, CollectionLiteral, ...) and the
+# separate class where the WRAPPED/relocated copy itself fails to compile
+# (root-relative imports and indentation/backtick-literal reproduction can
+# break when the instrumented source is written out as a fresh temp file) --
+# both are structural incompatibilities of the instrumentation path, not real
+# test failures, and neither may fail the spec outright. The verdict below is
+# a REAL pass/fail from actually executing the ORIGINAL (unwrapped) spec --
+# this never fabricates a pass and never silently swallows a real failure.
+# `mcdc_skip_reason` is always populated so callers/reporters can surface that
+# instrumentation was skipped for this spec, per-spec, rather than implying it
+# was collected.
+fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, fallback_tag: text, reason: text) -> TestFileResult:
     val binary = find_simple_binary()
     val timeout_ms = options.timeout * 1000
     var run_args: [text] = ["run", file_path]
@@ -872,8 +880,7 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
     val exit_code = scoped_child.result.exit_code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
-    val reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + first_line(compile_output)
-    print "[mcdc-fallback] {file_path}: {reason}"
+    print "[{fallback_tag}] {file_path}: {reason}"
     val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
     TestFileResult(
@@ -955,9 +962,25 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         # salvaged here -- and record truthfully that MC/DC instrumentation
         # was skipped for this spec rather than silently reporting a green
         # run with implied (but never collected) coverage evidence.
-        if mcdc_enabled and not options.coverage and compile_output.contains("cannot compile to standalone SMF"):
+        val wrapper_active = cleanup_path != ""
+        val uncompilable_construct = compile_output.contains("cannot compile to standalone SMF")
+        if mcdc_enabled and not options.coverage and uncompilable_construct:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
-            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, compile_output)
+            val reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + first_line(compile_output)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", reason)
+        if options.coverage and wrapper_active:
+            # The coverage wrapper (build_coverage_wrapper) writes an
+            # instrumented copy of the spec to a fresh temp file and compiles
+            # THAT. Whatever the specific diagnostic (unresolved root-relative
+            # import from the relocated copy, a parse break in the rewritten
+            # indentation/backtick-literal reproduction, or an interpreter-only
+            # construct), a failure here is a property of the instrumentation
+            # copy, not evidence the spec itself is broken -- the fallback
+            # below runs the REAL, unwrapped spec and reports its real
+            # pass/fail, so this cannot mask a genuine defect.
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            val reason = "Coverage instrumentation skipped: wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason)
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
