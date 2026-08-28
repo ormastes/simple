@@ -13,12 +13,27 @@ policy, always recorded). Full contract, modes (value-compare, shadow-buffer,
 shadow-state, record-compare, replay) and the stability bar:
 `doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md` Part B.
 
-**What exists today is narrower:** `scripts/check/check-dual-run-shadow.shs` +
-`src/lib/common/spec/dual_run.spl` compare return values of 13 pure-function
-pairs inside a test spec (no shadow buffers, nothing gated), and `@rt(hal,
-providers: pure+c+rust)` compares zero-argument `i64` receipts through an
-isolated host. See `doc/07_guide/infra/c_migration/dual_run_shadow.md` and
-`doc/01_research/os/hal/hal_asm_embedding_dual_run_survey_2026-08-28.md` Q2.
+**Implemented (2026-08-28):** `std.nogc_sync_mut.rt_hal.dual_runner`
+(`DualRunner`, typed `DualArgs` transport, `ShadowSet` shadow buffers,
+byte/f64/text/struct comparators, `MismatchPolicy` Trap/UseRef/UseCandLog),
+`virtual_device` (`VirtualDevice` façade + effect logs for record-compare /
+replay) and `dual_run_ledger` (soak ledger + stability-bar predicate).
+`scripts/check/check-dual-run-shadow.shs` enumerates pairs from `# @dual_pair:`
+annotations and fails on any ledger mismatch. The legacy
+`src/lib/common/spec/dual_run.spl` `dual_check_*` helpers remain the
+value-compare comparator (mode `value-legacy` for the 13 original pairs). See
+`doc/07_guide/infra/c_migration/dual_run_shadow.md`.
+
+Related terms: **shadow buffer** — a per-target copy of an output buffer,
+one per provider, initialised from the real target; the real target is written
+only by the commit step. **Record-compare** — device-effect mode where both
+providers run against the `VirtualDevice` façade and their effect logs are
+compared before the agreed log is replayed once. **Replay** — device-effect
+mode where the reference ran for real and the candidate runs against that
+recording, never touching hardware. **Soak ledger** — SDN rows
+(`build/dual_run/dual_run_ledger.sdn`) of `pair, mode, run_id, cases,
+mismatches, first_mismatch_repr, binary_identity`; a pair is *stable* at
+≥1000 cases / ≥30 runs / ≥2 binary identities / 0 mismatches.
 
 ## Simple embedded DB / Simple SQLite
 

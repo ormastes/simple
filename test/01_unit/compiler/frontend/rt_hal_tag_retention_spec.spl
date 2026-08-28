@@ -4,14 +4,19 @@ use std.spec
 use compiler.common.attributes.{parse_function_attrs}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.semantics.rt_hal_tag.{validate_rt_hal_tags}
 
 fn rt_hal_lowered_calls(source: text) -> [text]:
     val parsed = parse_and_build_module(source, "rt_hal_boundary_lowering.spl")
     var hir_lowering = HirLowering.with_filename("rt_hal_boundary_lowering.spl")
     val hir = hir_lowering.lower_module(parsed)
-    var mir_lowering = MirLowering.new(hir.symbols)
+    var mir_lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
     val mir = mir_lowering.lower_module(hir)
     var calls: [text] = []
     for function in mir.functions.values():
@@ -103,12 +108,28 @@ describe "rt(hal) frontend metadata":
                 has_boundary_import = true
         expect(has_boundary_import).to_equal(false)
 
-    it "fails closed when arguments cannot be transported canonically":
+    it "accepts typed arguments the dual-run vector can transport (i64/u8/f64/bool/text/[u8])":
+        # design B.4: arguments are transported by value in-process (DualArgs)
         val errors = rt_hal_semantic_errors(
-            "@rt(hal, c)\nfn clock_read(port: i64) -> i64:\n    port\n",
+            "@rt(hal, c)\nfn clock_read(port: i64, lane: u8, scale: f64, on: bool, name: text, buf: [u8]) -> i64:\n    port\n",
+            "/rt-hal-plan.sdn"
+        )
+        expect(errors.join("\n")).to_equal("")
+
+    it "fails closed when an argument cannot be transported canonically, naming the parameter":
+        val errors = rt_hal_semantic_errors(
+            "@rt(hal, c)\nfn clock_read(ports: Dict<text, i64>) -> i64:\n    0\n",
             "/rt-hal-plan.sdn"
         )
         expect(errors.join("\n")).to_contain("E-RT-HAL-SIGNATURE")
+        expect(errors.join("\n")).to_contain("parameter `ports`")
+
+    it "fails closed on a non-u8 buffer argument":
+        val errors = rt_hal_semantic_errors(
+            "@rt(hal, c)\nfn sum(xs: [i64]) -> i64:\n    0\n",
+            "/rt-hal-plan.sdn"
+        )
+        expect(errors.join("\n")).to_contain("not u8")
 
     it "fails closed when a return cannot be transported as an i64 receipt":
         val errors = rt_hal_semantic_errors(

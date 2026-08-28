@@ -147,6 +147,8 @@ run the gate; ledger must show the pair.
 | Phase | Status (2026-08-28) |
 |---|---|
 | 0 toolchain | RED — stage binaries SEGV on any input |
-| 1.0–1.9 | not started (1.3 partially: attrs parsed, pure backend emits `naked`, seed drops it) |
-| 2 A/B/C/D | not started; 13 value-compare pairs already wired count toward D |
+| 1.0–1.7 | not started (1.3 partially: attrs parsed, pure backend emits `naked`, seed drops it) |
+| 1.8 | DONE 2026-08-28 (impl_C): `std.nogc_sync_mut.rt_hal.{dual_runner,virtual_device,dual_run_ledger}`; specs `test/01_unit/lib/nogc_sync_mut/rt_hal_dual_run_{shadow_buffer,record_compare,ledger}_spec.spl` (14+8+6 GREEN, RED-before evidence in the lane report). `validate_rt_hal_tags` now accepts typed args (i64/u*/f64/bool/text/[u8]) and only enforces transport/receipt rules on comparator-tagged fns. Hardware apply (`dual_apply_effects_mmio`) exists but no lane runs it yet. |
+| 1.9 | DONE 2026-08-28: gate enumerates `# @dual_pair:` annotations (16 pairs: 13 `value-legacy` + 3 DualRunner), reads the run's ledger rows, 7 selftest fixtures (0 pairs → ERROR, ledger mismatch → FAIL). |
+| 2 A/B/C/D | D started: 3 pairs on the DualRunner contract (`dual_run_pairs_spec.spl`: parse_i64 value, base64url_decode shadow-buffer, ns16550_putc record-compare vs a source-derived C trace — QEMU-captured trace still owed); 13 value-legacy pairs remain |
 | 3 | not started |
