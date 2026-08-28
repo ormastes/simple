@@ -400,6 +400,7 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_ctx_batch_execute` | Run commands, index each output under `source#i`, answer queries in one call | commands |
 | `simple_ctx_fetch_and_index` | GET via the Simple http client (http/https only, no JS), cap bytes, strip tags, index | url |
 | `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
+| `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
 
 - **Persistent store**: `.simple/ctx/` (override with `SIMPLE_CTX_DIR`), two
   SDN tables written atomically (`chunks.sdn`, `stats.sdn`) — survives across
@@ -417,6 +418,49 @@ deny of curl/wget/inline-HTTP Bash with a redirect to the ctx tools),
 `webfetch_deny.shs` (fail-closed WebFetch deny), `bash_output_hint.shs` and
 `read_analysis_hint.shs` (fail-open additionalContext hints for likely
 >20-line commands and Read-for-analysis of large files).
+
+### Token savings
+
+`simple_token_stats` shows, per feature, how many tokens the two mimics keep
+out of the model context. Ledger: `.simple/ctx/telemetry.sdn` (next to the
+ctx store, `SIMPLE_CTX_DIR` override), one row per call:
+`id, feature, tool, ts, captured, returned, hit`. Findings memo:
+`.simple/ctx/telemetry_memo.sdn` keyed by content hash. Both are written
+atomically (tmp + rename). Code: `src/app/mcp/main_lazy_telemetry.spl`.
+
+| Field | Meaning |
+|-------|---------|
+| `bytes_captured` | Raw bytes the tool consumed — program stdout+stderr, fetched page, indexed text, or the source file ponytail scanned. This is what a plain `Bash`/`Read` would have put in the context. |
+| `bytes_returned` | The tool result text actually sent back to the LLM. |
+| `tokens_saved` | `max(0, bytes_captured - bytes_returned) / 4` (4 bytes ≈ 1 token). Summed per feature and over the last 7 days. |
+| `cache_hits` | ponytail calls answered from the content-hash memo. |
+
+**Why context-mode saves tokens.** `simple_ctx_batch_execute` / `_execute` /
+`_fetch_and_index` run the program (or GET the page) inside the server, store
+the full output in the BM25 chunk store, and return only ranked snippets (or
+stdout with stderr collapsed to one line). The raw output never enters the
+model context; a later `simple_ctx_search` pulls just the chunks a query
+ranks. Every `simple_ctx_*` call records `captured` vs `returned`, so the
+saving is per call and cumulative. Measured 2026-08-28 (source-mode server,
+one `cat` of four `src/app/mcp` files): captured 140,511 B, returned 3,199 B,
+34,328 tokens saved on that one call.
+
+**Why ponytail saves tokens.** (a) The lazy ladder returns rung-tagged
+findings that are far shorter than the source it stands in for (measured:
+35,273 B source -> 1,002 B findings). (b) Repeat calls on unchanged bytes are
+answered from the memo: key = sha256(mode + level + file content), so an
+edited file misses and a renamed-but-identical file hits. A hit returns the
+cached findings verbatim, sets `hit=1`, and counts the prior analysis
+(source bytes read + findings produced) as `bytes_captured` avoided. The memo
+is file-mode only — a `diff` request is one-shot and never memoized — and
+is taken before the optional `lint: true` append. `reset` truncates the
+ledger only; the memo survives (it is a cache, not a counter).
+
+`simple_ctx_stats` keeps its old fields and adds `telemetry_calls`,
+`telemetry_bytes_captured`, `telemetry_bytes_returned`,
+`telemetry_tokens_saved`, `telemetry_tokens_saved_7d` for the ctx feature.
+Spec: `test/01_unit/app/mcp/token_stats_spec.spl`. Research:
+`doc/01_research/app/mcp/token_reduction_context_mode_ponytail_2026-08-28.md`.
 
 ### Code Query (3 tools)
 

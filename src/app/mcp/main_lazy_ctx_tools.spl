@@ -28,6 +28,7 @@
 
 use .main_lazy_json.{extract_field, extract_field_raw, make_tool_error, make_tool_result}
 use .main_lazy_node_tools.{require_external_tool}
+use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_CTX}
 
 use std.io_runtime.{env_get, file_read, file_write, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
@@ -511,6 +512,7 @@ struct CtxExecResult:
     exit_code: i64
     timed_out: bool
     wall_ms: i64
+    raw_bytes: i64   # stdout + stderr bytes the process actually produced (before any capping/summarizing)
 
 fn _ctx_summarize_stderr(stderr: text, truncated: bool) -> text:
     val trimmed = stderr.trim()
@@ -539,7 +541,8 @@ fn ctx_run_bounded(cmd: text, args: [text], timeout_ms: i64) -> CtxExecResult:
         stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated),
         exit_code: exit_code,
         timed_out: timed_out,
-        wall_ms: p.usage.wall_ms
+        wall_ms: p.usage.wall_ms,
+        raw_bytes: p.stdout.len() + p.stderr.len()
     )
 
 fn _ctx_simple_binary() -> text:
@@ -553,7 +556,7 @@ fn _ctx_simple_binary() -> text:
 # argument (simple). Returns nil + error text when the language is unknown.
 fn ctx_execute_code(language: text, code: text, file_path: text, timeout_ms: i64) -> (CtxExecResult?, text):
     val lang = language.lower().trim()
-    val empty = CtxExecResult(stdout: "", stderr_summary: "", exit_code: -1, timed_out: false, wall_ms: 0)
+    val empty = CtxExecResult(stdout: "", stderr_summary: "", exit_code: -1, timed_out: false, wall_ms: 0, raw_bytes: 0)
     if lang == "shell" or lang == "sh" or lang == "bash" or lang == "":
         var argv: [text] = ["-c", "FILE=\"$1\"; export FILE; " + code, "sh"]
         if file_path != "":
@@ -599,7 +602,9 @@ fn handle_simple_ctx_index(id: text, body: text) -> text:
     val n = ctx_index_text(content, source)
     if n < 0:
         return make_tool_error(id, -32603, "simple_ctx_index: cannot write " + _ctx_chunks_path())
-    make_tool_result(id, "Indexed " + str(n) + " chunk(s) (" + str(content.len()) + " bytes) under source '" + source + "' in " + ctx_store_dir())
+    val msg = "Indexed " + str(n) + " chunk(s) (" + str(content.len()) + " bytes) under source '" + source + "' in " + ctx_store_dir()
+    tok_record(TOK_FEATURE_CTX, "simple_ctx_index", content.len(), msg.len(), false)
+    make_tool_result(id, msg)
 
 fn handle_simple_ctx_search(id: text, body: text) -> text:
     val queries = _ctx_queries(body)
@@ -614,6 +619,7 @@ fn handle_simple_ctx_search(id: text, body: text) -> text:
     val out = blocks.join("\n")
     _ctx_stats_bump("bytes_returned", out.len())
     _ctx_stats_bump("search_calls", 1)
+    tok_record(TOK_FEATURE_CTX, "simple_ctx_search", 0, out.len(), false)
     make_tool_result(id, out)
 
 fn _ctx_exec_common(id: text, body: text, tool: text, file_path: text) -> text:
@@ -627,7 +633,10 @@ fn _ctx_exec_common(id: text, body: text, tool: text, file_path: text) -> text:
         Some(r):
             _ctx_stats_bump("exec_calls", 1)
             _ctx_stats_bump("bytes_returned", r.stdout.len())
-            make_tool_result(id, ctx_format_exec(tool, r))
+            val out = ctx_format_exec(tool, r)
+            val tool_name = if tool.starts_with("simple_ctx_execute_file"): "simple_ctx_execute_file" else: "simple_ctx_execute"
+            tok_record(TOK_FEATURE_CTX, tool_name, r.raw_bytes, out.len(), false)
+            make_tool_result(id, out)
         nil:
             make_tool_error(id, -32602, tool + ": " + err)
 
@@ -677,6 +686,7 @@ fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
     val out = lines.join("\n")
     _ctx_stats_bump("bytes_returned", out.len())
     _ctx_stats_bump("batch_calls", 1)
+    tok_record(TOK_FEATURE_CTX, "simple_ctx_batch_execute", total_bytes, out.len(), false)
     make_tool_result(id, out)
 
 fn ctx_fetch_allowed_url(url: text) -> bool:
@@ -729,6 +739,7 @@ fn handle_simple_ctx_fetch_and_index(id: text, body: text) -> text:
         msg = msg + " (capped to " + str(max_bytes) + ")"
     msg = msg + ", " + str(plain.len()) + " byte(s) of text, " + str(n) + " chunk(s) under source '" + source + "'"
     _ctx_stats_bump("fetch_calls", 1)
+    tok_record(TOK_FEATURE_CTX, "simple_ctx_fetch_and_index", resp.body.len(), msg.len(), false)
     make_tool_result(id, msg)
 
 fn _ctx_stat_get(d: Dict<text, i64>, k: text) -> i64:
@@ -761,6 +772,13 @@ fn ctx_stats_text() -> text:
     lines.push("bytes_returned: " + str(returned))
     lines.push("bytes_saved: " + str(saved))
     lines.push("calls: index=" + str(_ctx_stat_get(d, "index_calls")) + " search=" + str(_ctx_stat_get(d, "search_calls")) + " exec=" + str(_ctx_stat_get(d, "exec_calls")) + " batch=" + str(_ctx_stat_get(d, "batch_calls")) + " fetch=" + str(_ctx_stat_get(d, "fetch_calls")))
+    # Token-savings telemetry (see simple_token_stats for the per-feature view).
+    val tok = tok_rollup(tok_load_events(), TOK_FEATURE_CTX, _ctx_now_secs())
+    lines.push("telemetry_calls: " + str(tok.calls))
+    lines.push("telemetry_bytes_captured: " + str(tok.captured))
+    lines.push("telemetry_bytes_returned: " + str(tok.returned))
+    lines.push("telemetry_tokens_saved: " + str(tok.saved))
+    lines.push("telemetry_tokens_saved_7d: " + str(tok.saved_7d))
     lines.join("\n")
 
 fn handle_simple_ctx_stats(id: text, body: text) -> text:
