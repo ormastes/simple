@@ -12,7 +12,7 @@ use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_labe
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
 use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
-    native_build_warm_receipt_finish
+    native_build_warm_artifact_restore, native_build_warm_receipt_finish
 }
 
 # Absolute path of the current bootstrap-stage compiler.
@@ -532,6 +532,12 @@ fn run_native_build_worker(args: [text]) -> i64:
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
     val warm_receipt = native_build_warm_receipt_prepare(args, simple_bin)
+    if warm_receipt.hit:
+        if native_build_warm_artifact_restore(warm_receipt):
+            print "[native-build-warm] exact final artifact restored; worker skipped"
+            env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+            return 0
+        print "[native-build-warm] final artifact restore refused; running normal worker"
     val old_warm_candidate = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
     # Never leak a caller's stale candidate into warm-up children. The real
     # worker receives only this invocation's pid-private path below.
@@ -547,15 +553,13 @@ fn run_native_build_worker(args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
-    if warm_receipt.hit:
-        print "[native-build-warm] exact receipt hit; skipping parse/HIR warming children"
-    elif shard_count > 0:
+    if shard_count > 0:
         run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
     val hir_shard_count = native_build_hir_shard_count(args)
-    if not warm_receipt.hit and hir_shard_count > 1:
+    if hir_shard_count > 1:
         run_hir_shards(args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
     # Publish the candidate path only for the real worker. Parse-shard_main
     # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this

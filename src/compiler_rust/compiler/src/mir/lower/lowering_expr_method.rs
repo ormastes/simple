@@ -2041,7 +2041,7 @@ impl<'a> MirLowerer<'a> {
                 // concrete classes that merely share a method name with a trait
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
-                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name);
+                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name, args.len());
                 // Duck-typed trait (no `impl Trait for ...` anywhere in the
                 // unit, e.g. game2d's `App`/`GameBackend`): there is no vtable
                 // to dispatch through, so the old lowering emitted the

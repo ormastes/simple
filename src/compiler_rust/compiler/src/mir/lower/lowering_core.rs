@@ -1107,6 +1107,7 @@ impl<'a> MirLowerer<'a> {
         &self,
         method_name: &str,
         receiver_type_name: Option<&str>,
+        explicit_arg_count: usize,
     ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
         let infos = self.trait_infos?;
         let duck_dbg = std::env::var("SIMPLE_DEBUG_DUCK").is_ok();
@@ -1159,6 +1160,13 @@ impl<'a> MirLowerer<'a> {
             let mut best: Option<(&String, &crate::hir::HirMethodSignature)> = None;
             for (trait_name, info) in infos {
                 if let Some(sig) = info.get_method(method_name) {
+                    // Rust trait metadata excludes the implicit receiver, so
+                    // its parameter count must equal the explicit call arity.
+                    // This mirrors resolve_strategies.spl's +1 check on symbol
+                    // signatures, which include the receiver at slot zero.
+                    if sig.param_types.len() != explicit_arg_count {
+                        continue;
+                    }
                     let replace = match best {
                         None => true,
                         Some((best_name, _)) => {
@@ -1190,6 +1198,9 @@ impl<'a> MirLowerer<'a> {
         // Receiver statically typed as the trait itself → virtual through it.
         if let Some(info) = infos.get(recv) {
             if let Some(sig) = info.get_method(method_name) {
+                if sig.param_types.len() != explicit_arg_count {
+                    return None;
+                }
                 if duck_dbg {
                     eprintln!(
                         "[DUCK] path2 recv-is-trait recv={} slot={} implemented={}",
@@ -1223,6 +1234,9 @@ impl<'a> MirLowerer<'a> {
         // project-wide trait_impls into dependency_graph).
         for (trait_name, info) in infos {
             if let Some(sig) = info.get_method(method_name) {
+                if sig.param_types.len() != explicit_arg_count {
+                    continue;
+                }
                 let implements = self
                     .local_trait_impls
                     .get(trait_name)

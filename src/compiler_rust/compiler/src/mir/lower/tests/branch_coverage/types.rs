@@ -44,6 +44,52 @@ fn array_empty() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::ArrayLit { .. })));
 }
 
+#[test]
+fn bootstrap_parity_array_destructuring_recursively_assigns_nested_lvalues() {
+    let source = include_str!(
+        "../../../../../../../../test/fixtures/compiler/array_destructuring_assignment.spl"
+    );
+    let mir = compile_to_mir(source).expect("array-pattern assignments must lower to MIR");
+
+    for (function_name, expected_gets) in [("single", 1), ("pair", 2), ("nested", 6)] {
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect(function_name);
+        let count_call = |name: &str| {
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .filter(|inst| {
+                    matches!(inst, MirInst::Call { target, .. } if target == &CallTarget::from_name(name))
+                })
+                .count()
+        };
+        assert_eq!(count_call("rt_array_get"), expected_gets);
+        assert_eq!(
+            count_call("rt_array_copy")
+                + count_call("rt_array_new")
+                + count_call("rt_array_with_capacity"),
+            0,
+            "{function_name} destructuring must not allocate or copy an aggregate"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_parity_array_destructuring_rejects_excessive_nesting() {
+    use crate::mir::instructions::VReg;
+    use crate::mir::lower::lowering_stmt::MAX_ARRAY_DESTRUCTURING_DEPTH;
+
+    let mut lowerer = MirLowerer::new();
+    let err = lowerer
+        .lower_array_destructuring_assign(&[], VReg(0), MAX_ARRAY_DESTRUCTURING_DEPTH + 1)
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("array destructuring nesting exceeds"));
+}
+
 // =============================================================================
 // Tuple index vs array index dispatch (lowering_expr.rs line 870)
 // =============================================================================
