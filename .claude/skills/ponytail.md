@@ -13,9 +13,11 @@ ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if unsure.
 Off only on "stop ponytail" / "normal mode". Default level: **full**.
 
 State lives in `.simple/ponytail.level` (gitignored). The SessionStart hook
-`.claude/hooks/ponytail-session-start.shs` re-injects this skill with a
-`PONYTAIL MODE ACTIVE — level: <x>` banner on startup, resume, clear and
-compact, so the mode survives context compaction.
+`.claude/hooks/ponytail-session-start.shs` re-injects a short banner: a
+`PONYTAIL MODE ACTIVE — level: <x>` banner (level + ladder + rules summary +
+a pointer here, <= 4,039 bytes so it costs no more than the original plugin) on
+startup, resume, clear and compact, so the mode survives context compaction.
+This file is the long form; read it on demand.
 
 - `/ponytail lite|full|ultra` → `printf '%s\n' <level> > .simple/ponytail.level`
 - `/ponytail` with no argument → `full`

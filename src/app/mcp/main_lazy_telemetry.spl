@@ -17,8 +17,13 @@
 #   bytes_returned  the tool result text actually sent back to the LLM.
 #   tokens_saved    max(0, captured - returned) / 4  (4 bytes ≈ 1 token).
 #   ponytail hit    same file content + mode + level already analyzed: the
-#                   cached findings are returned and the prior analysis's
-#                   bytes (source read + findings produced) count as avoided.
+#                   cached findings are returned BYTE-IDENTICAL, so the model
+#                   receives exactly what a miss would have sent — a hit saves
+#                   NO tokens. It saves the repeat analysis (source re-scan +
+#                   findings recomputation): the prior analysis bytes count
+#                   ONLY under `repeat_work_avoided_bytes`, never under
+#                   bytes_captured / tokens_saved (that double-counted until
+#                   2026-08-28).
 
 use std.io_runtime.{env_get, file_read, file_write, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
@@ -177,12 +182,13 @@ struct TokRollup:
     captured: i64
     returned: i64
     saved: i64
+    avoided: i64   # repeat-work bytes a cache hit did not re-scan/recompute (not a token saving)
     calls_7d: i64
     hits_7d: i64
     saved_7d: i64
 
 fn _tok_empty_rollup() -> TokRollup:
-    TokRollup(calls: 0, hits: 0, captured: 0, returned: 0, saved: 0, calls_7d: 0, hits_7d: 0, saved_7d: 0)
+    TokRollup(calls: 0, hits: 0, captured: 0, returned: 0, saved: 0, avoided: 0, calls_7d: 0, hits_7d: 0, saved_7d: 0)
 
 fn tok_rollup(events: [TokEvent], feature: text, now: i64) -> TokRollup:
     var r = _tok_empty_rollup()
@@ -190,13 +196,20 @@ fn tok_rollup(events: [TokEvent], feature: text, now: i64) -> TokRollup:
     for e in events:
         if feature != "" and e.feature != feature:
             continue
-        val s = tok_tokens_saved(e.captured, e.returned)
+        # A memo hit returns byte-identical output: nothing was kept out of
+        # the context, so it contributes 0 to captured/saved and its prior
+        # analysis bytes go to `avoided` instead.
+        var s: i64 = 0
         r.calls = r.calls + 1
-        r.captured = r.captured + e.captured
-        r.returned = r.returned + e.returned
-        r.saved = r.saved + s
         if e.hit:
             r.hits = r.hits + 1
+            r.avoided = r.avoided + e.captured
+            r.returned = r.returned + e.returned
+        else:
+            s = tok_tokens_saved(e.captured, e.returned)
+            r.captured = r.captured + e.captured
+            r.returned = r.returned + e.returned
+            r.saved = r.saved + s
         if e.ts >= since:
             r.calls_7d = r.calls_7d + 1
             r.saved_7d = r.saved_7d + s
@@ -213,9 +226,9 @@ fn tok_stats_text() -> text:
     var lines: [text] = []
     lines.push("token stats store: " + tok_telemetry_path())
     lines.push("ctx-mimic: calls=" + str(ctx.calls) + " bytes_captured=" + str(ctx.captured) + " bytes_returned=" + str(ctx.returned) + " tokens_saved=" + str(ctx.saved) + " last_7d: calls=" + str(ctx.calls_7d) + " tokens_saved=" + str(ctx.saved_7d))
-    lines.push("ponytail-mimic: calls=" + str(pony.calls) + " cache_hits=" + str(pony.hits) + " bytes_captured=" + str(pony.captured) + " bytes_returned=" + str(pony.returned) + " tokens_saved=" + str(pony.saved) + " last_7d: calls=" + str(pony.calls_7d) + " cache_hits=" + str(pony.hits_7d) + " tokens_saved=" + str(pony.saved_7d))
+    lines.push("ponytail-mimic: calls=" + str(pony.calls) + " cache_hits=" + str(pony.hits) + " bytes_captured=" + str(pony.captured) + " bytes_returned=" + str(pony.returned) + " tokens_saved=" + str(pony.saved) + " repeat_work_avoided_bytes=" + str(pony.avoided) + " last_7d: calls=" + str(pony.calls_7d) + " cache_hits=" + str(pony.hits_7d) + " tokens_saved=" + str(pony.saved_7d))
     lines.push("total: calls=" + str(all.calls) + " bytes_captured=" + str(all.captured) + " bytes_returned=" + str(all.returned) + " tokens_saved=" + str(all.saved) + " last_7d: tokens_saved=" + str(all.saved_7d))
-    lines.push("(tokens_saved = max(0, bytes_captured - bytes_returned) / 4; ponytail cache hit counts the prior analysis's bytes as avoided)")
+    lines.push("(tokens_saved = max(0, bytes_captured - bytes_returned) / 4 over cache MISSES only; a ponytail cache hit returns byte-identical findings, saves 0 tokens, and counts its prior analysis bytes under repeat_work_avoided_bytes)")
     lines.join("\n")
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,15 @@ fn _mcp_static_props(required_json: text) -> text:
 fn _mcp_static_prop_desc(param_name: text, description: text) -> text:
     jp(param_name, jo2(jp("type", js("string")), jp("description", js(description))))
 
+# Typed variants: the schema must say what the handler actually parses
+# (`_ctx_int_param` -> integer, `== "true"` -> boolean). Until 2026-08-28 every
+# property was advertised as `string`, including array-valued ones.
+fn _mcp_static_prop_typed(param_name: text, json_type: text, description: text) -> text:
+    jp(param_name, jo2(jp("type", js(json_type)), jp("description", js(description))))
+
+fn _mcp_static_prop_string_array(param_name: text, description: text) -> text:
+    jp(param_name, jo3(jp("type", js("array")), jp("items", jo1(jp("type", js("string")))), jp("description", js(description))))
+
 fn _mcp_static_context_props() -> text:
     var parts: [text] = []
     parts.push(_mcp_static_prop_desc("requester", "Requester location path[:line] for the MDSOC visibility section (default: last file read this session; none => section carries a note)"))
@@ -73,16 +82,6 @@ fn _mcp_static_context_props() -> text:
     parts.push(_mcp_static_prop_desc("sql", "Use Simple embedded SQLite for index/query (true/false)"))
     parts.push(_mcp_static_prop_desc("db", "SQLite index database path"))
     parts.push(_mcp_static_prop_desc("source_filter", "Filter SQL query rows by stored source path"))
-    LB() + parts.join(",") + RB()
-
-fn _mcp_static_ponytail_props() -> text:
-    var parts: [text] = []
-    parts.push(_mcp_static_prop_desc("file", "Source file path (optional when diff is given)"))
-    parts.push(_mcp_static_prop_desc("diff", "Unified diff text; only added lines produce findings"))
-    parts.push(_mcp_static_prop_desc("format", "Output format: text, markdown, json"))
-    parts.push(_mcp_static_prop_desc("mode", "Mode: audit/review (legacy counters + ladder findings), simplification/simplify, ladder (findings only)"))
-    parts.push(_mcp_static_prop_desc("level", "Intensity: lite (high-confidence only), full (default), ultra (everything)"))
-    parts.push(_mcp_static_prop_desc("lint", "true to append `simple lint` output (slow, ~12s startup)"))
     LB() + parts.join(",") + RB()
 
 fn _mcp_static_pipe_props() -> text:
@@ -112,26 +111,27 @@ fn _mcp_static_ctx_props(name: text) -> text:
         parts.push(_mcp_static_prop_desc("content", "Text to chunk and index into the persistent .simple/ctx store"))
         parts.push(_mcp_static_prop_desc("source", "Source label stored with every chunk (default manual:<ts>)"))
     if name == "simple_ctx_search":
-        parts.push(_mcp_static_prop_desc("queries", "Array of search queries (or use `query` for one)"))
+        parts.push(_mcp_static_prop_string_array("queries", "Array of search queries (or use `query` for one)"))
         parts.push(_mcp_static_prop_desc("query", "Single search query"))
         parts.push(_mcp_static_prop_desc("source", "Only search chunks whose source label starts with this prefix"))
-        parts.push(_mcp_static_prop_desc("limit", "Max hits per query (default 5, max 25)"))
+        parts.push(_mcp_static_prop_typed("limit", "integer", "Max hits per query (default 5, max 25)"))
     if name == "simple_ctx_execute" or name == "simple_ctx_execute_file":
         parts.push(_mcp_static_prop_desc("language", "shell | javascript | simple"))
         parts.push(_mcp_static_prop_desc("code", "Code to run in a bounded sandbox; only stdout is returned, stderr is summarized"))
-        parts.push(_mcp_static_prop_desc("timeout_ms", "Wall budget (default 15000, max 120000)"))
+        parts.push(_mcp_static_prop_typed("timeout_ms", "integer", "Wall budget (default 15000, max 120000)"))
     if name == "simple_ctx_execute_file":
         parts.push(_mcp_static_prop_desc("path", "File exposed to the code as $1/$FILE (shell), process.argv[2] (javascript), first CLI arg (simple)"))
     if name == "simple_ctx_batch_execute":
-        parts.push(_mcp_static_prop_desc("commands", "Array of shell commands; each output is indexed"))
-        parts.push(_mcp_static_prop_desc("queries", "Array of queries searched over the indexed outputs"))
+        parts.push(_mcp_static_prop_string_array("commands", "Array of shell commands; each output is indexed (up to the capture cap)"))
+        parts.push(_mcp_static_prop_string_array("queries", "Array of queries searched over the indexed outputs"))
         parts.push(_mcp_static_prop_desc("source", "Source label prefix (default batch:<ts>)"))
-        parts.push(_mcp_static_prop_desc("timeout_ms", "Wall budget per command (default 15000, max 120000)"))
-        parts.push(_mcp_static_prop_desc("limit", "Max hits per query (default 5, max 25)"))
+        parts.push(_mcp_static_prop_typed("timeout_ms", "integer", "Wall budget per command (default 15000, max 120000)"))
+        parts.push(_mcp_static_prop_typed("capture_bytes", "integer", "Per-command capture cap in bytes (default SIMPLE_CTX_CAPTURE_MAX_BYTES or 8388608, max 67108864); a truncated capture is marked and counted"))
+        parts.push(_mcp_static_prop_typed("limit", "integer", "Max hits per query (default 5, max 25)"))
     if name == "simple_ctx_fetch_and_index":
         parts.push(_mcp_static_prop_desc("url", "http(s) URL to fetch through the Simple http client (no JS, size-capped)"))
         parts.push(_mcp_static_prop_desc("source", "Source label (default web:<url>)"))
-        parts.push(_mcp_static_prop_desc("max_bytes", "Body cap in bytes (default 262144, max 2097152)"))
+        parts.push(_mcp_static_prop_typed("max_bytes", "integer", "Body cap in bytes (default 262144, max 2097152)"))
     LB() + parts.join(",") + RB()
 
 fn _mcp_static_props_for_tool(name: text, required_json: text) -> text:
@@ -141,8 +141,8 @@ fn _mcp_static_props_for_tool(name: text, required_json: text) -> text:
         return _mcp_static_pipe_props()
     if name == "simple_context":
         return _mcp_static_context_props()
-    if name == "simple_ponytail":
-        return _mcp_static_ponytail_props()
+    if name == "simple_token_stats":
+        return LB() + _mcp_static_prop_typed("reset", "boolean", "true to clear the token-savings ledger (the ponytail memo is kept)") + RB()
     _mcp_static_props(required_json)
 
 # The full tool table is the single source of truth for input schemas

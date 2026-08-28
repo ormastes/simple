@@ -19,7 +19,10 @@ own `.simple/ctx/` is never written by a test run.
 - A ctx call appends one event with bytes_captured >= bytes_returned for a
   large program output, and tokens_saved = (captured - returned) / 4.
 - A second `simple_ponytail` call on the same file bytes returns the cached
-  findings verbatim, records a cache hit, and grows tokens_saved.
+  findings verbatim and records a cache hit; because the bytes are identical
+  the hit saves NO tokens (tokens_saved / bytes_captured unchanged) and is
+  reported as `repeat_work_avoided_bytes` instead (double-counted until
+  2026-08-28, see scratchpad/mcp_token_ab_REPORT.md §3.2).
 - Editing the file misses the memo (content hash, not path, is the key).
 - Rollup math: totals count every event; the 7-day window excludes an event
   planted 8 days in the past.
@@ -148,9 +151,17 @@ describe "ponytail content-hash memo":
         val roll = tok_rollup(ev2, TOK_FEATURE_PONYTAIL, 0 - 1)
         assert_equal(roll.calls, 2)
         assert_equal(roll.hits, 1)
-        assert_true(roll.saved > saved_before)
+        # A hit returns byte-identical findings: it saves NO tokens (the model
+        # receives the same bytes), so tokens_saved and bytes_captured do not
+        # grow; the prior analysis bytes are reported as repeat work avoided.
+        assert_equal(roll.saved, saved_before)
+        assert_equal(roll.captured, _smelly_source().len())
+        assert_equal(roll.avoided, _smelly_source().len() + ev1[0].returned)
+        assert_equal(roll.returned, ev1[0].returned * 2)
         val stats = tok_stats_text()
         assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits="), 1)
+        assert_equal(_num_after(stats, "repeat_work_avoided_bytes="), _smelly_source().len() + ev1[0].returned)
+        assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits=1 bytes_captured="), _smelly_source().len())
 
     it "an edited file misses the memo (key is content, not path)":
         val dir = _fresh_store()
@@ -185,15 +196,19 @@ describe "rollup math, 7-day window, reset, persistence":
         val pony = tok_rollup(ev, TOK_FEATURE_PONYTAIL, now)
         assert_equal(pony.calls, 2)
         assert_equal(pony.hits, 1)
-        # A result larger than its input never counts negative.
-        assert_equal(pony.saved, 200)
+        # The hit saves 0 tokens (byte-identical output); its 1000 prior bytes
+        # are repeat work avoided. The miss returned more than it captured,
+        # which never counts negative.
+        assert_equal(pony.saved, 0)
+        assert_equal(pony.avoided, 1000)
+        assert_equal(pony.captured, 100)
         val all = tok_rollup(ev, "", now)
         assert_equal(all.calls, 4)
-        assert_equal(all.saved, 2700 + 200)
-        assert_equal(all.saved_7d, 900 + 200)
+        assert_equal(all.saved, 2700)
+        assert_equal(all.saved_7d, 900)
         val stats = tok_stats_text()
         assert_contains(stats, "ctx-mimic: calls=2 bytes_captured=12000 bytes_returned=1200 tokens_saved=2700 last_7d: calls=1 tokens_saved=900")
-        assert_contains(stats, "ponytail-mimic: calls=2 cache_hits=1")
+        assert_contains(stats, "ponytail-mimic: calls=2 cache_hits=1 bytes_captured=100 bytes_returned=600 tokens_saved=0 repeat_work_avoided_bytes=1000")
         assert_contains(stats, "total: calls=4")
 
     it "reset zeroes the ledger via the tool and keeps the memo":

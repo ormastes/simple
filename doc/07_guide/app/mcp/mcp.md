@@ -403,10 +403,16 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
 
 - **Persistent store**: `.simple/ctx/` (override with `SIMPLE_CTX_DIR`), two
-  SDN tables written atomically (`chunks.sdn`, `stats.sdn`) — survives across
-  server processes and sessions, unlike the plugin's per-process temp DB.
+  SDN tables (`chunks.sdn` append-only with a linear row reader, `stats.sdn`
+  rewritten atomically) — survives across server processes and sessions,
+  unlike the plugin's per-process temp DB. Every hot path over captured
+  output is linear and built from native string ops (no per-char loops):
+  see `doc/08_tracking/bug/mcp_ctx_batch_execute_crash_hang_on_real_output_2026-08-28.md`.
 - **Sandbox**: `std.nogc_sync_mut.io.resource_scope` bounded run — wall
-  timeout (default 15 s, max 120 s), 1 MiB output cap, `ulimit`-based pid and
+  timeout (default 15 s, max 120 s), per-command capture cap enforced at the
+  reader (default 8 MiB; `SIMPLE_CTX_CAPTURE_MAX_BYTES` env or `capture_bytes`
+  param, hard max 64 MiB; a truncated capture is marked inline and counted as
+  `capture_truncations` in `simple_ctx_stats`), `ulimit`-based pid and
   memory caps (cgroup v2 when available). Note `ulimit -u` counts the whole
   user, so the pid budget uses the `Large` class (2048) on shared hosts.
 - **Fetch cap**: default 256 KiB, hard max 2 MiB, applied before tag
@@ -432,8 +438,9 @@ atomically (tmp + rename). Code: `src/app/mcp/main_lazy_telemetry.spl`.
 |-------|---------|
 | `bytes_captured` | Raw bytes the tool consumed — program stdout+stderr, fetched page, indexed text, or the source file ponytail scanned. This is what a plain `Bash`/`Read` would have put in the context. |
 | `bytes_returned` | The tool result text actually sent back to the LLM. |
-| `tokens_saved` | `max(0, bytes_captured - bytes_returned) / 4` (4 bytes ≈ 1 token). Summed per feature and over the last 7 days. |
-| `cache_hits` | ponytail calls answered from the content-hash memo. |
+| `tokens_saved` | `max(0, bytes_captured - bytes_returned) / 4` (4 bytes ≈ 1 token) over cache MISSES only. Summed per feature and over the last 7 days. |
+| `cache_hits` | ponytail calls answered from the content-hash memo. A hit returns byte-identical findings, so it saves 0 tokens and adds nothing to `bytes_captured`. |
+| `repeat_work_avoided_bytes` | Sum over hits of the prior analysis bytes (source scanned + findings produced) that were NOT recomputed. Latency/CPU saved, not context saved (double-counted into `tokens_saved` until 2026-08-28). |
 
 **Why context-mode saves tokens.** `simple_ctx_batch_execute` / `_execute` /
 `_fetch_and_index` run the program (or GET the page) inside the server, store
@@ -450,8 +457,9 @@ findings that are far shorter than the source it stands in for (measured:
 35,273 B source -> 1,002 B findings). (b) Repeat calls on unchanged bytes are
 answered from the memo: key = sha256(mode + level + file content), so an
 edited file misses and a renamed-but-identical file hits. A hit returns the
-cached findings verbatim, sets `hit=1`, and counts the prior analysis
-(source bytes read + findings produced) as `bytes_captured` avoided. The memo
+cached findings verbatim, sets `hit=1`, and reports the prior analysis
+(source bytes read + findings produced) as `repeat_work_avoided_bytes` — not
+as a token saving, since the model receives the same bytes either way. The memo
 is file-mode only — a `diff` request is one-shot and never memoized — and
 is taken before the optional `lint: true` append. `reset` truncates the
 ledger only; the memo survives (it is a cache, not a counter).
