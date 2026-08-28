@@ -20,3 +20,9 @@ Seed impl A, seed impl B (landed), and the pure backend disagree on whether
 documented default + dual-run record.
 
 Source: $SCRATCHPAD/hal/VERIFY_impl_A.md (commit 644292b2e6a).
+
+## R1 (batch-1 verify, 2026-08-28): @align power-of-two ambiguity
+`@align(2)` emits 2-byte alignment, but riscv `.align 2` means 2^2=4
+(readelf Addralign 4 vs 2). Decision needed: make @align p2align-semantics or
+require byte counts (`@align(4)`) in twins. Until decided, riscv twins must
+write the byte count explicitly. Source: $SCRATCHPAD/hal/VERIFY_batch1.md.
