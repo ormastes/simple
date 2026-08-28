@@ -1,10 +1,16 @@
 # HIR lowering - Pattern tests and match desugaring.
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.core.{int_to_str}
+@unsafe(reason: "raw enum discriminant bridge for a level-gated trace", capabilities: [ffi])
+extern fn rt_enum_discriminant(value: HirPatternKind) -> i64
+extern fn rt_env_get(key: text) -> text?
 # Split impl provider: native entry-closure discovery follows import edges and
 # otherwise omits HirLowering.union_narrow_arms from the final link.
 use compiler.hir.hir_lowering._Expressions.union_narrow_arms.*
@@ -215,7 +221,7 @@ impl HirLowering:
         when the value is a different variant. Same nested-MatchCase idiom as
         enum_variant_test -- it is the only payload accessor HIR/MIR agree on
         (there is no `Field`/`Index` path into an enum payload)."""
-        val fresh = self.symbols.define("__mp_enum_slot", SymbolKind.Variable, nil, span, false, false, nil)
+        val fresh = self.symbols.define("__mp_enum_slot", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
         val binding_pattern = HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span)
         var pl_out: HirPatternPayload? = nil
         if val pl = payload:
@@ -403,7 +409,7 @@ impl HirLowering:
         HirExpr(kind: HirExprKind.Block(arm_block), type_: nil, span: span)
 
     me desugar_match_to_if_chain(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
-        val fresh = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, false, false, nil)
+        val fresh = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
         val let_stmt = HirStmt(kind: HirStmtKind.Let(fresh, nil, hir_scrutinee), span: span)
         val scrut_var = HirExpr(kind: HirExprKind.Var(fresh), type_: nil, span: span)
         val chain_value = self.build_if_chain(scrut_var, hir_arms, 0, span)
@@ -560,7 +566,7 @@ impl HirLowering:
                 case _:
                     ()
             if is_range:
-                val fresh = self.symbols.define("__mp_payload_range", SymbolKind.Variable, nil, span, false, false, nil)
+                val fresh = self.symbols.define("__mp_payload_range", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
                 new_pats = new_pats.push(HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span))
                 val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), type_: nil, span: span)
                 val rc = self.pattern_test_condition(fresh_var, pats[pi], span)
@@ -655,6 +661,8 @@ impl HirLowering:
                                         # bare binding (that would drop the test).
                                         ()
                                     case _:
+                                        if (rt_env_get("SIMPLE_MATCH_DESUGAR_TRACE") ?? "") == "1":
+                                            eprint("[match-desugar-scan-kind] disc=" + int_to_str(rt_enum_discriminant(pat.kind)) + " wild=" + int_to_str(rt_enum_discriminant(HirPatternKind.Wildcard)) + " bind1=" + int_to_str(rt_enum_discriminant(HirPatternKind.Binding(SymbolId(id: 0), false))))
                                         any_complex = true
                             if any_complex:
                                 var new_patterns: [HirPattern] = []
@@ -681,7 +689,7 @@ impl HirLowering:
                                             # lower_range_payload_arms.
                                             new_patterns = new_patterns.push(pat)
                                         case _:
-                                            val fresh = self.symbols.define("__mp_nested_flat", SymbolKind.Variable, nil, span, false, false, nil)
+                                            val fresh = self.symbols.define("__mp_nested_flat", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
                                             val fresh_pat = HirPattern(kind: HirPatternKind.Binding(fresh, false), type_: nil, span: span)
                                             new_patterns = new_patterns.push(fresh_pat)
                                             val fresh_var = HirExpr(kind: HirExprKind.Var(fresh), type_: nil, span: span)
@@ -712,6 +720,8 @@ impl HirLowering:
                                                         prelude = prelude.push(sub_stmts2[si2])
                                                         si2 = si2 + 1
                                                 case _:
+                                                    if (rt_env_get("SIMPLE_MATCH_DESUGAR_TRACE") ?? "") == "1":
+                                                        eprint("[match-desugar-nested-kind] disc=" + int_to_str(rt_enum_discriminant(pat.kind)) + " wild=" + int_to_str(rt_enum_discriminant(HirPatternKind.Wildcard)) + " err=" + int_to_str(rt_enum_discriminant(HirPatternKind.Error)) + " n=" + int_to_str(patterns.len()))
                                                     # `pat.span` arrives through a nested aggregate
                                                     # payload and can be malformed on the Stage-2
                                                     # native ABI. The enclosing match span is the
@@ -782,7 +792,7 @@ impl HirLowering:
             # A range sub-pattern's fallthrough re-dispatches the remaining
             # arms, so the scrutinee must be evaluated exactly once into a
             # temp first (same idiom as desugar_match_to_if_chain).
-            val range_scrut = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, false, false, nil)
+            val range_scrut = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, Visibility.Private, false, nil)
             val range_let = HirStmt(kind: HirStmtKind.Let(range_scrut, nil, hir_scrutinee), span: span)
             val range_var = HirExpr(kind: HirExprKind.Var(range_scrut), type_: nil, span: span)
             val ranged_arms = self.lower_range_payload_arms(range_var, flat_arms, 0, span)
