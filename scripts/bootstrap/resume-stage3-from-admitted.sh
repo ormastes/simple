@@ -251,6 +251,20 @@ evidence_run_id="stage3-${platform}-$$"
 # into both the args hash and the real invocation so they cannot diverge; empty
 # unless an allowlisted print-only probe var is set to exactly 1.
 stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
+# Opt-in parallelism / per-file timeout for the Stage 3 recompile.  Unset
+# reproduces the pinned `--threads 1` argv byte-for-byte.  Baked into both the
+# args hash and the transcribed invocation (the child runs under `env -i`, so
+# an outer variable would never reach it).  `full` = online CPUs.
+stage3_threads=${SIMPLE_NATIVE_BUILD_THREADS:-1}
+[ "$stage3_threads" != full ] ||
+  stage3_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+case "$stage3_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
+stage3_timeout_args=
+case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
+  '') ;;
+  *[!0-9]*) exit 1 ;;
+  *) stage3_timeout_args="--timeout $SIMPLE_NATIVE_FILE_TIMEOUT" ;;
+esac
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -264,12 +278,13 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_MEM_SNAPSHOT_FILE=$memory_snapshot" \
   "SIMPLE_EVIDENCE_RUN_ID=$evidence_run_id" \
   "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
-  "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=1" \
+  "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=$stage3_threads" \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
   ${stage3_diagnostic_env} \
   native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+  --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
+  ${stage3_timeout_args} --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl)
 
@@ -289,12 +304,13 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_MEM_SNAPSHOT_FILE="$memory_snapshot" \
   SIMPLE_EVIDENCE_RUN_ID="$evidence_run_id" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-  SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS=1 \
+  SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS="$stage3_threads" \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \
   SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
   ${stage3_diagnostic_env} -- \
   "$admitted" native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+  --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
+  ${stage3_timeout_args} --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl
 status=$?
@@ -388,7 +404,7 @@ BSTAGE3_STAGE2_ADMISSION=$stage2_admission BSTAGE3_STAGE3=$candidate
 BSTAGE3_SOURCE_BEFORE=$source_before BSTAGE3_SOURCE_AFTER=$source_after
 BSTAGE3_STAGE2_LOG=$stage2_log BSTAGE3_STAGE3_LOG=$stage3_log
 BSTAGE3_STAGE2_ARGS_SHA256=$stage2_args BSTAGE3_STAGE3_ARGS_SHA256=$stage3_args
-BSTAGE3_STAGE2_THREADS=$stage2_threads BSTAGE3_STAGE3_THREADS=1
+BSTAGE3_STAGE2_THREADS=$stage2_threads BSTAGE3_STAGE3_THREADS=$stage3_threads
 BSTAGE3_STAGE2_CACHE_DIR=$stage2_cache BSTAGE3_STAGE3_CACHE_DIR=$stage3_cache
 BSTAGE3_RUNTIME_PATH=$runtime BSTAGE3_STAGE2_COMMAND_OUTPUT=$stage2
 BSTAGE3_STAGE3_COMMAND_OUTPUT=$candidate BSTAGE3_BOOTSTRAP_SCRIPT=$script

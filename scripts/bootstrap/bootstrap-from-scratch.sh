@@ -506,7 +506,7 @@ if [ -n "${resume_stage3_output}" ]; then
     echo "error: Stage 3 resume is mutually exclusive with rebuild/deploy/diagnostic options" >&2
     exit 1
   }
-  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
+  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1 unless SIMPLE_NATIVE_BUILD_THREADS is set; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -998,6 +998,17 @@ selfhost_jobs="${jobs}"
 if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
   selfhost_jobs=2
 fi
+# Opt-in override of the self-host thread count (stage 2/3/4 recompiles);
+# unset keeps the profile-derived value above.  `full` = host CPUs.
+case "${SIMPLE_NATIVE_BUILD_THREADS:-}" in
+  '') ;;
+  full) selfhost_jobs="${host_cpus}" ;;
+  *[!0-9]*|0)
+    echo "error: SIMPLE_NATIVE_BUILD_THREADS must be a positive integer or 'full'" >&2
+    exit 1
+    ;;
+  *) selfhost_jobs="${SIMPLE_NATIVE_BUILD_THREADS}" ;;
+esac
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
 
 native_cache_dir="${output_dir}/native_cache"
