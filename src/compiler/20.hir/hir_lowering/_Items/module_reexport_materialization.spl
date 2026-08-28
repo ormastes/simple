@@ -1,5 +1,5 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
+use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
 use compiler.hir.hir_lowering._Items.module_lowering.*
 # HIR Lowering - Item Lowering
 #
@@ -10,11 +10,13 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}  # explicit: a glob is not an import-origin for surface projection
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_syntactically_exports}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -36,6 +38,65 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
+    me canonical_callable_dependency_candidate(
+        target_index: i64, item_name: text
+    ) -> HirReexportSource:
+        """One canonical terminal for a callable-signature dependency route.
+
+        Restored 2026-08-28 from 7236f30dc22 after the stale snapshot
+        4edef8fab8 deleted it (Stage-3 wall: `ambiguous explicit callable
+        dependency` for 112 distinct single-declaration names)."""
+        if target_index < 0 or target_index >= self.module_surfaces.surfaces.len():
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
+        val target = self.module_surfaces.surfaces[target_index]
+        if hir_module_declares_item(target, item_name):
+            return HirReexportSource(found: true, module_index: target_index,
+                module_name: target.preferred_registry_name,
+                item_name: item_name)
+        # A module's private imports are not transitive exports.  The old
+        # fallback chased every import of every wildcard target, so importing
+        # `mir_instruction_kinds.*` also invented routes to the private
+        # `mir_types.*` dependency of that module.  Admit a chase only for a
+        # spelling the target actually exports.
+        if not module_surface_syntactically_exports(target, item_name):
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
+        # Materialized facade surfaces can list a re-exported declaration in
+        # their ordinary declaration arrays. Resolve the frozen export-origin
+        # carrier first; otherwise every facade along one route appears to be
+        # a distinct terminal and creates a phantom ambiguity.
+        var current_index = target_index
+        var current_item = item_name
+        var depth = 0
+        while depth < 8:
+            val current = self.module_surfaces.surfaces[current_index]
+            val origin = module_surface_export_origin_index_lookup(
+                current.export_origin_index, current_item)
+            if not origin.found: break
+            val owner_index = hir_module_surface_index(
+                self.module_surfaces, origin.owner_module)
+            if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
+                return HirReexportSource(found: false, module_index: -1,
+                    module_name: "", item_name: "")
+            if owner_index == current_index and origin.source_name == current_item:
+                break
+            current_index = owner_index
+            current_item = origin.source_name
+            depth = depth + 1
+        if depth >= 8:
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
+        val terminal = self.module_surfaces.surfaces[current_index]
+        if hir_module_declares_item(terminal, current_item):
+            return HirReexportSource(found: true, module_index: current_index,
+                module_name: terminal.preferred_registry_name,
+                item_name: current_item)
+        val hop = self.find_reexport_source(terminal.physical_index, current_item)
+        if hop.found: return hop
+        HirReexportSource(found: false, module_index: -1,
+            module_name: "", item_name: "")
+
     me find_reexport_source_walk(
         facade_index: i64, wanted: text, depth: i64,
         state: HirReexportWalkState
@@ -547,8 +608,22 @@ impl HirLowering:
             # same short name may be present in multiple sibling modules (Span,
             # TraitBound, TraitDef), and choosing one would silently rewrite the
             # signature.
+            if hir_ambig_dep_trace_enabled():
+                hir_ambig_dep_trace("sweep-enter owner={imported_mod.module_name} dep={dependency} imports={imported_mod.imports.len()}")
             var import_index: i64 = 0
             var ambiguous = false
+            # EXPLICIT-OVER-GLOB (2026-08-22, restored 2026-08-28). Rank of the
+            # current selection: 1 = an explicit named import row written by
+            # the callable owner, 0 = a glob route, -1 = nothing selected yet.
+            # Ambiguity is only ever computed WITHIN a rank: two disagreeing
+            # EXPLICIT routes are a real ambiguity and still report, but a
+            # glob route must never compete with -- let alone override -- an
+            # explicit import. Measured in run14: this owner's four candidate
+            # rows were glob/glob/named/glob, the named row naming
+            # `compiler.backend.backend.backend_api` and the globs naming
+            # `compiler.frontend.parser_types_expr`; last-writer-wins made the
+            # trailing GLOB the selection and flagged the pair ambiguous.
+            var selected_rank: i64 = -1
             while import_index < imported_mod.imports.len() and
                   import_index < imported_mod.import_target_indices.len():
                 val target_index = imported_mod.import_target_indices[import_index]
@@ -562,23 +637,23 @@ impl HirLowering:
                     else: item_name
                     if local_name == dependency and target_index >= 0 and
                        target_index < self.module_surfaces.surfaces.len():
-                        val target = self.module_surfaces.surfaces[target_index]
-                        var candidate_target = target_index
-                        var candidate_item = item_name
-                        var candidate_found = hir_module_declares_item(
-                            target, item_name)
-                        if not candidate_found:
-                            val hop = self.find_reexport_source(
-                                target.physical_index, item_name)
-                            if hop.found and hop.module_index >= 0:
-                                candidate_target = hop.module_index
-                                candidate_item = hop.item_name
-                                candidate_found = true
+                        val candidate = self.canonical_callable_dependency_candidate(
+                            target_index, item_name)
+                        val candidate_target = candidate.module_index
+                        val candidate_item = candidate.item_name
+                        val candidate_found = candidate.found
                         if candidate_found:
-                            if selected_target >= 0 and
+                            if hir_ambig_dep_trace_enabled():
+                                hir_ambig_dep_trace("sweep-candidate route=named owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
+                            if selected_rank == 1 and
                                (selected_target != candidate_target or
                                 selected_item != candidate_item):
                                 ambiguous = true
+                            if selected_rank < 1:
+                                # First explicit route supersedes any glob
+                                # selection, including a glob-vs-glob ambiguity.
+                                ambiguous = false
+                            selected_rank = 1
                             selected_target = candidate_target
                             selected_item = candidate_item
                     item_index = item_index + 1
@@ -587,26 +662,25 @@ impl HirLowering:
                 # when every matching named/glob route reaches one terminal.
                 if item_start == item_end and target_index >= 0 and
                    target_index < self.module_surfaces.surfaces.len():
-                    val target = self.module_surfaces.surfaces[target_index]
-                    var candidate_target = target_index
-                    var candidate_item = dependency
-                    var candidate_found = hir_module_declares_item(
-                        target, dependency)
-                    if not candidate_found:
-                        val hop = self.find_reexport_source(
-                            target.physical_index, dependency)
-                        if hop.found and hop.module_index >= 0:
-                            candidate_target = hop.module_index
-                            candidate_item = hop.item_name
-                            candidate_found = true
-                    if candidate_found:
-                        if selected_target >= 0 and
+                    val candidate = self.canonical_callable_dependency_candidate(
+                        target_index, dependency)
+                    val candidate_target = candidate.module_index
+                    val candidate_item = candidate.item_name
+                    val candidate_found = candidate.found
+                    if candidate_found and selected_rank < 1:
+                        if hir_ambig_dep_trace_enabled():
+                            hir_ambig_dep_trace("sweep-candidate route=glob owner={imported_mod.module_name} dep={dependency} import={import_index} target={self.module_surfaces.surfaces[candidate_target].module_name} item={candidate_item}")
+                        if selected_rank == 0 and
                            (selected_target != candidate_target or
                             selected_item != candidate_item):
                             ambiguous = true
+                        selected_rank = 0
                         selected_target = candidate_target
                         selected_item = candidate_item
                 import_index = import_index + 1
+            if hir_ambig_dep_trace_enabled():
+                val sweep_verdict_name = if selected_target >= 0: self.module_surfaces.surfaces[selected_target].module_name else: "<none>"
+                hir_ambig_dep_trace("sweep-verdict owner={imported_mod.module_name} dep={dependency} ambiguous={ambiguous} selected_target={sweep_verdict_name} selected_item={selected_item}")
             if ambiguous:
                 # -2 is the ambiguity sentinel, cached like any other fact so a
                 # later importer does not re-sweep to rediscover it. The
