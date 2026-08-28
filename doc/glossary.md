@@ -3,6 +3,23 @@
 ## Sub-Glossaries
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
 
+## Dual running
+
+Running BOTH implementations of one HAL/runtime operation — the pure-Simple
+candidate and its C/asm reference twin — on the same inputs, comparing every
+observable result **before** any effect reaches real hardware or real data, and
+committing the agreed effect exactly once (mismatch traps or falls back per
+policy, always recorded). Full contract, modes (value-compare, shadow-buffer,
+shadow-state, record-compare, replay) and the stability bar:
+`doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md` Part B.
+
+**What exists today is narrower:** `scripts/check/check-dual-run-shadow.shs` +
+`src/lib/common/spec/dual_run.spl` compare return values of 13 pure-function
+pairs inside a test spec (no shadow buffers, nothing gated), and `@rt(hal,
+providers: pure+c+rust)` compares zero-argument `i64` receipts through an
+isolated host. See `doc/07_guide/infra/c_migration/dual_run_shadow.md` and
+`doc/01_research/os/hal/hal_asm_embedding_dual_run_survey_2026-08-28.md` Q2.
+
 ## Simple embedded DB / Simple SQLite
 
 These phrases mean the SQLite-compatible SQL engine rewritten in Simple:
