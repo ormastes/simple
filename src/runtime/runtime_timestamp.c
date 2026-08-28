@@ -70,10 +70,10 @@ int64_t rt_timestamp_from_components(int32_t y, int32_t m, int32_t d, int32_t h,
 }
 int64_t rt_timestamp_add_days(int64_t v, int64_t d) { return rt_timestamp_oracle_add_days(v, d); }
 int64_t rt_timestamp_diff_days(int64_t a, int64_t b) { return rt_timestamp_oracle_diff_days(a, b); }
-/* rt_time_now_seconds: historical i64 ABI. Defined in runtime.c, which this
- * crate deliberately does not compile (see runtime/build.rs), so the seed
- * had no provider and the link failed with an undefined symbol. */
-int64_t rt_time_now_seconds(void) { return (int64_t)time(NULL); }
+/* rt_time_now_seconds: historical i64 ABI. Defined in runtime_time.c (the
+ * designated C companion of time.rs, alongside its sibling clocks) since
+ * 5362c2345c6; defining it here too made the seed link fail with a duplicate
+ * symbol. See doc/08_tracking/bug/seed_rt_time_now_seconds_unlinkable_2026-08-28.md. */
 bool rt_progress_init(void) {
     int64_t now = rt_progress_clock_now_nanos();
     if (now < 0) { rt_progress_tls_clear(); return false; }
