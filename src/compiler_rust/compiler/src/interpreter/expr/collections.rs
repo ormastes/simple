@@ -1082,6 +1082,7 @@ mod seed_regression_tests {
     //! path (`instantiate_class`) already pre-filled every declared field;
     //! this fix brought brace-form construction to parity.
 
+    use crate::error::{codes, CompileError};
     use crate::interpreter::evaluate_module;
     use simple_parser::Parser;
 

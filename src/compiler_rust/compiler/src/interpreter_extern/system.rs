@@ -895,6 +895,195 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
     ]))
 }
 
+/// Mirror of `RtOwnedProcessReceipt` in `src/runtime/runtime.h`.
+#[repr(C)]
+#[derive(Default)]
+struct RtOwnedProcessReceipt {
+    version: u64,
+    slot: u64,
+    generation: u64,
+    pid: i64,
+    process_group_id: i64,
+    start_identity: u64,
+    stdout_bytes_seen: u64,
+    stderr_bytes_seen: u64,
+    stdout_bytes_kept: u64,
+    stderr_bytes_kept: u64,
+    exit_code: i64,
+    timed_out: i32,
+    term_sent: i32,
+    kill_sent: i32,
+    identity_revalidated: i32,
+    reaped: i32,
+    stdout_truncated: i32,
+    stderr_truncated: i32,
+    runtime_error: i32,
+}
+
+/// Mirror of `RtOwnedProcessObservationV1` in `src/runtime/runtime.h`.
+#[repr(C)]
+#[derive(Default)]
+struct RtOwnedProcessObservationV1 {
+    version: u64,
+    evidence_flags: u64,
+    user_cpu_ms: i64,
+    system_cpu_ms: i64,
+    peak_direct_child_rss_bytes: i64,
+    peak_tree_charge_bytes: i64,
+    io_read_bytes: i64,
+    io_write_bytes: i64,
+    pids_peak: i64,
+    termination_signal: i64,
+    runtime_error: i32,
+}
+
+// Core owned-process runners from src/runtime/runtime_process_owned.c, which
+// the runtime crate compiles (see runtime/build.rs). The `*_value` C wrappers
+// return seed-runtime string/array handles the interpreter cannot own, so the
+// interpreter calls the core entry and builds the tuple itself.
+unsafe extern "C" {
+    fn rt_process_run_owned_observed_bounded(
+        cmd: *const std::os::raw::c_char,
+        argv: *const *const std::os::raw::c_char,
+        timeout_ms: i64,
+        max_output_bytes: u64,
+        out: *mut std::os::raw::c_char,
+        out_cap: u64,
+        err: *mut std::os::raw::c_char,
+        err_cap: u64,
+        receipt: *mut RtOwnedProcessReceipt,
+        observation: *mut RtOwnedProcessObservationV1,
+    ) -> bool;
+}
+
+/// `rt_process_run_owned_observed_bounded_value(cmd, args, timeout_ms, max_output_bytes) -> (text, text, [i64])`
+///
+/// Interpreter twin of the C `_value` wrapper in `runtime_process_owned.c`:
+/// the 30-field `[i64]` is 19 receipt fields followed by 11 observation
+/// fields, in the exact `OWNED_PUSH` order (`fields[0] == 1`,
+/// `fields[19] == 2` are the layout versions the Simple facade checks).
+/// Argument validation and clamps mirror `owned_run_bounded_value_impl`.
+pub fn rt_process_run_owned_observed_bounded_value(args: &[Value]) -> Result<Value, CompileError> {
+    const NAME: &str = "rt_process_run_owned_observed_bounded_value";
+    const RT_OWNED_ABI_MAX_TIMEOUT_MS: i64 = 3_600_000;
+    const RT_OWNED_ABI_MAX_OUTPUT_BYTES: i64 = 16 * 1024 * 1024;
+    if args.len() < 4 {
+        return Err(CompileError::runtime(format!(
+            "{NAME} requires 4 arguments (cmd, args, timeout_ms, max_output_bytes)"
+        )));
+    }
+    let cmd = match &args[0] {
+        Value::Str(value) => std::ffi::CString::new(value.as_str())
+            .map_err(|_| CompileError::runtime(format!("{NAME}: cmd must not contain NUL")))?,
+        _ => return Err(CompileError::runtime(format!("{NAME}: cmd must be a string"))),
+    };
+    let cmd_args = match &args[1] {
+        Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                Value::Str(value) => std::ffi::CString::new(value.as_str()).map_err(|_| {
+                    CompileError::runtime(format!("{NAME}: args must not contain NUL"))
+                }),
+                _ => Err(CompileError::runtime(format!(
+                    "{NAME}: args must be an array of strings"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{NAME}: args must be an array of strings"
+            )))
+        }
+    };
+    let timeout_ms = match args[2] {
+        Value::Int(value) if value >= 0 => value.min(RT_OWNED_ABI_MAX_TIMEOUT_MS),
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{NAME}: timeout_ms must be a non-negative integer"
+            )))
+        }
+    };
+    let max_output_bytes = match args[3] {
+        Value::Int(value) if value >= 0 => value.min(RT_OWNED_ABI_MAX_OUTPUT_BYTES),
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{NAME}: max_output_bytes must be a non-negative integer"
+            )))
+        }
+    };
+
+    let mut argv: Vec<*const std::os::raw::c_char> = Vec::with_capacity(cmd_args.len() + 2);
+    argv.push(cmd.as_ptr());
+    argv.extend(cmd_args.iter().map(|arg| arg.as_ptr()));
+    argv.push(std::ptr::null());
+
+    let capacity = max_output_bytes as usize + 1;
+    let mut out = vec![0u8; capacity];
+    let mut err = vec![0u8; capacity];
+    let mut receipt = RtOwnedProcessReceipt::default();
+    let mut observation = RtOwnedProcessObservationV1::default();
+    // The bool result is deliberately ignored, as in the C `_value` wrapper:
+    // `receipt.runtime_error` carries provider failure without hiding output.
+    // SAFETY: every pointer is valid for the call; argv is NULL-terminated and
+    // its CStrings outlive the call; out/err are `capacity` bytes each.
+    let _ = unsafe {
+        rt_process_run_owned_observed_bounded(
+            cmd.as_ptr(),
+            argv.as_ptr(),
+            timeout_ms,
+            max_output_bytes as u64,
+            out.as_mut_ptr() as *mut std::os::raw::c_char,
+            capacity as u64,
+            err.as_mut_ptr() as *mut std::os::raw::c_char,
+            capacity as u64,
+            &mut receipt,
+            &mut observation,
+        )
+    };
+
+    let stdout_kept = (receipt.stdout_bytes_kept as usize).min(capacity);
+    let stderr_kept = (receipt.stderr_bytes_kept as usize).min(capacity);
+    let r = &receipt;
+    let o = &observation;
+    let fields: Vec<i64> = vec![
+        r.version as i64,
+        r.slot as i64,
+        r.generation as i64,
+        r.pid,
+        r.process_group_id,
+        r.start_identity as i64,
+        r.stdout_bytes_seen as i64,
+        r.stderr_bytes_seen as i64,
+        r.stdout_bytes_kept as i64,
+        r.stderr_bytes_kept as i64,
+        r.exit_code,
+        r.timed_out as i64,
+        r.term_sent as i64,
+        r.kill_sent as i64,
+        r.identity_revalidated as i64,
+        r.reaped as i64,
+        r.stdout_truncated as i64,
+        r.stderr_truncated as i64,
+        r.runtime_error as i64,
+        o.version as i64,
+        o.evidence_flags as i64,
+        o.user_cpu_ms,
+        o.system_cpu_ms,
+        o.peak_direct_child_rss_bytes,
+        o.peak_tree_charge_bytes,
+        o.io_read_bytes,
+        o.io_write_bytes,
+        o.pids_peak,
+        o.termination_signal,
+        o.runtime_error as i64,
+    ];
+    Ok(Value::Tuple(vec![
+        Value::text(String::from_utf8_lossy(&out[..stdout_kept]).into_owned()),
+        Value::text(String::from_utf8_lossy(&err[..stderr_kept]).into_owned()),
+        Value::array(fields.into_iter().map(Value::Int).collect()),
+    ]))
+}
+
 /// Spawn a process asynchronously and return its PID
 ///
 /// Callable from Simple as: `rt_process_spawn_async(cmd, args)`

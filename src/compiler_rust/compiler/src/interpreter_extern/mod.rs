@@ -1677,6 +1677,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_run", system::rt_process_run);
     insert_simple!("rt_process_run_bounded", system::rt_process_run_bounded);
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
+    // Declared by src/lib/nogc_sync_mut/io/resource_scope.spl and reached by
+    // every directory-mode `simple test` run via _run_scoped_child; the C
+    // definition is compiled into the runtime crate but had no interpreter
+    // dispatch entry, so directory mode died with `unknown extern function`.
+    insert_simple!(
+        "rt_process_run_owned_observed_bounded_value",
+        system::rt_process_run_owned_observed_bounded_value
+    );
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     // Piped-process family -- present in the C runtime and declared by real
@@ -1684,6 +1692,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
     insert_simple!("rt_process_write_stdin", system::rt_process_write_stdin);
+    // Implemented in system.rs and declared by process_ops.spl, but never
+    // registered here (found by the same extern census as the entry above).
+    insert_simple!("rt_process_write_stdin_some", system::rt_process_write_stdin_some);
     insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);

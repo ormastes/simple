@@ -471,6 +471,8 @@ fn spipe_inline_helpers() -> text:
     "    expect false\n\n" +
     "fn fail_test(message: text):\n" +
     "    fail_assertion(message)\n\n" +
+    "fn fail(message: text):\n" +
+    "    fail_assertion(message)\n\n" +
     "fn assert_eq(a, b):\n" +
     "    expect a == b\n\n" +
     "fn assert_ne(a, b):\n" +
@@ -667,7 +669,7 @@ fn spipe_is_top_level_start(trimmed: text) -> bool:
 fn spipe_helpers_used(body: text, top_level: text) -> bool:
     val helper_names: [text] = [
         "step", "pending", "skip", "skip_it", "check", "check_msg",
-        "fail_assertion", "fail_test", "assert_eq", "assert_ne",
+        "fail_assertion", "fail_test", "fail", "assert_eq", "assert_ne",
         "assert_true", "assert_false", "assert_nil", "assert_not_nil",
         "pending_on", "pending_skip", "expect"
     ]
@@ -766,7 +768,19 @@ fn preprocess_spipe_file(file_path: text) -> text:
 
         # Import/use statements go before fn main()
         if trimmed.starts_with("import ") or trimmed.starts_with("use "):
-            if trimmed.starts_with("import std.spec") or trimmed.starts_with("use std.spec"):
+            # `std.spec` is the interpreter-only BDD harness and is replaced by
+            # the inline helpers below, so its imports are dropped. The
+            # `std.spec.scenario_governance` module is a plain library, and
+            # `build_coverage_wrapper` injects `use std.spec.scenario_governance
+            # .{scenario_governance_mcdc_exclusions_reset, ..._snapshot}` while
+            # its generated MC/DC dump code calls both — dropping that line
+            # left every MC/DC-lane spec at `Undefined("undefined identifier:
+            # scenario_governance_mcdc_exclusions_snapshot")`.
+            val is_spec_harness_import = (trimmed.starts_with("import std.spec") or
+                trimmed.starts_with("use std.spec")) and
+                not trimmed.starts_with("use std.spec.scenario_governance") and
+                not trimmed.starts_with("import std.spec.scenario_governance")
+            if is_spec_harness_import:
                 val delta = spipe_brace_delta(line)
                 if delta > 0:
                     skipping_spec_import = true
