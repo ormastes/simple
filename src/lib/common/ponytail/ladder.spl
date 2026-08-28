@@ -1,0 +1,370 @@
+# Ponytail ladder heuristics — pure text scanner, no I/O.
+#
+# Mirrors the "lazy senior developer" ladder from .claude/skills/ponytail.md:
+#   rung 1 YAGNI / delete   rung 2 stdlib   rung 3 native/platform
+#   rung 4 already-installed dependency     rung 5 one line   rung 6 minimum code
+# Every finding names the rung the code should have stopped at.
+#
+# ponytail: line-based heuristics, not AST — false positives are cheap to ignore;
+# upgrade path is `simple_ast_query` if precision ever matters.
+
+use std.common.text.{parse_i64}
+
+fn _pt_in(xs: [text], needle: text) -> bool:
+    for x in xs:
+        if x == needle:
+            return true
+    false
+
+fn ponytail_level_threshold(level: text) -> i64:
+    # Findings carry a weight 1..3. lite = only weight 3, full = 2+, ultra = all.
+    if level == "lite":
+        return 3
+    if level == "ultra":
+        return 1
+    2
+
+fn ponytail_level_valid(level: text) -> bool:
+    level == "lite" or level == "full" or level == "ultra"
+
+fn _pt_indent(line: text) -> i64:
+    var n: i64 = 0
+    for ch in line:
+        if ch == " ":
+            n = n + 1
+        else:
+            break
+    n
+
+fn _pt_ident_after(line: text, keyword: text) -> text:
+    # "fn _helper(x: i64)" with keyword "fn " -> "_helper"
+    val t = line.trim()
+    if not t.starts_with(keyword):
+        return ""
+    val rest = t.slice(keyword.len(), t.len())
+    var out = ""
+    for ch in rest:
+        val code = ch.char_code_at(0)
+        val alnum = (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+        if alnum:
+            out = out + ch
+        else:
+            break
+    out
+
+fn _pt_occurrences(lines: [text], needle: text) -> i64:
+    var count: i64 = 0
+    for line in lines:
+        if line.contains(needle):
+            count = count + 1
+    count
+
+fn _pt_is_code(line: text) -> bool:
+    val t = line.trim()
+    t != "" and not t.starts_with("#") and not t.starts_with("use ") and not t.starts_with("\"\"\"")
+
+fn _pt_has_ceiling_comment(lines: [text], i: i64) -> bool:
+    if lines[i].contains("ponytail:"):
+        return true
+    var j = i - 1
+    while j >= 0 and j >= i - 2:
+        if lines[j].contains("ponytail:"):
+            return true
+        j = j - 1
+    false
+
+struct PonytailFinding:
+    line: i64
+    rung: i64
+    kind: text
+    weight: i64
+    message: text
+    fix: text
+
+fn _pt_push(out: [PonytailFinding], line: i64, rung: i64, kind: text, weight: i64, message: text, fix: text):
+    out.push(PonytailFinding(line: line, rung: rung, kind: kind, weight: weight, message: message, fix: fix))
+
+fn ponytail_scan_lines(lines: [text]) -> [PonytailFinding]:
+    var out: [PonytailFinding] = []
+    val n = lines.len()
+    var i: i64 = 0
+    var fn_start: i64 = -1
+    var fn_name = ""
+    var config_owner = ""
+    var config_indent: i64 = 0
+    var loop_stack: [i64] = []
+    while i < n:
+        val line = lines[i]
+        val t = line.trim()
+        val indent = _pt_indent(line)
+
+        # ---- traits/interfaces with one implementation (rung 6) ----
+        var trait_name = _pt_ident_after(line, "trait ")
+        if trait_name == "":
+            trait_name = _pt_ident_after(line, "interface ")
+        if trait_name != "":
+            # `impl <Trait> for <Type>:` is the real Simple form — the trait name
+            # precedes `for`, so a "for <Trait>:" probe alone always counts 0 and
+            # fires this finding on EVERY trait (false positive on multi-impl).
+            val impls = _pt_occurrences(lines, "impl " + trait_name + " for ") + _pt_occurrences(lines, "for " + trait_name + ":") + _pt_occurrences(lines, ": " + trait_name + ":")
+            if impls <= 1:
+                _pt_push(out, i, 6, "single-impl", 2, "`" + trait_name + "` has " + str(impls) + " implementation(s) in this file", "use the concrete type directly; add the trait when a second impl exists")
+
+        # ---- factory for one product (rung 6) ----
+        val class_name = _pt_ident_after(line, "class ")
+        if class_name != "" and (class_name.ends_with("Factory") or class_name.ends_with("Builder")):
+            _pt_push(out, i, 6, "factory-for-one", 2, "`" + class_name + "` abstracts construction", "call the constructor directly; add the factory when there are two products")
+
+        # ---- config struct fields that are never read (rung 6) ----
+        val owner = if class_name != "": class_name else: _pt_ident_after(line, "struct ")
+        if owner != "":
+            if owner.ends_with("Config") or owner.ends_with("Options") or owner.ends_with("Settings"):
+                config_owner = owner
+                config_indent = indent
+            else:
+                config_owner = ""
+        elif config_owner != "" and indent > config_indent and t.contains(": ") and t.contains(" = ") and not t.starts_with("fn ") and not t.starts_with("val ") and not t.starts_with("var "):
+            val field = t.split(":")[0].trim()
+            if field != "" and _pt_occurrences(lines, field) == 1:
+                _pt_push(out, i, 6, "config-for-constant", 2, "`" + config_owner + "." + field + "` has a default and is never read", "inline the value; make it configurable when a second value exists")
+        elif config_owner != "" and indent <= config_indent and t != "":
+            config_owner = ""
+
+        # ---- function-level signals ----
+        val this_fn = _pt_ident_after(line, "fn ")
+        if this_fn != "":
+            if fn_start >= 0:
+                _pt_fn_length(out, fn_start, i, fn_name, lines)
+            fn_start = i
+            fn_name = this_fn
+            # unused private helper (rung 1)
+            if this_fn.starts_with("_") and _pt_occurrences(lines, this_fn) == 1:
+                _pt_push(out, i, 1, "unused", 3, "`" + this_fn + "` is defined but never called", "delete it")
+            elif _pt_occurrences(lines, this_fn) == 1:
+                _pt_push(out, i, 1, "unused", 1, "`" + this_fn + "` has no caller in this file", "delete it unless it is public API")
+            # hand-rolled stdlib (rung 2)
+            val lname = this_fn
+            if lname.contains("line_count") or lname.contains("count_lines") or lname.ends_with("_split") or lname.ends_with("_join") or lname.ends_with("_trim") or lname.ends_with("_contains") or lname.ends_with("_starts_with") or lname.ends_with("_ends_with") or lname.ends_with("_repeat") or lname.ends_with("_pad_left") or lname.ends_with("_pad_right") or lname.ends_with("_to_upper") or lname.ends_with("_to_lower"):
+                _pt_push(out, i, 2, "stdlib", 2, "`" + this_fn + "` looks like a hand-rolled text/array helper", "use the std text/array method instead")
+
+        # ---- direct rt_* call (rung 4: the typed std alias is already installed) ----
+        if _pt_is_code(line) and t.contains("rt_") and not t.starts_with("extern ") and not t.starts_with("fn "):
+            val at = line.index_of("rt_")
+            var word_start = at == 0
+            if at > 0:
+                val prev_ch = line.slice(at - 1, at)
+                val prev = prev_ch.char_code_at(0)
+                val ident = (prev >= 48 and prev <= 57) or (prev >= 65 and prev <= 90) or (prev >= 97 and prev <= 122) or prev == 95 or prev == 46
+                word_start = not ident
+            if at >= 0 and word_start:
+                val after = line.slice(at + 3, line.len())
+                if after.contains("("):
+                    _pt_push(out, i, 4, "direct-rt", 2, "direct `rt_*` call", "use the typed std alias (scripts/check/check-no-direct-rt.shs ratchet)")
+
+        # ---- one-liner: `return true` / else / `return false` (rung 5) ----
+        if t == "return true" and i + 2 < n:
+            if lines[i + 1].trim() == "else:" and lines[i + 2].trim() == "return false":
+                _pt_push(out, i - 1, 5, "one-line", 2, "if/else that returns a bool", "return the condition itself")
+
+        # ---- known shortcut patterns without a `ponytail:` ceiling comment ----
+        if _pt_is_code(line) and not _pt_has_ceiling_comment(lines, i):
+            if t.contains("pass_todo") or t.contains("expect(true).to_equal(true)"):
+                _pt_push(out, i, 1, "placeholder", 3, "placeholder body", "implement it or delete it — a placeholder is not lazy, it is unfinished")
+            elif t.contains("TODO") or t.contains("FIXME"):
+                _pt_push(out, i, 1, "todo", 2, "TODO without a ceiling comment", "implement, delete, or `# ponytail: <ceiling>, <upgrade path>`")
+            elif t.contains("sleep(") or t.contains("unsafe") or t.contains("global_lock") or t.contains("Mutex"):
+                _pt_push(out, i, 6, "missing-ceiling", 2, "shortcut pattern (`sleep`/`unsafe`/lock) without `ponytail:`", "add `# ponytail: <ceiling>, <upgrade path>`")
+
+        # ---- nested loops over the same shape (O(n^2) ceiling) ----
+        if t.starts_with("for ") or t.starts_with("while "):
+            while loop_stack.len() > 0 and loop_stack[loop_stack.len() - 1] >= indent:
+                loop_stack.pop()
+            if loop_stack.len() > 0 and not _pt_has_ceiling_comment(lines, i):
+                _pt_push(out, i, 6, "missing-ceiling", 2, "nested loop (O(n^2) or worse) without `ponytail:`", "add `# ponytail: O(n^2) scan, index when n grows` or index it now")
+            loop_stack.push(indent)
+        elif t != "" and loop_stack.len() > 0 and indent <= loop_stack[loop_stack.len() - 1]:
+            while loop_stack.len() > 0 and loop_stack[loop_stack.len() - 1] >= indent:
+                loop_stack.pop()
+
+        # ---- nesting depth (complexity) ----
+        if _pt_is_code(line) and indent >= 24:
+            _pt_push(out, i, 6, "nesting", 2, "nesting depth " + str(indent / 4), "flatten with early returns or split the function")
+
+        i = i + 1
+    if fn_start >= 0:
+        _pt_fn_length(out, fn_start, n, fn_name, lines)
+    _pt_duplicates(out, lines)
+    out
+
+fn _pt_fn_length(out: [PonytailFinding], start: i64, end: i64, name: text, lines: [text]):
+    var body: i64 = 0
+    var k = start
+    while k < end:
+        if _pt_is_code(lines[k]):
+            body = body + 1
+        k = k + 1
+    if body > 60:
+        _pt_push(out, start, 6, "long-fn", 2, "`" + name + "` is " + str(body) + " code lines", "split it, or delete the branches nobody asked for")
+    elif body > 30:
+        _pt_push(out, start, 6, "long-fn", 1, "`" + name + "` is " + str(body) + " code lines", "check for branches nobody asked for")
+
+fn _pt_duplicates(out: [PonytailFinding], lines: [text]):
+    # ponytail: O(n^2) trimmed-line comparison, files are small; hash if it ever matters
+    var seen: [text] = []
+    var i: i64 = 0
+    while i < lines.len():
+        val t = lines[i].trim()
+        if _pt_is_code(lines[i]) and t.len() > 40 and not _pt_in(seen, t):
+            var count: i64 = 0
+            var j = i
+            while j < lines.len():
+                if lines[j].trim() == t:
+                    count = count + 1
+                j = j + 1
+            if count >= 3:
+                seen.push(t)
+                _pt_push(out, i, 6, "duplicate", 2, "line repeated " + str(count) + " times", "extract one helper or delete the copies")
+        i = i + 1
+
+# ---- diff scope ----------------------------------------------------------
+
+struct PonytailDiffView:
+    lines: [text]
+    numbers: [i64]
+    added: [bool]
+    path: text
+
+fn ponytail_diff_view(diff: text) -> PonytailDiffView:
+    # Keeps context lines so whole-file heuristics still see neighbours,
+    # but only ADDED lines can produce findings.
+    var lines: [text] = []
+    var numbers: [i64] = []
+    var added: [bool] = []
+    var path = ""
+    var next: i64 = 0
+    for raw in diff.split("\n"):
+        if raw.starts_with("+++ "):
+            var p = raw.slice(4, raw.len()).trim()
+            if p.starts_with("b/"):
+                p = p.slice(2, p.len())
+            if path == "":
+                path = p
+        elif raw.starts_with("@@ "):
+            val plus = raw.index_of("+")
+            if plus >= 0:
+                var num = ""
+                var k = plus + 1
+                while k < raw.len():
+                    val ch = raw.slice(k, k + 1)
+                    val code = ch.char_code_at(0)
+                    if code >= 48 and code <= 57:
+                        num = num + ch
+                    else:
+                        break
+                    k = k + 1
+                if num != "":
+                    next = parse_i64(num)
+        elif raw.starts_with("---") or raw.starts_with("diff ") or raw.starts_with("index "):
+            pass
+        elif raw.starts_with("+"):
+            lines.push(raw.slice(1, raw.len()))
+            numbers.push(next)
+            added.push(true)
+            next = next + 1
+        elif raw.starts_with("-"):
+            pass
+        elif raw.starts_with(" ") or raw == "":
+            if raw != "":
+                lines.push(raw.slice(1, raw.len()))
+                numbers.push(next)
+                added.push(false)
+                next = next + 1
+    PonytailDiffView(lines: lines, numbers: numbers, added: added, path: path)
+
+# ---- report --------------------------------------------------------------
+
+fn _pt_render(path: text, level: text, scope: text, line_count: i64, findings: [PonytailFinding], numbers: [i64], added: [bool]) -> text:
+    val threshold = ponytail_level_threshold(level)
+    var lines: [text] = []
+    lines.push("Ponytail Ladder")
+    lines.push("source: " + path)
+    lines.push("level: " + level)
+    lines.push("scope: " + scope)
+    lines.push("lines: " + str(line_count))
+    var shown: [text] = []
+    var hidden: i64 = 0
+    var per_kind: [text] = []
+    var per_kind_count: [i64] = []
+    for f in findings:
+        if f.line >= 0 and f.line < added.len() and not added[f.line]:
+            continue
+        if f.weight < threshold:
+            hidden = hidden + 1
+            continue
+        var idx: i64 = -1
+        var q: i64 = 0
+        while q < per_kind.len():
+            if per_kind[q] == f.kind:
+                idx = q
+            q = q + 1
+        if idx < 0:
+            per_kind.push(f.kind)
+            per_kind_count.push(0)
+            idx = per_kind.len() - 1
+        per_kind_count[idx] = per_kind_count[idx] + 1
+        if per_kind_count[idx] > 5:
+            continue
+        var display: i64 = f.line + 1
+        if f.line >= 0 and f.line < numbers.len():
+            display = numbers[f.line]
+        elif f.line < 0:
+            display = 1
+        shown.push("L" + str(display) + " rung" + str(f.rung) + " " + f.kind + ": " + f.message + " -> " + f.fix)
+    if shown.len() == 0:
+        lines.push("status: ok")
+    else:
+        lines.push("status: review")
+    lines.push("findings: " + str(shown.len()))
+    for s in shown:
+        lines.push(s)
+    var k: i64 = 0
+    while k < per_kind.len():
+        if per_kind_count[k] > 5:
+            lines.push("(" + per_kind[k] + ": " + str(per_kind_count[k] - 5) + " more not shown)")
+        k = k + 1
+    if hidden > 0:
+        lines.push("hidden at level " + level + ": " + str(hidden) + " (raise to ultra to see all)")
+    lines.push("pattern: [code] -> skipped: [X], add when [Y]")
+    lines.join("\n")
+
+fn ponytail_ladder_report_source(path: text, source: text, level: text) -> text:
+    val lines = source.split("\n")
+    val findings = ponytail_scan_lines(lines)
+    var numbers: [i64] = []
+    var added: [bool] = []
+    _pt_render(path, level, "file", lines.len(), findings, numbers, added)
+
+fn ponytail_ladder_report_diff(diff: text, level: text) -> text:
+    val view = ponytail_diff_view(diff)
+    val findings = ponytail_scan_lines(view.lines)
+    var path = view.path
+    if path == "":
+        path = "(diff)"
+    var added_count: i64 = 0
+    for a in view.added:
+        if a:
+            added_count = added_count + 1
+    _pt_render(path, level, "diff", added_count, findings, view.numbers, view.added)
+
+fn ponytail_ladder_findings_section(source: text, level: text) -> text:
+    # Appended to the legacy audit report so `mode=audit` carries real findings too.
+    val lines = source.split("\n")
+    val findings = ponytail_scan_lines(lines)
+    val threshold = ponytail_level_threshold(level)
+    var out: [text] = []
+    for f in findings:
+        if f.weight >= threshold and out.len() < 10:
+            out.push("L" + str(f.line + 1) + " rung" + str(f.rung) + " " + f.kind + ": " + f.message + " -> " + f.fix)
+    if out.len() == 0:
+        return "ladder findings: 0"
+    "ladder findings: " + str(out.len()) + "\n" + out.join("\n")

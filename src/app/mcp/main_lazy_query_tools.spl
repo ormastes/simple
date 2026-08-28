@@ -13,10 +13,12 @@
 # context` subprocess below instead. See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
-use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report}
+use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report, ponytail_ladder}
+use std.common.ponytail.ladder.{ponytail_level_valid}
 use std.io_runtime.{env_get, file_exists, file_read}
 use std.string_core.{char_from_code}
 use .main_lazy_json.{mcp_run_argv}
+use .main_session_state.{mcp_resolve_requester}
 
 fn _mcp_json_escape(value: text) -> text:
     var out = ""
@@ -318,29 +320,82 @@ fn handle_simple_context(id: text, body: text) -> text:
             else:
                 out_parts.push(check_out)
 
+    # 5. MDSOC visibility of `file` from the requester location
+    #    (explicit > last file read this session > none, never `file` itself)
+    if not sourceless_sql_query:
+        val (requester, req_source) = mcp_resolve_requester(extract_field(body, "requester"))
+        out_parts.push("\n--- Visibility (requester=" + requester + ", source=" + req_source + ") ---\n")
+        if requester == "":
+            out_parts.push("no requester: none given and no file read/opened in this session; showing boundary-crossing symbols only\n")
+        val (vis_out, _vis_err, vis_exit) = process_run_timeout(_mcp_find_simple_binary(), ["run", "src/app/cli/query_visibility.spl", "visibility", file, "--requester", requester, "--requester-source", req_source], 30000)
+        if vis_exit == 0 and vis_out.trim() != "":
+            out_parts.push(vis_out.trim() + "\n")
+        else:
+            out_parts.push("(visibility unavailable: exit " + str(vis_exit) + ")\n")
+
     make_tool_result(id, out_parts.join(""))
+
+fn _ponytail_unescape_diff(raw: text) -> text:
+    # extract_field returns the JSON string body with escapes intact; a diff
+    # arrives as `\n`-separated text. Only `\n`, `\t`, `\"` and `\\` matter here.
+    var out = ""
+    var i = 0
+    while i < raw.len():
+        val ch = raw.slice(i, i + 1)
+        if ch == "\\" and i + 1 < raw.len():
+            val nx = raw.slice(i + 1, i + 2)
+            if nx == "n":
+                out = out + "\n"
+                i = i + 2
+                continue
+            if nx == "t":
+                out = out + "\t"
+                i = i + 2
+                continue
+            if nx == "\"" or nx == "\\":
+                out = out + nx
+                i = i + 2
+                continue
+        out = out + ch
+        i = i + 1
+    out
 
 fn handle_simple_ponytail(id: text, body: text) -> text:
     val file = extract_field(body, "file")
+    val diff = _ponytail_unescape_diff(extract_field(body, "diff"))
     var format = extract_field(body, "format")
     var mode = extract_field(body, "mode")
+    var level = extract_field(body, "level")
+    val lint = extract_field(body, "lint")
     if format == "":
         format = "text"
-    if mode == "":
+    if mode == "" or mode == "review":
         mode = "audit"
-    if file == "":
-        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if mode == "simplify":
+        mode = "simplification"
+    if level == "":
+        level = "full"
+    if file == "" and diff == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file (or diff)")
     if format != "text" and format != "markdown" and format != "json":
         return make_tool_error(id, -32602, "Invalid format: " + format)
-    if mode != "audit" and mode != "simplification":
+    if mode != "audit" and mode != "simplification" and mode != "ladder":
         return make_tool_error(id, -32602, "Invalid mode: " + mode)
+    if not ponytail_level_valid(level):
+        return make_tool_error(id, -32602, "Invalid level: " + level + " (lite|full|ultra)")
     var result = ""
-    if mode == "simplification":
+    if mode == "ladder" or diff != "":
+        result = ponytail_ladder(file, diff, level)
+    elif mode == "simplification":
         result = ponytail_simplification_report(file)
     else:
         result = ponytail_audit(file)
     if result == "":
         return make_tool_error(id, -32602, "Could not read file: " + file)
+    if lint == "true" and file != "":
+        # ponytail: opt-in, `simple lint` costs ~12s startup; the ladder scan itself is pure text
+        val (lint_stdout, lint_stderr, lint_exit) = process_run_timeout(_mcp_find_simple_binary(), ["lint", file], 60000)
+        result = result + "\nlint (exit " + str(lint_exit) + "):\n" + _mcp_first_lines(lint_stdout + lint_stderr, 20)
     make_tool_result(id, _render_ponytail_mcp(file, mode, result, format))
 
 # simple_search — Language-aware code search

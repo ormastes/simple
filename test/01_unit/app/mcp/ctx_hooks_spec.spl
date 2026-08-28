@@ -1,0 +1,125 @@
+"""
+# Context Hook Layer Specification
+
+**Requirements:** N/A
+
+## Overview
+
+Guards the project-level PreToolUse hook scripts under `.claude/hooks/` that
+replace the user-level context-mode plugin's hook layer. Each scenario pipes a
+sample Claude Code hook JSON payload into the real script via `/bin/sh`
+(dash on this host, so dash-cleanliness is exercised too) and inspects the
+decision JSON on stdout.
+
+## Behavior
+
+- `bash_net_blocker.shs` (fail-closed): denies curl/wget/inline-HTTP Bash
+  commands with a redirect to simple_ctx_fetch_and_index / simple_ctx_execute;
+  denies when the command cannot be parsed; stays silent for safe commands.
+- `bash_output_hint.shs` (fail-open): adds context for likely >20-line
+  commands, stays silent for short/bounded ones and on parse failure.
+- `webfetch_deny.shs` (fail-closed): denies every WebFetch, echoing the URL.
+- `read_analysis_hint.shs` (fail-open): hints simple_ctx_execute_file for
+  large un-windowed reads, silent otherwise.
+- Every script also carries a `--selftest` that must PASS.
+"""
+
+# @feature mcp_ctx_hooks
+# tag: unit
+
+use std.spec
+use std.io_runtime.{process_run}
+
+fn hook_run(script: text, payload: text) -> (text, i64):
+    val shell_cmd = "printf '%s' '" + payload + "' | sh .claude/hooks/" + script
+    val (out, _err, code) = process_run("/bin/sh", ["-c", shell_cmd])
+    (out, code)
+
+fn selftest(script: text) -> (text, i64):
+    val (out, _err, code) = process_run("/bin/sh", [".claude/hooks/" + script, "--selftest"])
+    (out, code)
+
+describe "bash_net_blocker.shs — fail-closed network blocker":
+    it "denies curl with a redirect to the simple_ctx tools":
+        val (out, code) = hook_run("bash_net_blocker.shs", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"curl -s https://example.org\"}}")
+        assert_equal(code, 0)
+        assert_contains(out, "\"permissionDecision\":\"deny\"")
+        assert_contains(out, "simple_ctx_fetch_and_index")
+
+    it "denies inline HTTP client calls":
+        val (out, _c) = hook_run("bash_net_blocker.shs", "{\"tool_input\":{\"command\":\"python3 -c import requests; requests.get(u)\"}}")
+        assert_contains(out, "\"permissionDecision\":\"deny\"")
+
+    it "denies when the command cannot be parsed (fail-closed)":
+        val (out, _c) = hook_run("bash_net_blocker.shs", "{\"tool_name\":\"Bash\"}")
+        assert_contains(out, "\"permissionDecision\":\"deny\"")
+        assert_contains(out, "fail-closed")
+
+    it "stays silent for a safe command":
+        val (out, code) = hook_run("bash_net_blocker.shs", "{\"tool_input\":{\"command\":\"git status\"}}")
+        assert_equal(code, 0)
+        assert_equal(out.trim(), "")
+
+    it "passes its selftest":
+        val (out, code) = selftest("bash_net_blocker.shs")
+        assert_equal(code, 0)
+        assert_contains(out, "PASS")
+
+describe "bash_output_hint.shs — fail-open large-output hint":
+    it "hints on a likely >20-line command":
+        val (out, code) = hook_run("bash_output_hint.shs", "{\"tool_input\":{\"command\":\"grep -rn pattern src/\"}}")
+        assert_equal(code, 0)
+        assert_contains(out, "\"additionalContext\"")
+        assert_contains(out, "simple_ctx_batch_execute")
+
+    it "stays silent for bounded and short commands and on empty input (fail-open)":
+        val (a, ca) = hook_run("bash_output_hint.shs", "{\"tool_input\":{\"command\":\"git log --oneline -n 3\"}}")
+        assert_equal(ca, 0)
+        assert_equal(a.trim(), "")
+        val (b, cb) = hook_run("bash_output_hint.shs", "")
+        assert_equal(cb, 0)
+        assert_equal(b.trim(), "")
+
+    it "passes its selftest":
+        val (out, code) = selftest("bash_output_hint.shs")
+        assert_equal(code, 0)
+        assert_contains(out, "PASS")
+
+describe "webfetch_deny.shs — fail-closed WebFetch deny":
+    it "denies and echoes the URL with the redirect":
+        val (out, code) = hook_run("webfetch_deny.shs", "{\"tool_name\":\"WebFetch\",\"tool_input\":{\"url\":\"https://example.org/doc\"}}")
+        assert_equal(code, 0)
+        assert_contains(out, "\"permissionDecision\":\"deny\"")
+        assert_contains(out, "https://example.org/doc")
+        assert_contains(out, "simple_ctx_fetch_and_index")
+
+    it "denies even with unreadable input (fail-closed)":
+        val (out, _c) = hook_run("webfetch_deny.shs", "not json at all")
+        assert_contains(out, "\"permissionDecision\":\"deny\"")
+
+    it "passes its selftest":
+        val (out, code) = selftest("webfetch_deny.shs")
+        assert_equal(code, 0)
+        assert_contains(out, "PASS")
+
+describe "read_analysis_hint.shs — fail-open Read hint":
+    it "hints simple_ctx_execute_file for a large un-windowed read":
+        val (out, code) = hook_run("read_analysis_hint.shs", "{\"tool_input\":{\"file_path\":\"src/app/mcp/tool_table.spl\"}}")
+        assert_equal(code, 0)
+        assert_contains(out, "simple_ctx_execute_file")
+
+    it "stays silent for a windowed read, a missing file, and bad input (fail-open)":
+        val (a, ca) = hook_run("read_analysis_hint.shs", "{\"tool_input\":{\"file_path\":\"src/app/mcp/tool_table.spl\",\"offset\":10,\"limit\":40}}")
+        assert_equal(ca, 0)
+        assert_equal(a.trim(), "")
+        val (b, cb) = hook_run("read_analysis_hint.shs", "{\"tool_input\":{\"file_path\":\"no/such/file.xyz\"}}")
+        assert_equal(cb, 0)
+        assert_equal(b.trim(), "")
+        val (c, cc) = hook_run("read_analysis_hint.shs", "garbage")
+        assert_equal(cc, 0)
+        assert_equal(c.trim(), "")
+
+    it "passes its selftest":
+        val (out, code) = selftest("read_analysis_hint.shs")
+        assert_equal(code, 0)
+        assert_contains(out, "PASS")

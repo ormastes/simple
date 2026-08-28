@@ -64,6 +64,7 @@ fn _mcp_static_prop_desc(param_name: text, description: text) -> text:
 
 fn _mcp_static_context_props() -> text:
     var parts: [text] = []
+    parts.push(_mcp_static_prop_desc("requester", "Requester location path[:line] for the MDSOC visibility section (default: last file read this session; none => section carries a note)"))
     parts.push(_mcp_static_prop_desc("file", "Source file path; required except when sql=true and query is non-empty"))
     parts.push(_mcp_static_prop_desc("target", "Target symbol or section"))
     parts.push(_mcp_static_prop_desc("format", "Output format: text, markdown/md, json"))
@@ -76,9 +77,12 @@ fn _mcp_static_context_props() -> text:
 
 fn _mcp_static_ponytail_props() -> text:
     var parts: [text] = []
-    parts.push(_mcp_static_prop_desc("file", "Source file path"))
+    parts.push(_mcp_static_prop_desc("file", "Source file path (optional when diff is given)"))
+    parts.push(_mcp_static_prop_desc("diff", "Unified diff text; only added lines produce findings"))
     parts.push(_mcp_static_prop_desc("format", "Output format: text, markdown, json"))
-    parts.push(_mcp_static_prop_desc("mode", "Mode: audit/review, simplification/simplify"))
+    parts.push(_mcp_static_prop_desc("mode", "Mode: audit/review (legacy counters + ladder findings), simplification/simplify, ladder (findings only)"))
+    parts.push(_mcp_static_prop_desc("level", "Intensity: lite (high-confidence only), full (default), ultra (everything)"))
+    parts.push(_mcp_static_prop_desc("lint", "true to append `simple lint` output (slow, ~12s startup)"))
     LB() + parts.join(",") + RB()
 
 fn _mcp_static_pipe_props() -> text:
@@ -102,7 +106,37 @@ fn _mcp_static_node_repl_props() -> text:
     parts.push(_mcp_static_prop_desc("timeout_ms", "Max time to wait for node to exit (default 10000, max 60000)"))
     LB() + parts.join(",") + RB()
 
+fn _mcp_static_ctx_props(name: text) -> text:
+    var parts: [text] = []
+    if name == "simple_ctx_index":
+        parts.push(_mcp_static_prop_desc("content", "Text to chunk and index into the persistent .simple/ctx store"))
+        parts.push(_mcp_static_prop_desc("source", "Source label stored with every chunk (default manual:<ts>)"))
+    if name == "simple_ctx_search":
+        parts.push(_mcp_static_prop_desc("queries", "Array of search queries (or use `query` for one)"))
+        parts.push(_mcp_static_prop_desc("query", "Single search query"))
+        parts.push(_mcp_static_prop_desc("source", "Only search chunks whose source label starts with this prefix"))
+        parts.push(_mcp_static_prop_desc("limit", "Max hits per query (default 5, max 25)"))
+    if name == "simple_ctx_execute" or name == "simple_ctx_execute_file":
+        parts.push(_mcp_static_prop_desc("language", "shell | javascript | simple"))
+        parts.push(_mcp_static_prop_desc("code", "Code to run in a bounded sandbox; only stdout is returned, stderr is summarized"))
+        parts.push(_mcp_static_prop_desc("timeout_ms", "Wall budget (default 15000, max 120000)"))
+    if name == "simple_ctx_execute_file":
+        parts.push(_mcp_static_prop_desc("path", "File exposed to the code as $1/$FILE (shell), process.argv[2] (javascript), first CLI arg (simple)"))
+    if name == "simple_ctx_batch_execute":
+        parts.push(_mcp_static_prop_desc("commands", "Array of shell commands; each output is indexed"))
+        parts.push(_mcp_static_prop_desc("queries", "Array of queries searched over the indexed outputs"))
+        parts.push(_mcp_static_prop_desc("source", "Source label prefix (default batch:<ts>)"))
+        parts.push(_mcp_static_prop_desc("timeout_ms", "Wall budget per command (default 15000, max 120000)"))
+        parts.push(_mcp_static_prop_desc("limit", "Max hits per query (default 5, max 25)"))
+    if name == "simple_ctx_fetch_and_index":
+        parts.push(_mcp_static_prop_desc("url", "http(s) URL to fetch through the Simple http client (no JS, size-capped)"))
+        parts.push(_mcp_static_prop_desc("source", "Source label (default web:<url>)"))
+        parts.push(_mcp_static_prop_desc("max_bytes", "Body cap in bytes (default 262144, max 2097152)"))
+    LB() + parts.join(",") + RB()
+
 fn _mcp_static_props_for_tool(name: text, required_json: text) -> text:
+    if name.starts_with("simple_ctx_"):
+        return _mcp_static_ctx_props(name)
     if name == "simple_pipe":
         return _mcp_static_pipe_props()
     if name == "simple_context":
@@ -214,6 +248,7 @@ fn _mcp_static_tool_table() -> [McpStaticTool]:
     t.push(_mcp_static_tool("debug_log_tree", "[debug-log] Get debug log tree", "[]"))
     t.push(_mcp_static_tool("debug_log_status", "[debug-log] Get debug log status", "[]"))
     t.push(_mcp_static_tool("simple_read", "[diagnostics] Read Simple source with diagnostics", "[]"))
+    t.push(_mcp_static_tool("simple_visibility", "[diagnostics] MDSOC layer-public + feature-public symbol sets for a requester location", "[]"))
     t.push(_mcp_static_tool("simple_edit", "[diagnostics] Edit Simple source file (native handler)", "[]"))
     t.push(_mcp_static_tool("simple_multi_edit", "[diagnostics] Edit multiple files (native handler)", "[]"))
     t.push(_mcp_static_tool("simple_check", "[diagnostics] Check Simple source for errors", "[]"))
@@ -239,7 +274,7 @@ fn _mcp_static_tool_table() -> [McpStaticTool]:
     t.push(_mcp_static_tool("simple_dependencies", "[query] Module dependency graph", "[]"))
     t.push(_mcp_static_tool("simple_api_diff", "[query] API surface diff", "[]"))
     t.push(_mcp_static_tool("simple_context", "[query] Context pack for AI/docs", "[]"))
-    t.push(_mcp_static_tool("simple_ponytail", "[query] Ponytail over-engineering audit", "[]"))
+    t.push(_mcp_static_tool("simple_ponytail", "[query] Ponytail lazy-ladder review: rung-tagged over-engineering findings for a file or diff (level lite|full|ultra)", "[]"))
     t.push(_mcp_static_tool("simple_search", "[query] Language-aware code search", "[]"))
     t.push(_mcp_static_tool("editor.open_file", "[editor] Open a file in the shared IDE editor session", "[\"path\"]"))
     t.push(_mcp_static_tool("editor.read_buffer", "[editor] Read the active shared IDE editor buffer", "[]"))
@@ -300,6 +335,13 @@ fn _mcp_static_tool_table() -> [McpStaticTool]:
     t.push(_mcp_static_tool("debug_ui_theme_tokens", "[debug-ui] Dump all theme token values", "[]"))
     t.push(_mcp_static_tool("debug_ui_css_dump", "[debug-ui] Generate full CSS output for a theme", "[]"))
     t.push(_mcp_static_tool("node_repl", "[node] Run a JavaScript snippet with `node -e` (one-shot, requires Node.js)", "[\"code\"]"))
+    t.push(_mcp_static_tool("simple_ctx_index", "[ctx] Chunk + index text into the persistent .simple/ctx BM25 store", "[\"content\"]"))
+    t.push(_mcp_static_tool("simple_ctx_search", "[ctx] Ranked BM25 search over indexed content (queries[] or query)", "[]"))
+    t.push(_mcp_static_tool("simple_ctx_execute", "[ctx] Run shell/javascript/simple code in a bounded sandbox; stdout only", "[\"code\"]"))
+    t.push(_mcp_static_tool("simple_ctx_execute_file", "[ctx] Run code against a file in a bounded sandbox; stdout only", "[\"path\", \"code\"]"))
+    t.push(_mcp_static_tool("simple_ctx_batch_execute", "[ctx] Run commands, index their output, return search hits in one call", "[\"commands\"]"))
+    t.push(_mcp_static_tool("simple_ctx_fetch_and_index", "[ctx] Fetch an http(s) page (size-capped, tags stripped) and index it", "[\"url\"]"))
+    t.push(_mcp_static_tool("simple_ctx_stats", "[ctx] Index counts and bytes saved", "[]"))
     t
 
 # Cheap probe count: number of tools in the manifest. Walks the descriptor

@@ -384,6 +384,40 @@ For the operator workflow and HTTP route equivalents, see
 | `simple_implementation` | Trait impls | file, line |
 | `simple_folding_range` | Folding ranges | file |
 
+### Context (7 tools)
+
+Repo-native replacement for the user-level "context-mode" plugin. Handlers:
+`src/app/mcp/main_lazy_ctx_tools.spl`; specs:
+`test/01_unit/app/mcp/ctx_tools_spec.spl` and
+`test/01_unit/app/mcp/ctx_hooks_spec.spl`.
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `simple_ctx_index` | Chunk (~1200 chars, line-aligned) + index text with a source label | content |
+| `simple_ctx_search` | Ranked BM25 (k1=1.2, b=0.75) search; per-query hit blocks with source/score/snippet | queries (or query) |
+| `simple_ctx_execute` | Run shell/javascript/simple code in a bounded sandbox; stdout only, stderr summarized | code |
+| `simple_ctx_execute_file` | Same, with a file exposed as `$1`/`$FILE` (shell), `process.argv[2]` (js), first arg (simple) | path, code |
+| `simple_ctx_batch_execute` | Run commands, index each output under `source#i`, answer queries in one call | commands |
+| `simple_ctx_fetch_and_index` | GET via the Simple http client (http/https only, no JS), cap bytes, strip tags, index | url |
+| `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
+
+- **Persistent store**: `.simple/ctx/` (override with `SIMPLE_CTX_DIR`), two
+  SDN tables written atomically (`chunks.sdn`, `stats.sdn`) — survives across
+  server processes and sessions, unlike the plugin's per-process temp DB.
+- **Sandbox**: `std.nogc_sync_mut.io.resource_scope` bounded run — wall
+  timeout (default 15 s, max 120 s), 1 MiB output cap, `ulimit`-based pid and
+  memory caps (cgroup v2 when available). Note `ulimit -u` counts the whole
+  user, so the pid budget uses the `Large` class (2048) on shared hosts.
+- **Fetch cap**: default 256 KiB, hard max 2 MiB, applied before tag
+  stripping; non-http(s) schemes are refused.
+
+**Context hooks** (`.claude/hooks/*.shs`, wired in `.claude/settings.json`,
+POSIX/dash-clean, each with `--selftest`): `bash_net_blocker.shs` (fail-closed
+deny of curl/wget/inline-HTTP Bash with a redirect to the ctx tools),
+`webfetch_deny.shs` (fail-closed WebFetch deny), `bash_output_hint.shs` and
+`read_analysis_hint.shs` (fail-open additionalContext hints for likely
+>20-line commands and Read-for-analysis of large files).
+
 ### Code Query (3 tools)
 
 | Tool | Description | Required Params |

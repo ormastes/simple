@@ -1,0 +1,170 @@
+# Query visibility — MDSOC feature-dimension classification (leaf module)
+#
+# A *feature capsule* is the nearest ancestor directory whose `__init__.spl`
+# declares `arch { dimension = "feature" ... }` (see
+# `src/compiler/85.mdsoc/feature/<name>/__init__.spl`). Its feature-public
+# surface is:
+#   (a) every symbol named in an `export A, B` / `export use m.{A, B}` line of an
+#       `__init__.spl` between the owner file and the capsule root, or
+#   (b) a non-private declaration in a file under one of the manifest's
+#       `exports { expose = ["./app/ports"] }` paths.
+# Anything else inside the capsule is feature-private: reachable only from a
+# requester inside the same capsule. `imports { deny = [...] }` is NOT enforced
+# here (imports axis, virtual-path globs) — documented as future work in
+# doc/05_design/app/mcp/mdsoc_visibility_requester_design.md.
+
+use app.cli.query_rich_common.{query_file_read_rich, query_file_exists}
+use app.cli._QueryVisibility.symbol_resolution.{parent_dir, relative_to_src, list_has_text, json_text, bool_json}
+
+fn feature_manifest_is_feature(manifest: text) -> bool:
+    if not query_file_exists(manifest):
+        return false
+    val content = query_file_read_rich(manifest) ?? ""
+    content.contains("dimension = \"feature\"")
+
+fn feature_dir_of(file_path: text) -> text:
+    var current = parent_dir(file_path)
+    while current != "":
+        if feature_manifest_is_feature(current + "/__init__.spl"):
+            return current
+        val next = parent_dir(current)
+        if next == current:
+            break
+        current = next
+    ""
+
+fn feature_id_of(file_path: text) -> text:
+    val dir = feature_dir_of(file_path)
+    if dir == "":
+        return ""
+    relative_to_src(dir).replace("/", ".")
+
+fn feature_expose_paths(feature_dir: text) -> [text]:
+    if feature_dir == "":
+        return []
+    val content = query_file_read_rich(feature_dir + "/__init__.spl") ?? ""
+    var paths: [text] = []
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if not trimmed.starts_with("expose"):
+            continue
+        val open_idx = trimmed.index_of("[")
+        val close_idx = trimmed.index_of("]")
+        if open_idx < 0 or close_idx <= open_idx:
+            continue
+        val inner = trimmed.substring(open_idx + 1, close_idx)
+        for raw in inner.split(","):
+            var entry = raw.trim().replace("\"", "").replace("'", "")
+            if entry.starts_with("./"):
+                entry = entry.substring(2)
+            if entry == "":
+                continue
+            paths = paths.push(feature_dir + "/" + entry)
+    paths
+
+fn feature_file_exposed(feature_dir: text, file_path: text) -> bool:
+    for base in feature_expose_paths(feature_dir):
+        if file_path == base + ".spl" or file_path.starts_with(base + "/"):
+            return true
+    false
+
+fn feature_export_names_in_line(trimmed: text) -> [text]:
+    var names: [text] = []
+    var rest = ""
+    if trimmed.starts_with("export use "):
+        val open_idx = trimmed.index_of("{")
+        val close_idx = trimmed.index_of("}")
+        if open_idx < 0 or close_idx <= open_idx:
+            return []
+        rest = trimmed.substring(open_idx + 1, close_idx)
+    elif trimmed.starts_with("export "):
+        rest = trimmed.substring(7)
+    else:
+        return []
+    for raw in rest.split(","):
+        val name = raw.trim()
+        if name == "" or name.contains(".") or name.contains("*") or name.contains(" "):
+            continue
+        names = names.push(name)
+    names
+
+# Symbols named in `export ...` lines of every __init__.spl from the owner's
+# directory up to (and including) the feature capsule root.
+fn feature_manifest_exports(feature_dir: text, file_path: text) -> [text]:
+    if feature_dir == "":
+        return []
+    var names: [text] = []
+    var current = parent_dir(file_path)
+    while current != "" and current.starts_with(feature_dir):
+        val manifest = current + "/__init__.spl"
+        if query_file_exists(manifest):
+            val content = query_file_read_rich(manifest) ?? ""
+            for line in content.split("\n"):
+                for name in feature_export_names_in_line(line.trim()):
+                    if not list_has_text(names, name):
+                        names = names.push(name)
+        if current == feature_dir:
+            break
+        current = parent_dir(current)
+    names
+
+# Names an exposed port file re-exports through `use m.{A, B}` — a port file
+# such as feature/lexing/app/ports.spl declares nothing itself.
+fn feature_reexports_in_file(file_path: text) -> [text]:
+    if not query_file_exists(file_path):
+        return []
+    val content = query_file_read_rich(file_path) ?? ""
+    var names: [text] = []
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if not trimmed.starts_with("use ") and not trimmed.starts_with("export use "):
+            continue
+        val open_idx = trimmed.index_of("{")
+        val close_idx = trimmed.index_of("}")
+        if open_idx < 0 or close_idx <= open_idx:
+            continue
+        for raw in trimmed.substring(open_idx + 1, close_idx).split(","):
+            val name = raw.trim()
+            if name != "" and not name.contains(" ") and not list_has_text(names, name):
+                names = names.push(name)
+    names
+
+# Why a symbol is feature-public, or "" when it is feature-private / not in a
+# feature capsule. `declared` is the owner's declared visibility (from
+# query_commands.declared_visibility) so this leaf stays import-cycle free.
+fn feature_export_reason(symbol: text, owner_file: text, declared: text) -> text:
+    val dir = feature_dir_of(owner_file)
+    if dir == "":
+        return ""
+    if list_has_text(feature_manifest_exports(dir, owner_file), symbol):
+        return "named in an export line of a capsule __init__.spl"
+    if feature_file_exposed(dir, owner_file):
+        if declared != "private":
+            return "declared " + declared + " in exposed port " + relative_to_src(owner_file)
+        if list_has_text(feature_reexports_in_file(owner_file), symbol):
+            return "re-exported by exposed port " + relative_to_src(owner_file)
+    ""
+
+fn feature_reachable(owner_file: text, requester_file: text, exported: bool) -> bool:
+    if exported:
+        return true
+    if requester_file == "":
+        return false
+    val owner_dir = feature_dir_of(owner_file)
+    owner_dir != "" and owner_dir == feature_dir_of(requester_file)
+
+# Sibling of simpleVisibility: {"feature","exported","reachable"[,"why"]}.
+# Empty text when the owner is not inside a feature capsule (field omitted).
+fn feature_visibility_json(symbol: text, owner_file: text, requester_file: text, declared: text) -> text:
+    val feature = feature_id_of(owner_file)
+    if feature == "":
+        return ""
+    val why = feature_export_reason(symbol, owner_file, declared)
+    val exported = why != ""
+    var parts: [text] = []
+    parts = parts.push("\"feature\":" + json_text(feature))
+    parts = parts.push("\"exported\":" + bool_json(exported))
+    parts = parts.push("\"reachable\":" + bool_json(feature_reachable(owner_file, requester_file, exported)))
+    if exported:
+        parts = parts.push("\"why\":" + json_text(why))
+    "{" + parts.join(",") + "}"

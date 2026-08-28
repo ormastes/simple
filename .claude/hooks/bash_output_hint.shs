@@ -1,0 +1,53 @@
+#!/bin/sh
+# bash_output_hint.shs — PreToolUse(Bash) HINT. FAIL-OPEN.
+#
+# Adds context (never blocks) when a Bash command is likely to print more
+# than ~20 lines: file dumps, recursive greps/finds, git log/diff/show, test
+# and build runs. Points at simple_ctx_batch_execute / simple_ctx_execute so
+# only a summary or search hits enter the transcript.
+#
+# Fail-open: any parse problem exits 0 with no output. A hint that cannot be
+# computed must never stop work.
+#
+# Selftest: sh .claude/hooks/bash_output_hint.shs --selftest
+
+set -u
+HOOK_DIR=$(dirname "$0")
+. "$HOOK_DIR/ctx_common.shs" || exit 0
+
+ctx_is_bounded() {
+    # already piped through a bounding filter, or a count/quiet form
+    printf '%s' "$1" | grep -Eq '\|[[:space:]]*(head|tail|wc|sed -n|grep -c|grep -q|cut|sort \| uniq -c)|(^|[[:space:]])(-q|--quiet|--stat|--oneline|-n[[:space:]]*[0-9]+|-c)([[:space:]]|$)'
+}
+
+ctx_is_verbose() {
+    printf '%s' "$1" | grep -Eq '(^|[[:space:]|;&])(cat|find|tree|rg|grep -r|grep -rn|grep -R|ls -R|git (log|diff|show|blame)|bin/simple (test|lint|build|run)|cargo (build|test)|make|npm (test|run)|pytest|tail -f|journalctl|dmesg|strace)([[:space:]]|$)'
+}
+
+ctx_decide() {
+    cmd=$1
+    [ -n "$cmd" ] || return 0
+    if ctx_is_verbose "$cmd" && ! ctx_is_bounded "$cmd"; then
+        ctx_emit_hint "This Bash command may print more than 20 lines. Prefer simple-mcp: simple_ctx_batch_execute(commands, queries) runs it, indexes the output and returns only search hits; simple_ctx_execute(language: shell, code) returns stdout only from a bounded sandbox. Bash is best for git/mkdir/rm/mv and other short-output commands."
+    fi
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    fail=0
+    for verbose in 'cat src/app/mcp/main.spl' 'grep -rn foo src/' 'git log' 'bin/simple test test/01_unit' 'find . -name "*.spl"'; do
+        out=$(ctx_decide "$verbose")
+        case "$out" in *'"additionalContext"'*) ;; *) echo "selftest FAIL: no hint: $verbose"; fail=1 ;; esac
+    done
+    for quiet in 'git status' 'mkdir -p x' 'cat f | head -5' 'git log --oneline -n 3' 'grep -rn foo src/ | wc -l' ''; do
+        out=$(ctx_decide "$quiet")
+        [ -z "$out" ] || { echo "selftest FAIL: unexpected hint: $quiet"; fail=1; }
+    done
+    [ "$fail" -eq 0 ] && echo "PASS — bash_output_hint selftest: 5 hinted, 6 silent"
+    exit "$fail"
+fi
+
+ctx_read_input || exit 0
+command=$(ctx_json_str command) || exit 0
+ctx_decide "$command"
+exit 0

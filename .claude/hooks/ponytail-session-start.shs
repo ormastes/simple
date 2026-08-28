@@ -1,0 +1,61 @@
+#!/bin/sh
+# SessionStart hook: re-inject ponytail mode after startup/resume/clear/compact.
+#
+# Reads the level from $PONYTAIL_LEVEL_FILE (default .simple/ponytail.level,
+# gitignored). Missing file -> "full". "off" -> print nothing, exit 0.
+# Otherwise prints the activation banner plus the skill body so the mode
+# survives context compaction. Stdout of a SessionStart hook is added to the
+# model's context by Claude Code.
+#
+# --selftest: run the level-file variants in a temp dir and print
+#   Results: <passed> passed, <failed> failed   (exit 1 on any failure)
+#
+# ponytail: plain POSIX sh, no JSON output; Codex/Copilot readers get the same
+# text via their own skill mirrors, upgrade to hookSpecificOutput JSON if a host needs it.
+
+ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+LEVEL_FILE="${PONYTAIL_LEVEL_FILE:-$ROOT/.simple/ponytail.level}"
+SKILL="${PONYTAIL_SKILL_FILE:-$ROOT/.claude/skills/ponytail.md}"
+
+read_level() {
+    lvl=""
+    [ -f "$LEVEL_FILE" ] && lvl=$(head -n 1 "$LEVEL_FILE" | tr -d '[:space:]')
+    case "$lvl" in
+        lite|full|ultra|off) ;;
+        *) lvl=full ;;
+    esac
+    printf '%s' "$lvl"
+}
+
+emit() {
+    level=$(read_level)
+    [ "$level" = off ] && return 0
+    printf 'PONYTAIL MODE ACTIVE — level: %s\n\n' "$level"
+    [ -f "$SKILL" ] && cat "$SKILL"
+    printf '\nActive level: %s. Switch: /ponytail lite|full|ultra. Off: "stop ponytail" / "normal mode".\n' "$level"
+}
+
+selftest() {
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/ponytail-hook.XXXXXX")
+    pass=0; fail=0
+    check() {  # name expected_first_line_or_EMPTY
+        out=$(PONYTAIL_LEVEL_FILE="$tmp/level" sh "$0" | head -n 1)
+        if [ "$out" = "$2" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $1: got '$out' want '$2'"; fi
+    }
+    rm -f "$tmp/level";                 check missing-file-defaults-full "PONYTAIL MODE ACTIVE — level: full"
+    printf 'lite\n' > "$tmp/level";     check lite "PONYTAIL MODE ACTIVE — level: lite"
+    printf 'ultra\n' > "$tmp/level";    check ultra "PONYTAIL MODE ACTIVE — level: ultra"
+    printf 'off\n' > "$tmp/level";      check off ""
+    printf 'bogus\n' > "$tmp/level";    check bogus-falls-back-to-full "PONYTAIL MODE ACTIVE — level: full"
+    printf 'full\n' > "$tmp/level"
+    body=$(PONYTAIL_LEVEL_FILE="$tmp/level" sh "$0")
+    case "$body" in *"## The ladder"*) pass=$((pass+1));; *) fail=$((fail+1)); echo "FAIL skill-body-included";; esac
+    rm -rf "$tmp"
+    echo "Results: $pass passed, $fail failed"
+    [ "$fail" -eq 0 ]
+}
+
+case "${1:-}" in
+    --selftest) selftest ;;
+    *) emit ;;
+esac

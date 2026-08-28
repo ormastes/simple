@@ -1,0 +1,63 @@
+#!/bin/sh
+# bash_net_blocker.shs — PreToolUse(Bash) BLOCKER. FAIL-CLOSED.
+#
+# Denies Bash commands that fetch over the network directly (curl / wget as a
+# command word, or inline HTTP client calls) and points the caller at the
+# repo's own MCP tools: simple_ctx_fetch_and_index / simple_ctx_execute.
+#
+# Fail-closed: if stdin cannot be read or the command cannot be extracted, the
+# call is DENIED — a blocker that cannot see what it is guarding must not wave
+# it through. (The hint hooks are the opposite: they fail open.)
+#
+# Selftest: sh .claude/hooks/bash_net_blocker.shs --selftest
+
+set -u
+HOOK_DIR=$(dirname "$0")
+. "$HOOK_DIR/ctx_common.shs"
+
+ctx_is_net_command() {
+    # word-boundary match so `echo curling` or `./wget-log` are not blocked
+    if printf '%s' "$1" | grep -Eq '(^|[^A-Za-z0-9_./-])(curl|wget)([^A-Za-z0-9_-]|$)'; then
+        return 0
+    fi
+    for needle in "fetch('http" 'fetch("http' 'requests.get(' 'requests.post(' 'http.get(' 'http.request(' 'urllib.request' 'Invoke-WebRequest'; do
+        if printf '%s' "$1" | grep -Fq "$needle"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+ctx_decide() {
+    cmd=$1
+    if [ -z "$cmd" ]; then
+        ctx_emit_deny "bash_net_blocker: could not read the Bash command from the hook input (fail-closed). Retry with a plain command, or use simple_ctx_execute(language: shell, code: ...) via simple-mcp."
+        return 0
+    fi
+    if ctx_is_net_command "$cmd"; then
+        ctx_emit_deny "Direct network fetch in Bash is blocked by .claude/hooks/bash_net_blocker.shs. Use the simple-mcp tools instead: simple_ctx_fetch_and_index(url, source) to fetch+index a page (then simple_ctx_search), or simple_ctx_execute(language, code) to run HTTP code in a bounded sandbox where only stdout returns."
+        return 0
+    fi
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    fail=0
+    for blocked in 'curl https://x' 'wget -q http://x -O f' 'cd a && curl x' "python3 -c \"import requests; requests.get('u')\"" "node -e \"fetch('http://x')\""; do
+        out=$(ctx_decide "$blocked")
+        case "$out" in *'"permissionDecision":"deny"'*) ;; *) echo "selftest FAIL: not denied: $blocked"; fail=1 ;; esac
+    done
+    for allowed in 'echo curling' 'ls ./wget-log' 'git status' 'grep -rn curl_easy src/' 'cat README.md'; do
+        out=$(ctx_decide "$allowed")
+        [ -z "$out" ] || { echo "selftest FAIL: wrongly denied: $allowed"; fail=1; }
+    done
+    out=$(ctx_decide "")
+    case "$out" in *'"permissionDecision":"deny"'*) ;; *) echo "selftest FAIL: empty input must deny"; fail=1 ;; esac
+    [ "$fail" -eq 0 ] && echo "PASS — bash_net_blocker selftest: 5 denied, 5 allowed, empty input denied"
+    exit "$fail"
+fi
+
+ctx_read_input
+command=$(ctx_json_str command)
+ctx_decide "$command"
+exit 0

@@ -1,0 +1,772 @@
+# MCP Context Tool Handlers — persistent BM25 index + sandboxed execution
+#
+# Repo-native replacement for the user-level "context-mode" plugin tools:
+#
+#   simple_ctx_index(content, source)                 -> chunk + index text
+#   simple_ctx_search(queries[] | query, source?, limit?) -> ranked BM25 hits
+#   simple_ctx_execute(language, code, timeout_ms?)   -> bounded run, stdout only
+#   simple_ctx_execute_file(path, language, code)     -> same, file path in $1/argv
+#   simple_ctx_batch_execute(commands[], queries[], source?) -> run+index+search
+#   simple_ctx_fetch_and_index(url, source, max_bytes?) -> capped GET, tags stripped
+#   simple_ctx_stats()                                -> counts + bytes saved
+#
+# Store: `.simple/ctx/` (override: SIMPLE_CTX_DIR). Two SDN tables written
+# atomically (tmp + rename) so a killed session never leaves a torn store:
+#   chunks.sdn  ctx_chunks | id, source, ts, bytes, text |   (text is escaped)
+#   stats.sdn   ctx_stats  | key, value |
+# The index survives across server processes and sessions — it is a file, not
+# a per-process temp DB. Search is BM25 (k1=1.2, b=0.75) over word tokens of
+# each chunk, computed at query time from the stored chunks; no external
+# search engine, no SQLite FTS5 dependency.
+#
+# Sandbox: every execution goes through std resource_scope
+# (`run_in_execution_resource_scope`) which applies wall timeout, output cap,
+# pid cap (`ulimit -u`) and memory cap. Only stdout is returned; stderr is
+# summarized to one line so a noisy failure cannot flood the caller.
+
+use .main_lazy_json.{extract_field, extract_field_raw, make_tool_error, make_tool_result}
+use .main_lazy_node_tools.{require_external_tool}
+
+use std.io_runtime.{env_get, file_read, file_write, file_exists, file_move_cross_device, dir_create, time_now_unix_micros}
+use std.database.core.{parse_sdn_table}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
+use std.nogc_sync_mut.io.http_sffi.{http_get}
+use std.nogc_sync_mut.security.sanitize.{strip_html_tags}
+use std.common.math.special.{ln_f64}
+use std.common.perf.execution_metrics.{TerminationCause}
+
+const _CTX_CHUNK_CHARS: i64 = 1200
+const _CTX_DEFAULT_LIMIT: i64 = 5
+const _CTX_MAX_LIMIT: i64 = 25
+const _CTX_SNIPPET_CHARS: i64 = 320
+const _CTX_DEFAULT_TIMEOUT_MS: i64 = 15000
+const _CTX_MAX_TIMEOUT_MS: i64 = 120000
+const _CTX_MAX_OUTPUT_BYTES: i64 = 1048576
+const _CTX_FETCH_DEFAULT_MAX_BYTES: i64 = 262144
+const _CTX_FETCH_HARD_MAX_BYTES: i64 = 2097152
+
+# ---------------------------------------------------------------------------
+# Store location + SDN cell escaping
+# ---------------------------------------------------------------------------
+
+fn ctx_store_dir() -> text:
+    val override = env_get("SIMPLE_CTX_DIR") ?? ""
+    if override != "":
+        return override
+    ".simple/ctx"
+
+fn _ctx_chunks_path() -> text:
+    ctx_store_dir() + "/chunks.sdn"
+
+fn _ctx_stats_path() -> text:
+    ctx_store_dir() + "/stats.sdn"
+
+fn _ctx_ensure_dir() -> bool:
+    val dir = ctx_store_dir()
+    if file_exists(dir):
+        return true
+    dir_create(dir, true)
+
+# One SDN cell must be a single line with no raw double quote (the SDN row
+# splitter toggles quoting on `"`). Commas are fine: the writer quotes cells
+# containing them and the parser strips the quotes back off.
+fn ctx_escape_cell(s: text) -> text:
+    var r = s.replace("\\", "\\\\")
+    r = r.replace("\"", "\\q")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\n", "\\n")
+    r = r.replace("\t", "\\t")
+    r
+
+fn ctx_unescape_cell(s: text) -> text:
+    var out: [text] = []
+    var esc = false
+    for ch in s:
+        if esc:
+            esc = false
+            if ch == "n":
+                out.push("\n")
+            elif ch == "r":
+                out.push("\r")
+            elif ch == "t":
+                out.push("\t")
+            elif ch == "q":
+                out.push("\"")
+            else:
+                out.push(ch)
+        elif ch == "\\":
+            esc = true
+        else:
+            out.push(ch)
+    out.join("")
+
+fn _ctx_cell(s: text) -> text:
+    val e = ctx_escape_cell(s)
+    if e.contains(","):
+        return "\"" + e + "\""
+    e
+
+# Atomic write: tmp file + rename.
+fn _ctx_write_atomic(path: text, content: text) -> bool:
+    val tmp = path + ".tmp"
+    if not file_write(tmp, content):
+        return false
+    file_move_cross_device(tmp, path)
+
+# ---------------------------------------------------------------------------
+# Chunk store
+# ---------------------------------------------------------------------------
+
+struct CtxChunk:
+    id: i64
+    source: text
+    ts: i64
+    bytes: i64
+    body: text
+
+fn _ctx_load_chunks() -> [CtxChunk]:
+    var out: [CtxChunk] = []
+    val path = _ctx_chunks_path()
+    if not file_exists(path):
+        return out
+    val content = file_read(path)
+    val table = parse_sdn_table(content)
+    match table:
+        Some(t):
+            for row in t.rows:
+                val id = (row.get("id") ?? "0").to_int() ?? 0
+                val src = row.get("source") ?? ""
+                val ts = (row.get("ts") ?? "0").to_int() ?? 0
+                val bytes = (row.get("bytes") ?? "0").to_int() ?? 0
+                val body = ctx_unescape_cell(row.get("text") ?? "")
+                out.push(CtxChunk(id: id, source: src, ts: ts, bytes: bytes, body: body))
+        nil:
+            pass
+    out
+
+fn _ctx_chunk_line(c: CtxChunk) -> text:
+    "    " + str(c.id) + ", " + _ctx_cell(c.source) + ", " + str(c.ts) + ", " + str(c.bytes) + ", " + _ctx_cell(c.body) + "\n"
+
+fn _ctx_append_chunks(new_chunks: [CtxChunk]) -> bool:
+    if not _ctx_ensure_dir():
+        return false
+    val path = _ctx_chunks_path()
+    var lines: [text] = []
+    if file_exists(path):
+        lines.push(file_read(path))
+    else:
+        lines.push("# ctx chunk store — written by simple_ctx_* MCP tools. Do not edit by hand.\n")
+        lines.push("ctx_chunks | id, source, ts, bytes, text |\n")
+    for c in new_chunks:
+        lines.push(_ctx_chunk_line(c))
+    _ctx_write_atomic(path, lines.join(""))
+
+fn _ctx_next_id(existing: [CtxChunk]) -> i64:
+    var mx: i64 = 0
+    for c in existing:
+        if c.id > mx:
+            mx = c.id
+    mx + 1
+
+fn _ctx_now_secs() -> i64:
+    time_now_unix_micros() / 1000000
+
+# Split text into chunks of ~_CTX_CHUNK_CHARS, breaking on line boundaries.
+fn ctx_chunk_text(content: text, chunk_chars: i64) -> [text]:
+    var chunks: [text] = []
+    var cur: [text] = []
+    var cur_len: i64 = 0
+    for line in content.split("\n"):
+        val ll = line.len() + 1
+        if cur_len > 0 and cur_len + ll > chunk_chars:
+            chunks.push(cur.join("\n"))
+            cur = []
+            cur_len = 0
+        # A single line longer than the chunk budget is split by fixed width.
+        if ll > chunk_chars:
+            var start = 0
+            val n = line.len()
+            while start < n:
+                var end = start + chunk_chars
+                if end > n:
+                    end = n
+                chunks.push(line.substring(start, end))
+                start = end
+            continue
+        cur.push(line)
+        cur_len = cur_len + ll
+    if cur_len > 0:
+        val tail = cur.join("\n")
+        if tail.trim() != "":
+            chunks.push(tail)
+    chunks
+
+# Index `content` under `source`; returns number of chunks written.
+fn ctx_index_text(content: text, source: text) -> i64:
+    if content.trim() == "":
+        return 0
+    val existing = _ctx_load_chunks()
+    var next = _ctx_next_id(existing)
+    val now = _ctx_now_secs()
+    var rows: [CtxChunk] = []
+    for piece in ctx_chunk_text(content, _CTX_CHUNK_CHARS):
+        rows.push(CtxChunk(id: next, source: source, ts: now, bytes: piece.len(), body: piece))
+        next = next + 1
+    if rows.len() == 0:
+        return 0
+    if not _ctx_append_chunks(rows):
+        return -1
+    _ctx_stats_bump("bytes_indexed", content.len())
+    _ctx_stats_bump("index_calls", 1)
+    rows.len()
+
+# ---------------------------------------------------------------------------
+# Stats (key/value SDN)
+# ---------------------------------------------------------------------------
+
+fn _ctx_load_stats() -> Dict<text, i64>:
+    var d: Dict<text, i64> = {}
+    val path = _ctx_stats_path()
+    if not file_exists(path):
+        return d
+    val table = parse_sdn_table(file_read(path))
+    match table:
+        Some(t):
+            for row in t.rows:
+                val k = row.get("key") ?? ""
+                val v = (row.get("value") ?? "0").to_int() ?? 0
+                if k != "":
+                    d[k] = v
+        nil:
+            pass
+    d
+
+fn _ctx_save_stats(d: Dict<text, i64>) -> bool:
+    if not _ctx_ensure_dir():
+        return false
+    var lines: [text] = []
+    lines.push("ctx_stats | key, value |\n")
+    val keys = d.keys()
+    for k in keys:
+        lines.push("    " + k + ", " + str(d[k]) + "\n")
+    _ctx_write_atomic(_ctx_stats_path(), lines.join(""))
+
+fn _ctx_stats_bump(key: text, delta: i64):
+    var d = _ctx_load_stats()
+    if d.contains_key(key):
+        d[key] = d[key] + delta
+    else:
+        d[key] = delta
+    _ctx_save_stats(d)
+
+# ---------------------------------------------------------------------------
+# Tokenizer + BM25
+# ---------------------------------------------------------------------------
+
+fn _ctx_is_word_char(ch: text) -> bool:
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    ch == "_"
+
+fn ctx_tokenize(s: text) -> [text]:
+    var toks: [text] = []
+    var cur: [text] = []
+    for ch in s.lower():
+        if _ctx_is_word_char(ch):
+            cur.push(ch)
+        else:
+            if cur.len() >= 2:
+                toks.push(cur.join(""))
+            cur = []
+    if cur.len() >= 2:
+        toks.push(cur.join(""))
+    toks
+
+struct CtxHit:
+    chunk: CtxChunk
+    score: f64
+    matched: i64
+
+fn _ctx_tf(tokens: [text]) -> Dict<text, i64>:
+    var tf: Dict<text, i64> = {}
+    for t in tokens:
+        if tf.contains_key(t):
+            tf[t] = tf[t] + 1
+        else:
+            tf[t] = 1
+    tf
+
+# BM25 over all chunks (optionally restricted to a source prefix).
+fn ctx_bm25_search(chunks: [CtxChunk], query: text, source_prefix: text, limit: i64) -> [CtxHit]:
+    val q_terms = ctx_tokenize(query)
+    if q_terms.len() == 0:
+        return []
+    var docs: [CtxChunk] = []
+    for c in chunks:
+        if source_prefix == "" or c.source.starts_with(source_prefix):
+            docs.push(c)
+    val n_docs = docs.len()
+    if n_docs == 0:
+        return []
+    # Pass 1: term frequencies + document lengths + document frequencies.
+    var tfs: [Dict<text, i64>] = []
+    var lens: [i64] = []
+    var total_len: i64 = 0
+    var df: Dict<text, i64> = {}
+    for d in docs:
+        val toks = ctx_tokenize(d.body)
+        val tf = _ctx_tf(toks)
+        tfs.push(tf)
+        lens.push(toks.len())
+        total_len = total_len + toks.len()
+        for qt in q_terms:
+            if tf.contains_key(qt):
+                if df.contains_key(qt):
+                    df[qt] = df[qt] + 1
+                else:
+                    df[qt] = 1
+    val avg_len = if n_docs > 0: total_len.to_float() / n_docs.to_float() else: 1.0
+    val k1 = 1.2
+    val b = 0.75
+    # Pass 2: score.
+    var scored: [CtxHit] = []
+    var i = 0
+    while i < n_docs:
+        var score = 0.0
+        var matched: i64 = 0
+        val tf = tfs[i]
+        val dl = lens[i].to_float()
+        for qt in q_terms:
+            if tf.contains_key(qt):
+                val f = tf[qt].to_float()
+                val n_q = (df[qt]).to_float()
+                val idf = ln_f64(1.0 + (n_docs.to_float() - n_q + 0.5) / (n_q + 0.5))
+                val denom = f + k1 * (1.0 - b + b * dl / avg_len)
+                score = score + idf * (f * (k1 + 1.0)) / denom
+                matched = matched + 1
+        if matched > 0:
+            scored.push(CtxHit(chunk: docs[i], score: score, matched: matched))
+        i = i + 1
+    # Top-k by repeated max selection (result sets are small).
+    var out: [CtxHit] = []
+    var taken: [bool] = []
+    for h in scored:
+        taken.push(false)
+    var k = 0
+    while k < limit and k < scored.len():
+        var best = -1
+        var j = 0
+        while j < scored.len():
+            if not taken[j]:
+                if best < 0 or scored[j].score > scored[best].score:
+                    best = j
+            j = j + 1
+        if best < 0:
+            break
+        taken[best] = true
+        out.push(scored[best])
+        k = k + 1
+    out
+
+fn _ctx_fmt_score(score: f64) -> text:
+    val milli = (score * 1000.0).to_int()
+    val whole = milli / 1000
+    var frac = milli - whole * 1000
+    if frac < 0:
+        frac = 0 - frac
+    var frac_s = str(frac)
+    while frac_s.len() < 3:
+        frac_s = "0" + frac_s
+    str(whole) + "." + frac_s
+
+# Snippet: window around the first query token hit, else the chunk head.
+fn _ctx_snippet(body: text, query: text) -> text:
+    val lower = body.lower()
+    var pos = -1
+    for qt in ctx_tokenize(query):
+        val p = lower.index_of(qt)
+        if p >= 0 and (pos < 0 or p < pos):
+            pos = p
+    var start = 0
+    if pos > _CTX_SNIPPET_CHARS / 3:
+        start = pos - _CTX_SNIPPET_CHARS / 3
+    var end = start + _CTX_SNIPPET_CHARS
+    if end > body.len():
+        end = body.len()
+    var s = body.substring(start, end)
+    if start > 0:
+        s = "…" + s
+    if end < body.len():
+        s = s + "…"
+    s
+
+fn ctx_format_hits(query: text, hits: [CtxHit]) -> text:
+    var lines: [text] = []
+    lines.push("## query: " + query + " (" + str(hits.len()) + " hit(s))")
+    var rank = 1
+    for h in hits:
+        lines.push("[" + str(rank) + "] score=" + _ctx_fmt_score(h.score) + " source=" + h.chunk.source + " chunk=" + str(h.chunk.id) + " ts=" + str(h.chunk.ts))
+        lines.push(_ctx_snippet(h.chunk.body, query))
+        lines.push("")
+        rank = rank + 1
+    lines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Parameter helpers
+# ---------------------------------------------------------------------------
+
+# extract_field returns the still-escaped JSON string body; undo the escapes.
+fn ctx_unescape_json(s: text) -> text:
+    if not s.contains("\\"):
+        return s
+    var out: [text] = []
+    var esc = false
+    for ch in s:
+        if esc:
+            esc = false
+            if ch == "n":
+                out.push("\n")
+            elif ch == "t":
+                out.push("\t")
+            elif ch == "r":
+                out.push("\r")
+            elif ch == "b" or ch == "f":
+                out.push("")
+            elif ch == "u":
+                out.push("\\u")
+            else:
+                out.push(ch)
+        elif ch == "\\":
+            esc = true
+        else:
+            out.push(ch)
+    out.join("")
+
+# Parse a JSON array of strings ("[\"a\", \"b\"]") into unescaped texts.
+# A bare string is accepted as a one-element list.
+fn ctx_parse_string_array(raw: text) -> [text]:
+    var out: [text] = []
+    val t = raw.trim()
+    if t == "" or t == "null":
+        return out
+    if t.starts_with("\""):
+        var inner = t.substring(1, t.len())
+        if inner.ends_with("\""):
+            inner = inner.substring(0, inner.len() - 1)
+        out.push(ctx_unescape_json(inner))
+        return out
+    if not t.starts_with("["):
+        return out
+    var in_str = false
+    var esc = false
+    var cur: [text] = []
+    for ch in t:
+        if in_str:
+            if esc:
+                cur.push("\\" + ch)
+                esc = false
+            elif ch == "\\":
+                esc = true
+            elif ch == "\"":
+                out.push(ctx_unescape_json(cur.join("")))
+                cur = []
+                in_str = false
+            else:
+                cur.push(ch)
+        elif ch == "\"":
+            in_str = true
+    out
+
+fn _ctx_int_param(body: text, key: text, default_value: i64, max_value: i64) -> i64:
+    val raw = extract_field(body, key)
+    if raw == "":
+        return default_value
+    val parsed = raw.to_int() ?? default_value
+    if parsed <= 0:
+        return default_value
+    if parsed > max_value:
+        return max_value
+    parsed
+
+fn _ctx_queries(body: text) -> [text]:
+    var qs = ctx_parse_string_array(extract_field_raw(body, "queries"))
+    if qs.len() == 0:
+        val single = ctx_unescape_json(extract_field(body, "query"))
+        if single != "":
+            qs.push(single)
+    qs
+
+# ---------------------------------------------------------------------------
+# Sandboxed execution
+# ---------------------------------------------------------------------------
+
+struct CtxExecResult:
+    stdout: text
+    stderr_summary: text
+    exit_code: i64
+    timed_out: bool
+    wall_ms: i64
+
+fn _ctx_summarize_stderr(stderr: text, truncated: bool) -> text:
+    val trimmed = stderr.trim()
+    if trimmed == "":
+        return "stderr: (empty)"
+    val lines = trimmed.split("\n")
+    var first = lines[0]
+    if first.len() > 200:
+        first = first.substring(0, 200) + "…"
+    var s = "stderr: " + str(lines.len()) + " line(s), " + str(stderr.len()) + " byte(s); first: " + first
+    if truncated:
+        s = s + " [truncated]"
+    s
+
+fn ctx_run_bounded(cmd: text, args: [text], timeout_ms: i64) -> CtxExecResult:
+    val scope = execution_resource_scope(ExecutionResourceClass.Large, timeout_ms, _CTX_MAX_OUTPUT_BYTES)
+    val r = run_in_execution_resource_scope(scope, cmd, args)
+    val p = r.process
+    val exit_code = p.usage.exit_code
+    val timed_out = p.usage.termination == TerminationCause.WallTimeout
+    var out = p.stdout
+    if p.stdout_truncated:
+        out = out + "\n[stdout truncated at " + str(_CTX_MAX_OUTPUT_BYTES) + " bytes]"
+    CtxExecResult(
+        stdout: out,
+        stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated),
+        exit_code: exit_code,
+        timed_out: timed_out,
+        wall_ms: p.usage.wall_ms
+    )
+
+fn _ctx_simple_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    "bin/simple"
+
+# Run `code` in `language`. `file_path` (may be "") is exposed to the code as
+# `$1`/`$FILE` (shell), `process.argv[2]` (javascript) or the first CLI
+# argument (simple). Returns nil + error text when the language is unknown.
+fn ctx_execute_code(language: text, code: text, file_path: text, timeout_ms: i64) -> (CtxExecResult?, text):
+    val lang = language.lower().trim()
+    val empty = CtxExecResult(stdout: "", stderr_summary: "", exit_code: -1, timed_out: false, wall_ms: 0)
+    if lang == "shell" or lang == "sh" or lang == "bash" or lang == "":
+        var argv: [text] = ["-c", "FILE=\"$1\"; export FILE; " + code, "sh"]
+        if file_path != "":
+            argv.push(file_path)
+        return (Some(ctx_run_bounded("/bin/sh", argv, timeout_ms)), "")
+    if lang == "javascript" or lang == "js" or lang == "node":
+        if val missing = require_external_tool("simple_ctx_execute", "node", "Node.js"):
+            return (nil, missing)
+        var argv: [text] = ["-e", code]
+        if file_path != "":
+            argv.push("--")
+            argv.push(file_path)
+        return (Some(ctx_run_bounded("node", argv, timeout_ms)), "")
+    if lang == "simple" or lang == "spl":
+        if not _ctx_ensure_dir():
+            return (nil, "cannot create " + ctx_store_dir())
+        val tmp = ctx_store_dir() + "/exec_" + str(time_now_unix_micros()) + ".spl"
+        if not file_write(tmp, code):
+            return (nil, "cannot write " + tmp)
+        var argv: [text] = ["run", tmp]
+        if file_path != "":
+            argv.push(file_path)
+        return (Some(ctx_run_bounded(_ctx_simple_binary(), argv, timeout_ms)), "")
+    (nil, "Unsupported language: " + language + " (use shell, javascript, or simple)")
+
+fn ctx_format_exec(label: text, r: CtxExecResult) -> text:
+    var head = "-- " + label + " (exit: " + str(r.exit_code) + ", " + str(r.wall_ms) + "ms) --"
+    if r.timed_out:
+        head = "TIMEOUT: " + label + " exceeded its wall budget (exit: " + str(r.exit_code) + ")"
+    head + "\n" + r.stdout + "\n" + r.stderr_summary
+
+# ---------------------------------------------------------------------------
+# Tool handlers
+# ---------------------------------------------------------------------------
+
+fn handle_simple_ctx_index(id: text, body: text) -> text:
+    val content = ctx_unescape_json(extract_field(body, "content"))
+    if content == "":
+        return make_tool_error(id, -32602, "Missing required parameter: content")
+    var source = ctx_unescape_json(extract_field(body, "source"))
+    if source == "":
+        source = "manual:" + str(_ctx_now_secs())
+    val n = ctx_index_text(content, source)
+    if n < 0:
+        return make_tool_error(id, -32603, "simple_ctx_index: cannot write " + _ctx_chunks_path())
+    make_tool_result(id, "Indexed " + str(n) + " chunk(s) (" + str(content.len()) + " bytes) under source '" + source + "' in " + ctx_store_dir())
+
+fn handle_simple_ctx_search(id: text, body: text) -> text:
+    val queries = _ctx_queries(body)
+    if queries.len() == 0:
+        return make_tool_error(id, -32602, "Missing required parameter: queries (array) or query")
+    val source = ctx_unescape_json(extract_field(body, "source"))
+    val limit = _ctx_int_param(body, "limit", _CTX_DEFAULT_LIMIT, _CTX_MAX_LIMIT)
+    val chunks = _ctx_load_chunks()
+    var blocks: [text] = []
+    for q in queries:
+        blocks.push(ctx_format_hits(q, ctx_bm25_search(chunks, q, source, limit)))
+    val out = blocks.join("\n")
+    _ctx_stats_bump("bytes_returned", out.len())
+    _ctx_stats_bump("search_calls", 1)
+    make_tool_result(id, out)
+
+fn _ctx_exec_common(id: text, body: text, tool: text, file_path: text) -> text:
+    val code = ctx_unescape_json(extract_field(body, "code"))
+    if code == "":
+        return make_tool_error(id, -32602, "Missing required parameter: code")
+    val language = extract_field(body, "language")
+    val timeout_ms = _ctx_int_param(body, "timeout_ms", _CTX_DEFAULT_TIMEOUT_MS, _CTX_MAX_TIMEOUT_MS)
+    val (result, err) = ctx_execute_code(language, code, file_path, timeout_ms)
+    match result:
+        Some(r):
+            _ctx_stats_bump("exec_calls", 1)
+            _ctx_stats_bump("bytes_returned", r.stdout.len())
+            make_tool_result(id, ctx_format_exec(tool, r))
+        nil:
+            make_tool_error(id, -32602, tool + ": " + err)
+
+fn handle_simple_ctx_execute(id: text, body: text) -> text:
+    _ctx_exec_common(id, body, "simple_ctx_execute", "")
+
+fn handle_simple_ctx_execute_file(id: text, body: text) -> text:
+    val path = ctx_unescape_json(extract_field(body, "path"))
+    if path == "":
+        return make_tool_error(id, -32602, "Missing required parameter: path")
+    if not file_exists(path):
+        return make_tool_error(id, -32602, "simple_ctx_execute_file: no such file: " + path)
+    _ctx_exec_common(id, body, "simple_ctx_execute_file " + path, path)
+
+fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
+    val commands = ctx_parse_string_array(extract_field_raw(body, "commands"))
+    if commands.len() == 0:
+        return make_tool_error(id, -32602, "Missing required parameter: commands (array)")
+    val queries = _ctx_queries(body)
+    var source = ctx_unescape_json(extract_field(body, "source"))
+    if source == "":
+        source = "batch:" + str(_ctx_now_secs())
+    val timeout_ms = _ctx_int_param(body, "timeout_ms", _CTX_DEFAULT_TIMEOUT_MS, _CTX_MAX_TIMEOUT_MS)
+    val limit = _ctx_int_param(body, "limit", _CTX_DEFAULT_LIMIT, _CTX_MAX_LIMIT)
+    var lines: [text] = []
+    lines.push("## batch: " + str(commands.len()) + " command(s) indexed under '" + source + "'")
+    var idx = 0
+    var total_bytes: i64 = 0
+    for cmd in commands:
+        val r = ctx_run_bounded("/bin/sh", ["-c", cmd], timeout_ms)
+        val label = source + "#" + str(idx)
+        val text_out = "$ " + cmd + "\n" + r.stdout + "\n" + r.stderr_summary
+        val n = ctx_index_text(text_out, label)
+        total_bytes = total_bytes + text_out.len()
+        var status = "exit " + str(r.exit_code)
+        if r.timed_out:
+            status = "TIMEOUT"
+        lines.push("[" + str(idx) + "] " + status + ", " + str(r.stdout.len()) + " stdout byte(s), " + str(n) + " chunk(s) -> source " + label)
+        idx = idx + 1
+    lines.push("")
+    if queries.len() == 0:
+        lines.push("(no queries given — use simple_ctx_search with source '" + source + "')")
+    else:
+        val chunks = _ctx_load_chunks()
+        for q in queries:
+            lines.push(ctx_format_hits(q, ctx_bm25_search(chunks, q, source, limit)))
+    val out = lines.join("\n")
+    _ctx_stats_bump("bytes_returned", out.len())
+    _ctx_stats_bump("batch_calls", 1)
+    make_tool_result(id, out)
+
+fn ctx_fetch_allowed_url(url: text) -> bool:
+    url.starts_with("http://") or url.starts_with("https://")
+
+# Plain-text extraction: strip tags, collapse blank runs. No script execution.
+fn ctx_html_to_text(html: text) -> text:
+    var stripped = strip_html_tags(html)
+    stripped = stripped.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+    var out: [text] = []
+    var blank_run = 0
+    for line in stripped.split("\n"):
+        val t = line.trim()
+        if t == "":
+            blank_run = blank_run + 1
+            if blank_run > 1:
+                continue
+        else:
+            blank_run = 0
+        out.push(t)
+    out.join("\n")
+
+fn ctx_cap_bytes(s: text, max_bytes: i64) -> (text, bool):
+    if s.len() <= max_bytes:
+        return (s, false)
+    (s.substring(0, max_bytes), true)
+
+fn handle_simple_ctx_fetch_and_index(id: text, body: text) -> text:
+    val url = ctx_unescape_json(extract_field(body, "url"))
+    if url == "":
+        return make_tool_error(id, -32602, "Missing required parameter: url")
+    if not ctx_fetch_allowed_url(url):
+        return make_tool_error(id, -32602, "simple_ctx_fetch_and_index: only http:// and https:// URLs are allowed")
+    var source = ctx_unescape_json(extract_field(body, "source"))
+    if source == "":
+        source = "web:" + url
+    val max_bytes = _ctx_int_param(body, "max_bytes", _CTX_FETCH_DEFAULT_MAX_BYTES, _CTX_FETCH_HARD_MAX_BYTES)
+    val resp = http_get(url)
+    if resp.status_code < 0 or resp.error != "":
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: transport error: " + resp.error)
+    if not resp.is_ok:
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: HTTP " + str(resp.status_code))
+    val (raw, capped) = ctx_cap_bytes(resp.body, max_bytes)
+    val plain = ctx_html_to_text(raw)
+    val n = ctx_index_text(plain, source)
+    if n < 0:
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: cannot write " + _ctx_chunks_path())
+    var msg = "Fetched " + url + ": " + str(resp.body.len()) + " byte(s)"
+    if capped:
+        msg = msg + " (capped to " + str(max_bytes) + ")"
+    msg = msg + ", " + str(plain.len()) + " byte(s) of text, " + str(n) + " chunk(s) under source '" + source + "'"
+    _ctx_stats_bump("fetch_calls", 1)
+    make_tool_result(id, msg)
+
+fn _ctx_stat_get(d: Dict<text, i64>, k: text) -> i64:
+    if d.contains_key(k):
+        return d[k]
+    0
+
+fn ctx_stats_text() -> text:
+    val chunks = _ctx_load_chunks()
+    var sources: Dict<text, i64> = {}
+    var stored_bytes: i64 = 0
+    for c in chunks:
+        stored_bytes = stored_bytes + c.bytes
+        if sources.contains_key(c.source):
+            sources[c.source] = sources[c.source] + 1
+        else:
+            sources[c.source] = 1
+    val d = _ctx_load_stats()
+    val indexed = _ctx_stat_get(d, "bytes_indexed")
+    val returned = _ctx_stat_get(d, "bytes_returned")
+    var saved = indexed - returned
+    if saved < 0:
+        saved = 0
+    var lines: [text] = []
+    lines.push("ctx store: " + ctx_store_dir())
+    lines.push("chunks: " + str(chunks.len()))
+    lines.push("sources: " + str(sources.len()))
+    lines.push("stored_bytes: " + str(stored_bytes))
+    lines.push("bytes_indexed: " + str(indexed))
+    lines.push("bytes_returned: " + str(returned))
+    lines.push("bytes_saved: " + str(saved))
+    lines.push("calls: index=" + str(_ctx_stat_get(d, "index_calls")) + " search=" + str(_ctx_stat_get(d, "search_calls")) + " exec=" + str(_ctx_stat_get(d, "exec_calls")) + " batch=" + str(_ctx_stat_get(d, "batch_calls")) + " fetch=" + str(_ctx_stat_get(d, "fetch_calls")))
+    lines.join("\n")
+
+fn handle_simple_ctx_stats(id: text, body: text) -> text:
+    make_tool_result(id, ctx_stats_text())
+
+export handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute
+export handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute
+export handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats
+export ctx_store_dir, ctx_index_text, ctx_bm25_search, ctx_tokenize, ctx_chunk_text
+export ctx_escape_cell, ctx_unescape_cell, ctx_parse_string_array, ctx_unescape_json
+export ctx_execute_code, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text
+export CtxChunk, CtxHit, CtxExecResult

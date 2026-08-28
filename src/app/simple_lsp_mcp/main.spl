@@ -105,6 +105,37 @@ fn make_file_schema() -> text:
     schema = schema + RB()
     schema
 
+fn requester_prop_json() -> text:
+    jp("requester", jo2(jp("type", js("string")), jp("description", js("Optional requester location `path[:line]` that visibility is computed FROM. Omitted: the last location a position tool (lsp_hover/lsp_definition/...) was called with in this server session; if none, no requester (never the file itself)."))))
+
+# Position schema (file/line/character) plus optional `requester` — lsp_hover.
+fn make_position_requester_schema() -> text:
+    var p = LB()
+    p = p + jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file"))))
+    p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("0-indexed line number"))))
+    p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("0-indexed character offset"))))
+    p = p + "," + requester_prop_json()
+    p = p + RB()
+    var req = SB_L() + js("file") + "," + js("line") + "," + js("character") + SB_R()
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", p)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+    schema
+
+# File schema plus optional `requester` — lsp_symbols (file required) and
+# lsp_visibility (file optional: defaults to the requester's own file).
+fn make_file_requester_schema(file_required: bool) -> text:
+    val props = jo2(jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the source file whose symbols are classified")))), requester_prop_json())
+    val req = if file_required: SB_L() + js("file") + SB_R() else: SB_L() + SB_R()
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+    schema
+
 fn make_saml_analyze_schema() -> text:
     val props = jo2(
         jp("file", jo2(jp("type", js("string")), jp("description", js("Path to the .saml source file")))),
@@ -142,8 +173,9 @@ fn lsp_tools_list_result(id: text) -> text:
     val file_schema = make_file_schema()
     var tools_json = lsp_tool_json("lsp_definition", "Find where a symbol is defined in a Simple source file.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_references", "Find symbol references in Simple source.", pos_schema)
-    tools_json = tools_json + "," + lsp_tool_json("lsp_hover", "Get hover information for a symbol in Simple source.", pos_schema)
-    tools_json = tools_json + "," + lsp_tool_json("lsp_symbols", "List symbols in a Simple source file.", file_schema)
+    tools_json = tools_json + "," + lsp_tool_json("lsp_hover", "Get hover information for a symbol in Simple source, with MDSOC visibility relative to the requester location.", make_position_requester_schema())
+    tools_json = tools_json + "," + lsp_tool_json("lsp_symbols", "List symbols in a Simple source file with MDSOC layer (simpleVisibility) and feature (featureVisibility) classification relative to the requester location.", make_file_requester_schema(true))
+    tools_json = tools_json + "," + lsp_tool_json("lsp_visibility", "MDSOC two-set view for a requester location: layerPublic and featurePublic symbols of `file` (default: the requester's file), each with symbol/kind/module|feature/why.", make_file_requester_schema(false))
     tools_json = tools_json + "," + lsp_tool_json("lsp_diagnostics", "Run lightweight diagnostics via simple check.", file_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_completion", "Get code completions at a position in a Simple source file.", pos_schema)
     tools_json = tools_json + "," + lsp_tool_json("lsp_type_at", "Get the inferred type of a symbol at a position.", pos_schema)
