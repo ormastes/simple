@@ -1883,6 +1883,9 @@ else
   stage2_receiver_evidence="${stage3_provenance_dir}/stage2-receiver.env"
   stage2_receiver_log="${stage3_provenance_dir}/stage2-receiver.log"
   stage3_sanity_evidence="${stage3_provenance_dir}/stage3-sanity.env"
+  # Compiler-capsule caches. Tool closures (full CLI and test runner) are
+  # deliberately separate and producer-bound; see bootstrap_parallel_handoff.md.
+  # A later phase must not inherit a writable tool cache from its parent phase.
   stage2_provenance_cache="${stage3_provenance_dir}/stage2-native-cache"
   stage3_provenance_cache="${stage3_provenance_dir}/stage3-native-cache"
   stage2_provenance_home="${stage3_provenance_dir}/stage2-home"

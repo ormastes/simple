@@ -51,6 +51,10 @@ stage3_log="$output/logs/$platform/stage3-native-build.log"
 stage3_sanity="$stage3/stage3-sanity.env"
 stage2_cache="$stage3/stage2-native-cache"
 stage3_cache="$stage3/stage3-native-cache"
+# These caches are compiler-capsule caches only. Full-CLI and test-runner
+# closures must use separate producer-bound paths, conventionally:
+#   build/bootstrap/tool_cache/<phase>/<compiler-sha>/{full-cli,test-runner}
+# Never point two compiler generations at the same writable tool cache.
 home="$stage3/stage3-home"
 tmp="$stage3/stage3-tmp"
 source_before="$stage3/source-inputs-before.txt"

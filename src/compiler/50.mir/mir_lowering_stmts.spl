@@ -1544,6 +1544,39 @@ impl MirLowering:
                 else:
                     self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
+    me lower_array_destructuring_assign(elements: [HirExpr], value_local: LocalId, op: HirAssignOp?):
+        """Extract an array RHS into the recursive lvalue targets of `[a, b]`.
+
+        The HIR represents the target brackets as ArrayLit even though they are
+        an assignment pattern, not a newly allocated array value."""
+        if op.?:
+            self.error_fatal("compound assignment is not supported for array destructuring", nil)
+            return
+        var element_index = 0
+        while element_index < elements.len():
+            val target_element = elements[element_index]
+            var get_builder = self.builder
+            val index_local = get_builder.emit_const_int(element_index)
+            val get_operand = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_array_get"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                    return_type: MirType.i64(), is_variadic: false)))
+            ))
+            val raw_result = get_builder.emit_call(
+                get_operand,
+                [mir_operand_copy(value_local), mir_operand_copy(index_local)],
+                MirType.i64())
+            self.builder = get_builder
+            if val raw_element = raw_result:
+                val element_type = if target_element.has_type_:
+                    self.lower_type(target_element.type_)
+                else:
+                    MirType.i64()
+                val decoded_element = self.decode_runtime_value(raw_element, element_type)
+                self.lower_assign(target_element, nil, decoded_element, target_element.kind)
+            element_index = element_index + 1
+
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId, value_kind: HirExprKind):
         """Lower assignment."""
         match target.kind:
@@ -1559,6 +1592,9 @@ impl MirLowering:
                 # loop-carried updates (`i = i + 1`) were lost, producing
                 # non-terminating loops on the native path. Mirror the Var arm.
                 self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span, value_kind)
+
+            case ArrayLit(elements, _):
+                self.lower_array_destructuring_assign(elements, value_local, op)
 
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value

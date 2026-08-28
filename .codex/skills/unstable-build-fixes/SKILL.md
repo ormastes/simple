@@ -14,6 +14,16 @@ Goal: produce the requested Simple executable without throwing away useful cache
 - Do not delete the cache between retries unless a concrete stale-cache bug is proven.
 - Do not run parallel writers into the same cache dir. Use isolated shard caches:
   `build/mini_cache_<entry>`.
+- Bind tool caches to both the producing compiler phase and the entry closure.
+  A Stage 2, Stage 3, or Stage 4 compiler must never share a writable full-CLI
+  or test-runner cache with another generation. Prefer:
+  `build/bootstrap/tool_cache/<phase>/<compiler-sha>/<full-cli|test-runner>`.
+  Record the producer binary SHA-256 and frozen source revision beside each
+  cache. Reuse that exact cache for incremental retries of the same lineage.
+- Build both the full CLI and test runner for each requested producer phase.
+  The Stage 2/3 bootstrap CLI is compiler-only; `test --whole` becomes valid
+  only on the non-vacuous full-CLI artifact. Require a `Results:` line—exit 0
+  without test output is not evidence.
 - If a source fix lands while a build is still before object output, prefer letting it fail or finish. Restart only when no cache/output can be lost.
 - Keep every log under `build/mini_builds/` or `build/native_probe/`.
 - Set `SIMPLE_NO_STUB_FALLBACK=1` for every candidate or verification build;
@@ -31,6 +41,8 @@ Goal: produce the requested Simple executable without throwing away useful cache
    - `src/app/cli/bootstrap_main.spl` -> `build/mini_cache_bootstrap`
    - `src/app/cli/native_build_main.spl` -> `build/mini_cache_native_build`
    - `src/app/mcp/main.spl` -> `build/mini_cache_mcp`
+   - `src/app/cli/_CliMain/main_and_help.spl` -> phase-bound `full-cli`
+   - `src/app/test_runner_new/main.spl` -> phase-bound `test-runner`
 3. For each failure, group by the first real error, not warnings.
 4. Fix the smallest shared root cause. Add one focused regression.
 5. Rerun only failed shards first, with the same shard cache.
