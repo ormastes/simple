@@ -48,14 +48,61 @@ fn SB_L() -> text:
 fn SB_R() -> text:
     "]"
 
+# The 32 C0 control characters, indexed by code point. JSON strings must not
+# carry any of them raw (RFC 8259 §7), so every one maps to an escape.
+fn _json_ctrl_chars() -> [text]:
+    ["\u0000", "\u0001", "\u0002", "\u0003", "\u0004", "\u0005", "\u0006", "\u0007", 
+     "\u0008", "\t", "\n", "\u000B", "\u000C", "\r", "\u000E", "\u000F", 
+     "\u0010", "\u0011", "\u0012", "\u0013", "\u0014", "\u0015", "\u0016", "\u0017", 
+     "\u0018", "\u0019", "\u001A", "\u001B", "\u001C", "\u001D", "\u001E", "\u001F"]
+
+fn _json_ctrl_escape(ch: text) -> text:
+    if ch == "\n":
+        return r"\n"
+    if ch == "\r":
+        return r"\r"
+    if ch == "\t":
+        return r"\t"
+    val table = _json_ctrl_chars()
+    val hex = "0123456789ABCDEF"
+    var i = 0
+    while i < table.len():
+        if table[i] == ch:
+            return r"\u00" + hex.substring(i / 16, i / 16 + 1) + hex.substring(i % 16, i % 16 + 1)
+        i = i + 1
+    # Not a C0 control char (multi-byte or >= 0x20): pass through.
+    ch
+
+fn _json_needs_escape(ch: text) -> bool:
+    ch == Q() or ch == "\\" or ch < " "
+
+# Single-pass JSON string escaper. Deliberately does NOT chain `.replace()`:
+# the chained form left raw control characters in the payload and, on the
+# deployed 2026-08-10 native server, shifted the `\n` escape two bytes
+# ("WARNING" -> "W\nRNING"). Every byte is copied or escaped exactly once.
 fn escape_json(s: text) -> text:
-    var result = s
-    result = result.replace(r"\", r"\\")
-    result = result.replace(Q(), r"\" + Q())
-    result = result.replace("\n", r"\n")
-    result = result.replace("\r", r"\r")
-    result = result.replace("\t", r"\t")
-    result
+    var plain = true
+    for ch in s:
+        if _json_needs_escape(ch):
+            plain = false
+            break
+    if plain:
+        return s
+    var parts: [text] = []
+    for ch in s:
+        if ch == Q():
+            parts.push("\\" + Q())
+        elif ch == "\\":
+            parts.push("\\\\")
+        elif ch < " ":
+            parts.push(_json_ctrl_escape(ch))
+        else:
+            parts.push(ch)
+    parts.join("")
+
+# Public alias: the escaper body without quotes (used by api_tools).
+fn escape_json_text(s: text) -> text:
+    escape_json(s)
 
 fn js(s: text) -> text:
     Q() + escape_json(s) + Q()
@@ -350,6 +397,13 @@ fn summarize_json_shape(raw: text, depth: i64) -> text:
     value_type
 
 fn make_tool_result(id: text, output: text) -> text:
+    make_tool_result_status(id, output, false)
+
+# Tool result with an explicit MCP `isError` flag. A failed tool call is still
+# a successful JSON-RPC response (the protocol reserves `error` for transport
+# faults), so the failure travels in `result.isError`, never as prose inside a
+# success payload.
+fn make_tool_result_status(id: text, output: text, is_error: bool) -> text:
     val escaped = escape_json(output)
     val quoted = Q() + escaped + Q()
     val content = SB_L() + jo2(p1: jp(key: "type", value: js("text")), p2: jp(key: "text", value: quoted)) + SB_R()
@@ -359,7 +413,12 @@ fn make_tool_result(id: text, output: text) -> text:
         p1: jp(key: "inferredType", value: js(inferred)),
         p2: jp(key: "shape", value: js(shape))
     )
-    val result = jo2(p1: jp(key: "content", value: content), p2: jp(key: "structuredContent", value: structured))
+    val err_flag = if is_error: "true" else: "false"
+    val result = jo3(
+        p1: jp(key: "content", value: content),
+        p2: jp(key: "isError", value: err_flag),
+        p3: jp(key: "structuredContent", value: structured)
+    )
     make_json_result(id: id, result: result)
 
 fn make_tool_error(id: text, code: i64, msg: text) -> text:
@@ -390,9 +449,10 @@ fn log_level_to_int(level: text) -> i64:
     elif level == "emergency": 7
     else: -1
 
-export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_error
+export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_result_status, make_tool_error
+export escape_json_text
 export extract_json_string, extract_json_value, make_error_response, log_level_to_int
-export first_n_chars
+export first_n_chars, strip_ansi, shell_cmd
 
 # --- Shell helper ---
 # Uses process_run (returns tuple). Note: val (a,b) = expr is broken
@@ -416,18 +476,32 @@ fn _mcp_detect_shell() -> text:
 fn _get_shell() -> text:
     _mcp_detect_shell()
 
+# Remove ANSI CSI sequences (ESC '[' params final-byte) and bare ESC bytes.
+# No subprocess: the old version spawned `printf '\033'` on every tool call
+# and then only deleted the ESC byte, leaving `[33m` fragments in the text.
 fn strip_ansi(s: text) -> text:
-    val shell = _get_shell()
-    if shell == "cmd":
-        # No ANSI stripping needed on Windows cmd
+    val esc = "\u001B"
+    if not s.contains(esc):
         return s
-    var e_out = ""
-    var e_err = ""
-    var e_rc: i64 = 0
-    (e_out, e_err, e_rc) = process_run(shell, ["-c", r"printf '\033'"])
-    if e_out == "" or not s.contains(e_out):
-        return s
-    s.replace(e_out, "")
+    var parts: [text] = []
+    var in_csi = false
+    var after_esc = false
+    for ch in s:
+        if in_csi:
+            # CSI ends at the first byte in 0x40..0x7E
+            if ch >= "@" and ch <= "~":
+                in_csi = false
+            continue
+        if after_esc:
+            after_esc = false
+            if ch == "[":
+                in_csi = true
+            continue
+        if ch == esc:
+            after_esc = true
+            continue
+        parts.push(ch)
+    parts.join("")
 
 fn _strip_timeout_prefix(command: text) -> text:
     """Strip Unix 'timeout N' prefix for cmd.exe compatibility.

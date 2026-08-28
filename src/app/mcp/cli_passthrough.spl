@@ -4,8 +4,13 @@
 # and executes it via shell_cmd(). Works for any tool with handler_kind="cli".
 
 use .tool_registry
-use .main_lazy_json.{extract_field, make_tool_result, shell_cmd}
+use .main_lazy_json.{extract_field, make_tool_result_status, shell_cmd, first_n_chars}
 use .main_lazy_diag_tools.{handle_simple_diagnostics, handle_simple_symbols}
+
+# Largest tool payload returned to the client. `simple brief` alone prints
+# ~54k lines; anything past this is cut with an explicit marker so the JSON
+# escaper and the client stay bounded.
+val CLI_OUTPUT_LIMIT_BYTES = 262144
 
 fn handle_cli_passthrough(id: text, body: text, entry: McpToolEntry) -> text:
     handle_cli_passthrough_direct(id, body, entry.tool_name, entry.cli_command, entry.timeout_s)
@@ -26,29 +31,49 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
     # Extract known parameters from body and append as CLI args
     cmd = _append_cli_args_for_name(cmd, body, name)
 
+    # Every CLI subcommand may spawn detached children (test workers, `check`
+    # chunk workers, daemons) that inherit the popen pipe as their stdout. Even
+    # after `timeout` kills bin/simple those children keep the pipe write-end
+    # open, popen's fgets never sees EOF, and the MCP server hangs — the
+    # `process_run deadlocks on the simple check subcommand spawn` failure.
+    # Redirecting to a temp file gives the children a file fd instead of the
+    # pipe; the file is read back after the command finishes.
+    # < /dev/null is placed on the command itself so it never reads the MCP
+    # stdin pipe. mktemp uses trailing X's only for BSD/macOS compatibility.
+    val wrapped = "tmp=$(mktemp /tmp/simple_mcp_cli_XXXXXX); " + cmd + " < /dev/null > \"$tmp\" 2>&1; EC=$?; head -c " + str(CLI_OUTPUT_LIMIT_BYTES + 1) + " \"$tmp\"; rm -f \"$tmp\"; exit $EC"
     var out = ""
     var exit_code: i64 = 0
-
-    # simple_test spawns async child processes (test workers) that inherit the
-    # popen pipe as their stdout.  Even after `timeout` kills bin/simple, those
-    # workers keep the pipe write-end open, so popen's fgets never sees EOF and
-    # the MCP server hangs.  Fix: redirect the test command's output to a temp
-    # file so workers hold a file fd (not the popen pipe), then read the file
-    # back with `cat` after the command finishes.
-    if name == "simple_test":
-        # < /dev/null is explicitly placed on the test command itself so it doesn't
-        # read from the MCP stdin pipe.
-        # mktemp uses trailing X's only (no suffix) for BSD/macOS compatibility.
-        val wrapped = "tmp=$(mktemp /tmp/simple_mcp_test_XXXXXX); " + cmd + " < /dev/null > \"$tmp\" 2>&1; EC=$?; cat \"$tmp\"; rm -f \"$tmp\"; exit $EC"
-        (out, exit_code) = shell_cmd(wrapped)
-    else:
-        cmd = cmd + " 2>&1"
-        (out, exit_code) = shell_cmd(cmd)
+    (out, exit_code) = shell_cmd(wrapped)
+    out = strip_seed_banner(out)
+    if out.len() > CLI_OUTPUT_LIMIT_BYTES:
+        out = first_n_chars(out, CLI_OUTPUT_LIMIT_BYTES) + "\n[output truncated at " + str(CLI_OUTPUT_LIMIT_BYTES) + " bytes]\n"
 
     var output = "-- " + name + " (exit: " + str(exit_code) + ") --\n" + out
     if exit_code == 124:
-        output = "TIMEOUT: " + name + " timed out after " + str(effective_timeout_s) + "s\n" + out
-    make_tool_result(id, output)
+        output = "TIMEOUT: " + name + " timed out after " + str(effective_timeout_s) + "s (bounded by the tool's timeout; child processes were killed)\n" + out
+    elif exit_code != 0 and _looks_like_unknown_subcommand(out, cli_command):
+        output = "ERROR: " + name + ": the CLI subcommand `" + cli_command + "` is not available in " + _bin + " (exit: " + str(exit_code) + ")\n" + out
+    make_tool_result_status(id, output, exit_code != 0)
+
+# The bootstrap seed answers an unknown subcommand by treating it as a file
+# name and dumping its usage text. Never hand that dump back as an answer.
+fn _looks_like_unknown_subcommand(out: text, cli_command: text) -> bool:
+    val first_word = cli_command.split(" ")[0]
+    out.contains("error: file not found: " + first_word) and out.contains("Usage:")
+
+# Lines the Rust bootstrap seed prints on every invocation. They are not part
+# of any tool's answer, so they are removed before the payload is returned.
+fn strip_seed_banner(out: text) -> text:
+    if not out.contains("bootstrap seed only"):
+        return out
+    var kept: [text] = []
+    for line in out.split("\n"):
+        if line.starts_with("WARNING: this Rust-built Simple binary is a bootstrap seed only"):
+            continue
+        if line.starts_with("Build and use the pure-Simple bin/simple instead."):
+            continue
+        kept.push(line)
+    kept.join("\n")
 
 fn _effective_cli_timeout_s(name: text, body: text, default_timeout_s: i64) -> i64:
     if name != "simple_test":
@@ -71,6 +96,10 @@ fn _parse_positive_int_or_zero(value: text) -> i64:
 
 fn _append_cli_args(cmd: text, body: text, entry: McpToolEntry) -> text:
     _append_cli_args_for_name(cmd, body, entry.tool_name)
+
+# Spec-facing alias (cli_passthrough_spec drives the arg mapper by this name).
+fn _cli_args_for_name(cmd: text, body: text, name: text) -> text:
+    _append_cli_args_for_name(cmd, body, name)
 
 fn _append_cli_args_for_name(cmd: text, body: text, name: text) -> text:
     var result = cmd

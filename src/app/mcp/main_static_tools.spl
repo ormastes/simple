@@ -145,17 +145,64 @@ fn _mcp_static_props_for_tool(name: text, required_json: text) -> text:
         return _mcp_static_ponytail_props()
     _mcp_static_props(required_json)
 
+# The full tool table is the single source of truth for input schemas
+# (property names, descriptions, required lists) and annotations. Built once
+# per process; the static descriptor table only supplies order and the
+# reduced-set membership.
+var _MCP_TOOL_TABLE_CACHE: [McpToolEntry] = []
+
+# Getter-mediated read (native local-shadow bug on read+assign in one fn, see
+# doc/08_tracking/bug/native_module_var_bool_garbage_init_2026-06-13.md).
+fn _mcp_tool_table_cache_value() -> [McpToolEntry]:
+    _MCP_TOOL_TABLE_CACHE
+
+fn _mcp_tool_table_cached() -> [McpToolEntry]:
+    val cached = _mcp_tool_table_cache_value()
+    if cached.len() > 0:
+        return cached
+    _MCP_TOOL_TABLE_CACHE = get_tool_table()
+    _mcp_tool_table_cache_value()
+
+fn _mcp_tool_table_index(name: text) -> i64:
+    val table = _mcp_tool_table_cached()
+    var i = 0
+    while i < table.len():
+        if table[i].tool_name == name:
+            return i
+        i = i + 1
+    -1
+
+fn _bool_json(b: bool) -> text:
+    if b: "true" else: "false"
+
 fn _mcp_static_tool_schema(name: text, desc: text, required_json: text) -> text:
+    var props = _mcp_static_props_for_tool(name, required_json)
+    var required = required_json
+    var read_only = false
+    var destructive = false
+    var idempotent = true
+    var open_world = false
+    val idx = _mcp_tool_table_index(name)
+    if idx >= 0:
+        val entry = _mcp_tool_table_cached()[idx]
+        if entry.props_json != "{}":
+            props = entry.props_json
+        if entry.required_json != "[]":
+            required = entry.required_json
+        read_only = entry.read_only
+        destructive = entry.destructive
+        idempotent = entry.idempotent
+        open_world = entry.open_world
     val input_schema = jo3(
         jp("type", js("object")),
-        jp("properties", _mcp_static_props(required_json)),
-        jp("required", required_json)
+        jp("properties", props),
+        jp("required", required)
     )
     val annotations = jo4(
-        jp("readOnlyHint", "false"),
-        jp("destructiveHint", "false"),
-        jp("idempotentHint", "true"),
-        jp("openWorldHint", "false")
+        jp("readOnlyHint", _bool_json(read_only)),
+        jp("destructiveHint", _bool_json(destructive)),
+        jp("idempotentHint", _bool_json(idempotent)),
+        jp("openWorldHint", _bool_json(open_world))
     )
     jo4(
         jp("name", js(name)),
