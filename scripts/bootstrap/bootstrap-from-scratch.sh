@@ -1157,6 +1157,7 @@ CANDIDATE_FRONTEND_ROOT=${repo_root}
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
+NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
@@ -1316,6 +1317,7 @@ bootstrap_native_build_main() {
     --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
+    --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     --low-memory
   set -- "$@" \
     --threads "${selfhost_jobs}" \
