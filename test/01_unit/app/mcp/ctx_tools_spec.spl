@@ -229,3 +229,65 @@ describe "dispatcher registration":
             assert_false(r.contains("Unknown tool"))
             assert_false(r.contains("Unknown in-process tool"))
         assert_contains(dispatch_tool("21", "simple_ctx_stats", "{}"), "chunks: 0")
+
+describe "execute return cap (parity: context-mode 100 KB smart truncation)":
+    it "truncates a >100 KB stdout to head+tail, indexes the full output and names the search source":
+        _fresh_store()
+        # 6000 lines x ~36 B ~= 214 KB; the 60/40 head+tail window keeps
+        # roughly lines 0..1700 and 4860..5999, so a marker at 3000 is cut.
+        val code = "i=0; while [ $i -lt 6000 ]; do if [ $i -eq 3000 ]; then echo MIDDLEMARKERZQ; else echo line-$i-padding-padding-padding-pad; fi; i=$((i+1)); done"
+        val r = handle_simple_ctx_execute("30", "{\"language\":\"shell\",\"code\":\"" + code + "\",\"timeout_ms\":\"60000\"}")
+        assert_contains(r, "line-0-")
+        assert_contains(r, "line-5999-")
+        assert_false(r.contains("MIDDLEMARKERZQ"))
+        assert_contains(r, "truncated")
+        assert_contains(r, "simple_ctx_search")
+        assert_contains(r, "source: 'exec:")
+        assert_true(r.len() < 110000)
+        # The dropped middle is still reachable through the store.
+        val s = handle_simple_ctx_search("31", "{\"queries\":[\"MIDDLEMARKERZQ\"]}")
+        assert_contains(s, "MIDDLEMARKERZQ (1 hit(s))")
+        assert_contains(s, "source=exec:")
+
+    it "returns a <100 KB stdout untouched and indexes nothing":
+        _fresh_store()
+        val r = handle_simple_ctx_execute("32", "{\"language\":\"shell\",\"code\":\"seq 1 200\"}")
+        assert_contains(r, "200")
+        assert_false(r.contains("truncated"))
+        assert_contains(handle_simple_ctx_stats("33", "{}"), "chunks: 0")
+
+describe "search quality (parity: stopwords, code-token fallback)":
+    it "ignores stopwords in the query but still answers a stopword-only query":
+        _fresh_store()
+        assert_equal(ctx_index_text("the cat sat on the mat", "doc:a"), 1)
+        assert_equal(ctx_index_text("a dog in the park", "doc:b"), 1)
+        val s = handle_simple_ctx_search("34", "{\"queries\":[\"the mat\"]}")
+        assert_contains(s, "the mat (1 hit(s))")
+        assert_contains(s, "source=doc:a")
+        val only = handle_simple_ctx_search("35", "{\"queries\":[\"the\"]}")
+        assert_contains(only, "the (2 hit(s))")
+
+    it "falls back to substring matching for a partial code token with no BM25 hit":
+        _fresh_store()
+        assert_equal(ctx_index_text("val n = rt_string_len(s)\nreturn n", "code:len"), 1)
+        assert_equal(ctx_index_text("unrelated words only", "code:other"), 1)
+        val s = handle_simple_ctx_search("36", "{\"queries\":[\"string_len\"]}")
+        assert_contains(s, "string_len (1 hit(s))")
+        assert_contains(s, "source=code:len")
+        assert_contains(s, "match=substring")
+        assert_false(s.contains("source=code:other"))
+
+    it "keeps BM25 as the primary ranking with the shorter document first":
+        _fresh_store()
+        var filler: [text] = []
+        var i = 0
+        while i < 400:
+            filler.push("filler" + str(i))
+            i = i + 1
+        # A >1,200-char single line splits into several fixed-width chunks.
+        assert_true(ctx_index_text("alpha " + filler.join(" "), "doc:long") >= 1)
+        assert_equal(ctx_index_text("alpha beta", "doc:short"), 1)
+        val s = handle_simple_ctx_search("37", "{\"queries\":[\"alpha\"]}")
+        assert_contains(s, "alpha (2 hit(s))")
+        assert_contains(s, "match=bm25")
+        assert_true(_idx(s, "source=doc:short") < _idx(s, "source=doc:long"))

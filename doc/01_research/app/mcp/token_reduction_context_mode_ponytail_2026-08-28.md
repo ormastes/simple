@@ -132,3 +132,26 @@ tools, `simple_token_stats` present.
 Spec: `test/01_unit/app/mcp/token_stats_spec.spl` (8 scenarios; goes red
 under a wrong divisor and under a broken memo lookup). Guide:
 `doc/07_guide/app/mcp/mcp.md` § Token savings.
+
+## 5. Addendum (2026-08-28, parity lane): execute cap, search quality, hook recall
+
+Superset study with plugin-source mechanics, a 74-transcript replay and a
+parity matrix: `context_mode_ponytail_originals_vs_mimic_2026-08-28.md` (same
+directory). Changes landed there that alter the numbers above:
+
+- `simple_ctx_execute` / `_execute_file` now cap the RETURNED stdout at
+  100 KB (60/40 head+tail, `ctx_smart_truncate`); the full output is indexed
+  under `exec:<ts>` and the annotation names the `simple_ctx_search` source.
+  Previously up to 1 MiB of stdout entered the transcript unchunked.
+- `simple_ctx_search`: query-side stopwords, a substring fallback for partial
+  code tokens (`match=substring` in the hit line), and BM25 over byte lengths
+  with a candidate prefilter (only chunks containing a query term are
+  tokenized).
+- Hook-firing measured against this project's real history (74 sessions,
+  14,334 Bash calls): the >20-line Bash hint's recall on the 1,982 actually-
+  large results went 2.9% -> 90.4% after re-tuning (compound-statement count,
+  big `sed -n`/`head`/`-A` windows, loops, per-segment verbose check);
+  `bash_net_blocker` no longer denies heredocs that merely mention curl; new
+  `grep_hint.shs` and `agent_routing.shs` (routing-block injection + Bash->
+  general-purpose subagent upgrade, the plugin's single biggest uncovered
+  mechanism here: 2,128 historical Agent spawns).

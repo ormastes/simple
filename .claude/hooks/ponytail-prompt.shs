@@ -19,7 +19,11 @@ LEVEL_FILE="${PONYTAIL_LEVEL_FILE:-$ROOT/.simple/ponytail.level}"
 apply() {  # reads prompt json from stdin
     input=$(cat)
     new=""
-    if printf '%s' "$input" | grep -qiE 'stop ponytail|normal mode|/ponytail[[:space:]]+off'; then
+    # Deactivation phrases must be the WHOLE prompt (trailing punctuation
+    # ignored), as the original plugin does (ponytail-config.js:40-43) — a
+    # substring match would switch the mode off on "don't stop ponytail".
+    prompt=$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr 'A-Z' 'a-z' | sed 's/^[[:space:]]*//; s/[[:space:]!.?]*$//')
+    if [ "$prompt" = "stop ponytail" ] || [ "$prompt" = "normal mode" ] || printf '%s' "$input" | grep -qiE '/ponytail[[:space:]]+off'; then
         new=off
     elif printf '%s' "$input" | grep -qE '/ponytail[[:space:]]+(lite|full|ultra)'; then
         new=$(printf '%s' "$input" | grep -oE '/ponytail[[:space:]]+(lite|full|ultra)' | head -n 1 | awk '{print $2}')
@@ -47,10 +51,13 @@ selftest() {
     check lite      "/ponytail lite please"      lite
     check ultra     "/ponytail ultra"            ultra
     check bare      "/ponytail"                  full
-    check stop      "ok stop ponytail now"       off
-    check normal    "back to normal mode"        off
+    check stop      "Stop ponytail!"             off
+    check normal    "normal mode"                off
     check noop      "unrelated prompt"           off
     check help-noop "/ponytail-help"             off
+    printf 'ultra\n' > "$tmp/level"
+    check embedded  "do not stop ponytail yet"   ultra
+    check embedded2 "back to normal mode later"  ultra
     rm -rf "$tmp"
     echo "Results: $pass passed, $fail failed"
     [ "$fail" -eq 0 ]

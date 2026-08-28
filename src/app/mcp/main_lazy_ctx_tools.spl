@@ -45,6 +45,10 @@ const _CTX_SNIPPET_CHARS: i64 = 320
 const _CTX_DEFAULT_TIMEOUT_MS: i64 = 15000
 const _CTX_MAX_TIMEOUT_MS: i64 = 120000
 const _CTX_MAX_OUTPUT_BYTES: i64 = 1048576
+# Return cap for execute stdout (parity with context-mode's 100 KB smart
+# truncation): above this, the head (60%) and tail (40%) are returned, the
+# full output is indexed under `exec:<ts>` and the annotation names it.
+const _CTX_RETURN_CAP_BYTES: i64 = 102400
 const _CTX_FETCH_DEFAULT_MAX_BYTES: i64 = 262144
 const _CTX_FETCH_HARD_MAX_BYTES: i64 = 2097152
 const _CTX_SCHEMA_VERSION: i64 = 1
@@ -292,6 +296,30 @@ struct CtxHit:
     chunk: CtxChunk
     score: f64
     matched: i64
+    mode: text      # "bm25" | "substring"
+
+# Query-side stopwords (parity with context-mode's stopword strip: common
+# English + dev-noise words). Applied to query terms only, so document
+# lengths and the store are untouched.
+const _CTX_STOPWORDS: [text] = ["the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for", "on", "with", "as", "at", "by", "be", "this", "that", "from", "are", "was", "not", "but", "if", "then", "so", "we", "you", "do", "does", "did", "has", "have", "had", "will", "can", "use", "using", "how", "what", "which", "where", "when", "all", "any", "each", "into", "than", "also", "just", "more", "some", "such", "only", "same", "other", "out", "up", "no", "yes", "its", "these", "those", "there", "here", "update", "fix", "test", "deps"]
+
+fn _ctx_is_stopword(t: text) -> bool:
+    for s in _CTX_STOPWORDS:
+        if s == t:
+            return true
+    false
+
+# Query terms with stopwords removed; a query made only of stopwords keeps
+# its raw terms so it still answers rather than returning nothing.
+fn ctx_query_terms(query: text) -> [text]:
+    val raw = ctx_tokenize(query)
+    var kept: [text] = []
+    for t in raw:
+        if not _ctx_is_stopword(t):
+            kept.push(t)
+    if kept.len() == 0:
+        return raw
+    kept
 
 fn _ctx_tf(tokens: [text]) -> Dict<text, i64>:
     var tf: Dict<text, i64> = {}
@@ -302,58 +330,19 @@ fn _ctx_tf(tokens: [text]) -> Dict<text, i64>:
             tf[t] = 1
     tf
 
-# BM25 over all chunks (optionally restricted to a source prefix).
-fn ctx_bm25_search(chunks: [CtxChunk], query: text, source_prefix: text, limit: i64) -> [CtxHit]:
-    val q_terms = ctx_tokenize(query)
-    if q_terms.len() == 0:
-        return []
-    var docs: [CtxChunk] = []
-    for c in chunks:
-        if source_prefix == "" or c.source.starts_with(source_prefix):
-            docs.push(c)
-    val n_docs = docs.len()
-    if n_docs == 0:
-        return []
-    # Pass 1: term frequencies + document lengths + document frequencies.
-    var tfs: [Dict<text, i64>] = []
-    var lens: [i64] = []
-    var total_len: i64 = 0
-    var df: Dict<text, i64> = {}
-    for d in docs:
-        val toks = ctx_tokenize(d.body)
-        val tf = _ctx_tf(toks)
-        tfs.push(tf)
-        lens.push(toks.len())
-        total_len = total_len + toks.len()
-        for qt in q_terms:
-            if tf.contains_key(qt):
-                if df.contains_key(qt):
-                    df[qt] = df[qt] + 1
-                else:
-                    df[qt] = 1
-    val avg_len = if n_docs > 0: total_len.to_float() / n_docs.to_float() else: 1.0
-    val k1 = 1.2
-    val b = 0.75
-    # Pass 2: score.
-    var scored: [CtxHit] = []
-    var i = 0
-    while i < n_docs:
-        var score = 0.0
-        var matched: i64 = 0
-        val tf = tfs[i]
-        val dl = lens[i].to_float()
-        for qt in q_terms:
-            if tf.contains_key(qt):
-                val f = tf[qt].to_float()
-                val n_q = (df[qt]).to_float()
-                val idf = ln_f64(1.0 + (n_docs.to_float() - n_q + 0.5) / (n_q + 0.5))
-                val denom = f + k1 * (1.0 - b + b * dl / avg_len)
-                score = score + idf * (f * (k1 + 1.0)) / denom
-                matched = matched + 1
-        if matched > 0:
-            scored.push(CtxHit(chunk: docs[i], score: score, matched: matched))
-        i = i + 1
-    # Top-k by repeated max selection (result sets are small).
+# Raw substring needles for the zero-hit fallback: whitespace-separated
+# pieces of the query (>= 3 chars), lowercased — keeps `_`, `.`, `-`, `(`
+# so a partial identifier like `string_len` or `foo.bar` still matches.
+fn _ctx_substring_needles(query: text) -> [text]:
+    var out: [text] = []
+    for piece in query.lower().split(" "):
+        val p = piece.trim()
+        if p.len() >= 3:
+            out.push(p)
+    out
+
+# Top-k by repeated max selection (result sets are small).
+fn _ctx_top_k(scored: [CtxHit], limit: i64) -> [CtxHit]:
     var out: [CtxHit] = []
     var taken: [bool] = []
     for h in scored:
@@ -373,6 +362,93 @@ fn ctx_bm25_search(chunks: [CtxChunk], query: text, source_prefix: text, limit: 
         out.push(scored[best])
         k = k + 1
     out
+
+# BM25 over all chunks (optionally restricted to a source prefix), with a
+# substring fallback when no chunk carries any query token (the role of
+# context-mode's trigram table).
+fn ctx_bm25_search(chunks: [CtxChunk], query: text, source_prefix: text, limit: i64) -> [CtxHit]:
+    val q_terms = ctx_query_terms(query)
+    if q_terms.len() == 0:
+        return []
+    var docs: [CtxChunk] = []
+    for c in chunks:
+        if source_prefix == "" or c.source.starts_with(source_prefix):
+            docs.push(c)
+    val n_docs = docs.len()
+    if n_docs == 0:
+        return []
+    # ponytail: document length is the stored byte count, not a token count,
+    # so only chunks that contain a query term as a substring get tokenized
+    # (a tokenized hit implies a substring hit, so df is exact). Byte-length
+    # normalization shifts scores slightly; ranking order is what matters.
+    var total_len: i64 = 0
+    var lowers: [text] = []
+    var cand: [bool] = []
+    for d in docs:
+        total_len = total_len + d.bytes
+        val low = d.body.lower()
+        var any = false
+        for qt in q_terms:
+            if low.contains(qt):
+                any = true
+                break
+        lowers.push(low)
+        cand.push(any)
+    val avg_len = if total_len > 0: total_len.to_float() / n_docs.to_float() else: 1.0
+    # Pass 1: term frequencies + document frequencies over candidates only.
+    var tfs: [Dict<text, i64>] = []
+    var df: Dict<text, i64> = {}
+    var i = 0
+    while i < n_docs:
+        var tf: Dict<text, i64> = {}
+        if cand[i]:
+            tf = _ctx_tf(ctx_tokenize(lowers[i]))
+            for qt in q_terms:
+                if tf.contains_key(qt):
+                    if df.contains_key(qt):
+                        df[qt] = df[qt] + 1
+                    else:
+                        df[qt] = 1
+        tfs.push(tf)
+        i = i + 1
+    val k1 = 1.2
+    val b = 0.75
+    # Pass 2: score.
+    var scored: [CtxHit] = []
+    i = 0
+    while i < n_docs:
+        if cand[i]:
+            var score = 0.0
+            var matched: i64 = 0
+            val tf = tfs[i]
+            val dl = docs[i].bytes.to_float()
+            for qt in q_terms:
+                if tf.contains_key(qt):
+                    val f = tf[qt].to_float()
+                    val n_q = (df[qt]).to_float()
+                    val idf = ln_f64(1.0 + (n_docs.to_float() - n_q + 0.5) / (n_q + 0.5))
+                    val denom = f + k1 * (1.0 - b + b * dl / avg_len)
+                    score = score + idf * (f * (k1 + 1.0)) / denom
+                    matched = matched + 1
+            if matched > 0:
+                scored.push(CtxHit(chunk: docs[i], score: score, matched: matched, mode: "bm25"))
+        i = i + 1
+    if scored.len() > 0:
+        return _ctx_top_k(scored, limit)
+    # Fallback: raw substring match, scored by occurrence count.
+    val needles = _ctx_substring_needles(query)
+    if needles.len() == 0:
+        return []
+    i = 0
+    while i < n_docs:
+        var hits: i64 = 0
+        for nd in needles:
+            if lowers[i].contains(nd):
+                hits = hits + lowers[i].split(nd).len() - 1
+        if hits > 0:
+            scored.push(CtxHit(chunk: docs[i], score: hits.to_float(), matched: 0, mode: "substring"))
+        i = i + 1
+    _ctx_top_k(scored, limit)
 
 fn _ctx_fmt_score(score: f64) -> text:
     val milli = (score * 1000.0).to_int()
@@ -411,7 +487,7 @@ fn ctx_format_hits(query: text, hits: [CtxHit]) -> text:
     lines.push("## query: " + query + " (" + str(hits.len()) + " hit(s))")
     var rank = 1
     for h in hits:
-        lines.push("[" + str(rank) + "] score=" + _ctx_fmt_score(h.score) + " source=" + h.chunk.source + " chunk=" + str(h.chunk.id) + " ts=" + str(h.chunk.ts))
+        lines.push("[" + str(rank) + "] score=" + _ctx_fmt_score(h.score) + " match=" + h.mode + " source=" + h.chunk.source + " chunk=" + str(h.chunk.id) + " ts=" + str(h.chunk.ts))
         lines.push(_ctx_snippet(h.chunk.body, query))
         lines.push("")
         rank = rank + 1
@@ -582,6 +658,61 @@ fn ctx_execute_code(language: text, code: text, file_path: text, timeout_ms: i64
         return (Some(ctx_run_bounded(_ctx_simple_binary(), argv, timeout_ms)), "")
     (nil, "Unsupported language: " + language + " (use shell, javascript, or simple)")
 
+# Smart truncation: keep whole lines from the head up to 60% of `cap` bytes
+# and from the tail up to 40%, with `marker` as the line between them;
+# returns (text, omitted_lines, omitted_bytes), omitted_lines == 0 when
+# nothing was cut.
+fn ctx_smart_truncate(stdout: text, cap: i64, marker: text) -> (text, i64, i64):
+    if stdout.len() <= cap:
+        return (stdout, 0, 0)
+    val lines = stdout.split("\n")
+    val n = lines.len()
+    val head_budget = cap * 6 / 10
+    val tail_budget = cap - head_budget
+    var head_end = 0
+    var used: i64 = 0
+    while head_end < n and used + lines[head_end].len() + 1 <= head_budget:
+        used = used + lines[head_end].len() + 1
+        head_end = head_end + 1
+    var tail_start = n
+    used = 0
+    while tail_start > head_end and used + lines[tail_start - 1].len() + 1 <= tail_budget:
+        used = used + lines[tail_start - 1].len() + 1
+        tail_start = tail_start - 1
+    if tail_start <= head_end:
+        return (stdout, 0, 0)
+    var omitted_bytes: i64 = 0
+    var i = head_end
+    while i < tail_start:
+        omitted_bytes = omitted_bytes + lines[i].len() + 1
+        i = i + 1
+    var out: [text] = []
+    i = 0
+    while i < head_end:
+        out.push(lines[i])
+        i = i + 1
+    out.push(marker)
+    i = tail_start
+    while i < n:
+        out.push(lines[i])
+        i = i + 1
+    (out.join("\n"), tail_start - head_end, omitted_bytes)
+
+# Apply the return cap to an execute result: when the stdout exceeds
+# `_CTX_RETURN_CAP_BYTES` the full text is indexed under `exec:<ts>` and the
+# returned stdout is the head+tail with an annotation naming that source.
+fn ctx_cap_exec_stdout(r: CtxExecResult) -> CtxExecResult:
+    if r.stdout.len() <= _CTX_RETURN_CAP_BYTES:
+        return r
+    val source = "exec:" + str(time_now_unix_micros())
+    val (kept, omitted_lines, omitted_bytes) = ctx_smart_truncate(r.stdout, _CTX_RETURN_CAP_BYTES, "[...truncated: see below]")
+    if omitted_lines == 0:
+        return r
+    val n = ctx_index_text(r.stdout, source)
+    val note = "[...truncated — " + str(omitted_lines) + " line(s) / " + str(omitted_bytes) + " byte(s) omitted from the middle; full output indexed as " + str(n) + " chunk(s): simple_ctx_search(queries: [...], source: '" + source + "')]"
+    val marked = kept.replace("[...truncated: see below]", note)
+    CtxExecResult(stdout: marked, stderr_summary: r.stderr_summary, exit_code: r.exit_code, timed_out: r.timed_out, wall_ms: r.wall_ms, raw_bytes: r.raw_bytes)
+
 fn ctx_format_exec(label: text, r: CtxExecResult) -> text:
     var head = "-- " + label + " (exit: " + str(r.exit_code) + ", " + str(r.wall_ms) + "ms) --"
     if r.timed_out:
@@ -630,7 +761,8 @@ fn _ctx_exec_common(id: text, body: text, tool: text, file_path: text) -> text:
     val timeout_ms = _ctx_int_param(body, "timeout_ms", _CTX_DEFAULT_TIMEOUT_MS, _CTX_MAX_TIMEOUT_MS)
     val (result, err) = ctx_execute_code(language, code, file_path, timeout_ms)
     match result:
-        Some(r):
+        Some(raw):
+            val r = ctx_cap_exec_stdout(raw)
             _ctx_stats_bump("exec_calls", 1)
             _ctx_stats_bump("bytes_returned", r.stdout.len())
             val out = ctx_format_exec(tool, r)
@@ -899,5 +1031,6 @@ export handle_simple_ctx_doctor, handle_simple_ctx_upgrade
 export ctx_store_dir, ctx_index_text, ctx_bm25_search, ctx_tokenize, ctx_chunk_text
 export ctx_escape_cell, ctx_unescape_cell, ctx_parse_string_array, ctx_unescape_json
 export ctx_execute_code, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text
+export ctx_query_terms, ctx_smart_truncate, ctx_cap_exec_stdout
 export ctx_doctor_text, ctx_upgrade_store, ctx_schema_version
 export CtxChunk, CtxHit, CtxExecResult
