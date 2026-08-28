@@ -288,6 +288,10 @@ impl Lowerer {
             // registry entry) -- fall back to lowering exactly what was
             // written, in source order, matching prior behavior for this
             // unresolvable case.
+            if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                eprintln!("[CTOR-TRACE] {name} ERASED source-order n={} in {fpath}", provided.len());
+            }
             let mut out = Vec::with_capacity(provided.len());
             for (_, expr) in provided {
                 out.push(self.lower_expr(expr, ctx)?);
