@@ -4,6 +4,8 @@
 # helpers used during the self-hosted bootstrap process.
 
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
+use std.io_runtime.{file_copy}
+use std.env.{env_get}
 use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
@@ -27,12 +29,10 @@ use compiler.driver.driver_source_loading.{_driver_module_name_from_path, _drive
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity}
 
-extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
 
 fn bootstrap_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+    (env_get("SIMPLE_BOOTSTRAP_DEBUG")) == "1"
 
 pub fn bootstrap_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
     # NOTE: explicit match, not `if ctx.options.opt_level.?:` -- an explicit
@@ -101,7 +101,7 @@ pub fn bootstrap_emit_seed_wrapper(output: text) -> CompileResult:
     CompileResult.CodegenError("bootstrap seed-wrapper fallback was removed")
 
 pub fn bootstrap_entry_module_name(ctx: CompileContext) -> text:
-    val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+    val native_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
     if native_entry != "":
         var i = 0
         while i < ctx.sources.len():
@@ -135,7 +135,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     # from the freshly-parsed Module.functions) to the MIR free path so it lowers
     # real bodies instead of ret-0 stubs.
     val entry_module_name = bootstrap_entry_module_name(ctx)
-    val closure_mode = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+    val closure_mode = (env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")) == "1"
     if closure_mode and bootstrap_hir_module_count() > 0:
         if bootstrap_trace_enabled():
             print "[driver-mir] bootstrap flat:start entry={entry_module_name} modules={bootstrap_hir_module_count()}"
@@ -356,7 +356,7 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))
     val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
-    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+    if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
         log_phase("aot:bootstrap_real_llvm:copied_obj")
         return CompileResult.Success(obj_path)
     CompileResult.CodegenError(
@@ -410,7 +410,7 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
         return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))
     val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
-    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+    if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
         log_phase("aot:bootstrap_real_llvm_module:copied_obj")
         return CompileResult.Success(obj_path)
     CompileResult.CodegenError(
@@ -436,7 +436,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
     Bootstrap stages must produce a real native compiler.  Seed-wrapper and
     ret-0 stub fallbacks are intentionally rejected.
     """
-    if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR") ?? "") == "1":
+    if (env_get("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR")) == "1":
         return bootstrap_compile_to_native_local(ctx, backend_name, output)
     val is_release = ctx.options.release
     val opt_level = bootstrap_native_opt_level(ctx, is_release)
@@ -460,7 +460,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 bootstrap_llvm_phase_message("worker", "backend={backend_name} output={obj_path}", err.message)
             )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
-        if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
             log_phase("aot:bootstrap_native_context:copied_obj")
         else:
             return CompileResult.CodegenError(
@@ -501,7 +501,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
     if ctx.bootstrap_entry_mir.?:
         log_phase("aot:bootstrap_native_local_real:context_mir")
         return compile_bootstrap_context_to_native(ctx, backend_name, output)
-    if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1":
+    if (env_get("SIMPLE_BOOTSTRAP_REAL_LLVM")) == "1":
         log_phase("aot:bootstrap_native_local_real:local_mir")
         var next_ctx = ctx
         log_phase("aot:bootstrap_native_local_real:free_mir:start")
@@ -514,7 +514,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
     log_phase("aot:bootstrap_native_local_real:module")
     log_phase("aot:bootstrap_native_local_real:compile")
     val obj_path = output + ".app.cli.bootstrap_main.o"
-    if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1":
+    if (env_get("SIMPLE_BOOTSTRAP_REAL_LLVM")) == "1":
         val real_result = bootstrap_emit_real_llvm_object(output, opt_level)
         match real_result:
             case CompileResult.Success(_): ()
@@ -527,7 +527,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
                 bootstrap_llvm_phase_message("worker", "backend={backend_name} output={obj_path}", err.message)
             )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
-        if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
             log_phase("aot:bootstrap_native_local_real:copied_obj")
         else:
             return CompileResult.CodegenError(

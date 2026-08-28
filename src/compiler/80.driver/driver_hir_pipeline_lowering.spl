@@ -1,4 +1,6 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use std.io_runtime.{exit, hash_text}
+use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
@@ -45,12 +47,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
-extern fn rt_env_get(key: text) -> text
-extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
-extern fn rt_exit(code: i64)
 extern fn rt_stdout_flush()
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
@@ -58,7 +57,7 @@ fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
 
 fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
     not driver_hir_explicit_semantic_policy(ctx) and
-        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        (env_get("SIMPLE_BOOTSTRAP")) == "1"
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
@@ -185,7 +184,7 @@ impl CompilerDriver:
             # stale field under the Stage-3 native backend. The non-streaming
             # validation path below already uses this scalar boundary.
             val source_content_length: i64 = source.content.len()
-            val source_content_hash: i64 = rt_hash_text(source.content)
+            val source_content_hash: i64 = hash_text(source.content)
             val is_physical_owner = (
                 surfaces.surfaces[surface_index].source_index == source_index and
                 surfaces.surfaces[surface_index].module_name == source.module_name)
@@ -307,7 +306,7 @@ impl CompilerDriver:
                         return (self.ctx, false)
                     hir_loop_pos = hir_loop_pos + 1
                     continue
-                if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+                if (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
                     val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
                     print hir_codec_roundtrip_line(hir_round_trip, source.path)
                     hir_module = hir_round_trip.module
@@ -342,7 +341,7 @@ impl CompilerDriver:
         if hir_shard_mode:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
             rt_stdout_flush()
-            rt_exit(0)
+            exit(0)
         # Collect-all summary (streaming surfaces path). Same provenance marker
         # as the non-streaming loop -- see the comment there.
         val poisoned_count = self.ctx.poisoned_module_count_value
@@ -569,7 +568,7 @@ impl CompilerDriver:
             # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
             # stage4 lowering regression ever needs to be bypassed in the field.
             val unstub_hir = driver_hir_explicit_semantic_policy(self.ctx) or
-                (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
+                (env_get("SIMPLE_STUB_HIR")) != "1"
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
@@ -681,7 +680,7 @@ impl CompilerDriver:
             val module_error_count: i64 = lowering.lowering_error_count()
             val bootstrap_mode = hir_bootstrap_mode_gate
             val bootstrap_diag = bootstrap_mode and
-                (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+                (env_get("SIMPLE_BOOTSTRAP_DEBUG")) == "1"
             if bootstrap_diag and module_error_count > 0 and source_idx < 20:
                 eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
             var module_error_idx = 0
@@ -748,7 +747,7 @@ impl CompilerDriver:
             # receipt per module, and the build CONTINUES FROM THE DECODED
             # module so a lossy codec cannot pass quietly. Gate:
             # scripts/check/check-hir-codec-roundtrip.shs
-            if (rt_env_get("SIMPLE_HIR_CODEC_ROUNDTRIP") ?? "") == "1":
+            if (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
                 val hir_round_trip = hir_codec_roundtrip_selfcheck(hir_module)
                 print hir_codec_roundtrip_line(hir_round_trip, src.path)
                 hir_module = hir_round_trip.module
@@ -782,7 +781,7 @@ impl CompilerDriver:
             # parameter duplicates the no-GC Stage-3 ownership graph.
             var validation_surface_index: i64 = -1
             val validation_content_length: i64 = src.content.len()
-            val validation_content_hash: i64 = rt_hash_text(src.content)
+            val validation_content_hash: i64 = hash_text(src.content)
             var validation_alias_index: i64 = 0
             while validation_alias_index < retained_module_surfaces.ordered_names.len() and
                   validation_alias_index < retained_module_surfaces.ordered_indices.len():
@@ -869,7 +868,7 @@ impl CompilerDriver:
             # this point is the real build's job and must not run N times.
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
             rt_stdout_flush()
-            rt_exit(0)
+            exit(0)
         log_debug("HIR lowering complete")
 
         if not mem_snapshot_finish():
@@ -912,7 +911,7 @@ impl CompilerDriver:
         val typecheck_enforcing = match typecheck_pass_severity():
             case TypecheckPassSeverity.Advisory: false
             case _: true
-        if ((rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
+        if ((env_get("SIMPLE_TYPECHECK_WARN")) == "1") or typecheck_enforcing:
             val tc_warnings = run_typecheck_warn_pass(phase_ctx, phase_hir_modules)
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
@@ -926,7 +925,7 @@ impl CompilerDriver:
         val safety_enforcing = match safety_pass_severity_phased():
             case SafetyPassSeverity.Advisory: false
             case _: true
-        if ((rt_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
+        if ((env_get("SIMPLE_SAFETY_WARN")) == "1") or safety_enforcing:
             val safety_warnings = run_safety_warn_pass(phase_ctx, phase_hir_modules)
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
