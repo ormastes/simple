@@ -674,6 +674,37 @@ describe "Mir Lowering New":
         expect(calls).to_contain("self.canonical_mir_type_symbol(nested_symbol)")
         expect(methods).to_contain("self.canonical_mir_type_symbol(")
 
+    it "initializes local_symbol_index_slots so local_symbol_slot never receives nil":
+        # @req REQ-SSPEC-COMPILER
+        # Regression for bug native_len_nil_fix_2026-08-28: MirLowering.new_for_target's
+        # struct literal omitted `local_symbol_index_slots`, so the field defaulted
+        # to nil. The first call into local_symbol_slot() (mir_lowering_types.spl,
+        # via bind_local during MIR lowering of ANY statement, including a
+        # three-line hello world) then called `.len()` on that nil field and
+        # crashed native-build with `method 'len' not found on type 'nil'` before
+        # any code could be generated. Pinned by asserting the constructor literal
+        # sets the field explicitly, the same way its sibling fields do.
+        step("initializes local_symbol_index_slots so local_symbol_slot never receives nil")
+        val types_source = read_mir_source("src/compiler/50.mir/mir_lowering_types.spl")
+        val ctor_source = read_mir_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+
+        expect(types_source).to_contain("local_symbol_index_slots: [i64]")
+        expect(types_source).to_contain("if self.local_symbol_index_slots.len() == 0:")
+        expect(ctor_source).to_contain("local_symbol_index_slots: [],")
+
+    it "keeps every sibling local-tracking array initialized alongside local_symbol_ids":
+        # @req REQ-SSPEC-COMPILER
+        # Neighbor of the local_symbol_index_slots regression above: the same
+        # constructor also owns local_symbol_ids/local_symbol_values, which
+        # local_symbol_slot() and its siblings index into unconditionally. If
+        # either drops out of the constructor literal the same nil-receiver
+        # class of crash recurs one field over.
+        step("keeps every sibling local-tracking array initialized alongside local_symbol_ids")
+        val ctor_source = read_mir_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+
+        expect(ctor_source).to_contain("local_symbol_ids: [],")
+        expect(ctor_source).to_contain("local_symbol_values: [],")
+
 # # # MIR Lowering Initialization Specification
 # #
 # # **Feature IDs:** #TBD
