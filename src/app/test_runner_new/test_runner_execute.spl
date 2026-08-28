@@ -17,6 +17,7 @@ use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{time_now_unix_micros}
+use std.io.{env_get}
 use std.io.{process_run_timeout, process_run_with_limits, ProcessResult}
 
 # Import from split-out files (same directory, but need use for re-export)
@@ -523,6 +524,43 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val compile_exit = compile_result.exit_code
 
     if compile_exit != 0:
+        # Governance-mandated MC/DC-on wraps every spec (build_coverage_wrapper
+        # above), forcing standalone-SMF compilation. That compile is
+        # structurally impossible for specs using interpreter-only constructs
+        # (TryOperator, PatternMatch, CollectionLiteral, ...) -- degrade to
+        # plain interpreter execution of the ORIGINAL source instead of
+        # failing the spec outright, and record truthfully that MC/DC
+        # instrumentation was skipped rather than implying coverage that was
+        # never collected.
+        val configured_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
+        val mcdc_enabled = configured_mcdc_mode == "on" or configured_mcdc_mode == "dynamic"
+        val compile_output = compile_stdout + "\n" + compile_stderr
+        if mcdc_enabled and not options.coverage and compile_output.contains("cannot compile to standalone SMF"):
+            if cleanup_path != "" and not options.keep_artifacts:
+                if file_exists(cleanup_path):
+                    file_delete(cleanup_path)
+            val fb_start = time_now_unix_micros()
+            # Explicit `run` subcommand: a bare `simple <spec>` is routed back
+            # into `simple test`, which recursively spawns test runners (same
+            # reason build_child_args uses it). Mirror its gc flags too.
+            var fb_args: [text] = ["run", file_path]
+            if options.gc_log:
+                fb_args.push("--gc-log")
+            if options.gc_off:
+                fb_args.push("--gc=off")
+            val fb_result = process_run_with_limits(binary, fb_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs)
+            val fb_end = time_now_unix_micros()
+            val fb_duration_ms = (fb_end - fb_start) / 1000
+            val fb_reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution."
+            print "[mcdc-fallback] {file_path}: {fb_reason}"
+            val fb_base = make_result_from_output(file_path, fb_result.stdout, fb_result.stderr, fb_result.exit_code, fb_duration_ms, options.timeout)
+            return TestFileResult(
+                path: fb_base.path, passed: fb_base.passed, failed: fb_base.failed,
+                skipped: fb_base.skipped, pending: fb_base.pending,
+                duration_ms: fb_base.duration_ms, setup_ms: fb_base.setup_ms,
+                error: fb_base.error, timed_out: fb_base.timed_out, cached: fb_base.cached,
+                mcdc_skip_reason: fb_reason
+            )
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"

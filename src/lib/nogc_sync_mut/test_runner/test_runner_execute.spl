@@ -850,6 +850,58 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
     cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
     cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
 
+# Graceful MC/DC-on degradation path: run the spec directly via the
+# interpreter (no coverage/MC/DC wrapper, no native SMF compile) when the
+# governance-mandated always-on MC/DC mode cannot instrument this spec
+# because it contains interpreter-only constructs. The verdict below is a
+# REAL pass/fail from actually executing the spec -- this never fabricates a
+# pass and never silently swallows a real failure. `mcdc_skip_reason` is
+# always populated so callers/reporters can surface that MC/DC coverage was
+# not collected for this spec, per-spec, rather than implying it was.
+fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, compile_output: text) -> TestFileResult:
+    val binary = find_simple_binary()
+    val timeout_ms = options.timeout * 1000
+    var run_args: [text] = ["run", file_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val stdout = scoped_child.result.stdout
+    val stderr = scoped_child.result.stderr
+    val exit_code = scoped_child.result.exit_code
+    val end = time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+    val reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + first_line(compile_output)
+    print "[mcdc-fallback] {file_path}: {reason}"
+    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+    TestFileResult(
+        path: evidenced.path, passed: evidenced.passed, failed: evidenced.failed,
+        skipped: evidenced.skipped, pending: evidenced.pending,
+        duration_ms: evidenced.duration_ms, setup_ms: evidenced.setup_ms,
+        error: evidenced.error, timed_out: evidenced.timed_out, cached: evidenced.cached,
+        in_development: evidenced.in_development, mcdc_evidence_v1: "",
+        blocked: evidenced.blocked, unsupported: evidenced.unsupported,
+        omission_evidence: evidenced.omission_evidence,
+        compile_ms: 0, execution_ms: duration_ms,
+        resource_usage: evidenced.resource_usage, resource_class: evidenced.resource_class,
+        cohort_id: evidenced.cohort_id, budget_status: evidenced.budget_status,
+        anomaly_status: evidenced.anomaly_status,
+        mcdc_skip_reason: reason
+    )
+
+# First NON-EMPTY line. `compile_output` is `stdout + "\n" + stderr`, so when
+# the compiler wrote nothing to stdout the string starts with "\n" and a
+# naive first-line take yields an empty diagnostic (observed: the printed
+# "Compiler diagnostic:" was blank for every real fallback).
+fn first_line(text_value: text) -> text:
+    for line in text_value.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            return trimmed
+    ""
+
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
@@ -892,6 +944,20 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val compile_output = compile_stdout + "\n" + compile_stderr
 
     if compile_exit != 0:
+        # MC/DC-forced standalone-SMF compilation is impossible for specs
+        # that use interpreter-only constructs (TryOperator, PatternMatch,
+        # CollectionLiteral, ...) -- "cannot compile to standalone SMF: N
+        # function(s) contain constructs that require the interpreter" is a
+        # structural incompatibility, not a real test failure, and must not
+        # fail the spec. Degrade to direct interpreter execution of the
+        # ORIGINAL (unwrapped) source -- the wrapper's MC/DC scaffolding
+        # itself depends on the same native-only path, so it cannot be
+        # salvaged here -- and record truthfully that MC/DC instrumentation
+        # was skipped for this spec rather than silently reporting a green
+        # run with implied (but never collected) coverage evidence.
+        if mcdc_enabled and not options.coverage and compile_output.contains("cannot compile to standalone SMF"):
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, compile_output)
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
