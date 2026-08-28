@@ -1,0 +1,122 @@
+# Assurance WARNING PHASE — the one-level severity downgrade (2026-08-23).
+#
+# User requirement: "warning mode, when mission critical mode in warning
+# phase. which normal error and mission critical warning. when set to warning
+# on a mode, one level lower error the level warning."
+#
+# I.e. a profile (mission-critical especially) can be run in a WARNING PHASE:
+# every diagnostic that profile would raise drops EXACTLY ONE severity level.
+# An error becomes a warning. This is the migration ramp INTO a stricter
+# profile: you see what would fail before the build fails.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS A MODIFIER, NOT A PROFILE NAME
+# ---------------------------------------------------------------------------
+# `policy_names.spl` states the alias set is FROZEN, so a new spelling such as
+# `critical-warn` is out of bounds by construction. But the decisive reason is
+# FAILURE DIRECTION, not the freeze:
+#
+#   * A name/suffix encoding (`SIMPLE_SAFETY_PROFILE=critical:warn`) makes
+#     `normalize_profile_name` return "" at every consumer that was not
+#     updated. "" resolves to moderate/Advisory. A suffix therefore fails
+#     OPEN — an un-updated projection silently enforces LESS than it does
+#     today.
+#   * A separate knob fails CLOSED — an un-updated consumer simply ignores the
+#     modifier and keeps enforcing FULL severity. Never weaker than today.
+#
+# Mission-critical infrastructure takes the fail-closed encoding.
+#
+# ---------------------------------------------------------------------------
+# THE DOWNGRADE NEVER REACHES A SILENT LEVEL
+# ---------------------------------------------------------------------------
+# This is a severity transform, NOT a mute switch. Every ladder in the tree
+# has a lowest level that still REPORTS, and the downgrade clamps there:
+#
+#   driver (SafetyPassSeverity)  Deny -> Warn -> Advisory (clamp)
+#       Advisory is log-only via SIMPLE_SAFETY_WARN — still reported, so it is
+#       a legitimate floor.
+#   lint (LintLevel)             Deny -> Warn (clamp)
+#       `Allow` is SILENCE, so lint clamps one rung higher than the enum's
+#       bottom. Downgrading into Allow is forbidden.
+#   interpreter (bool)           true -> false (one step, then clamp)
+#       A bool cannot count levels; see the honesty note in the header of
+#       `eval_apply_assurance_profile`.
+#
+# ---------------------------------------------------------------------------
+# ZERO `use` LINES, ZERO MODULE-LEVEL STATE
+# ---------------------------------------------------------------------------
+# Same constraint, and for the same reason, as its sibling `policy_names.spl`:
+# this leaf is imported by 80.driver, 10.frontend, 90.tools and src/app, and
+# module-level `Dict`/`var` state in an interpreter-visible module graph is
+# what the contamination bug record names as its likely trigger. Every
+# function here is a pure function of its arguments; the ONE environment read
+# lives in a thin named wrapper so that all real logic stays testable without
+# a process-global.
+
+# The dedicated env knob, mirroring `SIMPLE_SAFETY_PROFILE`'s convention:
+# orthogonal to the profile name, never encoded inside it.
+pub fn warning_phase_env_var_name() -> text:
+    "SIMPLE_ASSURANCE_WARNING_PHASE"
+
+# The CLI spelling, mirroring `--profile`.
+pub fn warning_phase_flag_name() -> text:
+    "--assurance-warning-phase"
+
+# Parse the knob's value. Accepted truthy spellings are deliberately narrow
+# and fail CLOSED: anything unrecognised (including "" and a typo) means NO
+# downgrade, i.e. full configured severity.
+# Non-`pub` for the same `primitive_api` reason as the rank helpers above.
+fn warning_phase_enabled_for_value(raw: text) -> bool:
+    val lower = raw.lower()
+    if lower == "1" or lower == "true" or lower == "yes" or lower == "on":
+        return true
+    # `warn` / `warning` read naturally at the CLI ("run this mode in warning
+    # phase") and are accepted for that reason only.
+    if lower == "warn" or lower == "warning":
+        return true
+    false
+
+# Canonical severity ladder shared by the projections, strictness-ascending.
+# Rank is an ordinal, not a wire format — nothing serialises these numbers.
+#
+#   0 advisory (log-only, lowest level that still REPORTS)
+#   1 warn     (reported, does not fail the build)
+#   2 deny     (fails the build)
+# Defined relative to each other so the "exactly one rung apart" invariant is
+# in the code rather than in three independent literals. Non-`pub` on purpose:
+# these are bare-primitive signatures, and the tree's convention (see
+# `20.hir/exhaustiveness/coverage_witness.spl:102`,
+# `35.semantics/match_exhaustiveness.spl:51`) is to keep such helpers a plain
+# `fn`, which is still importable across modules, rather than trip the
+# `primitive_api` rule.
+fn severity_rank_deny() -> i64:
+    2
+
+fn severity_rank_warn() -> i64:
+    severity_rank_deny() - 1
+
+fn severity_rank_advisory() -> i64:
+    severity_rank_warn() - 1
+
+# Drop exactly one level, clamping at `floor_rank` so the result is never a
+# silent level. The caller supplies its own floor because the ladders differ:
+# the driver passes `severity_rank_advisory()` (log-only still reports), lint
+# passes `severity_rank_warn()` (its `Allow` rung is silence).
+#
+# Exactly one level: this is deliberately NOT "set everything to warn". A Deny
+# under warning phase becomes Warn; a Warn becomes Advisory (driver) and stays
+# Warn (lint, by its floor).
+# A rank already at or below the floor is returned UNCHANGED — the clamp never
+# raises a severity, it only refuses to lower one past the floor.
+fn downgrade_severity_rank(rank: i64, floor_rank: i64) -> i64:
+    if rank <= floor_rank:
+        return rank
+    rank - 1
+
+# Convenience: apply the downgrade only when warning phase is on. Keeps every
+# call site a single expression and makes "non-warning mode is unchanged" a
+# property of ONE function rather than of N scattered `if`s.
+fn phased_severity_rank(rank: i64, floor_rank: i64, warning_phase: bool) -> i64:
+    if not warning_phase:
+        return rank
+    downgrade_severity_rank(rank, floor_rank)
