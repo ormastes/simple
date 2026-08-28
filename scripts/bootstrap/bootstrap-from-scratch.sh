@@ -2180,6 +2180,19 @@ else
   # unquoted expansion is safe and no glob character can occur.  Empty by
   # default => both uses are byte-identical to before this existed.
   stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
+  # Allocatable mission-critical mode for Stage 3 (step 1, 2026-08-28).
+  # OPT-IN via SIMPLE_STAGE3_MISSION_CRITICAL=1: pins SIMPLE_SAFETY_PROFILE=
+  # critical (read by driver_types.spl into CompileContext.assurance_policy)
+  # and SIMPLE_ASSURANCE_WARNING_PHASE=1 (safety_pass_severity_phased drops the
+  # critical Deny to Warn), so the recompile stays green while every violation
+  # is printed.  Same opt-in in resume-stage3-from-admitted.sh; unset keeps the
+  # args hash byte-identical.  Default-on is a separate lane (hash change).
+  stage3_mc_env=
+  case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
+    '') ;;
+    1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
+    *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
+  esac
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -2191,6 +2204,7 @@ else
       "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      ${stage3_mc_env} \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_COMPILER_PHASE_PROFILE=1" \
       "SIMPLE_COMPILER_PHASE_PROFILE_FILE=${stage3_phase_profile}" \
@@ -2507,6 +2521,7 @@ else
     MALLOC_TRIM_THRESHOLD_=0 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    ${stage3_mc_env} \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_COMPILER_PHASE_PROFILE=1 \
     SIMPLE_COMPILER_PHASE_PROFILE_FILE="${stage3_phase_profile}" \

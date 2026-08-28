@@ -265,6 +265,23 @@ case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
   *[!0-9]*) exit 1 ;;
   *) stage3_timeout_args="--timeout $SIMPLE_NATIVE_FILE_TIMEOUT" ;;
 esac
+# Allocatable mission-critical mode for the Stage 3 recompile (step 1,
+# 2026-08-28).  OPT-IN: `SIMPLE_STAGE3_MISSION_CRITICAL=1` pins the assurance
+# profile to `critical` (driver_types.spl reads SIMPLE_SAFETY_PROFILE into
+# CompileContext.assurance_policy; the safety pass DENIES at critical) and
+# turns the WARNING PHASE on (driver_safety_severity.safety_pass_severity_phased
+# drops that Deny to Warn), so the recompile stays green while every violation
+# is printed.  Unset reproduces the pinned argv byte-for-byte.  Baked into both
+# the args hash and the transcribed invocation, exactly like the threads knob
+# above, because the child runs under `env -i`.  Flipping this to default-on is
+# the "mission-critical default for phase 3" lane and is deliberately NOT done
+# here: it changes the Stage 3 args hash for every existing admission receipt.
+stage3_mc_env=
+case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
+  '') ;;
+  1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
+  *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
+esac
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -272,6 +289,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_FRONTEND_CACHE=0" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
+  ${stage3_mc_env} \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
   "SIMPLE_COMPILER_PHASE_PROFILE=1" \
   "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
@@ -298,7 +316,8 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
   SIMPLE_FRONTEND_CACHE=0 \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
-  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
+  SIMPLE_NO_STUB_FALLBACK=1 ${stage3_mc_env} \
+  SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
   SIMPLE_COMPILER_PHASE_PROFILE=1 \
   SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
   SIMPLE_MEM_SNAPSHOT_FILE="$memory_snapshot" \
