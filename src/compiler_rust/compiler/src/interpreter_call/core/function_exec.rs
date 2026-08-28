@@ -764,7 +764,21 @@ pub(crate) fn execute_function_body(
     // Auto-wrap return value in Some() when the declared return type is T? (Optional)
     // and the actual return value is not already an Option enum.
     // This handles `fn f() -> i32?: return 42` without explicit `return Some(42)`.
-    let result = if matches!(func.return_type, Some(Type::Optional(_))) {
+    //
+    // EXCEPTION: `-> any?`. For a dynamically-typed optional return there is no
+    // static call-site unwrap (the `any` erases the type info that drives the
+    // Some-unwrap for concrete `T?`), so wrapping delivers a raw Option enum to
+    // the caller ("cannot convert enum to float", `as i64` == 0). For `any?`,
+    // nil itself is the none sentinel: pass values and nil through untouched.
+    // Bugs: doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md,
+    // doc/08_tracking/bug/llm_caret_json_parse_nil_contract_and_any_option_wrap_2026-08-25.md
+    let optional_inner_is_any = matches!(
+        &func.return_type,
+        Some(Type::Optional(inner)) if matches!(inner.as_ref(), Type::Simple(name) if name == "any")
+    );
+    let result = if optional_inner_is_any {
+        result
+    } else if matches!(func.return_type, Some(Type::Optional(_))) {
         match &result {
             Value::Enum { enum_name, .. } if enum_name == "Option" => result,
             Value::Nil => Value::Enum {
