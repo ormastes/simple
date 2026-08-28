@@ -1158,6 +1158,7 @@ COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
+NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-1}   # 1 = --low-memory (single worker); 0 = full parallel
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
@@ -1318,7 +1319,7 @@ bootstrap_native_build_main() {
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
-    --low-memory
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
   set -- "$@" \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
@@ -1330,7 +1331,7 @@ bootstrap_native_build_main() {
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
-    SIMPLE_BOOTSTRAP_LOW_MEMORY=1 \
+    SIMPLE_BOOTSTRAP_LOW_MEMORY="${NATIVE_LOW_MEMORY}" \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
