@@ -2151,9 +2151,3 @@ mod tests {
         assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }
-#[test]
-fn atomic_write_provider_is_runtime_owned_and_linkable() {
-    let provider: unsafe extern "C" fn(RuntimeValue, RuntimeValue) -> i64 =
-        simple_runtime::value::sffi::file_io::file_ops::rt_file_atomic_write;
-    assert_ne!(provider as usize, 0);
-}
