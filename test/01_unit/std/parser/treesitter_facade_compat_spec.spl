@@ -8,7 +8,15 @@ describe "tree-sitter facade compatibility":
         val id = arena.alloc(Node(kind: "identifier", text: "abc", span: span, children: []))
         expect(id.index).to_equal(0)
         expect(arena.get(id).unwrap().kind).to_equal("identifier")
-        expect(arena.get(NodeId(index: id.index, generation: id.generation + 1))).to_be_nil()
+        expect(arena.get(NodeId(owner: id.owner, index: id.index, generation: id.generation + 1))).to_be_nil()
+
+        var other = NodeArena.new()
+        other.alloc(Node(kind: "other", text: "xyz", span: span, children: []))
+        expect(other.get(id)).to_be_nil()
+
+        arena.reset()
+        arena.alloc(Node(kind: "replacement", text: "def", span: span, children: []))
+        expect(arena.get(id)).to_be_nil()
 
     it "exposes root lookup and source text through the canonical tree owner":
         var parser = TreeSitterParser.new("simple").unwrap()
@@ -17,3 +25,17 @@ describe "tree-sitter facade compatibility":
         expect(root.kind).to_equal("module")
         expect(root.child_count()).to_equal(root.children.len())
         expect(tree.get_text(root)).to_equal("val answer = 42")
+        expect(root.child_count()).to_equal(1)
+        val child = tree.get_node(root.children[0]).unwrap()
+        expect(child.kind).to_equal("val_statement")
+        expect(tree.get_text(child)).to_equal("val answer = 42")
+
+    it "populates each top-level source line and skips indented lines":
+        var parser = TreeSitterParser.new("simple").unwrap()
+        val tree = parser.parse("fn answer():\n    42\nval ready = true\n").unwrap()
+        val root = tree.root().unwrap()
+        expect(root.child_count()).to_equal(2)
+        expect(tree.get_node(root.children[0]).unwrap().kind).to_equal("function_def")
+        expect(tree.get_node(root.children[1]).unwrap().kind).to_equal("val_statement")
+        expect(tree.get_text(tree.get_node(root.children[0]).unwrap())).to_equal("fn answer():")
+        expect(tree.get_text(tree.get_node(root.children[1]).unwrap())).to_equal("val ready = true")

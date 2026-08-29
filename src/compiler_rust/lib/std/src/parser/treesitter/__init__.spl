@@ -307,8 +307,16 @@ impl Lexer:
 # Stable handle into a parse tree's node arena.  The generation makes stale
 # handles fail closed if the arena representation is ever reused.
 pub struct NodeId:
+    owner: i64
     index: i64
     generation: i64
+
+var _next_node_arena_owner: i64 = 1
+
+fn next_node_arena_owner() -> i64:
+    val owner = _next_node_arena_owner
+    _next_node_arena_owner = _next_node_arena_owner + 1
+    return owner
 
 # Tree node
 pub struct Node:
@@ -328,21 +336,26 @@ impl Node:
 # remain stable for the lifetime of the tree.
 pub struct NodeArena:
     nodes: [Node]
+    owner: i64
     generation: i64
 
 impl NodeArena:
     pub static fn new() -> NodeArena:
-        return NodeArena(nodes: [], generation: 0)
+        return NodeArena(nodes: [], owner: next_node_arena_owner(), generation: 0)
 
     pub me alloc(node: Node) -> NodeId:
-        val id = NodeId(index: self.nodes.len(), generation: self.generation)
+        val id = NodeId(owner: self.owner, index: self.nodes.len(), generation: self.generation)
         self.nodes.push(node)
         return id
 
     pub fn get(self, id: NodeId) -> Option<Node>:
-        if id.generation != self.generation or id.index < 0 or id.index >= self.nodes.len():
+        if id.owner != self.owner or id.generation != self.generation or id.index < 0 or id.index >= self.nodes.len():
             return None
         return Some(self.nodes[id.index])
+
+    pub me reset():
+        self.nodes = []
+        self.generation = self.generation + 1
 
 # Parse tree
 pub struct Tree:
@@ -370,40 +383,41 @@ impl TreeSitterParser:
         return Ok(TreeSitterParser(language: language))
 
     pub me parse(self, source: text) -> Result<Tree, text>:
+        var arena = NodeArena.new()
+        var root_children: [NodeId] = []
+        var line_start = 0
+        var line_number = 1
+        for line in source.split("\n"):
+            if line.len() > 0 and line[0] != ' ' and line[0] != '\t':
+                val line_end = line_start + line.len()
+                val child_span = Span(start_byte: line_start, end_byte: line_end, start_line: line_number, end_line: line_number, start_column: 1, end_column: line.len() + 1)
+                root_children.push(arena.alloc(Node(kind: treesitter_top_level_kind(line), text: line, span: child_span, children: [])))
+            line_start = line_start + line.len() + 1
+            line_number = line_number + 1
+
         val root_span = Span(start_byte: 0, end_byte: source.len(), start_line: 1, end_line: 1, start_column: 1, end_column: source.len() + 1)
         val root = Node(
             kind: "module",
             text: source,
             span: root_span,
-            children: [],
+            children: root_children,
         )
-        var arena = NodeArena.new()
         val root_id = arena.alloc(root)
         return Ok(Tree(root_id: root_id, arena: arena, source: source, version: 0))
 
-fn treesitter_count_top_level_items(source: text) -> i64:
-    var count = 0
-    var at_line_start = true
-    var top_level = true
-    var saw_content = false
-
-    for ch in source:
-        if ch == '\n':
-            if top_level and saw_content:
-                count = count + 1
-            at_line_start = true
-            top_level = true
-            saw_content = false
-        else:
-            if at_line_start:
-                if ch == ' ' or ch == '\t':
-                    top_level = false
-                else:
-                    at_line_start = false
-                    saw_content = true
-            else:
-                saw_content = true
-
-    if top_level and saw_content:
-        count = count + 1
-    return count
+fn treesitter_top_level_kind(line: text) -> text:
+    if line.starts_with("fn "): return "function_def"
+    if line.starts_with("val ") or line.starts_with("let "): return "val_statement"
+    if line.starts_with("var "): return "var_statement"
+    if line.starts_with("return"): return "return_statement"
+    if line.starts_with("if "): return "if_statement"
+    if line.starts_with("match "): return "match_statement"
+    if line.starts_with("for "): return "for_statement"
+    if line.starts_with("while "): return "while_statement"
+    if line.starts_with("struct "): return "struct_def"
+    if line.starts_with("enum "): return "enum_def"
+    if line.starts_with("impl "): return "impl_def"
+    if line == "break": return "break_statement"
+    if line == "continue": return "continue_statement"
+    if line == "pass": return "pass_statement"
+    return "expression_statement"
