@@ -193,14 +193,20 @@ describe "Bootstrap MCP — symlinks":
         expect(wrapper.contains("repo_root=\"$(CDPATH= cd \"$\{script_dir}/..\" && pwd)\"")).to_equal(true)
         expect(wrapper.contains("cd \"$\{repo_root}\"")).to_equal(true)
         val initialize = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-initialize\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bootstrap\",\"version\":\"1\"}}}"
-        val search = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-search\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"handle_simple_api\",\"kind\":\"fn\",\"scope\":\"app\"}}}"
-        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; trap 'rm -rf \"$workdir\"' EXIT; (cd \"$workdir\" && printf '%s\\n%s\\n' '" + initialize + "' '" + search + "' | $runner \"$repo_root/bin/simple_mcp_server\")"
+        val search = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-search\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"compile_runtime_objects\",\"kind\":\"fn\",\"scope\":\"compiler\"}}}"
+        val no_match = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-no-match\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"__PURE_SIMPLE_MCP_NO_SUCH_DECL__\",\"kind\":\"fn\",\"scope\":\"compiler\"}}}"
+        val injection = "{\"jsonrpc\":\"2.0\",\"id\":\"bootstrap-mcp-injection\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"query\":\"__NO_MATCH__; touch /tmp/simple_mcp_framed_injection\",\"scope\":\"compiler\"}}}"
+        val command = "runner=; if command -v timeout >/dev/null 2>&1; then runner='timeout 10'; elif command -v gtimeout >/dev/null 2>&1; then runner='gtimeout 10'; elif command -v perl >/dev/null 2>&1; then runner=\"perl -e 'alarm shift; exec @ARGV' 10\"; else exit 127; fi; repo_root=\"$(pwd)\"; workdir=\"$(mktemp -d)\"; sentinel=/tmp/simple_mcp_framed_injection; rm -f \"$sentinel\"; trap 'rm -rf \"$workdir\"; rm -f \"$sentinel\"' EXIT; init='" + initialize + "'; positive='" + search + "'; negative='" + no_match + "'; injection='" + injection + "'; (cd \"$workdir\" && { for body in \"$init\" \"$positive\" \"$negative\" \"$injection\"; do printf 'Content-Length: %s\\r\\n\\r\\n%s' \"$\{#body}\" \"$body\"; done; } | $runner \"$repo_root/bin/simple_mcp_server\"); test ! -e \"$sentinel\""
         val (out, err, rc) = process_run("sh", ["-c", command])
         expect(rc).to_equal(0)
         val response = out + err
         expect(response.contains("\"id\":\"bootstrap-mcp-initialize\",\"result\"")).to_equal(true)
         expect(response.contains("\"id\":\"bootstrap-mcp-search\",\"result\"")).to_equal(true)
-        expect(response.contains("handle_simple_api")).to_equal(true)
+        expect(response.contains("runtime_compiler.spl")).to_equal(true)
+        expect(response.contains("fn compile_runtime_objects")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-mcp-no-match\",\"result\"")).to_equal(true)
+        expect(response.contains("No results found.")).to_equal(true)
+        expect(response.contains("\"id\":\"bootstrap-mcp-injection\",\"result\"")).to_equal(true)
         expect(response.contains("\"error\"")).to_equal(false)
 
     it "deployed LSP MCP launcher passes correlated symbols admission":

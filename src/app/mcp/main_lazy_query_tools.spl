@@ -456,25 +456,35 @@ fn handle_simple_search(id: text, body: text) -> text:
 
     var pattern = query
     if kind == "fn" or kind == "function":
-        pattern = "^fn " + query + "\\|^ *fn " + query
+        # ripgrep uses modern regex alternation (`|`), not grep's escaped
+        # basic-regex alternation (`\|`).  Accept exported functions and
+        # indented methods while keeping the search declaration-shaped.
+        pattern = "^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+" + query + "\\b"
     elif kind == "class":
-        pattern = "^class " + query + "\\|^ *class " + query
+        pattern = "^[[:space:]]*(pub[[:space:]]+)?class[[:space:]]+" + query + "\\b"
     elif kind == "struct":
-        pattern = "^struct " + query + "\\|^ *struct " + query
+        pattern = "^[[:space:]]*(pub[[:space:]]+)?struct[[:space:]]+" + query + "\\b"
     elif kind == "enum":
-        pattern = "^enum " + query + "\\|^ *enum " + query
+        pattern = "^[[:space:]]*(pub[[:space:]]+)?enum[[:space:]]+" + query + "\\b"
     elif kind == "import" or kind == "use":
-        pattern = "use.*" + query + "\\|import.*" + query
+        pattern = "^[[:space:]]*(pub[[:space:]]+)?(use|import)[[:space:]]+.*" + query
     elif kind == "type":
-        pattern = "^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query
+        pattern = "^[[:space:]]*(pub[[:space:]]+)?(type|alias|class|struct|enum)[[:space:]]+" + query + "\\b"
 
     var args = ["-n", "--glob", "*.spl", "--", pattern, search_dir]
     if file != "":
         args = ["-n", "--", query, file]
 
     var out = ""
-    var _u: i64 = 0
-    (out, _u) = mcp_run_argv("rg", args, 15000, 262144)
+    var search_status: i64 = 0
+    (out, search_status) = mcp_run_argv("rg", args, 15000, 262144)
+    # ripgrep returns 1 for a valid search with no matches. Any other nonzero
+    # status is a malformed pattern, timeout, missing path/tool, or I/O error;
+    # reporting it as "No results" hides a broken request or server.
+    if search_status != 0 and search_status != 1:
+        val detail = _mcp_first_lines(out, 8).trim()
+        val message = if detail != "": "Search failed (rg exit " + str(search_status) + "): " + detail else: "Search failed (rg exit " + str(search_status) + ")"
+        return make_tool_error(id, -32602, message)
     out = _mcp_first_lines(out, 50)
 
     var out_parts: [text] = []
