@@ -59,6 +59,18 @@ fn _mcp_first_lines(value: text, maximum: i64) -> text:
         out = out + "\n"
     out
 
+fn _mcp_public_api_change_details(previous: [text], current: [text]) -> text:
+    var changes: [text] = []
+    for line in previous:
+        if not current.contains(line):
+            changes.push("- " + line)
+    for line in current:
+        if not previous.contains(line):
+            changes.push("+ " + line)
+    if changes.len() == 0:
+        return "(declaration order changed)\n"
+    changes.join("\n") + "\n"
+
 fn _render_ponytail_mcp(path: text, mode: text, report: text, format: text) -> text:
     if format == "json":
         "{\"command\":\"ponytail\",\"status\":\"ok\",\"mode\":\"{_mcp_json_escape(mode)}\",\"source\":\"{_mcp_json_escape(path)}\",\"audit\":\"{_mcp_json_escape(report)}\",\"report\":\"{_mcp_json_escape(report)}\"}"
@@ -442,30 +454,28 @@ fn handle_simple_search(id: text, body: text) -> text:
     elif scope == "app":
         search_dir = "src/app/"
 
-    var cmd = ""
+    var pattern = query
     if kind == "fn" or kind == "function":
-        cmd = "timeout 15 grep -rn '^fn " + query + "\\|^ *fn " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^fn " + query + "\\|^ *fn " + query
     elif kind == "class":
-        cmd = "timeout 15 grep -rn '^class " + query + "\\|^ *class " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^class " + query + "\\|^ *class " + query
     elif kind == "struct":
-        cmd = "timeout 15 grep -rn '^struct " + query + "\\|^ *struct " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^struct " + query + "\\|^ *struct " + query
     elif kind == "enum":
-        cmd = "timeout 15 grep -rn '^enum " + query + "\\|^ *enum " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^enum " + query + "\\|^ *enum " + query
     elif kind == "import" or kind == "use":
-        cmd = "timeout 15 grep -rn 'use.*" + query + "\\|import.*" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "use.*" + query + "\\|import.*" + query
     elif kind == "type":
-        cmd = "timeout 15 grep -rn '^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
-    else:
-        # General search
-        cmd = "timeout 15 grep -rn '" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+        pattern = "^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query
 
+    var args = ["-n", "--glob", "*.spl", "--", pattern, search_dir]
     if file != "":
-        # Restrict to specific file
-        cmd = "timeout 10 grep -n '" + query + "' " + file + " 2>/dev/null | head -50"
+        args = ["-n", "--", query, file]
 
     var out = ""
     var _u: i64 = 0
-    (out, _u) = shell_cmd(cmd)
+    (out, _u) = mcp_run_argv("rg", args, 15000, 262144)
+    out = _mcp_first_lines(out, 50)
 
     var out_parts: [text] = []
     out_parts.push("-- simple_search query=" + query)

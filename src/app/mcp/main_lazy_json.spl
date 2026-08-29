@@ -1,7 +1,7 @@
 # MCP Lazy Server - JSON helpers
 # Extracted from main_lazy.spl
 
-use std.io_runtime.{env_get, process_run, file_read, file_write}
+use std.io_runtime.{env_get, process_run, process_run_bounded, file_read, file_write}
 
 # --- Safe string helpers (workaround for 2-arg substring bug) ---
 
@@ -452,7 +452,7 @@ fn log_level_to_int(level: text) -> i64:
 export LB, RB, Q, jp, js, jo1, jo2, jo3, jo4, make_tool_result, make_tool_result_status, make_tool_error
 export escape_json_text
 export extract_json_string, extract_json_value, make_error_response, log_level_to_int
-export first_n_chars, strip_ansi, shell_cmd
+export first_n_chars, strip_ansi, shell_cmd, mcp_run_argv
 
 # --- Shell helper ---
 # Uses process_run (returns tuple). Note: val (a,b) = expr is broken
@@ -539,6 +539,29 @@ fn shell_cmd(command: text) -> (text, i64):
     if stdout != "":
         stdout = strip_ansi(stdout)
     (stdout, code)
+
+# Execute literal argv with bounded time and captured output. Public MCP fields
+# must never be reconstructed into a shell command.
+fn mcp_run_argv(
+    binary: text, args: [text], timeout_ms: i64, max_output_bytes: i64
+) -> (text, i64):
+    val (stdout, stderr, code) = process_run_bounded(
+        binary, args, timeout_ms, max_output_bytes)
+    var output = stdout + stderr
+    if output != "":
+        output = strip_ansi(output)
+    (output, _mcp_normalize_process_exit(code, stderr))
+
+fn _mcp_normalize_process_exit(code: i64, stderr: text) -> i64:
+    if code == -1:
+        if stderr.ends_with("\nTIMEOUT\n"):
+            return 124
+        if stderr.ends_with("Process timed out"):
+            return 124
+        if stderr.ends_with("ms]") and stderr.contains(
+            "[TIMEOUT: Process killed after "):
+            return 124
+    code
 
 fn text_byte_len(s: text) -> i64:
     s.len()
