@@ -22,6 +22,14 @@
 #include <unistd.h>
 #endif
 
+static char* core_host_strdup(const char* value) {
+    size_t length = strlen(value);
+    char* result = (char*)malloc(length + 1);
+    if (!result) return NULL;
+    memcpy(result, value, length + 1);
+    return result;
+}
+
 char* rt_hostname(void) {
 #if defined(_WIN32)
     char buffer[256];
@@ -37,10 +45,10 @@ char* rt_hostname(void) {
     char buffer[256];
     if (gethostname(buffer, sizeof(buffer)) == 0) {
         buffer[sizeof(buffer) - 1] = '\0';
-        return strdup(buffer);
+        return core_host_strdup(buffer);
     }
 #endif
-    return strdup("localhost");
+    return core_host_strdup("localhost");
 }
 
 int64_t rt_unix_socket_connect(const char* path) {
