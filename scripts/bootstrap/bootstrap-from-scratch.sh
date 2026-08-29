@@ -1136,6 +1136,57 @@ bootstrap_stamp_cache_lane() {
     > "${native_cache_dir}/.cache_scope" 2>/dev/null || true
 }
 
+# Stage 3 evidence is run-scoped even though its canonical filenames are
+# stable. A reused output may therefore contain a complete prior run. Preserve
+# that evidence with a same-directory atomic rename before applying the fresh
+# run's nonexistence gate; caches and every other provenance input stay intact.
+bootstrap_stage3_archive_prior_evidence() (
+  bsape_path=$1
+  bsape_generation=$2
+  if [ ! -e "${bsape_path}" ] && [ ! -L "${bsape_path}" ]; then
+    return 0
+  fi
+  case "${bsape_generation}" in
+    ''|*/*) echo "error: invalid Stage 3 evidence generation" >&2; return 1 ;;
+  esac
+  if [ -L "${bsape_path}" ] || [ ! -f "${bsape_path}" ]; then
+    echo "error: refusing non-regular prior Stage 3 evidence: ${bsape_path}" >&2
+    return 1
+  fi
+  bsape_archive="${bsape_path}.prior-to-${bsape_generation}"
+  if [ -e "${bsape_archive}" ] || [ -L "${bsape_archive}" ]; then
+    echo "error: Stage 3 evidence archive already exists: ${bsape_archive}" >&2
+    return 1
+  fi
+  mv "${bsape_path}" "${bsape_archive}" || {
+    echo "error: could not archive prior Stage 3 evidence: ${bsape_path}" >&2
+    return 1
+  }
+  echo "  Stage 3 evidence: archived prior ${bsape_path}"
+)
+
+# A timed-out Rust native-build leaves every already-published object in its
+# producer-scoped cache.  Retry only the one unambiguous recovery case while
+# the exact same seed process lineage and cache scope are still available.
+# Re-entering the whole bootstrap would rebuild the seed, change the producer
+# fingerprint, and strand those valid objects in the prior scope.
+bootstrap_stage2_single_timeout_cache_retry_eligible() {
+  bsscre_log=$1
+  [ -f "${bsscre_log}" ] && [ ! -L "${bsscre_log}" ] || return 1
+  awk '
+    /^FAILED FILES \(1\):$/ { failed_headers++ }
+    /^  - .* => .*: timeout \([0-9]+s\)$/ { timeout_rows++ }
+    /^  - .* => / { failure_rows++ }
+    /^Build failed: native-build aborted: 1 file\(s\) failed to compile$/ {
+      failed_summaries++
+    }
+    END {
+      exit !(failed_headers == 1 && timeout_rows == 1 &&
+             failure_rows == 1 && failed_summaries == 1)
+    }
+  ' "${bsscre_log}"
+}
+
 run_logged() {
   label=$1
   shift
@@ -1918,6 +1969,17 @@ else
   rm -rf "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"
+  if [ -n "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER:-}" ]; then
+    stage2_cleanup_marker_tmp="${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}.tmp.$$"
+    {
+      echo schema=simple-bootstrap-stage2-cleanup-v1
+      echo status=ready
+      echo output_dir="${output_dir}"
+    } >"${stage2_cleanup_marker_tmp}"
+    chmod 400 "${stage2_cleanup_marker_tmp}"
+    mv "${stage2_cleanup_marker_tmp}" \
+      "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}"
+  fi
   # Stage 2/3 native-build caches are content-hash keyed by the pure-Simple
   # driver itself (driver_native_sources_fingerprint scopes each cache entry
   # under the loaded source set's combined hash — see
@@ -2234,10 +2296,11 @@ else
     "${stage_runtime_absolute}" || exit 1
   cmp -s "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
-  set +e
-  bootstrap_stage3_run_transcribed \
+  stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
+  bootstrap_run_stage2_native() {
+    bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
-    "$(absolute_path "${log_dir}/stage2-native-build.log")" \
+    "${stage2_native_log}" \
     "${stage2_home_absolute}" "${stage2_tmp_absolute}" "${stage_build_path}" \
     RUST_LOG="${stage_build_rust_log}" \
     LIBRARY_PATH="${bootstrap_link_library_path}" \
@@ -2261,8 +2324,22 @@ else
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \
     -o "${stage2_bin}"
+  }
+  set +e
+  bootstrap_run_stage2_native
   stage2_status=$?
   set -e
+  if [ "${stage2_status}" -ne 0 ] &&
+    bootstrap_stage2_single_timeout_cache_retry_eligible \
+      "${stage2_native_log}"; then
+    echo "  Stage 2: one worker timed out; retrying once with the same producer-scoped cache"
+    cp "${stage2_native_log}" \
+      "${stage2_tmp_absolute}/stage2-native-build.before-cache-retry.log"
+    set +e
+    bootstrap_run_stage2_native
+    stage2_status=$?
+    set -e
+  fi
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
@@ -2505,6 +2582,10 @@ else
   # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0, so entry-closure discovery still
   # happens -- inside the self-hosted driver, which is the point of Stage 3.
   # Stage 2 above is a seed build by design and keeps its --entry/--source form.
+  bootstrap_stage3_archive_prior_evidence \
+    "${stage3_memory_snapshot}" "${stage3_evidence_run_id}" || exit 1
+  bootstrap_stage3_archive_prior_evidence \
+    "${stage3_phase_profile}" "${stage3_evidence_run_id}" || exit 1
   set +e
   [ ! -e "${stage3_memory_snapshot}" ] && [ ! -L "${stage3_memory_snapshot}" ] || exit 1
   [ ! -e "${stage3_phase_profile}" ] && [ ! -L "${stage3_phase_profile}" ] || exit 1

@@ -48,6 +48,7 @@ candidate="$stage3/simple"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
+stage3_status="$stage3/stage3-native-build-status.env"
 stage3_sanity="$stage3/stage3-sanity.env"
 stage2_cache="$stage3/stage2-native-cache"
 stage3_cache="$stage3/stage3-native-cache"
@@ -68,6 +69,111 @@ runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/recovery-threads1"
+
+# A self-hosted native-build controller can contain a crashed worker, print the
+# worker's unsigned exit code, and still return shell status 0.  The recovery
+# wrapper is the supervising parent, so it must classify both channels before
+# any sanity or provenance receipt can be minted.
+bootstrap_stage3_resume_effective_status() {
+  bootstrap_stage3_resume_shell_status=$1
+  bootstrap_stage3_resume_log=$2
+  bootstrap_stage3_resume_candidate=$3
+  bootstrap_stage3_resume_worker_status=absent
+  bootstrap_stage3_resume_diagnostic_class=none
+  bootstrap_stage3_resume_signal_identity=none
+  case "$bootstrap_stage3_resume_shell_status" in
+    ''|*[!0-9]*|*[0-9][0-9][0-9][0-9]*) return 125 ;;
+  esac
+  [ "$bootstrap_stage3_resume_shell_status" -le 255 ] || return 125
+  { [ -f "$bootstrap_stage3_resume_log" ] &&
+    [ ! -L "$bootstrap_stage3_resume_log" ]; } || return 125
+
+  bootstrap_stage3_resume_worker_rows=$(grep -c \
+    '^error: native-build worker exited with code ' \
+    "$bootstrap_stage3_resume_log" || true)
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    bootstrap_stage3_resume_worker_status=$(sed -n \
+      's/^error: native-build worker exited with code \([0-9][0-9]*\)[.]$/\1/p' \
+      "$bootstrap_stage3_resume_log" | tail -n 1)
+    [ -n "$bootstrap_stage3_resume_worker_status" ] || \
+      bootstrap_stage3_resume_worker_status=malformed
+    bootstrap_stage3_resume_diagnostic_class=worker-nonzero-exit
+    if [ "$bootstrap_stage3_resume_worker_status" = 4294967295 ]; then
+      # Simple's process facade represents its signed -1 sentinel as u32 in
+      # this compiled lane. It means signal OR wait failure, not a known
+      # signal number; retain that distinction instead of inventing SIGSEGV.
+      bootstrap_stage3_resume_diagnostic_class=worker-signal-or-wait-failure
+      bootstrap_stage3_resume_signal_identity=unresolved-signal-or-wait-failure
+    fi
+  fi
+  if grep -q '^timeout: .* dumped core$' "$bootstrap_stage3_resume_log"; then
+    bootstrap_stage3_resume_diagnostic_class=worker-core-dump
+    bootstrap_stage3_resume_signal_identity=core-dump-signal-unspecified
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_shell_status" -ge 128 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-signal-exit
+    bootstrap_stage3_resume_signal_identity=signal-number-$((bootstrap_stage3_resume_shell_status - 128))
+  elif [ "$bootstrap_stage3_resume_shell_status" -ne 0 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-nonzero-exit
+  fi
+  [ "$bootstrap_stage3_resume_shell_status" -eq 0 ] || \
+    return "$bootstrap_stage3_resume_shell_status"
+  { [ -f "$bootstrap_stage3_resume_candidate" ] &&
+    [ ! -L "$bootstrap_stage3_resume_candidate" ] &&
+    [ -x "$bootstrap_stage3_resume_candidate" ]; } || {
+      bootstrap_stage3_resume_diagnostic_class=missing-executable-candidate
+      return 1
+    }
+  return 0
+}
+
+bootstrap_stage3_resume_write_status_receipt() {
+  bootstrap_stage3_resume_receipt=$1
+  bootstrap_stage3_resume_receipt_log=$2
+  bootstrap_stage3_resume_receipt_transcript=$3
+  bootstrap_stage3_resume_receipt_shell_status=$4
+  bootstrap_stage3_resume_receipt_effective_status=$5
+  bootstrap_stage3_resume_receipt_worker_status=$6
+  bootstrap_stage3_resume_receipt_requested_route=$7
+  bootstrap_stage3_resume_receipt_fallback_route=$8
+  bootstrap_stage3_resume_receipt_diagnostic_class=$9
+  shift 9
+  bootstrap_stage3_resume_receipt_signal_identity=$1
+  bootstrap_stage3_resume_receipt_tmp="${bootstrap_stage3_resume_receipt}.tmp.$$"
+  [ ! -L "$bootstrap_stage3_resume_receipt" ] || return 125
+  [ ! -e "$bootstrap_stage3_resume_receipt_tmp" ] &&
+    [ ! -L "$bootstrap_stage3_resume_receipt_tmp" ] || return 125
+  bootstrap_stage3_resume_receipt_result=fail
+  [ "$bootstrap_stage3_resume_receipt_effective_status" -ne 0 ] ||
+    bootstrap_stage3_resume_receipt_result=pass
+  {
+    echo schema=simple-bootstrap-stage3-native-build-status-v1
+    echo status="$bootstrap_stage3_resume_receipt_result"
+    echo shell_exit_status="$bootstrap_stage3_resume_receipt_shell_status"
+    echo effective_exit_status="$bootstrap_stage3_resume_receipt_effective_status"
+    echo worker_exit_status="$bootstrap_stage3_resume_receipt_worker_status"
+    echo requested_route="$bootstrap_stage3_resume_receipt_requested_route"
+    echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
+    echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
+    echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo log_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_log")"
+    echo transcript_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_transcript")"
+  } >"$bootstrap_stage3_resume_receipt_tmp" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+  mv "$bootstrap_stage3_resume_receipt_tmp" \
+    "$bootstrap_stage3_resume_receipt" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+}
 
 for required in "$stage2" "$admitted" "$stage2_admission" "$seed" "$stamp" "$native_all" \
   "$stage2_sanity" "$stage2_receiver" "$stage2_receiver_log" \
@@ -200,10 +306,10 @@ bootstrap_native_cache_prune() {
   echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
 }
 
-for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"; do
+for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"; do
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
 done
-rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"
+rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"
 # stage3-native-cache is content-hash scoped by the pure-Simple driver itself
 # (driver_native_sources_fingerprint in
 # src/compiler/80.driver/driver_aot_native_output.spl), so a resumed run with
@@ -263,6 +369,12 @@ stage3_threads=${SIMPLE_NATIVE_BUILD_THREADS:-1}
 [ "$stage3_threads" != full ] ||
   stage3_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
 case "$stage3_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
+stage3_requested_route=direct
+stage3_fallback_route=none
+if [ "$stage3_threads" -gt 1 ]; then
+  stage3_requested_route=coordinator
+  stage3_fallback_route=direct
+fi
 stage3_timeout_args=
 case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
   '') ;;
@@ -290,6 +402,8 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
+  "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
+  "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
   "SIMPLE_FRONTEND_CACHE=0" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
@@ -318,6 +432,8 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   "$home" "$tmp" "$path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
+  SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$stage3_requested_route" \
+  SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$stage3_fallback_route" \
   SIMPLE_FRONTEND_CACHE=0 \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
   SIMPLE_NO_STUB_FALLBACK=1 ${stage3_mc_env} \
@@ -338,13 +454,25 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   src/app/cli/bootstrap_main.spl
 status=$?
 set -e
-if [ "$status" -ne 0 ]; then
-  exit "$status"
+effective_status=0
+bootstrap_stage3_resume_effective_status "$status" "$stage3_log" \
+  "$candidate" || effective_status=$?
+worker_status=$bootstrap_stage3_resume_worker_status
+diagnostic_class=$bootstrap_stage3_resume_diagnostic_class
+signal_identity=$bootstrap_stage3_resume_signal_identity
+if ! bootstrap_stage3_resume_write_status_receipt "$stage3_status" \
+  "$stage3_log" "$stage3_transcript" "$status" "$effective_status" \
+  "$worker_status" "$stage3_requested_route" "$stage3_fallback_route" \
+  "$diagnostic_class" "$signal_identity"; then
+  rm -f "$candidate" "$stage3_sanity" "$manifest"
+  echo "error: Stage 3 native-build status receipt publication failed" >&2
+  exit 125
 fi
-[ -x "$candidate" ] || {
-  echo "error: Stage 3 compiler exited successfully without an executable candidate" >&2
-  exit 1
-}
+if [ "$effective_status" -ne 0 ]; then
+  rm -f "$candidate" "$stage3_sanity" "$manifest"
+  echo "error: Stage 3 native-build failed (shell=$status worker=$worker_status effective=$effective_status class=$diagnostic_class signal=$signal_identity route=$stage3_requested_route fallback=$stage3_fallback_route)" >&2
+  exit "$effective_status"
+fi
 ! grep -qE '^(Build complete: [0-9]+ compiled|Linked: .* via clang)' "$stage3_log" || exit 1
 [ "$(bootstrap_stage3_hash_file "$admitted")" = "$admitted_sha" ] || exit 1
 runtime_check="$archive/runtime-after.$$"
