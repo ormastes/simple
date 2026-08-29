@@ -16,6 +16,8 @@ extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 @unsafe(reason: "nonnull raw read; mapped allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+@unsafe(reason: "nonnull borrowed source is copied into an owned byte array", capabilities: [ffi, raw_ptr])
+extern fn rt_bytes_from_raw(addr: i64, length: i64) -> [u8]
 @unsafe(reason: "nullable sentinel pointer borrows packed byte-array storage for one synchronous foreign call", capabilities: [ffi, raw_ptr])
 extern fn rt_array_data_ptr(bytes: [u8]) -> i64
 @unsafe(reason: "nonnull borrowed source; written-length status reports the executable-memory copy", capabilities: [ffi, raw_ptr])
@@ -171,36 +173,25 @@ fn native_munmap(address: i64, size: i64) -> bool:
 
 @unsafe(reason: "caller owns mapped-address extent and read lifetime", capabilities: [raw_ptr])
 fn native_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:
-    """Read bytes from mapped memory using unsafe pointer operations."""
     if address == 0 or offset < 0 or length <= 0:
         return []
-    var result: [u8] = []
-    result.reserve(length)
-    for i in 0..length:
-        result.push((_sffi_ptr_read_u8(address, offset + i) & 0xFF) as u8)
-    result
+    var bytes: [u8] = []
+    unsafe(capabilities: [ffi, raw_ptr]):
+        bytes = rt_bytes_from_raw(address + offset, length)
+    bytes
 
 @unsafe(reason: "caller owns mapped-address extent and read lifetime", capabilities: [raw_ptr])
 fn native_mmap_read_string(address: i64, offset: i64, max_length: i64) -> text:
-    """Read string from mapped memory."""
     if address == 0 or offset < 0 or max_length < 0:
         return ""
-    unsafe:
-        val ptr = (address + offset) as *u8
-
-        # Find string length (until null terminator or max_length)
-        var len = 0i64
-        val max_len = if max_length == 0: 4096 else: max_length
-
-        while len < max_len:
-            val byte = ptr_read_u8(ptr, len)
-            if byte == 0:
-                break
-            len = len + 1
-
-        # Create slice and convert to string
-        val slice = slice_from_raw_parts(ptr, len)
-        str_from_utf8_lossy(slice)
+    val max_len = if max_length == 0: 4096 else: max_length
+    val mapped = native_mmap_read_bytes(address, offset, max_len)
+    var bounded: [u8] = []
+    for byte in mapped:
+        if byte == 0u8:
+            break
+        bounded.push(byte)
+    str_from_utf8_lossy(bounded)
 
 @unsafe(reason: "caller owns mapped-address extent and lifetime", capabilities: [raw_ptr])
 fn native_madvise(address: i64, size: i64, advice: i64) -> bool:
