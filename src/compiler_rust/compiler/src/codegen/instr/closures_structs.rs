@@ -416,7 +416,19 @@ fn box_for_closure_boundary<M: Module>(
             };
             call_runtime_1(ctx, builder, "rt_value_int", widened)
         }
-        // Heap-shaped or unknown: the value already IS a tagged word.
+        // An unknown static type is usually already a tagged word, but the
+        // Cranelift value type is authoritative when lowering left a concrete
+        // float behind. Passing that raw f32/f64 to the boxed-entry i64 ABI is
+        // invalid IR (and used to surface only in very large dispatchers).
+        TypeId::ANY if vt == types::F32 || vt == types::F64 => {
+            let f = if vt == types::F32 {
+                builder.ins().fpromote(types::F64, val)
+            } else {
+                val
+            };
+            call_runtime_1(ctx, builder, "rt_value_float", f)
+        }
+        // Heap-shaped or unknown word: the value already IS tagged.
         _ => val,
     }
 }
