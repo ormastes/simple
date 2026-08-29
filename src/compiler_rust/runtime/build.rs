@@ -170,6 +170,11 @@ fn runtime_symbol_declaration(
         "rt_atomic_bool_fetch_and" => "(handle: i64, value: bool) -> bool",
         "rt_atomic_bool_fetch_or" => "(handle: i64, value: bool) -> bool",
         "rt_atomic_bool_fetch_not" => "(handle: i64) -> bool",
+        // The callable SFFI tier models booleans as I8, but this linker-anchor
+        // declaration shares a scope with the Rust wrapper's C `bool` ABI.
+        // Keep the declaration identical to the wrapper to avoid two
+        // incompatible Rust declarations for one link name.
+        "rt_progress_tls_is_initialized" => "() -> bool",
         "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
         "rt_atomic_flag_load" => "(handle: i64) -> bool",
