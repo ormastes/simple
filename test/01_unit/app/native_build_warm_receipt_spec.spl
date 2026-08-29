@@ -39,9 +39,11 @@ describe "native-build exact final-artifact receipt":
         expect(dir_create_all(root)).to_equal(true)
         val source_path = root + "/main.spl"
         val binary_path = root + "/simple"
+        val backend_plugin_path = root + "/backend-plugin.so"
         val output_path = root + "/out"
         expect(file_write(source_path, "fn main(): 0\n")).to_equal(true)
         expect(file_write(binary_path, "compiler-fixture\n")).to_equal(true)
+        expect(file_write(backend_plugin_path, "provider-build-42\n")).to_equal(true)
         expect(file_write(output_path, "output-fixture\n")).to_equal(true)
         val object_path = root + "/cache/object.main.o"
         expect(dir_create_all(root + "/cache")).to_equal(true)
@@ -63,7 +65,8 @@ describe "native-build exact final-artifact receipt":
         env_set("SIMPLE_HIR_SHARD", "")
         val args = [
             "--entry-closure", "--source", root, "--entry", source_path,
-            "--cache-dir", root + "/cache", "--output", output_path
+            "--cache-dir", root + "/cache", "--backend-plugin",
+            backend_plugin_path, "--output", output_path
         ]
         val cold = native_build_warm_receipt_prepare(args, binary_path)
         expect(cold.eligible).to_equal(true)
@@ -88,6 +91,16 @@ describe "native-build exact final-artifact receipt":
 
         val exact_again = native_build_warm_receipt_prepare(args, binary_path)
         expect(exact_again.hit).to_equal(true)
+
+        # Provider replacement at the same selected path is a cache miss even
+        # when compiler, argv, source closure, and output path are unchanged.
+        expect(file_write(backend_plugin_path, "provider-build-43\n")).to_equal(true)
+        val changed_provider = native_build_warm_receipt_prepare(args, binary_path)
+        expect(changed_provider.hit).to_equal(false)
+        expect(file_write(backend_plugin_path, "provider-build-42\n")).to_equal(true)
+        val exact_provider_again = native_build_warm_receipt_prepare(args, binary_path)
+        expect(exact_provider_again.hit).to_equal(true)
+
         expect(file_delete(exact_again.artifact_path)).to_equal(true)
         val missing_artifact = native_build_warm_receipt_prepare(args, binary_path)
         expect(missing_artifact.hit).to_equal(false)
@@ -175,6 +188,10 @@ describe "native-build exact final-artifact receipt":
         expect(receipt).to_contain("build_cache.sdn")
         expect(receipt).to_contain(".capsule-receipt")
         expect(receipt).to_contain("_warm_runtime_and_link_inputs(state.args)")
+        expect(receipt).to_contain('_warm_arg_value(args, "--backend-plugin")')
+        expect(receipt).to_contain('arg.starts_with("--backend-plugin=")')
+        expect(receipt).to_contain('paths.push(backend_plugin)')
+        expect(receipt).to_contain("simple-native-warm-receipt-v3")
         expect(receipt).to_contain(
             "for entry in _warm_sort_text(dir_list(runtime) ?? [])")
         expect(receipt.contains("var dirs: [text] = [root]")).to_equal(false)

@@ -1,0 +1,77 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
+use compiler.frontend.parser_types.{ParserImport}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry_index.{
+    module_surface_import_resolution_trace_v1}
+use compiler.mir.mir_data.{MirModule}
+use compiler.driver.cache.native_module_witness.{NativeModuleConfigFactV1}
+use compiler.driver.cache.native_module_witness_facts.{
+    native_direct_dependency_facts_v1, native_resolution_facts_v1,
+    native_external_layout_facts_from_mir_v1,
+    native_module_cache_fact_set_merge_v1}
+
+fn complete_fact_surfaces() -> ModuleSurfacesByName:
+    var consumer = ModuleSurface.empty("app.main")
+    consumer.preferred_registry_name = "app.main"
+    consumer.canonical_path = "src/app/main.spl"
+    consumer.imports = [ParserImport(
+        module: "lib.dep", items: [], is_lazy: false, span: Span.empty())]
+    consumer.import_target_indices = [1]
+    consumer.import_target_names = ["lib.dep"]
+    var dependency = ModuleSurface.empty("lib.dep")
+    dependency.preferred_registry_name = "lib.dep"
+    dependency.canonical_path = "src/lib/dep.spl"
+    var registry = ModuleSurfacesByName(
+        surfaces: [consumer, dependency],
+        index_by_name: {"app.main": 0, "lib.dep": 1},
+        ordered_names: ["app.main", "lib.dep"],
+        ordered_indices: [0, 1], generation: 1, frozen: true)
+    consumer.import_resolution_traces = [
+        module_surface_import_resolution_trace_v1(
+            registry, consumer, "lib.dep")]
+    registry.surfaces[0] = consumer
+    registry
+
+describe "native AOT complete module witness wiring":
+    it "combines retained dependency resolution and MIR layout facts":
+        val surfaces = complete_fact_surfaces()
+        val dependencies = native_direct_dependency_facts_v1(
+            "app.main", surfaces, [SourceFile(
+                path: "src/lib/dep.spl",
+                content: "pub struct External:\n    value: i64",
+                module_name: "lib.dep")])
+        val resolutions = native_resolution_facts_v1("app.main", surfaces)
+        val module = MirModule(name: "app.main", functions: {}, statics: {},
+            constants: {}, types: {}, external_layout_traces: [
+                MirExternalLayoutTraceV1(
+                    consumer_module_id: "app.main", owner_module_id: "lib.dep",
+                    type_id: "External", layout_digest: "layout-v1",
+                    owner_count: 1)])
+        val layouts = native_external_layout_facts_from_mir_v1(module, true)
+        val config = NativeModuleConfigFactV1(
+            compiler_identity: "compiler-v1", target_identity: "x86_64",
+            options_identity: "opt=2", provider_identity: "builtin-native")
+        val complete_facts = native_module_cache_fact_set_merge_v1(
+            dependencies, resolutions, layouts)
+        val witness = complete_facts.witness("mir-v1", config)
+        expect(dependencies.valid).to_equal(true)
+        expect(resolutions.valid).to_equal(true)
+        expect(layouts.valid).to_equal(true)
+        expect(witness.valid).to_equal(true)
+        expect(witness.dependency_fold == "").to_equal(false)
+        expect(witness.resolution_fold == "").to_equal(false)
+        expect(witness.cross_module_layout_fingerprint == "").to_equal(false)
+        expect(witness.config_fingerprint == "").to_equal(false)
+
+        val wiring = file_read(
+            "src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(wiring).to_contain("native_direct_dependency_facts_v1")
+        expect(wiring).to_contain("native_resolution_facts_v1")
+        expect(wiring).to_contain("native_external_layout_facts_from_mir_v1")
+        expect(wiring).to_contain("native_module_cache_fact_set_merge_v1")
+        expect(wiring).to_contain("module_cache_config")
+        expect(wiring).to_contain("capsule.module_witness")

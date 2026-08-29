@@ -73,9 +73,19 @@ class FrozenNativeModuleCapsuleV1:
     mir_module: MirModule
     storage_snapshot: FrozenStorageModuleSnapshotV1
     cache_source: text
+    # Content identity captured from SourceFile.content, the exact snapshot
+    # from which this module's MIR was produced. Cache publication must prove
+    # the source on disk still normalizes to this identity.
+    source_identity: text
+    module_witness: text
+    module_witness_reason: text
     output_base: text
     object_path: text
     backend_name: text
+    # Hash of the admitted BackendProviderReceipt. Empty is the transitional
+    # compiler-bound built-in lane; dynamic/versioned providers must supply the
+    # exact receipt hash before their capsules are cache-authoritative.
+    provider_receipt_hash: text
     target: text
     target_cpu: text
     opt_level: i64
@@ -83,12 +93,17 @@ class FrozenNativeModuleCapsuleV1:
     reason: text
 
     fn expected_identity() -> text:
-        "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(self.cache_source)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
+        "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(self.cache_source)}|{storage_identity_text_v1(self.source_identity)}|{storage_identity_text_v1(self.module_witness)}|{storage_identity_text_v1(self.module_witness_reason)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.provider_receipt_hash)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
 
     fn identity_valid() -> bool:
         self.ok and self.mir_identity == native_capsule_mir_identity_v1(self.mir_module)
+            and (self.cache_source == "" or self.source_identity != "")
             and self.storage_snapshot.identity_valid()
             and self.capsule_identity == self.expected_identity()
+
+    fn provider_receipt_valid(expected_hash: text) -> bool:
+        "" != expected_hash and self.identity_valid()
+            and self.provider_receipt_hash == expected_hash
 
 class FrozenNativeModuleCapsuleBatchV1:
     ok: bool
@@ -106,8 +121,9 @@ class FrozenNativeModuleCapsuleBatchV1:
                 module_name: module_name, registry_identity: "",
                 module_identity: "", sites: [], evidence: [],
                 reason: "capsule-not-found"),
-            cache_source: "", output_base: "", object_path: "",
-            backend_name: "", target: "", target_cpu: "", opt_level: 0,
+            cache_source: "", source_identity: "", module_witness: "",
+            module_witness_reason: "", output_base: "", object_path: "",
+            backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
             is_release: false,
             reason: "capsule-not-found")
         var count = 0
@@ -136,8 +152,9 @@ pub fn frozen_native_capsule_batch_find_v1(
             module_name: module_name, registry_identity: "",
             module_identity: "", sites: [], evidence: [],
             reason: "capsule-not-found"),
-        cache_source: "", output_base: "", object_path: "",
-        backend_name: "", target: "", target_cpu: "", opt_level: 0,
+        cache_source: "", source_identity: "", module_witness: "",
+        module_witness_reason: "", output_base: "", object_path: "",
+        backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
         is_release: false, reason: "capsule-not-found")
     var count = 0
     for capsule in batch.capsules:
@@ -352,7 +369,7 @@ fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
         case None_: "none"
     "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
 
-fn native_capsule_mir_identity_v1(module: MirModule) -> text:
+pub fn native_capsule_mir_identity_v1(module: MirModule) -> text:
     var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
     for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
         val function = module.functions[symbol]
@@ -972,9 +989,21 @@ class CompileContext:
             if source.path == found_path: path_count = path_count + 1
         if path_count == 1: found_path else: ""
 
+    fn frozen_native_cache_source_identity_v1(module_name: text) -> text:
+        var found_identity = ""
+        var found_count = 0
+        for source in self.sources:
+            if source.module_name == module_name:
+                found_identity = sha256_text(source.content)
+                found_count = found_count + 1
+        if found_count == 1: found_identity else: ""
+
     fn freeze_native_module_capsules_v1(
         module_names: [text], object_base: text, backend_name: text,
-        target: text, target_cpu: text, opt_level: i64, is_release: bool
+        target: text, target_cpu: text, opt_level: i64, is_release: bool,
+        provider_receipt_hash: text = "",
+        module_witnesses: {text: text} = {},
+        module_witness_reasons: {text: text} = {}
     ) -> FrozenNativeModuleCapsuleBatchV1:
         if not self.storage_registry_frozen
             or not self.frozen_storage_registry_well_formed():
@@ -1020,13 +1049,26 @@ class CompileContext:
                     registry_identity: self.storage_binding_identity(), capsules: [],
                     reason: "capsule-mir-module-name-mismatch")
             val cache_source = self.frozen_native_cache_source_v1(module_name)
+            val source_identity = self.frozen_native_cache_source_identity_v1(module_name)
+            val module_witness = if module_witnesses.contains_key(module_name):
+                module_witnesses[module_name]
+            else:
+                ""
+            val module_witness_reason = if module_witness_reasons.contains_key(module_name):
+                module_witness_reasons[module_name]
+            else:
+                "missing-witness-facts"
             val object_path = "{object_base}.{module_name}.o"
             var capsule = FrozenNativeModuleCapsuleV1(ok: true,
                 module_name: module_name, capsule_identity: "",
                 mir_identity: native_capsule_mir_identity_v1(module),
                 mir_module: module, storage_snapshot: snapshot,
-                cache_source: cache_source, output_base: object_base,
+                cache_source: cache_source, source_identity: source_identity,
+                module_witness: module_witness,
+                module_witness_reason: module_witness_reason,
+                output_base: object_base,
                 object_path: object_path, backend_name: backend_name,
+                provider_receipt_hash: provider_receipt_hash,
                 target: target, target_cpu: target_cpu, opt_level: opt_level,
                 is_release: is_release, reason: "ok")
             capsule.capsule_identity = capsule.expected_identity()
@@ -1237,3 +1279,4 @@ fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
 
 export CompileContext, compute_options_hash
 export BackendResult, BackendError
+export native_capsule_mir_identity_v1

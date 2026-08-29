@@ -289,7 +289,11 @@ pub fn native_build_cache_lane() -> text:
         return "default"
     lane
 
-fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_features: [text], optimization: i32, compiler_identity: text) -> text:
+fn native_build_cache_scope_key(
+    backend: text?, target_cpu: text?, target_features: [text],
+    optimization: i32, compiler_identity: text,
+    provider_receipt_hash: text = ""
+) -> text:
     val backend_text = match backend:
         case Some(name): name
         case nil: "smf"
@@ -298,7 +302,15 @@ fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_featur
         case nil: "native"
     val feature_text = target_features.join(",")
     val lane = native_build_cache_lane()
-    "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity}"
+    # Built-in providers remain compiler-bound until their admitted receipt is
+    # wired by the AOT owner. A dynamic/versioned provider supplies its receipt
+    # hash here, so changing provider version/build/ABI cannot reuse objects
+    # produced under a different admitted provider.
+    val provider_identity = if provider_receipt_hash == "":
+        "compiler-bound-builtin:{backend_text}"
+    else:
+        "receipt:{provider_receipt_hash}"
+    "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity};provider={provider_identity}"
 
 fn incremental_mkdir_p(path: text) -> bool:
     dir_create_all(path)
@@ -397,6 +409,12 @@ struct DependencyEntry:
     dependencies: [text]    # Files this source imports/uses
     outputs: [text]         # Generated artifact paths
     deps_iface: text        # dependency_interface_fold at compile time; "" = unknown (fail closed)
+    # Versioned per-module semantic witness. A complete exact match is the
+    # admission authority; the closure-wide fingerprint is comparison metadata.
+    module_witness: text
+
+val NATIVE_MODULE_CACHE_WITNESS_CORRUPT_V1: text =
+    "native-module-cache-witness-corrupt-v1"
 
 impl DependencyEntry:
     fn needs_recompile(current: FileFingerprint, dep_cache: {text: FileFingerprint}) -> bool:
@@ -656,10 +674,27 @@ impl BuildCache:
                                 if val di_text = di_str:
                                     deps_iface = di_text
 
+                            # Absent on legacy rows. Shadow comparison reports
+                            # this as `legacy-missing`; it never changes the
+                            # authoritative closure-scoped hit decision.
+                            var module_witness = ""
+                            val mw_val = item.get("module_witness")
+                            if val mw_raw = mw_val:
+                                val mw: SdnValue = mw_raw
+                                val mw_str = mw.as_str()
+                                if val mw_text = mw_str:
+                                    module_witness = mw_text
+                                else:
+                                    # Field exists but has the wrong schema
+                                    # type; keep it distinct from an old row
+                                    # where the optional field was absent.
+                                    module_witness = NATIVE_MODULE_CACHE_WITNESS_CORRUPT_V1
+
                             val entry = DependencyEntry(
                                 source: source, fingerprint: fp,
                                 dependencies: deps, outputs: outs,
-                                deps_iface: deps_iface)
+                                deps_iface: deps_iface,
+                                module_witness: module_witness)
                             entries[source] = entry
                             fingerprints[source] = fp
 
@@ -676,7 +711,8 @@ impl BuildCache:
         build_cache_persist(self)
 
     me update_entry(source: text, fingerprint: FileFingerprint,
-                    dependencies: [text], outputs: [text]):
+                    dependencies: [text], outputs: [text],
+                    module_witness: text = ""):
         """Update or create a cache entry.
 
         deps_iface is computed HERE, at record time, so the entry's validity is
@@ -684,7 +720,7 @@ impl BuildCache:
         was produced. If any dependency is unreadable the fold is nil and ""
         is stored — has_cached_object then fails closed on this entry."""
         build_cache_record_entry_with_fp(self, source, fingerprint,
-            dependencies, outputs)
+            dependencies, outputs, module_witness)
 
     me remove_entry(source: text):
         self.entries.remove(source)
@@ -957,18 +993,25 @@ pub fn build_cache_open(cache_path: text) -> BuildCache:
 
 pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
                                         fingerprint: FileFingerprint,
-                                        dependencies: [text], outputs: [text]):
+                                        dependencies: [text], outputs: [text],
+                                        module_witness: text = ""):
     """Record/update one entry. deps_iface is computed HERE, at record time,
     so the entry's validity is pinned to the dependencies' interfaces as they
     were when the artifact was produced. If any dependency is unreadable the
     fold is nil and "" is stored — build_cache_entry_is_valid then fails
     closed on this entry."""
     val deps_iface = dep_iface_gate_record(dependencies)
+    # Default/omitted witness means "caller has no new witness", not "erase a
+    # witness published by the native AOT owner". This keeps generic legacy
+    # record_compilation callers backward compatible.
+    var effective_module_witness = module_witness
+    if effective_module_witness == "" and cache.entries.contains_key(source):
+        effective_module_witness = cache.entries[source].module_witness
     cache.fingerprints[source] = fingerprint
     cache.entries[source] = DependencyEntry(
         source: source, fingerprint: fingerprint,
         dependencies: dependencies, outputs: outputs,
-        deps_iface: deps_iface)
+        deps_iface: deps_iface, module_witness: effective_module_witness)
 
 pub fn build_cache_record_entry(cache: BuildCache, source: text,
                                 dependencies: [text], outputs: [text]) -> bool:
@@ -1016,8 +1059,9 @@ pub fn build_cache_persist(cache: BuildCache):
         val deps_text = incremental_sdn_text_array(entry.dependencies)
         val outputs_text = incremental_sdn_text_array(entry.outputs)
         val deps_iface_text = incremental_sdn_escape(entry.deps_iface)
+        val module_witness_text = incremental_sdn_escape(entry.module_witness)
         val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
-        lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\" " + "}")
+        lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\", module_witness: \"" + module_witness_text + "\" " + "}")
     lines = lines.push("]")
     incremental_file_write_text(cache.cache_path, lines.join("\n"))
 
@@ -1043,3 +1087,16 @@ pub fn build_cache_entry_is_valid_at(cache_path: text, source: text) -> bool:
 export build_cache_open, build_cache_record_entry, build_cache_entry_is_valid, build_cache_persist, incremental_dependency_interface_fold
 export build_cache_record_entry_at, build_cache_entry_is_valid_at
 export dep_iface_gate_record, dep_iface_gate_valid
+
+pub fn native_module_cache_shadow_mismatch_v1(recorded: text, expected: text) -> text:
+    if recorded == "": return "legacy-missing"
+    if recorded == NATIVE_MODULE_CACHE_WITNESS_CORRUPT_V1: return "corrupt-recorded"
+    if recorded == expected: return "match"
+    "witness-mismatch"
+
+pub fn build_cache_module_witness(cache: BuildCache, source: text) -> text:
+    if cache.entries.contains_key(source):
+        return cache.entries[source].module_witness
+    ""
+
+export native_module_cache_shadow_mismatch_v1, build_cache_module_witness

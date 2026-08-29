@@ -8,6 +8,12 @@
 #endif
 #define SIMPLE_BACKEND_PLUGIN_ABI_V1 UINT32_C(1)
 #define SIMPLE_BACKEND_PLUGIN_ENTRY_V1 "simple_backend_plugin_v1"
+/* Boxed Simple [u8] bridge envelope, little-endian:
+ * magic:u32, version:u32, status:i32, result_kind:u32, payload_len:u64,
+ * diagnostic_len:u64, then payload bytes followed by diagnostic bytes. */
+#define SIMPLE_BACKEND_BRIDGE_MAGIC_V1 UINT32_C(0x31504253) /* "SBP1" */
+#define SIMPLE_BACKEND_BRIDGE_VERSION_V1 UINT32_C(1)
+#define SIMPLE_BACKEND_BRIDGE_HEADER_SIZE_V1 UINT32_C(32)
 typedef struct { const uint8_t *data; uint64_t size; } simple_backend_slice_v1;
 /* Provider-owned output; release exactly once when data is non-NULL. */
 typedef struct { const uint8_t *data; uint64_t size; uint64_t owner_token; }
@@ -47,4 +53,8 @@ typedef struct {
 } simple_backend_descriptor_v1;
 typedef const simple_backend_descriptor_v1 *(*simple_backend_plugin_entry_v1_fn)(void);
 SIMPLE_BACKEND_PLUGIN_EXPORT const simple_backend_descriptor_v1 *simple_backend_plugin_v1(void);
+/* Runtime-owned typed bridge. All arguments and the result are boxed Simple
+ * [u8] values; provider buffers are copied before release and library unload. */
+int64_t spl_backend_plugin_run_v1(int64_t path_bytes, int64_t request_bytes,
+                                  int64_t mir_bytes);
 #endif

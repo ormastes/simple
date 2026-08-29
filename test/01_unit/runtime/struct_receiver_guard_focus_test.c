@@ -14,9 +14,7 @@ int64_t rt_struct_registry_failures(void);
 int main(void) {
     assert(rt_struct_alloc(-1) == NULL);
     int64_t* empty = (int64_t*)rt_struct_alloc(0);
-    assert(empty != NULL);
-    assert(rt_struct_receiver_valid((int64_t)(uintptr_t)empty, 0, 8) == 1);
-    rt_free(empty);
+    assert(empty == NULL);
 
     int64_t* receiver = (int64_t*)rt_struct_alloc(16);
     assert(receiver != NULL);

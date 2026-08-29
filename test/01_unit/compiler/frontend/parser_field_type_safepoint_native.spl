@@ -1,0 +1,63 @@
+# Standalone native regression oracle for aggregate ownership at the
+# FlatAstBridge ParserField boundary.  Exit codes are intentionally distinct so
+# bootstrap logs identify the first ownership invariant that failed.
+
+use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_safepoint}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ParserField}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, Type, TypeKind, parser_type_kind_named_name}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_exit(code: i32)
+
+fn ownership_probe_span() -> Span:
+    Span.empty()
+
+fn ownership_probe_nil_expr() -> Expr:
+    Expr(kind: ExprKind.NilLit, span: ownership_probe_span())
+
+fn ownership_probe_field(type_name: text, bits: i64, fixed_address: i64) -> ParserField:
+    ParserField(
+        name: "retained_field",
+        type_: Type(kind: TypeKind.Named(type_name, []), span: ownership_probe_span()),
+        has_default: false,
+        default: ownership_probe_nil_expr(),
+        visibility: Visibility.Private,
+        is_public: false,
+        is_volatile: false,
+        has_bits: true,
+        bits: bits,
+        has_fixed_address: true,
+        fixed_address: fixed_address,
+        span: ownership_probe_span()
+    )
+
+fn ownership_probe_worker() -> i64:
+    val field = ownership_probe_field("SafepointPayload", 17, 4096)
+    val expected_kind = rt_enum_discriminant(field.type_.kind)
+    val retained: Option<ParserField> = Some(field)
+
+    # This executes on a runtime-pool worker, so the hook marks the worker
+    # blocked, may add compensation capacity, yields, and then resumes it.
+    multicore_green_safepoint()
+
+    # Allocate another complete aggregate before unwrapping.  The retained
+    # payload must own its storage rather than aliasing the latest temporary.
+    val fallback = ownership_probe_field("Fallback", 99, 8192)
+    val recovered: ParserField = retained ?? fallback
+    if recovered.name != "retained_field": return 41
+    if rt_enum_discriminant(recovered.type_.kind) != expected_kind: return 42
+    if parser_type_kind_named_name(recovered.type_.kind) != "SafepointPayload": return 43
+    if recovered.bits != 17: return 44
+    if recovered.fixed_address != 4096: return 45
+    0
+
+fn main() -> i64:
+    val handle = multicore_green_spawn(ownership_probe_worker)
+    if !handle.used_runtime_pool():
+        rt_exit(40)
+    val result = handle.join()
+    if result != 0:
+        rt_exit(result as i32)
+    0

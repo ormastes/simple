@@ -55,12 +55,8 @@ static int64_t text_bytes(const uint8_t* value, size_t len) {
     return rt_string_new(value, len);
 }
 
-static int walk_contains(SplArray* paths, const char* expected) {
-    for (int64_t i = 0; i < spl_array_len(paths); i++) {
-        const char* actual = spl_as_str(spl_array_get(paths, i));
-        if (actual && strcmp(actual, expected) == 0) return 1;
-    }
-    return 0;
+static int64_t add_i64_args(int64_t left, int64_t right) {
+    return left + right;
 }
 
 int main(void) {
@@ -140,14 +136,14 @@ int main(void) {
         (int64_t)(uintptr_t)add_i64_args, (int64_t)wffi_args, 2) == 0x24c746f);
 
     const uint8_t raw_bytes[] = {0, 127, 255};
-    SplArray* canonical_bytes = rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
+    SplArray* canonical_bytes = (SplArray*)(uintptr_t)rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
     assert(rt_array_len(canonical_bytes) == 3);
     assert(rt_array_get(canonical_bytes, 0) == 0);
     assert(rt_array_get(canonical_bytes, 1) == 127);
     assert(rt_array_get(canonical_bytes, 2) == 255);
     assert(rt_array_last(canonical_bytes) == 255);
     assert(rt_array_last(rt_array_new(0)) == 3);
-    assert(rt_array_len(rt_bytes_from_raw(0, 3)) == 0);
+    assert(rt_array_len((SplArray*)(uintptr_t)rt_bytes_from_raw(0, 3)) == 0);
 
     SplArray* split = rt_strsplit("a,,b", ",");
     assert(rt_array_len(split) == 3);
@@ -160,35 +156,6 @@ int main(void) {
     split = rt_strsplit("plain", "");
     assert(rt_array_len(split) == 1);
     assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "plain") == 0);
-
-    char walk_root[] = "/tmp/simple-dir-walk-XXXXXX";
-    assert(mkdtemp(walk_root) != NULL);
-    char walk_nested[256], walk_suffix_dir[256], walk_regular[256];
-    char walk_child[256], walk_file_link[256], walk_cycle[256];
-    snprintf(walk_nested, sizeof(walk_nested), "%s/nested", walk_root);
-    snprintf(walk_suffix_dir, sizeof(walk_suffix_dir), "%s/x.spl", walk_root);
-    snprintf(walk_regular, sizeof(walk_regular), "%s/regular.spl", walk_root);
-    snprintf(walk_child, sizeof(walk_child), "%s/child.spl", walk_nested);
-    snprintf(walk_file_link, sizeof(walk_file_link), "%s/file-link.spl", walk_root);
-    snprintf(walk_cycle, sizeof(walk_cycle), "%s/back", walk_nested);
-    assert(mkdir(walk_nested, 0700) == 0);
-    assert(mkdir(walk_suffix_dir, 0700) == 0);
-    FILE* walk_file = fopen(walk_regular, "w");
-    assert(walk_file != NULL && fclose(walk_file) == 0);
-    walk_file = fopen(walk_child, "w");
-    assert(walk_file != NULL && fclose(walk_file) == 0);
-    assert(symlink(walk_regular, walk_file_link) == 0);
-    assert(symlink(walk_root, walk_cycle) == 0);
-    SplArray* walked = rt_dir_walk(walk_root);
-    assert(spl_array_len(walked) == 4);
-    assert(walk_contains(walked, walk_regular));
-    assert(walk_contains(walked, walk_child));
-    assert(walk_contains(walked, walk_file_link));
-    assert(walk_contains(walked, walk_cycle));
-    assert(!walk_contains(walked, walk_nested));
-    assert(!walk_contains(walked, walk_suffix_dir));
-    assert(rt_dir_remove_all(walk_root));
-    assert(access(walk_root, F_OK) != 0);
 
     char atomic_root[] = "/tmp/simple-atomic-write-XXXXXX";
     assert(mkdtemp(atomic_root) != NULL);

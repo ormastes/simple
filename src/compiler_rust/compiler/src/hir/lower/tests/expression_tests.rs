@@ -344,7 +344,13 @@ fn impl_text_self_chars_index_remains_a_string_receiver() {
 "#,
     )
     .unwrap();
-    let function = module.functions.iter().find(|f| f.name == "first_code").unwrap();
+    let function_name = module
+        .impls
+        .iter()
+        .find(|implementation| implementation.type_name == "text")
+        .and_then(|implementation| implementation.methods.get("first_code"))
+        .expect("impl text first_code method");
+    let function = module.functions.iter().find(|f| &f.name == function_name).unwrap();
     let returned = function
         .body
         .iter()
@@ -501,7 +507,8 @@ fn test_lower_danger_block_retains_boundary_and_tail_type() {
     let HirExprKind::UnsafeBlock {
         statements,
         capabilities,
-    } = &expr.kind else {
+    } = &expr.kind
+    else {
         panic!("Expected retained unsafe boundary, got {:?}", expr.kind);
     };
     assert_eq!(statements.len(), 2);

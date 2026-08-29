@@ -3878,6 +3878,33 @@ int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
+/* Canonical RuntimeValue ASCII helpers used by std.sffi.system.  The Rust
+ * hosted runtime exposed these names while core-C only exposed the older
+ * rt_string_to_{lower,upper} spelling, leaving native tool closures with NULL
+ * GOT slots.  Keep both spellings on the same implementation. */
+int64_t rt_text_to_lower_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+int64_t rt_text_to_upper_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+int64_t rt_text_is_ascii(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_text_is_ascii(promoted);
+        }
+        return 0;
+    }
+    for (uint64_t i = 0; i < s->len; i++) {
+        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    }
+    return 1;
+}
+
 int64_t rt_string_to_float(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s || s->len == 0) return rt_core_nil();
@@ -5585,7 +5612,7 @@ void* rt_alloc(int64_t size) {
 }
 
 void* rt_struct_alloc(int64_t size) {
-    if (size < 0) return NULL;
+    if (size <= 0) return NULL;
     void* ptr = rt_alloc(size);
     if (ptr && !rt_struct_alloc_register(ptr, (size_t)size)) {
         rt_free(ptr);
@@ -5596,6 +5623,7 @@ void* rt_struct_alloc(int64_t size) {
 
 int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width) {
     if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
+    if ((((uint64_t)receiver) & RT_VALUE_TAG_MASK) > 1) return 0;
     uintptr_t ptr = (uintptr_t)(((uint64_t)receiver) & ~RT_VALUE_TAG_MASK);
     if (ptr == 0) return 0;
 

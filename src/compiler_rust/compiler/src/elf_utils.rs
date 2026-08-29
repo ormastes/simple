@@ -558,6 +558,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_process_execute" => value::rt_process_execute as *const () as usize,
         "rt_exec" => value::rt_exec as *const () as usize,
         "spl_dlopen" => value::spl_dlopen as *const () as usize,
+        "spl_backend_plugin_run_v1" => value::spl_backend_plugin_run_v1 as *const () as usize,
         "spl_dlopen_checked" => value::spl_dlopen_checked as *const () as usize,
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
         "spl_dlsym_checked" => value::spl_dlsym_checked as *const () as usize,
@@ -981,6 +982,7 @@ mod tests {
             "spl_wffi_call_bool1_checked",
             "spl_wffi_call_f64_checked",
             "spl_dlopen_checked",
+            "spl_backend_plugin_run_v1",
             "spl_dlsym_checked",
             "spl_dlsym_process_checked",
         ] {

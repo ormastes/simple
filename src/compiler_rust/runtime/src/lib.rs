@@ -438,6 +438,51 @@ fn runtime_symbol_table_contains_monotonic_time() {
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
 #[test]
+fn runtime_symbol_table_contains_char_from_code() {
+    let entry = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_char_from_code")
+        .expect("char-from-code provider must be registered so the seed JIT does not de-JIT");
+    assert!(!entry.ptr.is_null());
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table", not(feature = "runtime-tls")))]
+#[test]
+fn runtime_symbol_table_excludes_disabled_tls_providers() {
+    // `rt_tls_{new,get,set,...}` are unrelated thread-local-storage owners;
+    // pin only the cfg-gated network transport surface from net_tls.rs.
+    let transport_names = [
+        "rt_tls_client_connect",
+        "rt_tls_client_connect_with_sni",
+        "rt_tls_client_connect_address_with_sni_timeout",
+        "rt_tls_client_write",
+        "rt_tls_client_read_checked",
+        "rt_tls_client_write_timeout",
+        "rt_tls_client_read_timeout_checked",
+        "rt_tls_client_close",
+        "rt_tls_get_protocol_version",
+        "rt_tls_get_cipher_suite",
+        "rt_tls_get_negotiated_alpn",
+        "rt_tls_is_handshake_complete",
+        "rt_tls_server_accept",
+        "rt_tls_server_close_connection",
+        "rt_tls_server_create",
+        "rt_tls_server_create_from_der",
+        "rt_tls_server_read_checked",
+        "rt_tls_server_shutdown",
+        "rt_tls_server_write",
+        "rt_tls_server_write_bytes",
+    ];
+    for name in transport_names {
+        assert!(
+            !RUNTIME_SYMBOL_ENTRIES.iter().any(|entry| entry.name == name),
+            "cfg-disabled TLS transport provider leaked into the runtime table: {name}"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
 fn runtime_symbol_table_typed_memory_contracts_dispatch() {
     fn entry(name: &str) -> *const u8 {
         RUNTIME_SYMBOL_ENTRIES
@@ -981,24 +1026,19 @@ pub use value::{
     rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
     rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
-    rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len,
-    rt_io_udp_bind, rt_io_udp_close, rt_io_udp_connect, rt_io_udp_local_addr, rt_io_udp_recv,
-    rt_io_udp_recv_from, rt_io_udp_send, rt_io_udp_send_to, rt_io_udp_set_broadcast,
-    rt_io_udp_set_nonblocking, rt_io_udp_set_read_timeout,
+    rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len, rt_io_udp_bind,
+    rt_io_udp_close, rt_io_udp_connect, rt_io_udp_local_addr, rt_io_udp_recv, rt_io_udp_recv_from, rt_io_udp_send,
+    rt_io_udp_send_to, rt_io_udp_set_broadcast, rt_io_udp_set_nonblocking, rt_io_udp_set_read_timeout,
 };
 
 #[cfg(feature = "runtime-tls")]
 pub use value::{
     rt_tls_client_close, rt_tls_client_connect, rt_tls_client_connect_with_sni,
-    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_checked,
-    rt_tls_client_read_timeout_checked,
-    rt_tls_client_write, rt_tls_client_write_timeout,
-    rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
-    rt_tls_is_handshake_complete, rt_tls_server_accept,
-    rt_tls_server_close_connection, rt_tls_server_create,
-    rt_tls_server_create_from_der, rt_tls_server_read_checked,
-    rt_tls_server_shutdown, rt_tls_server_write,
-    rt_tls_server_write_bytes,
+    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
+    rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
+    rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
+    rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_read_checked, rt_tls_server_shutdown,
+    rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export contract violation types and SFFI functions (CTR-050-054)

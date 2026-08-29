@@ -648,6 +648,9 @@ impl HirLowering:
         val fld: ParserField = f
         val fld_type: Type = fld.type_
         val type_ = self.lower_type(fld_type)
+        self.lower_field_with_type(fld, type_)
+
+    me lower_field_with_type(fld: ParserField, type_: HirType) -> HirField:
         val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues.
@@ -687,9 +690,9 @@ impl HirLowering:
         )
 
     me lower_enum(enum_: ParserEnum, owner_module: text) -> HirEnum:
-        self.lower_enum_with_symbol(enum_, owner_module, enum_.name)
+        self.lower_enum_with_symbol(enum_, owner_module, enum_.name, false)
 
-    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text) -> HirEnum:
+    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text, project_imported_payloads: bool) -> HirEnum:
         # Field access, NOT a positional `case ParserEnum(...)` destructure: that
         # arm was written for an 8-field ParserEnum and stopped matching once
         # `attributes` (and later fields) were appended, so every enum lowered
@@ -706,8 +709,12 @@ impl HirLowering:
         for tp in type_params:
             hir_type_params = hir_type_params.push(self.lower_type_param(tp))
         var hir_variants: [HirVariant] = []
+        # Imported enum payload dependencies are registered in the declaring
+        # owner's qualified type index. Resolving their raw parser spellings in
+        # the consumer can either miss (`Effect`) or bind a distinct same-named
+        # type, so only imported variants project through that owner.
         for v in variants:
-            hir_variants = hir_variants.push(self.lower_variant(v))
+            hir_variants = hir_variants.push(self.lower_variant(v, owner_module, project_imported_payloads))
         var hir_attrs: [HirAttribute] = []
         for raw_attr in enum_.attributes:
             hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
@@ -740,7 +747,7 @@ impl HirLowering:
             dyn_open: enum_.dyn_open
         )
 
-    me lower_variant(v: Variant) -> HirVariant:
+    me lower_variant(v: Variant, owner_module: text, project_imported_payloads: bool) -> HirVariant:
         val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
 
         # QUALIFIED patterns in a statement match, not `val kind = match` over
@@ -755,12 +762,21 @@ impl HirLowering:
             case VariantKind.Tuple(types):
                 var hir_types: [HirType] = []
                 for t in types:
-                    hir_types = hir_types.push(self.lower_type(t))
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(t, owner_module)
+                    else:
+                        self.lower_type(t)
+                    hir_types = hir_types.push(lowered_type)
                 kind = HirVariantKind.Tuple(hir_types)
             case VariantKind.Struct(fields):
                 var hir_fields: [HirField] = []
                 for f in fields:
-                    hir_fields = hir_fields.push(self.lower_field(f))
+                    val fld: ParserField = f
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(fld.type_, owner_module)
+                    else:
+                        self.lower_type(fld.type_)
+                    hir_fields = hir_fields.push(self.lower_field_with_type(fld, lowered_type))
                 kind = HirVariantKind.Struct(hir_fields)
 
         var discriminant = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: v.span)

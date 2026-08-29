@@ -193,6 +193,67 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
         i = i + 1
     0
 
+# Construct a field behind a call boundary from scalar flat-AST identities.
+# The native bridge inserts a pool safepoint at the caller's field-loop
+# backedge. Keeping Type, Expr, or Span aggregates in that caller makes the
+# following iteration lower them through conditional aggregate joins. Early
+# returns keep every aggregate branch local to this helper; the caller retains
+# only scalar ids and immediately pushes the completed ParserField.
+fn flat_parser_field_from_nodes(
+    name: text,
+    has_type_node: bool,
+    type_node: i64,
+    default_node: i64,
+    raw_bits: i64
+) -> ParserField:
+    val has_default = default_node >= 0
+    val has_bits = raw_bits > 0
+    var bits: i64 = 0
+    if has_bits:
+        bits = raw_bits
+
+    if has_type_node:
+        if has_default:
+            val default_expr = convert_flat_expr(default_node)
+            val declared_type = convert_flat_type(type_node)
+            return ParserField(
+                name: name, type_: declared_type,
+                has_default: true, default: default_expr,
+                visibility: Visibility.Private, is_public: false,
+                is_volatile: false, has_bits: has_bits, bits: bits,
+                has_fixed_address: false, fixed_address: 0,
+                span: make_span())
+        val declared_type = convert_flat_type(type_node)
+        return ParserField(
+            name: name, type_: declared_type,
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: make_span()),
+            visibility: Visibility.Private, is_public: false,
+            is_volatile: false, has_bits: has_bits, bits: bits,
+            has_fixed_address: false, fixed_address: 0,
+            span: make_span())
+
+    if has_default:
+        val default_expr = convert_flat_expr(default_node)
+        return ParserField(
+            name: name,
+            type_: Type(kind: TypeKind.Infer, span: make_span()),
+            has_default: true, default: default_expr,
+            visibility: Visibility.Private, is_public: false,
+            is_volatile: false, has_bits: has_bits, bits: bits,
+            has_fixed_address: false, fixed_address: 0,
+            span: make_span())
+
+    return ParserField(
+        name: name,
+        type_: Type(kind: TypeKind.Infer, span: make_span()),
+        has_default: false,
+        default: Expr(kind: ExprKind.NilLit, span: make_span()),
+        visibility: Visibility.Private, is_public: false,
+        is_volatile: false, has_bits: has_bits, bits: bits,
+        has_fixed_address: false, fixed_address: 0,
+        span: make_span())
+
 fn flat_ast_to_module(path: text) -> ParserModule:
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     if flat_bridge_trace_enabled():
@@ -381,9 +442,6 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # used for function params/returns; falls back to Infer
                     # (unchanged behavior) when a field has no recorded type
                     # node.
-                    var ft = Type(kind: TypeKind.Infer, span: span)
-                    if fi < f_types.len():
-                        ft = convert_flat_type(f_types[fi])
                     # Field default: the flat AST records a default expr id per
                     # field (-1 = none; ast_types.spl `field_defaults`). This
                     # was `val fd = nil` — hardcoded ABSENT — so `has_default`
@@ -393,16 +451,9 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     var fd_id: i64 = -1
                     if fi < f_defaults.len():
                         fd_id = f_defaults[fi]
-                    val field_has_default = fd_id >= 0
                     var fb: i64 = -1
                     if fi < f_bits.len():
                         fb = f_bits[fi]
-                    var field_default = Expr(kind: ExprKind.NilLit, span: span)
-                    if field_has_default:
-                        field_default = convert_flat_expr(fd_id)
-                    var field_bits: i64 = 0
-                    if fb > 0:
-                        field_bits = fb
                     # NAMED construction (NOT positional): on stage4 the
                     # positional ParserField(...) form misaligns the 12-field desugared
                     # ParserField struct, so `type_` receives a non-Type value ->
@@ -411,20 +462,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # (bug doc iteration 20 #86; gdb: lower_type_list <- lower_type
                     # <- lower_field <- lower_struct). Explicit field names pin
                     # every slot.
-                    fields.push(ParserField(
-                        name: f_names[fi],
-                        type_: ft,
-                        has_default: field_has_default,
-                        default: field_default,
-                        visibility: Visibility.Private,
-                        is_public: false,
-                        is_volatile: false,
-                        has_bits: fb > 0,
-                        bits: field_bits,
-                        has_fixed_address: false,
-                        fixed_address: 0,
-                        span: span
-                    ))
+                    var field_type_node: i64 = -1
+                    if fi < f_types.len():
+                        field_type_node = f_types[fi]
+                    fields.push(flat_parser_field_from_nodes(
+                        f_names[fi], fi < f_types.len(), field_type_node,
+                        fd_id, fb))
                     fi = fi + 1
                 # decl_get_type_params returns the struct/class's own `<T, U,
                 # ...>` names (threaded through by parse_struct_decl via
@@ -631,8 +674,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     name: i_tp_names[i_tpi],
                     bounds: [],
                     has_default: false,
-                    default: Type(kind: TypeKind.Infer, span: span),
-                    span: span
+                    default: Type(kind: TypeKind.Infer, span: make_span()),
+                    span: make_span()
                 ))
                 i_tpi = i_tpi + 1
             # #157: restore the trait link that parse_impl_decl records via
@@ -641,19 +684,26 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # un-overridden trait default methods for the concrete type.
             val impl_trait_name = decl_get_impl_trait(idx)
             val impl_has_trait = impl_trait_name != ""
+            # `span` was allocated before the declaration walk. Parsing the
+            # impl methods (and even earlier declarations) crosses pool
+            # safepoints, so copying that six-word aggregate here dereferenced
+            # reclaimed storage in the admitted Stage2 compiler (GPF at
+            # flat_ast_to_module+0x40b4 / 0x4d6264). Rebuild the empty span
+            # after those safepoints, immediately before the impl aggregates.
+            val impl_span = make_span()
             val impl_trait_type = if impl_has_trait:
-                Type(kind: TypeKind.Named(impl_trait_name, []), span: span)
+                Type(kind: TypeKind.Named(impl_trait_name, []), span: impl_span)
             else:
-                Type(kind: TypeKind.Infer, span: span)
+                Type(kind: TypeKind.Infer, span: impl_span)
             impls.push(Impl(
-                type_: Type(kind: TypeKind.Named(target_name, []), span: span),
+                type_: Type(kind: TypeKind.Named(target_name, []), span: impl_span),
                 has_trait_: impl_has_trait,
                 trait_: impl_trait_type,
                 type_params: i_type_params,
                 where_clause: [],
                 methods: methods,
                 assoc_types: [],
-                span: span
+                span: impl_span
             ))
         elif tag_text == "4" or tag_text == "5":
             val c_name = decl_get_name(idx)

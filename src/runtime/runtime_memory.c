@@ -465,6 +465,7 @@ uint8_t* rt_struct_alloc(int64_t size) {
 int8_t rt_struct_receiver_valid(
     int64_t receiver, int64_t byte_offset, int64_t access_width) {
     if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
+    if ((((uintptr_t)receiver) & (uintptr_t)7) > 1) return 0;
     uintptr_t ptr = ((uintptr_t)receiver) & ~(uintptr_t)7;
     if (ptr == 0) return 0;
 

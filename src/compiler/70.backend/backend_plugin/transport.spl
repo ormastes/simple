@@ -1,0 +1,155 @@
+# Pure-Simple packed transport for the versioned backend plugin runtime bridge.
+
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
+    BackendPluginRequestV1}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_serialization.{serialize_mir_module}
+
+val BACKEND_PLUGIN_BRIDGE_MAGIC_V1: i64 = 0x31504253
+val BACKEND_PLUGIN_BRIDGE_VERSION_V1: i64 = 1
+val BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1: i64 = 32
+val BACKEND_PLUGIN_REQUEST_SIZE_V1: i64 = 16
+
+@unsafe(
+    reason: "runtime-owned boxed [u8] backend plugin bridge; result envelope is validated before use",
+    capabilities: [ffi],
+)
+extern fn spl_backend_plugin_run_v1(
+    path_bytes: [u8], request_bytes: [u8], mir_bytes: [u8]
+) -> [u8]
+
+struct BackendPluginBridgeEnvelopeV1:
+    valid: bool
+    reason: text
+    status: i64
+    result_kind: i64
+    payload: [u8]
+    diagnostic: text
+
+fn backend_plugin_bridge_invalid_v1(reason: text) -> BackendPluginBridgeEnvelopeV1:
+    BackendPluginBridgeEnvelopeV1(false, reason, -1, 0, [], "")
+
+fn backend_plugin_push_u32_le_v1(out: [u8], value: i64):
+    var index = 0
+    while index < 4:
+        out.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+
+fn backend_plugin_push_u64_le_v1(out: [u8], value: i64):
+    var index = 0
+    while index < 8:
+        out.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+
+fn backend_plugin_read_u32_le_v1(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var index = 0
+    while index < 4:
+        value = value | ((data[offset + index] as i64) << (index * 8))
+        index = index + 1
+    value
+
+fn backend_plugin_read_u64_le_v1(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var index = 0
+    while index < 8:
+        value = value | ((data[offset + index] as i64) << (index * 8))
+        index = index + 1
+    value
+
+fn backend_plugin_copy_range_v1(data: [u8], offset: i64, length: i64) -> [u8]:
+    var out: [u8] = []
+    var index = 0
+    while index < length:
+        out.push(data[offset + index])
+        index = index + 1
+    out
+
+fn backend_plugin_role_wire_v1(role: BackendRole) -> i64:
+    match role:
+        case BackendRole.InterpreterJit: 1
+        case BackendRole.CompilerAot: 2
+
+fn backend_plugin_capability_bit_v1(capability: BackendCapability) -> i64:
+    match capability:
+        case BackendCapability.JitExecute: 1
+        case BackendCapability.ObjectEmit: 2
+        case BackendCapability.DebugInfo: 4
+        case BackendCapability.Optimization: 8
+        case BackendCapability.CrossTarget: 16
+        case BackendCapability.IncrementalCompilation: 32
+
+fn backend_plugin_request_encode_v1(request: BackendPluginRequestV1) -> [u8]:
+    var out: [u8] = []
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_BRIDGE_VERSION_V1)
+    backend_plugin_push_u32_le_v1(out, backend_plugin_role_wire_v1(request.role))
+    var capabilities = 0
+    for capability in request.required_capabilities:
+        capabilities = capabilities | backend_plugin_capability_bit_v1(capability)
+    backend_plugin_push_u64_le_v1(out, capabilities)
+    out
+
+fn backend_plugin_envelope_encode_v1(
+    status: i64, result_kind: i64, payload: [u8], diagnostic: text
+) -> [u8]:
+    val diagnostic_bytes = text_to_bytes(diagnostic)
+    var out: [u8] = []
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_BRIDGE_MAGIC_V1)
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_BRIDGE_VERSION_V1)
+    backend_plugin_push_u32_le_v1(out, status)
+    backend_plugin_push_u32_le_v1(out, result_kind)
+    backend_plugin_push_u64_le_v1(out, payload.len())
+    backend_plugin_push_u64_le_v1(out, diagnostic_bytes.len())
+    for byte in payload:
+        out.push(byte)
+    for byte in diagnostic_bytes:
+        out.push(byte)
+    out
+
+fn backend_plugin_envelope_decode_v1(data: [u8]) -> BackendPluginBridgeEnvelopeV1:
+    if data.len() < BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1:
+        return backend_plugin_bridge_invalid_v1("truncated-envelope")
+    if backend_plugin_read_u32_le_v1(data, 0) != BACKEND_PLUGIN_BRIDGE_MAGIC_V1:
+        return backend_plugin_bridge_invalid_v1("bad-envelope-magic")
+    if backend_plugin_read_u32_le_v1(data, 4) != BACKEND_PLUGIN_BRIDGE_VERSION_V1:
+        return backend_plugin_bridge_invalid_v1("unsupported-envelope-version")
+    var status = backend_plugin_read_u32_le_v1(data, 8)
+    if status >= 2147483648:
+        status = status - 4294967296
+    val result_kind = backend_plugin_read_u32_le_v1(data, 12)
+    val payload_len = backend_plugin_read_u64_le_v1(data, 16)
+    val diagnostic_len = backend_plugin_read_u64_le_v1(data, 24)
+    if payload_len < 0 or diagnostic_len < 0:
+        return backend_plugin_bridge_invalid_v1("invalid-envelope-length")
+    val available = data.len() - BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1
+    if payload_len > available or diagnostic_len > available - payload_len:
+        return backend_plugin_bridge_invalid_v1("truncated-envelope-payload")
+    if payload_len + diagnostic_len != available:
+        return backend_plugin_bridge_invalid_v1("trailing-envelope-bytes")
+    val payload = backend_plugin_copy_range_v1(
+        data, BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1, payload_len)
+    val diagnostic_bytes = backend_plugin_copy_range_v1(
+        data, BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1 + payload_len,
+        diagnostic_len)
+    BackendPluginBridgeEnvelopeV1(
+        true, "ok", status, result_kind, payload,
+        bytes_to_text(diagnostic_bytes))
+
+fn backend_plugin_run_module_v1(
+    provider_path: text, request: BackendPluginRequestV1, module: MirModule
+) -> BackendPluginBridgeEnvelopeV1:
+    if provider_path == "":
+        return backend_plugin_bridge_invalid_v1("missing-provider-path")
+    val request_bytes = backend_plugin_request_encode_v1(request)
+    val mir_bytes = text_to_bytes(serialize_mir_module(module))
+    val response = unsafe(capabilities: [ffi]):
+        spl_backend_plugin_run_v1(
+            text_to_bytes(provider_path), request_bytes, mir_bytes)
+    backend_plugin_envelope_decode_v1(response)
+
+export BACKEND_PLUGIN_BRIDGE_MAGIC_V1, BACKEND_PLUGIN_BRIDGE_VERSION_V1
+export BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1, BACKEND_PLUGIN_REQUEST_SIZE_V1
+export BackendPluginBridgeEnvelopeV1
+export backend_plugin_request_encode_v1, backend_plugin_envelope_encode_v1
+export backend_plugin_envelope_decode_v1, backend_plugin_run_module_v1

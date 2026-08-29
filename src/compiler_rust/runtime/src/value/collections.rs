@@ -76,8 +76,7 @@ fn normalize_index(index: i64, len: i64) -> i64 {
 /// Number of times [`fnv1a_hash`] actually walked bytes. Test-only instrumentation
 /// used to pin the lazy-hash mechanism (see `lazy_string_hash_tests`).
 #[cfg(test)]
-pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FNV1A_HASH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// FNV-1a hash for strings (64-bit)
 /// This is a simple, fast hash suitable for hash tables.
@@ -3759,6 +3758,14 @@ pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
     unsafe { rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
+/// Canonical raw-i64 ABI used by integer `.chr()`/`.to_char()` MIR lowering.
+/// Keep it on the same scalar-validation and UTF-8 allocation path as the
+/// legacy Text method symbol so the seed JIT can retain compiled execution.
+#[no_mangle]
+pub extern "C" fn rt_char_from_code(code: i64) -> RuntimeValue {
+    text_dot_from_char_code(code)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
     // Negative start clamps to 0 (the two-arg index_of contract; matches the
@@ -5199,14 +5206,9 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst =
-                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    (*arr).data as *const u64,
-                    (*dst).data as *mut u64,
-                    len as usize,
-                );
+                std::ptr::copy_nonoverlapping((*arr).data as *const u64, (*dst).data as *mut u64, len as usize);
             }
             (*dst).len = len;
             return result;
@@ -5217,14 +5219,9 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             if result.is_nil() {
                 return result;
             }
-            let dst =
-                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
             if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    (*arr).data as *const u8,
-                    (*dst).data as *mut u8,
-                    len as usize,
-                );
+                std::ptr::copy_nonoverlapping((*arr).data as *const u8, (*dst).data as *mut u8, len as usize);
             }
             (*dst).len = len;
             return result;
@@ -6311,10 +6308,7 @@ mod array_free_deep_contract_tests {
 
 #[cfg(test)]
 mod lazy_string_hash_tests {
-    use super::{
-        rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS,
-        STRING_HASH_UNCOMPUTED,
-    };
+    use super::{rt_string_concat, rt_string_len, rt_string_new, RuntimeString, FNV1A_HASH_CALLS, STRING_HASH_UNCOMPUTED};
     use crate::value::{HeapObjectType, RuntimeValue};
     use std::sync::atomic::Ordering;
 
@@ -6327,8 +6321,7 @@ mod lazy_string_hash_tests {
     }
 
     fn raw_hash_field(v: RuntimeValue) -> u64 {
-        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String)
-            .expect("string");
+        let p = crate::value::heap::get_typed_ptr::<RuntimeString>(v, HeapObjectType::String).expect("string");
         unsafe { (*p).hash }
     }
 

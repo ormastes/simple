@@ -90,11 +90,15 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "FixConfidence".to_string(),
-        variant_name: "Safe".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "FixConfidence".to_string(),
+            variant_name: "Safe".to_string(),
+        });
     mir.functions.push(function);
 
     let runtime_names = std::collections::HashMap::from([(
@@ -126,11 +130,15 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "ByteOrder".to_string(),
-        variant_name: "LittleEndian".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "ByteOrder".to_string(),
+            variant_name: "LittleEndian".to_string(),
+        });
     mir.functions.push(function);
 
     super::mangle::qualify_enum_runtime_names(
@@ -540,7 +548,9 @@ __attribute__((constructor)) static void llvm_style_ctor(void) {}
                 "expected .init_array among {sections:?}"
             );
             assert!(
-                StripError::VerificationFailed { sections }.to_string().contains("LIM-010"),
+                StripError::VerificationFailed { sections }
+                    .to_string()
+                    .contains("LIM-010"),
                 "post-condition failure is untagged"
             );
         }
@@ -1012,7 +1022,10 @@ fn test_multi_root_sibling_dirs_do_not_collide_on_module_prefix() {
     assert_eq!(compiler_root, src, "multi-root naming must use the shared ancestor");
     let app_prefix = module_prefix_from_path(&app_init, &app_root);
     let compiler_prefix = module_prefix_from_path(&compiler_init, &compiler_root);
-    assert_ne!(app_prefix, compiler_prefix, "sibling roots must not collide after sanitization");
+    assert_ne!(
+        app_prefix, compiler_prefix,
+        "sibling roots must not collide after sanitization"
+    );
     assert_eq!(app_prefix, "app____init__");
     assert_eq!(compiler_prefix, "compiler____init__");
 
@@ -1350,10 +1363,23 @@ fn test_incremental_cache_dir_default() {
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
     // Entries are partitioned by a per-lane scope subdirectory (see
     // doc/05_design/compiler/incremental_build/per_lane_private_caches.md).
-    let parent = builder.cache_dir().parent().unwrap().to_string_lossy().replace('\\', "/");
-    assert!(parent.ends_with("/project/.simple/native_cache"), "unexpected cache dir {cache_dir}");
+    let parent = builder
+        .cache_dir()
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
     assert!(
-        builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"),
+        parent.ends_with("/project/.simple/native_cache"),
+        "unexpected cache dir {cache_dir}"
+    );
+    assert!(
+        builder
+            .cache_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("scope-"),
         "unexpected cache dir {cache_dir}"
     );
 }
@@ -1462,7 +1488,12 @@ fn test_incremental_cache_dir_custom() {
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
     assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
-    assert!(builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"));
+    assert!(builder
+        .cache_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("scope-"));
 }
 
 #[test]
@@ -3508,6 +3539,16 @@ fn test_core_c_runtime_native_focus_contract() {
     );
 }
 
+#[test]
+fn test_core_c_runtime_owns_required_ascii_text_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let symbols = archive_defined_symbols(&runtime).expect("core-c runtime symbols should be readable");
+    for symbol in ["rt_text_is_ascii", "rt_text_to_lower_ascii", "rt_text_to_upper_ascii"] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_struct_receiver_guard_native_contract() {
@@ -3786,7 +3827,10 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
             "{symbol} must be owner-overridable (weak or undefined) in the capsule, found strong/local"
         );
     }
-    assert!(unresolved_runtime.is_subset(&owner_provided), "unexpected unresolved: {unresolved_runtime:?}");
+    assert!(
+        unresolved_runtime.is_subset(&owner_provided),
+        "unexpected unresolved: {unresolved_runtime:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -3807,10 +3851,9 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload_text"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[cfg(target_os = "linux")]
@@ -3829,9 +3872,9 @@ fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(!error.contains("feature-built libsimple_runtime.a is missing"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[cfg(target_os = "linux")]
@@ -3850,7 +3893,9 @@ fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(&target_root), Some(hosted));
 }
 
@@ -3870,7 +3915,9 @@ fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(&bootstrap_root), Some(hosted));
 }
 
@@ -3886,8 +3933,9 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("feature-built libsimple_runtime.a is missing"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
 }
 
@@ -4136,9 +4184,21 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let sync_platform = sync_root.join("platform.spl");
     let gc_path = gc_root.join("path.spl");
     let consumer = sync_root.join("consumer.spl");
-    std::fs::write(&sync_path, "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n").unwrap();
-    std::fs::write(&sync_platform, "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n").unwrap();
-    std::fs::write(&gc_path, "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n").unwrap();
+    std::fs::write(
+        &sync_path,
+        "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &sync_platform,
+        "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &gc_path,
+        "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n",
+    )
+    .unwrap();
     std::fs::write(&consumer, "use std.nogc_sync_mut.platform.{normalize_path as platform_normalize, is_absolute_path as platform_is_absolute}\n").unwrap();
     let file_sources = [&sync_path, &sync_platform, &gc_path, &consumer]
         .into_iter()
@@ -4151,7 +4211,10 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
     let expected_prefix = module_prefix_from_path(&sync_path, &src_root);
 
-    assert_eq!(use_map.get("platform_normalize"), Some(&format!("{expected_prefix}__normalize_path")));
+    assert_eq!(
+        use_map.get("platform_normalize"),
+        Some(&format!("{expected_prefix}__normalize_path"))
+    );
     assert_eq!(
         use_map.get("platform_is_absolute"),
         Some(&format!("{expected_prefix}__is_absolute_path"))
@@ -4497,10 +4560,14 @@ fn test_entry_closure_follows_use_inside_unwrap_or_return_fallback() {
     let fallback_path = src_root.join("lib/fallback_value.spl");
     std::fs::create_dir_all(main_path.parent().unwrap()).unwrap();
     std::fs::create_dir_all(fallback_path.parent().unwrap()).unwrap();
-    std::fs::write(&main_path, "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n").unwrap();
+    std::fs::write(
+        &main_path,
+        "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n",
+    )
+    .unwrap();
     std::fs::write(
         &worker_path,
-        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: do:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
+        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: \\:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
     )
     .unwrap();
     std::fs::write(&fallback_path, "fn load_fallback() -> i64:\n    return 7\n").unwrap();
@@ -5818,11 +5885,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let main_object = builder.compile_main_stub(temp.path()).unwrap();
     let args_provider = temp.path().join("args-provider.cpp");
     let args_provider_object = temp.path().join("args-provider.o");
-    std::fs::write(
-        &args_provider,
-        "extern \"C\" void rt_set_args(int, char**) {}\n",
-    )
-    .unwrap();
+    std::fs::write(&args_provider, "extern \"C\" void rt_set_args(int, char**) {}\n").unwrap();
     assert!(std::process::Command::new("c++")
         .args(["-c"])
         .arg(&args_provider)
@@ -5841,9 +5904,9 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
             .unwrap();
         let symbols = String::from_utf8_lossy(&symbols.stdout);
         assert!(symbols.lines().any(|line| line.contains(" U _rt_set_args")));
-        assert!(!symbols.lines().any(|line| {
-            line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args")
-        }));
+        assert!(!symbols
+            .lines()
+            .any(|line| { line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args") }));
     }
 
     let linked_probe = temp.path().join("linked-probe");
@@ -6497,7 +6560,14 @@ int main(void) {
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
-    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
+    double float_input = 3.141592653589793;
+    int64_t float_bits = 0;
+    memcpy(&float_bits, &float_input, sizeof(float_bits));
+    int64_t boxed_float = rt_value_float(float_input);
+    int64_t float_ptr = boxed_float & ~7LL;
+    if ((boxed_float & 7LL) != 1LL || float_ptr < 4096 ||
+        (*(uint32_t*)(uintptr_t)float_ptr) != UINT32_C(0x464C5431) ||
+        (*(int64_t*)(uintptr_t)(float_ptr + 8)) != float_bits) return 14;
 
     uint8_t* p = (uint8_t*)rt_alloc(4);
     if (!p) return 20;
@@ -6560,7 +6630,10 @@ int main(void) {
     if (rt_string_len(trim_started) != 4 || memcmp(rt_string_data(trim_started), "123 ", 4) != 0) return 105;
     int64_t t = rt_string_new((const uint8_t*)"abc", 3);
     SplArray* t_bytes = (SplArray*)rt_string_bytes(t);
-    if (rt_array_len(t_bytes) != 3 || rt_value_as_int(rt_array_get(t_bytes, 1)) != 'b') return 77;
+    /* text.bytes() is [u8]: its physical slots are raw bytes, not tagged Any
+       integers. The untyped C probe must inspect the raw slot exactly as typed
+       native [u8] lowering does; rt_value_as_int would shift 0x62 to 12. */
+    if (rt_array_len(t_bytes) != 3 || rt_array_get(t_bytes, 1) != 'b') return 77;
     if (rt_string_char_code_at(t, 2) != 'c') return 78;
     int64_t utf8 = rt_string_new((const uint8_t*)"\xC3\xA9", 2);
     if (rt_string_char_code_at(utf8, 0) != 0xE9) return 79;
@@ -6654,6 +6727,41 @@ int main(void) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_simple_lsp_mcp_reduced_closure_avoids_broad_runtime_facades() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
+    for relative in [
+        "src/app/simple_lsp_mcp/main.spl",
+        "src/app/simple_lsp_mcp/startup_log.spl",
+        "src/app/simple_lsp_mcp/json_helpers.spl",
+        "src/app/simple_lsp_mcp/tools.spl",
+    ] {
+        let source = std::fs::read_to_string(repo_root.join(relative)).unwrap();
+        assert!(
+            !source.contains("use std.io_runtime")
+                && !source.contains("use std.log")
+                && !source.contains("use std.nogc_sync_mut.io.process_ops"),
+            "{relative} reintroduced a broad facade into the reduced entry closure"
+        );
+    }
+
+    let boundary = std::fs::read_to_string(repo_root.join("src/app/io/minimal_runtime_ops.spl")).unwrap();
+    for forbidden in [
+        "rt_time_day",
+        "rt_process_output",
+        "rt_file_mmap_read_bytes",
+        "rt_term_write",
+        "rt_cpu_count",
+    ] {
+        assert!(
+            !boundary.contains(forbidden),
+            "narrow runtime boundary admitted unused symbol family member {forbidden}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -7005,7 +7113,10 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .source_dir(source_dir.clone())
                 .build()
                 .unwrap();
-            assert_eq!(result.cached, 1, "retry did not reuse the object completed before the failed batch");
+            assert_eq!(
+                result.cached, 1,
+                "retry did not reuse the object completed before the failed batch"
+            );
 
             fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
             NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
@@ -7071,7 +7182,10 @@ fn test_incremental_cache_rejects_corrupt_mangled_object() {
     fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 33\n").unwrap();
     let changed = build();
     assert_eq!(changed.cached, 1, "unchanged sibling should still hit its key");
-    assert_eq!(changed.compiled, 1, "changed source key must not reuse stale object bytes");
+    assert_eq!(
+        changed.compiled, 1,
+        "changed source key must not reuse stale object bytes"
+    );
 }
 
 #[test]
@@ -7127,7 +7241,10 @@ fn test_cache_invalid_read_never_unlinks_concurrent_publication_path() {
     let path = temp.path().join("shared.o");
     fs::write(&path, b"invalid").unwrap();
     assert!(super::read_usable_cached_object(&path).is_none());
-    assert!(path.exists(), "reader must not unlink a path another builder can publish");
+    assert!(
+        path.exists(),
+        "reader must not unlink a path another builder can publish"
+    );
 }
 
 #[test]

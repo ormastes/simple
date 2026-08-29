@@ -16,6 +16,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -182,6 +183,45 @@ impl HirLowering:
     me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         val imported_mod = self.module_surfaces.surfaces[imported_index]
         hir_phase_profile_count_imported_symbol()
+        # A frozen facade can carry a materialized declaration payload for a
+        # re-export in its ordinary name/value arrays.  Those arrays make the
+        # facade LOOK like the declaration owner, so probing them before the
+        # frozen export-origin index binds the symbol to the facade and loses
+        # the real terminal.  In the full Stage-3 closure that made split
+        # facades such as mir_data/core.ast/std.io_runtime resolve under the
+        # seed's flat namespace but disappear under self-hosted HIR lowering.
+        #
+        # Route every non-terminal origin before the kind scans below.  A
+        # direct export has the exact same physical owner and spelling and is
+        # deliberately left on the existing path.  The recursive call is
+        # bounded by the already-frozen origin graph; invalid origins fail
+        # closed instead of silently manufacturing a facade-owned symbol.
+        val routed_origin = module_surface_export_origin_index_lookup(
+            imported_mod.export_origin_index, imported_name)
+        if routed_origin.found:
+            val routed_index = hir_export_origin_surface_index(
+                self.module_surfaces, routed_origin.owner_module)
+            if routed_index < 0 or routed_index >= self.module_surfaces.surfaces.len():
+                self.error(
+                    "invalid export origin `{routed_origin.owner_module}::{routed_origin.source_name}` for `{imported_mod.module_name}::{imported_name}`",
+                    import_span)
+                return
+            if routed_index != imported_index or routed_origin.source_name != imported_name:
+                val routed_surface = self.module_surfaces.surfaces[routed_index]
+                self.register_imported_symbol(
+                    routed_index, routed_surface.preferred_registry_name,
+                    routed_origin.source_name, local_name, import_span,
+                    materialize_enum)
+                # Type projection may still be expressed through the facade
+                # spelling. Publish that qualified alias after the terminal
+                # registration, matching the legacy chase path below.
+                val terminal_type = self.symbols.lookup_qualified_type_raw(
+                    routed_surface.module_name, routed_origin.source_name)
+                if terminal_type >= 0:
+                    self.symbols.bind_qualified_type(
+                        imported_mod.module_name, imported_name,
+                        SymbolId(id: terminal_type))
+                return
         val scan_started = hir_phase_profile_now()
         # NAMEIDX: six Dict probes against the per-surface name index instead
         # of six linear sweeps of the surface's name arrays per registration.

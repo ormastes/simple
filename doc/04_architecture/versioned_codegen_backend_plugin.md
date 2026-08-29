@@ -59,3 +59,20 @@ One interface supports static and dynamic operation and prevents Phase 3 symbol
 authority drift. The ABI requires explicit buffer ownership and versioning;
 adding an operation needs a new compatible tail field or a new ABI version.
 
+## Frozen C ABI v1 foundation
+
+The normative foreign header is
+`src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h`.
+It fixes structure widths and sizes, pointer-plus-length borrowed inputs,
+provider-owned outputs, and typed entry/open/compile/finalize/diagnostics/
+close/release signatures. The library lease outlives every descriptor, vtable,
+session, and buffer. ABI or structure mismatch fails before `open_session`.
+
+This completes only the ABI foundation. Production descriptor decoding,
+canonical MIR serialization, session integration, and `--backend-plugin`
+activation remain pending.
+
+Current status: native lifecycle, Simple canonical-MIR transport, CLI/cache
+path policy, and provider-content identity are implemented. Interpreter extern
+dispatch and admitted dynamic session activation remain pending. Phase 3
+convergence is not established.

@@ -115,6 +115,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("native_http_")
         || name.starts_with("rt_io_tcp_")
         || name.starts_with("spl_dl")
+        || name.starts_with("spl_backend_plugin_")
         || name.starts_with("spl_wffi_")
     {
         return Sys;
@@ -2141,6 +2142,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Dynamic Loading (WFFI)
     // =========================================================================
     RuntimeFuncSpec::new("spl_dlopen", &[I64], &[I64]),
+    RuntimeFuncSpec::new("spl_backend_plugin_run_v1", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlopen_checked", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlsym_checked", &[I64, I64, I64], &[I64]),

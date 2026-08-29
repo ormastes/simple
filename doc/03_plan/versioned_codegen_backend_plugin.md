@@ -127,3 +127,35 @@ Start the implementation session with:
 > Stop after each milestone's exit gate, preserve incremental caches, never
 > silently substitute LLVM/Cranelift, and cap verification at three cycles.
 
+## Implementation status (2026-08-28)
+
+- Milestone 1: implemented — ABI-safe metadata, typed admission errors, and
+  deterministic provider receipts with focused contract coverage.
+- Milestone 2: implemented. Built-in LLVM and Cranelift sessions retain one
+  `CodegenFactory` adapter and compile representative MIR through
+  `BackendSession`; focused coverage also rejects unmapped target text without
+  provider fallback.
+- Milestone 3: request projection and role defaults are implemented, but
+  production caller migration is not. Compiler/AOT still calls legacy direct
+  compile helpers, and interpreter/JIT still calls `rt_jit_*` and
+  `rt_exec_manager_*` owners without an admitted `BackendSession`.
+- Milestone 4: checked `DynLib` load, exact `simple_backend_plugin_v1` lookup,
+  and library lease are implemented. The explicit C ABI v1 header,
+  generated-compatible Simple wire DTOs, and a loadable provider/host fixture
+  now freeze typed operations and buffer/session lifetime. Native lifecycle,
+  canonical MIR transport, CLI propagation, and cache path/content identity
+  are complete. Interpreter extern dispatch and dynamic session activation
+  remain fail-closed and pending; Phase 3 convergence is unproven.
+- Milestone 5/6: the explicit-file structural boundary audit rejects direct
+  LLVM/Cranelift provider calls, raw JIT/execution-manager calls, and legacy
+  compile helpers outside their explicit adapter/SFFI/helper owners. It is not
+  yet wired over the production caller set. Cache-key binding, Phase 3 provider
+  admission/link convergence, latency/RSS evidence, and full verification
+  remain open.
+
+Verification checkpoint: focused common, driver, built-in compile-adapter, and
+boundary-scanner specs pass. The canonical
+32-worker Stage-2 incremental build reached compiler construction but timed out
+on the pre-existing `src/compiler/10.frontend/core/__init__.spl` 300-second
+per-file limit; its warmed cache may be retried once after the final source
+snapshot stabilizes.

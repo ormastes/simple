@@ -52,3 +52,14 @@ No implicit backend substitution. No partially emitted output survives an
 admission or compile failure. Teardown runs once, and a teardown diagnostic does
 not replace the primary compile error.
 
+## C ABI v1 wire and ownership contract
+
+`simple_backend_plugin_v1()` returns a borrowed immutable descriptor. Every
+structure begins with `abi_version` and `struct_size`, validated before its tail
+is read. Text and MIR inputs are borrowed byte slices valid only during a call.
+Compile, finalize, and diagnostics outputs are provider-owned
+`(data,size,owner_token)` buffers released exactly once through the same
+vtable. Consumers release buffers, close the session once, then unload the
+library. Native lifecycle, Simple canonical-MIR transport, CLI propagation,
+and cache path/content identity are implemented. Interpreter dispatch and the
+dynamic session adapter remain open; Phase 3 convergence is unproven.
