@@ -1,0 +1,107 @@
+# @req REQ-008
+"""Lifecycle contract for the free-function central debug service v1 API.
+
+Covers the exact surface the three real call sites use (src/app/mcp/dap_bridge.spl,
+src/os/realtime/jtag/debug_service_adapter_v1.spl,
+src/app/mcpgdb/debug_service_bridge_v1.spl):
+open -> add_target -> authorize (allow and policy-deny) -> record -> close."""
+
+use std.spec.*
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
+    DebugRootOperationV1, DebugTargetNodeV1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_add_target,
+    central_debug_service_v1_authorize, central_debug_service_v1_record,
+    central_debug_service_v1_close,
+    debug_policy_development_v1, debug_policy_observe_only_v1,
+}
+
+fn require_session(result: Result<DebugSessionId, text>) -> DebugSessionId:
+    match result:
+        case Ok(session_id): session_id
+        case Err(reason): fail("expected debug session: {reason}")
+
+fn host_target() -> DebugTargetNodeV1:
+    DebugTargetNodeV1(target_id: "host", parent_target_id: "", kind: "host", label: "Host")
+
+fn host_capability() -> DebugCapabilityV1:
+    DebugCapabilityV1(
+        target_id: "host",
+        support: CapLevel.Native,
+        verification: DebugVerificationV1.Unverified,
+        perturbation: DebugPerturbationV1.Stopping,
+        reason: "",
+    )
+
+describe "central debug service v1 lifecycle":
+    it "opens a session and rejects an empty build id":
+        val opened = central_debug_service_v1_open("build-lifecycle-1", debug_policy_development_v1())
+        val session_id = require_session(opened)
+        expect(session_id.value != "").to_be_true()
+        match central_debug_service_v1_open("", debug_policy_development_v1()):
+            case Ok(_): fail("empty build_id must be rejected")
+            case Err(_): expect(true).to_be_true()
+        central_debug_service_v1_close(session_id)
+
+    it "adds a target to an open session and fails on an unknown session":
+        val session_id = require_session(
+            central_debug_service_v1_open("build-lifecycle-2", debug_policy_development_v1()))
+        match central_debug_service_v1_add_target(session_id, host_target(), host_capability()):
+            case Ok(_): expect(true).to_be_true()
+            case Err(reason): fail("add_target should succeed: {reason}")
+        match central_debug_service_v1_add_target(
+                DebugSessionId(value: "no-such-session"), host_target(), host_capability()):
+            case Ok(_): fail("unknown session must be rejected")
+            case Err(_): expect(true).to_be_true()
+        central_debug_service_v1_close(session_id)
+
+    it "authorizes control under the development policy":
+        val session_id = require_session(
+            central_debug_service_v1_open("build-lifecycle-3", debug_policy_development_v1()))
+        val receipt = central_debug_service_v1_authorize(
+            session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Stopping, "test.control")
+        expect(receipt.allowed).to_be_true()
+        expect(receipt.session_id).to_equal(session_id.value)
+        central_debug_service_v1_close(session_id)
+
+    it "denies control and domain under the observe-only policy but allows inspect":
+        val session_id = require_session(
+            central_debug_service_v1_open("build-lifecycle-4", debug_policy_observe_only_v1()))
+        val denied = central_debug_service_v1_authorize(
+            session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Stopping, "test.control")
+        expect(denied.allowed).to_be_false()
+        expect(denied.reason != "").to_be_true()
+        val denied_domain = central_debug_service_v1_authorize(
+            session_id, DebugRootOperationV1.Domain, DebugPerturbationV1.Mutating, "test.flash")
+        expect(denied_domain.allowed).to_be_false()
+        val allowed = central_debug_service_v1_authorize(
+            session_id, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "test.read")
+        expect(allowed.allowed).to_be_true()
+        central_debug_service_v1_close(session_id)
+
+    it "records an outcome receipt carrying succeeded and execution_changed":
+        val session_id = require_session(
+            central_debug_service_v1_open("build-lifecycle-5", debug_policy_development_v1()))
+        val receipt = central_debug_service_v1_record(
+            session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative,
+            "test.close", true, true, "")
+        expect(receipt.succeeded).to_be_true()
+        expect(receipt.execution_changed).to_be_true()
+        expect(receipt.action).to_equal("test.close")
+        central_debug_service_v1_close(session_id)
+
+    it "closes a session and refuses further authorization on it":
+        val session_id = require_session(
+            central_debug_service_v1_open("build-lifecycle-6", debug_policy_development_v1()))
+        match central_debug_service_v1_close(session_id):
+            case Ok(_): expect(true).to_be_true()
+            case Err(reason): fail("close should succeed: {reason}")
+        val after = central_debug_service_v1_authorize(
+            session_id, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "test.after_close")
+        expect(after.allowed).to_be_false()
+        match central_debug_service_v1_close(DebugSessionId(value: "no-such-session")):
+            case Ok(_): fail("closing an unknown session must be rejected")
+            case Err(_): expect(true).to_be_true()
