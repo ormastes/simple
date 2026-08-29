@@ -101,10 +101,45 @@ fn terminal_facade_routes_name_physical_callable_owners() {
         }
     }
 
-    assert!(!repo_root.join("src/os/qemu_runner_part4.spl").exists());
+    for part in 1..=9 {
+        let module = format!("os.qemu_runner_part{part}");
+        let physical = repo_root.join(format!("src/os/qemu_runner_part{part}.spl"));
+        assert!(
+            physical.exists() || !qemu_facade.contains(&module),
+            "facade references absent qemu_runner_part{part}"
+        );
+    }
     assert!(!cli_facade.contains("app.io._CliCompile.native_build"));
     assert!(!cli_facade.contains("play_cli_main"));
     assert!(!qemu_facade.contains("bootstrap_authorization_receipt_v2"));
+}
+
+#[test]
+fn qemu_facade_preserves_exact_historical_public_surface_on_physical_owners() {
+    fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
+        let tail = source.split_once(marker).unwrap().1;
+        let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
+        body.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn names(surface: &str) -> std::collections::BTreeSet<String> {
+        surface.split_whitespace().map(str::to_owned).collect()
+    }
+
+    let repo_root = repo_root_for_native_project_tests();
+    let facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
+    let expected = [
+        ("os._QemuRunner.runner_targets.", "_MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
+        ("os._QemuRunner.scenario_catalog.", "test_os run_all_architectures test_all_architectures QemuScenario scenario_lane_kind _acceptance_lane_scenario _scenario_from_target _arm_fs_exec_platform_name _riscv_fs_exec_platform_name _arm_fs_exec_scenario _riscv_fs_exec_target _riscv_fs_exec_scenario _desktop_disk_scenario_target _is_desktop_disk_scenario_name _desktop_disk_scenario_target_direct _desktop_scenario_timeout_ms _ensure_desktop_scenario_media scenario_rv64_base scenario_rv64_dtb_pci scenario_rv64_ssh scenario_rv64_x25519_probe scenario_x64_pci_lab scenario_x64_nvme scenario_x64_net_user scenario_x64_ssh scenario_x64_toolchain_vfs_probe scenario_x64_q35_pure_nvme_perf scenario_x64_gpu_2d scenario_x64_gui scenario_x64_gui_tablet scenario_x64_wm_input_test scenario_x64_wm_simple_web_check scenario_x64_nvme_fat32 scenario_arm64_virtio_fat32_smf scenario_arm64_wm_ramfb scenario_arm32_virtio_fat32_smf scenario_riscv64_virtio_fat32_smf scenario_riscv32_virtio_fat32_smf scenario_riscv64_hosted scenario_x64_full_stack scenario_x64_desktop_test arm_fs_exec_disk_image_path arm_fs_exec_kernel_bin_path _arm_virtio_blk_exec_disk_args riscv_fs_exec_disk_image_path _riscv_virtio_blk_exec_disk_args ovmf_code_candidates ovmf_code_path desktop_uefi_bootloader_candidates desktop_uefi_bootloader_path desktop_uefi_disk_image_path desktop_uefi_esp_dir_path desktop_uefi_boot_media_ready _x64_desktop_uefi_args scenario_x64_desktop_uefi get_all_scenarios get_scenario scenario_exists scenario_by_name_direct _arm_fs_exec_scenario_name _riscv_fs_exec_scenario_name"),
+        ("os._QemuRunner.scenario_exec.", "ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
+    ];
+    for (owner, historical_surface) in expected {
+        assert_eq!(explicit_names(&facade, owner), names(historical_surface), "public facade parity changed for {owner}");
+    }
 }
 
 #[test]
