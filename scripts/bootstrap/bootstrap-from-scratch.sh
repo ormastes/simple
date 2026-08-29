@@ -1641,7 +1641,12 @@ prepare_rust_authority_workspace() {
     return 0
   fi
 
-  rm -rf "${rust_authority_root}"
+  # The authority root is already content-addressed by every Rust seed input.
+  # Preserve its Cargo target so an interrupted/retried build with the same
+  # fingerprint can reuse dependency artifacts. Ephemeral HOME/config/tmp state
+  # is recreated below; a changed fingerprint selects a different root.
+  rm -rf "${rust_authority_home}" "${rust_authority_cargo_home}" \
+    "${rust_authority_tmp}"
   mkdir -p "${rust_authority_target}" "${rust_authority_home}" \
     "${rust_authority_cargo_home}" "${rust_authority_tmp}"
   vendored_sources_absolute=$(
