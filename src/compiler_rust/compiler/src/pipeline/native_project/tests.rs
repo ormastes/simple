@@ -3562,6 +3562,10 @@ fn test_core_c_runtime_owns_tool_host_service_family() {
         "rt_coverage_clear",
         "rt_coverage_dump_sdn",
         "rt_package_chmod",
+        "rt_is_debug_mode_enabled",
+        "rt_file_stat",
+        "rt_process_exists",
+        "rt_ptr_read_i32",
     ] {
         assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
     }

@@ -9,7 +9,9 @@
 
 #include "runtime.h"
 
+#include <errno.h>
 #include <stdint.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -78,6 +80,31 @@ int64_t rt_unix_socket_connect(const char* path) {
 int64_t rt_metal_is_available(void) {
     /* The portable core capsule has no Objective-C Metal provider. */
     return 0;
+}
+
+bool rt_is_debug_mode_enabled(void) {
+    return false;
+}
+
+int64_t rt_file_stat(const uint8_t* path, uint64_t path_len) {
+    if (!path || path_len == 0 || path_len >= 4096) return 0;
+    char buffer[4096];
+    memcpy(buffer, path, (size_t)path_len);
+    buffer[path_len] = '\0';
+    struct stat metadata;
+    return stat(buffer, &metadata) == 0 ? (int64_t)metadata.st_mtime : 0;
+}
+
+bool rt_process_exists(int64_t pid) {
+    if (pid <= 0) return false;
+#if defined(_WIN32)
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) return GetLastError() == ERROR_ACCESS_DENIED;
+    CloseHandle(process);
+    return true;
+#else
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
 }
 
 int32_t rt_package_chmod(const uint8_t* path, uint64_t path_len, int32_t mode) {

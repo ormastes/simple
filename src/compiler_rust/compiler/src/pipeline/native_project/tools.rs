@@ -353,6 +353,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_process_owned.c",
         "runtime_coverage_core.c",
         "runtime_core_host_services.c",
+        "runtime_memory.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
