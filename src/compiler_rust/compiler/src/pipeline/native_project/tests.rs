@@ -3566,6 +3566,13 @@ fn test_core_c_runtime_owns_tool_host_service_family() {
         "rt_file_stat",
         "rt_process_exists",
         "rt_ptr_read_i32",
+        "rt_string_index_of",
+        "rt_array_max",
+        "rt_array_sort",
+        "max",
+        "f64.sqrt",
+        "f64.floor",
+        "f64.ceil",
     ] {
         assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
     }

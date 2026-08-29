@@ -10,6 +10,7 @@
 #include "runtime.h"
 
 #include <errno.h>
+#include <math.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -105,6 +106,21 @@ bool rt_process_exists(int64_t pid) {
 #else
     return kill((pid_t)pid, 0) == 0 || errno == EPERM;
 #endif
+}
+
+/* ELF spellings emitted by the self-hosted method fallback. Keep these as
+ * compatibility aliases while MIR lowering converges on the libm names. */
+#if !defined(_WIN32)
+double rt_f64_sqrt(double value) __asm__("f64.sqrt");
+double rt_f64_floor(double value) __asm__("f64.floor");
+double rt_f64_ceil(double value) __asm__("f64.ceil");
+double rt_f64_sqrt(double value) { return sqrt(value); }
+double rt_f64_floor(double value) { return floor(value); }
+double rt_f64_ceil(double value) { return ceil(value); }
+#endif
+
+int64_t max(int64_t left, int64_t right) {
+    return left > right ? left : right;
 }
 
 int32_t rt_package_chmod(const uint8_t* path, uint64_t path_len, int32_t mode) {

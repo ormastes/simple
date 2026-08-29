@@ -3760,6 +3760,12 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
     return -1;
 }
 
+/* Self-hosted Simple declares index_of as a raw i64 result.  Its historical
+ * fallback spelling differed from the canonical C worker only by name. */
+int64_t rt_string_index_of(int64_t value, int64_t needle) {
+    return rt_string_find(value, needle);
+}
+
 int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
@@ -4889,6 +4895,23 @@ int64_t rt_sort(int64_t receiver) {
     for (int64_t i = 0; i < n; i++) rt_array_set(arr, i, buf[i]);
     free(buf);
     return receiver;
+}
+
+bool rt_array_sort(int64_t receiver) {
+    (void)rt_sort(receiver);
+    return true;
+}
+
+int64_t rt_array_max(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    int64_t result = rt_array_get(arr, 0);
+    int64_t count = rt_array_len(arr);
+    for (int64_t index = 1; index < count; index++) {
+        int64_t candidate = rt_array_get(arr, index);
+        if (rt_sort_cmp(result, candidate) < 0) result = candidate;
+    }
+    return result;
 }
 
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
