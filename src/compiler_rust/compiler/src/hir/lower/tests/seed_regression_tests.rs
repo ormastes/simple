@@ -355,3 +355,48 @@ fn optional_enum_payload_binding_resolves_variant_fields_through_pointer() {
          from a HashMap-order-dependent walk that can land on DecoyPayload"
     );
 }
+
+/// Genuine-ambiguity tie-break path in the wildcard `"_"` variant-owner
+/// search: when TWO enums both own a variant of the same bare name AND their
+/// payload shapes genuinely disagree, `get_enum_variant_field_types_with_hint`
+/// cannot resolve the receiver's real owner from an ANY expected type alone.
+/// It must not silently return whichever HashMap iteration produced first
+/// (the original heisenbug); instead it must deterministically pick by
+/// smallest owner name, so a wrong pick is at least stable and diagnosable.
+/// This exercises the branch the accepted verify report flagged as untested
+/// (`VERIFY_enum_dispatch.md` §2 / §3b): "No test covers the tie-break path".
+#[test]
+fn ambiguous_wildcard_variant_owner_picks_smallest_name_deterministically() {
+    use crate::hir::lower::lowerer::Lowerer;
+    use crate::hir::{HirType, TypeId};
+
+    let mut lowerer = Lowerer::new();
+    // Two owners of a same-named variant, genuinely different payloads, and
+    // no Pointer/expected-type information to disambiguate (ANY receiver).
+    let _zeta = lowerer.module.types.register(HirType::Enum {
+        name: "ZetaKind".to_string(),
+        variants: vec![("Shared".to_string(), Some(vec![TypeId::I64]))],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+    let _alpha = lowerer.module.types.register(HirType::Enum {
+        name: "AlphaKind".to_string(),
+        variants: vec![("Shared".to_string(), Some(vec![TypeId::STRING, TypeId::BOOL]))],
+        generic_params: vec![],
+        is_generic_template: false,
+        type_bindings: Default::default(),
+    });
+
+    let fields = lowerer.get_enum_variant_field_types_with_hint("_", "Shared", TypeId::ANY);
+    // "AlphaKind" < "ZetaKind" lexicographically -> deterministic pick must
+    // be AlphaKind's payload, every run, regardless of registration order or
+    // per-process HashMap RandomState.
+    assert_eq!(
+        fields,
+        Some(vec![TypeId::STRING, TypeId::BOOL]),
+        "on genuine disagreement the wildcard search must deterministically \
+         pick the smallest-named owner (AlphaKind), not a random HashMap-order \
+         first-match"
+    );
+}

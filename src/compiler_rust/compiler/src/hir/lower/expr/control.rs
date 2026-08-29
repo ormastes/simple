@@ -1441,7 +1441,7 @@ impl Lowerer {
             // Surface it (gated, default-off) so a recurrence is diagnosable
             // rather than silent; the deterministic order keeps it stable.
             candidates.sort_by(|a, b| a.0.cmp(&b.0));
-            if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+            if crate::hir::lower::trace_field_get_enabled() {
                 let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
                 let owners: Vec<&str> = candidates.iter().map(|(o, _)| o.as_str()).collect();
                 eprintln!("[ENUM-AMBIG] variant `{variant_name}` owned by {owners:?} with DIFFERING payloads; guessing `{}` in {fpath}", owners[0]);
@@ -1643,7 +1643,7 @@ impl Lowerer {
                             .as_ref()
                             .and_then(|types| types.get(i).copied())
                             .unwrap_or(TypeId::ANY);
-                        if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                        if crate::hir::lower::trace_field_get_enabled() {
                             let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
                             eprintln!("[PB] {enum_name}.{variant_name} slot{i} expected_ty={:?} field_ty={:?} ({:?}) in {fpath}", expected_ty, field_ty, self.module.types.get(field_ty), );
                         }

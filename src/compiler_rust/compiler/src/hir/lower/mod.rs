@@ -214,5 +214,14 @@ pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
     lowerer.lower_module(module)
 }
 
+
+/// Cached lookup for the `SIMPLE_TRACE_FIELD_GET` debug-trace gate.
+/// Reads the environment variable once per process instead of on every
+/// ANY-typed field access / pattern binding (hot path in HIR lowering).
+pub(crate) fn trace_field_get_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok())
+}
+
 #[cfg(test)]
 mod tests;
