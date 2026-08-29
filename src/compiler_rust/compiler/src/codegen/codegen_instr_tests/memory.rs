@@ -89,6 +89,38 @@ fn codegen_box_unbox_float() {
     }));
 }
 
+#[test]
+fn codegen_unbox_float_accepts_already_unboxed_f32() {
+    assert!(aot_compiles("unbox_raw_f32", |f| {
+        let f64_value = f.new_vreg();
+        let f32_value = f.new_vreg();
+        let unboxed = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstFloat {
+            dest: f64_value,
+            value: 7.0,
+        });
+        block.instructions.push(MirInst::Cast {
+            dest: f32_value,
+            source: f64_value,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::F32,
+        });
+        block.instructions.push(MirInst::UnboxFloat {
+            dest: unboxed,
+            value: f32_value,
+        });
+        block.instructions.push(MirInst::Cast {
+            dest,
+            source: unboxed,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::I64,
+        });
+        dest
+    }));
+}
+
 // =============================================================================
 // Drop / EndScope (no-ops in codegen)
 // =============================================================================

@@ -1644,7 +1644,25 @@ pub fn compile_instruction<M: Module>(
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
-            let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_as_float", val);
+            let val_ty = builder.func.dfg.value_type(val);
+            // Inlining can expose an already-unboxed float at this MIR
+            // boundary. Such a value cannot carry the tagged nil word and
+            // must not be passed to an integer/tag decoder (or compared with
+            // `icmp_imm`, which is invalid for F32/F64).
+            let (unboxed, is_nil) = if val_ty == types::F32 {
+                let unboxed = builder.ins().fpromote(types::F64, val);
+                let is_nil = builder.ins().iconst(types::I8, 0);
+                (unboxed, is_nil)
+            } else if val_ty == types::F64 {
+                let is_nil = builder.ins().iconst(types::I8, 0);
+                (val, is_nil)
+            } else {
+                let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_as_float", val);
+                let is_nil = builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
+                (unboxed, is_nil)
+            };
             // NIL-PRESERVING UNBOX. `rt_value_as_float(NIL)` is 0.0, which is a
             // perfectly ordinary stored float — so a `Dict<_, f64>` MISS decoded
             // to 0.0 and `?? default` never fired, while the downstream nil test
@@ -1660,9 +1678,6 @@ pub fn compile_instruction<M: Module>(
             // arm), so miss and a stored 3.0 are now distinct. Non-nil inputs are
             // untouched: only the exact word 3 selects the sentinel.
             // Bug: doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md
-            let is_nil = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
             let nil_f = builder.ins().f64const(f64::from_bits(3));
             let unboxed = builder.ins().select(is_nil, nil_f, unboxed);
             ctx.vreg_values.insert(*dest, unboxed);
