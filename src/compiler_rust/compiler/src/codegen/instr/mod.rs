@@ -1644,6 +1644,19 @@ pub fn compile_instruction<M: Module>(
                 // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
+            let mut val = val;
+            let source_is_raw_float = matches!(
+                ctx.vreg_types.get(value).copied(),
+                Some(TypeId::F32) | Some(TypeId::F64)
+            );
+            // Values live across MIR blocks in uniformly-i64 Cranelift
+            // Variables. Float producers are promoted to f64 and bitcast on
+            // the outgoing edge (body::coerce_to_i64_typed), so recover that
+            // representation before deciding whether this is a tagged value.
+            // Do not do this for BoxFloat/Any: those are genuine tagged i64s.
+            if source_is_raw_float && builder.func.dfg.value_type(val) == types::I64 {
+                val = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+            }
             let val_ty = builder.func.dfg.value_type(val);
             // Inlining can expose an already-unboxed float at this MIR
             // boundary. Such a value cannot carry the tagged nil word and

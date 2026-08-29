@@ -1,6 +1,8 @@
 use super::{aot_compiles, aot_compiles_module};
+use crate::codegen::jit::JitCompiler;
 use crate::hir::TypeId;
-use crate::mir::{BlockId, LocalKind, MirFunction, MirInst, MirLocal, MirModule};
+use crate::mir::{BlockId, CallTarget, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+use simple_parser::ast::Visibility;
 
 // =============================================================================
 // Memory (memory.rs) — LocalAddr, Load, Store
@@ -177,6 +179,77 @@ fn tagged_float_and_nil_runtime_semantics_match_unbox_float_contract() {
 
     let raw_f64 = f64::from_bits(3);
     assert_eq!(raw_f64.to_bits(), 3);
+}
+
+#[test]
+fn jit_unbox_float_preserves_cross_block_provenance_and_results() {
+    fn probe(name: &str, source: impl FnOnce(&mut MirFunction) -> crate::mir::VReg) -> MirFunction {
+        let mut f = MirFunction::new(name.to_string(), TypeId::I64, Visibility::Public);
+        let source_value = source(&mut f);
+        let decode_block = f.new_block();
+        f.block_mut(BlockId(0)).unwrap().terminator = Terminator::Jump(decode_block);
+
+        let unboxed = f.new_vreg();
+        let result_bits = f.new_vreg();
+        let block = f.block_mut(decode_block).unwrap();
+        block.instructions.push(MirInst::UnboxFloat {
+            dest: unboxed,
+            value: source_value,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(result_bits),
+            target: CallTarget::from_name("spl_f64_to_bits"),
+            args: vec![unboxed],
+        });
+        block.terminator = Terminator::Return(Some(result_bits));
+        f
+    }
+
+    let mut module = MirModule::new();
+    module.functions.push(probe("raw_sentinel_bits", |f| {
+        let value = f.new_vreg();
+        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstFloat {
+            dest: value,
+            value: f64::from_bits(3),
+        });
+        value
+    }));
+    module.functions.push(probe("raw_ordinary", |f| {
+        let value = f.new_vreg();
+        f.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstFloat {
+            dest: value,
+            value: 7.25,
+        });
+        value
+    }));
+    module.functions.push(probe("tagged_float", |f| {
+        let raw = f.new_vreg();
+        let boxed = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstFloat { dest: raw, value: 7.25 });
+        block.instructions.push(MirInst::BoxFloat {
+            dest: boxed,
+            value: raw,
+        });
+        boxed
+    }));
+    module.functions.push(probe("tagged_nil", |f| {
+        let value = f.new_vreg();
+        f.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: value, value: 3 });
+        value
+    }));
+
+    let mut jit = JitCompiler::new_static().expect("JIT creation");
+    jit.compile_module(&module).expect("JIT compilation");
+    unsafe {
+        assert_eq!(jit.call_i64_void("raw_sentinel_bits").unwrap() as u64, 3);
+        assert_eq!(jit.call_i64_void("raw_ordinary").unwrap() as u64, 7.25f64.to_bits());
+        assert_eq!(jit.call_i64_void("tagged_float").unwrap() as u64, 7.25f64.to_bits());
+        assert_eq!(jit.call_i64_void("tagged_nil").unwrap() as u64, 3);
+    }
 }
 
 // =============================================================================
