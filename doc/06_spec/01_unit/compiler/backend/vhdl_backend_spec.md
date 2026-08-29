@@ -23,6 +23,7 @@ val a_local = make_arg_local(1, 0, "a", make_i32())
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 val a_local = make_arg_local(1, 0, "a", make_i32())
     val b_local = make_arg_local(2, 1, "b", make_i32())
     val ret_local = make_return_local(3, make_i32())
@@ -112,6 +113,7 @@ describe "VHDL Backend - registration":
 
 describe "VHDL Backend - simple function compilation":
 
+```
 ## Scenarios
 
 ### VHDL Backend - registration

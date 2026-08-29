@@ -32,10 +32,12 @@ parser_functions_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # Parser Function Definition Specification
 
 fn name(params) -> ReturnType:
 
+```
 ## At a Glance
 
 | Field | Value |

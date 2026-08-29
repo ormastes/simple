@@ -32,10 +32,12 @@ treesitter_query_spec -> compiler
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter Advanced Outline Parsing Specification
 
 use compiler.treesitter.*
 
+```
 ## At a Glance
 
 | Field | Value |

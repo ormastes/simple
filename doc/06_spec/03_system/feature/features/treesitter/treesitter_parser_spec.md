@@ -32,10 +32,12 @@ treesitter_parser_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter Parser Specification
 
 use std.parser.treesitter.{TreeSitterParser, Tree, Node}
 
+```
 ## At a Glance
 
 | Field | Value |

@@ -689,3 +689,5 @@ test/01_unit/app/sspec_maintain/scoring_spec.spl:28:1: warning SSDOC-EVD-001 [ev
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
+
+<!-- doc06-layout-migration: Historical generated/manual evidence retained; authoritative executable source remains at test/01_unit/app/sspec_maintain/scoring_spec.spl. -->

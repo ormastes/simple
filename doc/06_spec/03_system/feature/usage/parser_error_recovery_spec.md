@@ -32,10 +32,12 @@ parser_error_recovery_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # Parser Error Recovery Specification
 
 use std.parser.{Parser, CommonMistake, detect_common_mistake}
 
+```
 ## At a Glance
 
 | Field | Value |

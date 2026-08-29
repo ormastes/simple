@@ -32,10 +32,12 @@ math_block_solve_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # ---------------------------------------------------------------------------
 
 use std.spipe.*
 
+```
 ## At a Glance
 
 | Field | Value |
@@ -46,6 +48,7 @@ use std.spipe.*
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 use std.spipe.*
 
 extern fn rt_math_sqrt(x: f64) -> f64
@@ -245,6 +248,7 @@ fn classify_op(tag: text) -> MathBlockOp:
 
 describe "MathBlock inv — identity input":
 
+```
 ## Scenarios
 
 ### MathBlock inv — identity input

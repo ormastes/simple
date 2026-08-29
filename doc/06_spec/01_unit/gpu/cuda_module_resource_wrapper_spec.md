@@ -23,6 +23,7 @@ Resource wrapper for CudaModule — WP-J pilot migration
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 Resource wrapper for CudaModule — WP-J pilot migration
 
 Tests the CudaModule wrapper class with resource ownership pattern:
@@ -41,6 +42,7 @@ use std.spec.step
 use only invalid sentinels (0 and negative), which short-circuit before
 any extern call.
 
+```
 ## Scenarios
 
 ### CudaModule resource wrapper

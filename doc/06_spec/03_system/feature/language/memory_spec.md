@@ -68,6 +68,7 @@ design rationale, and architecture, see doc/06_spec/feature/language/memory_spec
 
 ## Syntax
 
+```simple
 Value type — copied on assignment:
 
     struct Point:
@@ -94,6 +95,7 @@ Option type — no null pointers:
     val value = found.unwrap_or(0)   # => 42
     empty.is_some()                  # => false
 
+```
 ## Examples
 
     val opt = OptionI64.new(42)
@@ -129,6 +131,7 @@ heap. `NoGC` regions enable deterministic cleanup for embedded code.
 
 ## Common Patterns
 
+```simple
 Safe optional chaining (no null checks):
 
     val user: Option<User> = find_user(id)
@@ -147,6 +150,7 @@ Resource cleanup with `defer`:
         defer f.close()
         Ok(f.read_all())
 
+```
 ## Scenarios
 
 ### Memory Spec

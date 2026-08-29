@@ -23,6 +23,7 @@ A function declared `-> T?` that yields nil must test FALSY under `if x:`,
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 A function declared `-> T?` that yields nil must test FALSY under `if x:`,
 exactly as a directly-bound nil does. Regression cover for
 doc/08_tracking/bug/nil_optional_enum_return_truthy_2026-08-21.md, where nil
@@ -35,6 +36,7 @@ was already correct, which is why four earlier reduced fixtures all passed.
 `bin/simple test` runs the tree-walk interpreter, so these examples exercise
 the engine that was wrong.
 
+```
 ## Scenarios
 
 ### optional-returning function nil truthiness

@@ -238,3 +238,5 @@ test/01_unit/compiler/driver/incremental_missing_cache_file_spec.spl:54:1: warni
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
+
+<!-- doc06-layout-migration: Historical generated/manual evidence retained; authoritative executable source remains at test/01_unit/compiler/driver/incremental_missing_cache_file_spec.spl. -->
