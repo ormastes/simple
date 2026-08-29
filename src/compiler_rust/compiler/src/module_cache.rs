@@ -47,6 +47,31 @@ fn rss_kb() -> u64 {
         .unwrap_or(0)
 }
 
+thread_local! {
+    /// Process-local memo for import-resolution probe source.
+    static PROBE_SOURCE_CACHE: RefCell<HashMap<(PathBuf, u64), Option<Arc<String>>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub fn probe_source_cached(path: &Path, max_check_bytes: u64) -> Option<Arc<String>> {
+    let key = (path.to_path_buf(), max_check_bytes);
+    if let Some(hit) = PROBE_SOURCE_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_HITS, 1);
+        return hit;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_READS, 1);
+    let value = match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() > max_check_bytes => None,
+        _ => crate::read_trace::rts(file!(), line!(), path).ok().map(Arc::new),
+    };
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, value.clone()));
+    value
+}
+
+pub fn clear_probe_source_cache() {
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
 /// Print a one-line breakdown of every never-evicted loader cache.
 pub fn report_cache_sizes(tag: &str) {
     let exports = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
@@ -166,7 +191,7 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     clear_probe_source_cache();
-    crate::hir::lower::import_loader::clear_imported_module_ast_cache();
+    crate::hir::lower::clear_imported_module_ast_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
@@ -691,7 +716,26 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{reserve_module_load, reset_total_modules, total_modules_loaded};
+    use super::{
+        clear_probe_source_cache, probe_source_cached, reserve_module_load, reset_total_modules,
+        total_modules_loaded,
+    };
+
+    #[test]
+    fn probe_source_memo_respects_the_size_limit() {
+        clear_probe_source_cache();
+        let path = std::env::temp_dir().join(format!("probe-source-memo-{}", std::process::id()));
+        std::fs::write(&path, "pub fn probe(): 1\n").expect("write probe source");
+
+        assert!(probe_source_cached(&path, 1).is_none());
+        let source = probe_source_cached(&path, u64::MAX).expect("larger limit reads source");
+        let cached = probe_source_cached(&path, u64::MAX).expect("same limit hits memo");
+        assert_eq!(source.as_str(), "pub fn probe(): 1\n");
+        assert!(std::sync::Arc::ptr_eq(&source, &cached));
+
+        let _ = std::fs::remove_file(path);
+        clear_probe_source_cache();
+    }
 
     #[test]
     fn module_load_reservation_commits_only_successful_loads() {
