@@ -14,7 +14,7 @@
 //!                        cranelift, clamped to 4 for llvm -- see LLVM_DEFAULT_MAX_THREADS
 //!                        in pipeline/native_project/mod.rs)
 //!   --low-memory        Force single-worker compilation regardless of backend/--threads
-//!   --timeout <secs>    Per-file compilation timeout (default: 60)
+//!   --timeout <secs>    Per-file compilation timeout (default: 300)
 //!   --no-incremental    Disable incremental compilation
 //!   --clean             Force clean rebuild (delete cache)
 //!   --cache-dir <dir>   Cache directory for incremental builds
@@ -90,7 +90,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut threads: Option<usize> = None;
     let mut low_memory = false;
     // Large legitimate files need >60s; raised to avoid spurious bootstrap aborts.
-    let mut timeout: u64 = 300;
+    let mut timeout = simple_compiler::pipeline::native_project::DEFAULT_NATIVE_FILE_TIMEOUT_SECS;
     let mut incremental = true;
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
@@ -746,7 +746,10 @@ fn print_help() {
     println!("  --strip             Strip symbols from output");
     println!("  --threads <n>       Number of compilation threads (default: all CPUs; llvm backend defaults to at most 4 -- each worker owns a full LLVM Context/optimizer, so unclamped parallelism balloons memory)");
     println!("  --low-memory        Force single-worker compilation (overrides --threads); use when even the llvm default (4 workers) is too much for the host");
-    println!("  --timeout <secs>    Per-file timeout in seconds (default: 60)");
+    println!(
+        "  --timeout <secs>    Per-file timeout in seconds (default: {})",
+        simple_compiler::pipeline::native_project::DEFAULT_NATIVE_FILE_TIMEOUT_SECS
+    );
     println!("  --no-incremental    Disable incremental compilation");
     println!("  --clean             Force clean rebuild (delete cache)");
     println!("  --cache-dir <dir>   Cache directory for incremental builds");

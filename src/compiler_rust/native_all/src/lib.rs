@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
-use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
+use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder, DEFAULT_NATIVE_FILE_TIMEOUT_SECS};
 use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
@@ -166,7 +166,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut verbose = false;
     let mut strip = false;
     let mut threads: Option<usize> = None;
-    let mut timeout: u64 = 60;
+    let mut timeout = DEFAULT_NATIVE_FILE_TIMEOUT_SECS;
     let mut incremental = true;
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
@@ -207,7 +207,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --verbose, -v       Verbose output");
                 println!("  --strip             Strip symbols from output");
                 println!("  --threads <n>       Number of compilation threads");
-                println!("  --timeout <secs>    Per-file timeout (default: 60)");
+                println!("  --timeout <secs>    Per-file timeout (default: {DEFAULT_NATIVE_FILE_TIMEOUT_SECS})");
                 println!("  --no-incremental    Disable incremental compilation");
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");
@@ -2023,6 +2023,15 @@ pub extern "C" fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_build_provider_uses_compiler_sized_file_timeout() {
+        assert_eq!(DEFAULT_NATIVE_FILE_TIMEOUT_SECS, 300);
+        assert_eq!(
+            NativeBuildConfig::default().file_timeout,
+            DEFAULT_NATIVE_FILE_TIMEOUT_SECS
+        );
+    }
 
     #[test]
     fn native_build_entry_infers_single_bare_spl() {

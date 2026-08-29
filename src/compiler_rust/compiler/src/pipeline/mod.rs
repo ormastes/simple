@@ -37,7 +37,10 @@ pub use execution::{
 pub use module_loader::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
 
 // Re-export native project builder types
-pub use native_project::{NativeBuildConfig, NativeBuildResult, NativeProjectBuilder};
+pub use native_project::{
+    NativeBuildConfig, NativeBuildResult, NativeProjectBuilder,
+    DEFAULT_NATIVE_FILE_TIMEOUT_SECS,
+};
 
 #[cfg(test)]
 mod tests {

@@ -436,13 +436,19 @@ pub struct NativeBuildConfig {
     pub low_memory: bool,
 }
 
+/// Per-file budget shared by every native-build entrypoint.
+///
+/// Export-heavy compiler facades are deliberately compiled before parallel
+/// fanout, but still need more than 60 seconds when their cache entry is cold.
+pub const DEFAULT_NATIVE_FILE_TIMEOUT_SECS: u64 = 300;
+
 impl Default for NativeBuildConfig {
     fn default() -> Self {
         Self {
             // Large legitimate files (3000+-line controllers, big re-export hubs)
             // need more than 60s for full parse->lowering->codegen; they compile
             // fine, just slowly. Raised to avoid spurious bootstrap aborts.
-            file_timeout: 300,
+            file_timeout: DEFAULT_NATIVE_FILE_TIMEOUT_SECS,
             stack_size: 16 * 1024 * 1024,
             parallel: true,
             strip: false,
