@@ -254,6 +254,10 @@ pub fn clear_module_cache_selective() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     // Drop memoised filtered dicts whose source no one else holds any more.
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().retain(|_, (src, _)| Arc::strong_count(src) > 1));
+    // Source-derived probe/AST memos must not survive a selective boundary:
+    // test and IDE callers may edit, delete, or recreate files between runs.
+    clear_probe_source_cache();
+    crate::hir::lower::clear_imported_module_ast_cache();
     // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     // Keep path resolution cache (stable across tests)
@@ -732,6 +736,24 @@ mod tests {
         let cached = probe_source_cached(&path, u64::MAX).expect("same limit hits memo");
         assert_eq!(source.as_str(), "pub fn probe(): 1\n");
         assert!(std::sync::Arc::ptr_eq(&source, &cached));
+
+        std::fs::write(&path, "pub fn changed(): 2\n").expect("mutate probe source");
+        super::clear_module_cache_selective();
+        assert_eq!(
+            probe_source_cached(&path, u64::MAX).expect("edited source is visible").as_str(),
+            "pub fn changed(): 2\n"
+        );
+
+        std::fs::remove_file(&path).expect("delete probe source");
+        super::clear_module_cache_selective();
+        assert!(probe_source_cached(&path, u64::MAX).is_none());
+
+        std::fs::write(&path, "pub fn recreated(): 3\n").expect("recreate probe source");
+        super::clear_module_cache_selective();
+        assert_eq!(
+            probe_source_cached(&path, u64::MAX).expect("recreated source is visible").as_str(),
+            "pub fn recreated(): 3\n"
+        );
 
         let _ = std::fs::remove_file(path);
         clear_probe_source_cache();
