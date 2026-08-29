@@ -224,6 +224,71 @@ fn entry_closure_resolver_reaches_terminal_facade_owners_only_when_routed() {
 }
 
 #[test]
+fn interpreter_sources_resolve_the_physical_treesitter_facade() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let treesitter_owner = repo_root.join("src/compiler_rust/lib/std/src/parser/treesitter/__init__.spl");
+    let owner_source = std::fs::read_to_string(&treesitter_owner).unwrap();
+    for public_type in ["Tree", "Node", "TreeSitterParser"] {
+        assert!(
+            owner_source.contains(&format!("pub struct {public_type}:")),
+            "physical treesitter facade does not expose {public_type}"
+        );
+    }
+    assert!(!repo_root
+        .join("src/compiler_rust/lib/std/src/parser/treesitter/tree.spl")
+        .exists());
+    assert!(!repo_root
+        .join("src/compiler_rust/lib/std/src/parser/treesitter/parser.spl")
+        .exists());
+
+    for (relative, needs_treesitter) in [
+        ("src/app/interpreter/ast_convert.spl", true),
+        ("src/app/interpreter/ast_convert_expr.spl", true),
+        ("src/app/interpreter/ast_convert_pattern.spl", true),
+        ("src/app/interpreter/ast_convert_stmt.spl", true),
+        ("src/app/interpreter/ast_types.spl", false),
+        ("src/app/interpreter/parser.spl", true),
+    ] {
+        let source = std::fs::read_to_string(repo_root.join(relative)).unwrap();
+        assert!(
+            !source.contains("parser.treesitter.tree"),
+            "{relative} retains synthetic tree module"
+        );
+        assert!(
+            !source.contains("parser.treesitter.parser"),
+            "{relative} retains synthetic parser module"
+        );
+        assert!(
+            !source.contains("NodeId") && !source.contains("NodeArena"),
+            "{relative} imports absent APIs"
+        );
+
+        let files = NativeProjectBuilder::new(repo_root.clone(), repo_root.join("build/test-interpreter-treesitter"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(repo_root.join("src/app"))
+            .source_dir(repo_root.join("src/compiler_rust/lib/std/src"))
+            .entry_file(repo_root.join(relative))
+            .discover_files()
+            .unwrap();
+        assert_eq!(
+            files.iter().any(|path| same_file_path(path, &treesitter_owner)),
+            needs_treesitter,
+            "{relative} treesitter facade reachability is incorrect"
+        );
+    }
+}
+
+#[test]
 fn simpleos_entry_closure_compatibility_owners_are_explicit() {
     fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
         let tail = source.split_once(marker).unwrap().1;
