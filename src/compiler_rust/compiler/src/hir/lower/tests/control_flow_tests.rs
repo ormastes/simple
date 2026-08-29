@@ -14,6 +14,26 @@ fn test_lower_if_statement() {
 }
 
 #[test]
+fn match_arm_local_does_not_shadow_later_function_call() {
+    let module = parse_and_lower(
+        "fn mean(values: [f64]) -> f64:\n    return values[0]\n\nfn test(values: [f64]) -> f64:\n    match 1:\n        1:\n            val mean = 2.0\n        _:\n            val fallback = 0.0\n    return mean(values)\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("test return") else {
+        panic!("expected return after match: {:?}", func.body)
+    };
+    assert!(
+        matches!(
+            &expr.kind,
+            HirExprKind::Call { func, .. } if matches!(&func.kind, HirExprKind::Global(name) if name == "mean")
+        ),
+        "match-arm local leaked into later function call: {expr:?}"
+    );
+}
+
+#[test]
 fn test_lower_while_loop() {
     let module =
         parse_and_lower("fn count() -> i64:\n    let x: i64 = 0\n    while x < 10:\n        x = x + 1\n    return x\n")

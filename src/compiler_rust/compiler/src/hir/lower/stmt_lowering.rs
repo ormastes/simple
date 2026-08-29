@@ -141,6 +141,12 @@ impl Lowerer {
     }
 
     pub(super) fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+        // A block is a lexical name scope. Keep allocated local slots (HIR
+        // statements already refer to their indices), but restore the visible
+        // name-to-slot bindings after lowering so a local declared in one
+        // match/if arm cannot shadow an outer function or import in later
+        // code.
+        let saved_local_map = ctx.local_map.clone();
         // Enter block scope for lifetime tracking
         let span = block.statements.first().and_then(|n| match n {
             Node::Let(l) => Some(l.span),
@@ -157,6 +163,7 @@ impl Lowerer {
 
         // Exit block scope
         self.lifetime_context.exit_scope();
+        ctx.local_map = saved_local_map;
 
         Ok(stmts)
     }
