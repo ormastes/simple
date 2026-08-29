@@ -1724,6 +1724,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mmap_raw", memory::rt_mmap_raw);
     insert_simple!("rt_munmap_raw", memory::rt_munmap_raw);
     insert_simple!("rt_mprotect", memory::rt_mprotect);
+    insert_simple!("rt_page_size", memory::rt_page_size);
     insert_simple!("rt_madvise_raw", memory::rt_madvise_raw);
     insert_simple!("rt_msync_flags", memory::rt_msync_flags);
     insert_simple!("rt_mlock", memory::rt_mlock);
@@ -3055,6 +3056,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loader_memory_extern_family_includes_page_size_alignment_query() {
+        for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
+            assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
+        }
+    }
+
+    #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
     }
@@ -3334,7 +3342,7 @@ mod tests {
             // multi-byte suffix: byte-wise tail compare must not split a
             // codepoint or report a false hit
             ("héllo…", "…", true),
-            ("héllo…", "o…", false),
+            ("héllo…", "o…", true),
         ];
 
         for &(subject, suffix, expected) in cases {

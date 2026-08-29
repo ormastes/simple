@@ -80,7 +80,11 @@ pub fn rt_fd_write(args: &[Value]) -> Result<Value, CompileError> {
             "rt_fd_write requires 3 arguments (fd, data, len)",
         ));
     }
-    let fd = args[0].as_int()?;
+    let Value::Int(fd) = args[0] else {
+        return Err(CompileError::runtime(
+            "rt_fd_write requires an i64 fd",
+        ));
+    };
     let Value::Str(data) = &args[1] else {
         return Err(CompileError::runtime("rt_fd_write requires text data"));
     };
@@ -272,7 +276,11 @@ pub fn rt_unix_socket_accept(args: &[Value]) -> Result<Value, CompileError> {
             "rt_unix_socket_accept requires 1 argument (fd)",
         ));
     }
-    let fd = args[0].as_int()?;
+    let Value::Int(fd) = args[0] else {
+        return Err(CompileError::runtime(
+            "rt_unix_socket_accept requires an i64 fd",
+        ));
+    };
     #[cfg(unix)]
     {
         let mut lguard = LISTENERS.lock().unwrap();

@@ -274,7 +274,10 @@ pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mem_attr_report requires 1 argument (n)",
         ));
     }
-    let n = args[0].as_int()?.max(0) as usize;
+    let Value::Int(n) = args[0] else {
+        return Err(CompileError::runtime("rt_mem_attr_report requires an i64 n"));
+    };
+    let n = n.max(0) as usize;
     Ok(Value::Str(simple_runtime::value::heap::owner_report(n).into()))
 }
 
@@ -363,7 +366,11 @@ pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError>
             "rt_heap_live_bytes_by_kind requires 1 argument (kind)",
         ));
     }
-    let kind = args[0].as_int()?;
+    let Value::Int(kind) = args[0] else {
+        return Err(CompileError::runtime(
+            "rt_heap_live_bytes_by_kind requires an i64 kind",
+        ));
+    };
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(
         kind,
     )))
@@ -378,7 +385,11 @@ pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError>
             "rt_heap_live_count_by_kind requires 1 argument (kind)",
         ));
     }
-    let kind = args[0].as_int()?;
+    let Value::Int(kind) = args[0] else {
+        return Err(CompileError::runtime(
+            "rt_heap_live_count_by_kind requires an i64 kind",
+        ));
+    };
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(
         kind,
     )))
@@ -915,6 +926,30 @@ pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
 }
 
+/// Hosted interpreter bridge for the canonical runtime page-size query.
+///
+/// Loader code uses this value to align W^X protection transitions.  Keeping
+/// the query in the same hosted memory family as mmap/mprotect prevents the
+/// interpreter from accepting those operations but rejecting their required
+/// alignment primitive as an unknown extern.
+pub fn rt_page_size(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_page_size requires 0 arguments"));
+    }
+    #[cfg(unix)]
+    {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return Err(CompileError::runtime("rt_page_size is unavailable on this host"));
+        }
+        Ok(Value::Int(page_size as i64))
+    }
+    #[cfg(not(unix))]
+    {
+        Err(CompileError::runtime("rt_page_size is unavailable on this host"))
+    }
+}
+
 macro_rules! unix_address_length_status {
     ($name:literal, $args:expr, $call:path) => {{
         let args = $args;
@@ -1003,7 +1038,7 @@ pub fn rt_msync_flags(_args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod ptr_read_u8_tests {
-    use super::{rt_mmap_raw, rt_mprotect, rt_munmap_raw, rt_ptr_read_u8};
+    use super::{rt_mmap_raw, rt_mprotect, rt_munmap_raw, rt_page_size, rt_ptr_read_u8};
     use crate::value::Value;
 
     #[cfg(unix)]
@@ -1021,6 +1056,12 @@ mod ptr_read_u8_tests {
     fn rejects_missing_arguments() {
         assert!(rt_ptr_read_u8(&[]).is_err());
         assert!(rt_ptr_read_u8(&[Value::Int(1)]).is_err());
+    }
+
+    #[test]
+    fn page_size_bridge_is_positive_and_rejects_arguments() {
+        assert!(rt_page_size(&[]).unwrap().as_int().unwrap() > 0);
+        assert!(rt_page_size(&[Value::Int(1)]).is_err());
     }
 
     #[test]

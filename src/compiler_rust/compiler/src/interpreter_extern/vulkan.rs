@@ -110,6 +110,7 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_last_present_copy_bytes", Ret::I, "i"),
     ("rt_vulkan_last_present_copy_rects", Ret::I, "i"),
     ("rt_vulkan_create_compute_pipeline", Ret::I, "iii"),
+    ("rt_vulkan_create_compute_pipeline_raw", Ret::I, "iiii"),
     ("rt_vulkan_create_descriptor_set", Ret::I, "i"),
     ("rt_vulkan_create_fence", Ret::I, ""),
     ("rt_vulkan_create_font_graphics_pipeline", Ret::I, "iiii"),

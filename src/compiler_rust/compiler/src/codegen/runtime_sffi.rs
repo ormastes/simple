@@ -2080,6 +2080,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_io_file_delete", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),            // fd -> size
     RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]),                // fd -> bool
+    RuntimeFuncSpec::new("rt_close_fd", &[I64], &[I64]),                 // fd -> status
     // =========================================================================
     // Path Operations
     // =========================================================================
