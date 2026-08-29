@@ -1,5 +1,6 @@
 use std.spec
 use compiler.common.driver_core_types.{CompileOptions, compileoptions_effective_mir_opt_level, compileoptions_normalize_mir_optimization}
+use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.cache.{compile_options_hash_compute}
 use compiler.backend.target_presets.{preset_cortex_m4, preset_linux_x86_64, preset_apply_compile_options}
 
@@ -10,6 +11,12 @@ fn normalized_options(release: bool, optimize: bool, profile: text, opt_level: i
     options.profile = profile
     options.opt_level = opt_level
     compileoptions_normalize_mir_optimization(options)
+
+fn normalize_through_value_tail_copy(options: CompileOptions) -> CompileOptions:
+    # Model the admitted bootstrap call chain: receive the large aggregate by
+    # value, copy it once, then return normalization's aggregate tail value.
+    val copied = options
+    compileoptions_normalize_mir_optimization(copied)
 
 describe "compile option normalization":
     it "keeps debug defaults at opt level zero":
@@ -51,6 +58,25 @@ describe "compile option normalization":
         expect(options.optimize).to_equal(true)
         expect(options.opt_level).to_equal(2)
         expect(compileoptions_effective_mir_opt_level(options)).to_equal(2)
+
+    it "preserves MC/DC budgets through normalization into context creation":
+        var options = CompileOptions.default()
+        options.release = true
+        options.mcdc_mode_text = "static-off"
+        options.mcdc_owner_bytes = 4096
+        options.mcdc_global_bytes = 16384
+        options.bootstrap_input_5 = "tail-copy-sentinel"
+        options.riscv_gen2_target = "tail-field-sentinel"
+        val normalized = normalize_through_value_tail_copy(options)
+        expect(normalized.mcdc_mode_text).to_equal("static-off")
+        expect(normalized.mcdc_owner_bytes).to_equal(4096)
+        expect(normalized.mcdc_global_bytes).to_equal(16384)
+        expect(normalized.bootstrap_input_5).to_equal("tail-copy-sentinel")
+        expect(normalized.riscv_gen2_target).to_equal("tail-field-sentinel")
+        val ctx = CompileContext.create(normalized)
+        expect(ctx.config.contains_key("mcdc_config_error")).to_equal(false)
+        expect(ctx.config["mcdc_owner_bytes"]).to_equal("4096")
+        expect(ctx.config["mcdc_global_bytes"]).to_equal("16384")
 
     it "preserves explicit none while keeping release metadata intact":
         val options = normalized_options(true, false, "prod", Some(0))
