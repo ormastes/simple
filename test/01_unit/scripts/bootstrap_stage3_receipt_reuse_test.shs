@@ -10,7 +10,8 @@ BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-receipt-reuse.XXXXXX")
-trap 'rm -rf "$scratch"' EXIT INT TERM HUP
+trap 'chmod -R u+w "$scratch" 2>/dev/null || true; rm -rf "$scratch"' \
+    EXIT INT TERM HUP
 
 marker="$scratch/candidate-executed"
 candidate="$scratch/stage2"
@@ -29,7 +30,7 @@ schema=simple-bootstrap-sanity-evidence-v1
 status=pass
 candidate_sha256_before=$candidate_sha
 version_status=0
-version_output=simple-bootstrap 1.0.0-beta
+version_output=simple-bootstrap $canonical_version
 unsupported_status=1
 unsupported_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
 frontend_smoke_status=0
@@ -51,6 +52,21 @@ if bootstrap_stage3_verify_sanity_evidence_receipt \
 fi
 
 runtime_snapshot="$scratch/runtime-admitted.txt"
+runtime_authority="$scratch/stage2-runtime-authority"
+mkdir -p "$runtime_authority/deps"
+printf 'hosted runtime\n' \
+    >"$runtime_authority/deps/libspl_hosted_runtime-fixture.rlib"
+hosted_sha=$(bootstrap_stage3_hash_file \
+    "$runtime_authority/deps/libspl_hosted_runtime-fixture.rlib")
+cat >"$runtime_authority/hosted-runtime.env" <<EOF
+schema=simple-bootstrap-hosted-runtime-authority-v1
+status=frozen
+relative_path=deps/libspl_hosted_runtime-fixture.rlib
+sha256=$hosted_sha
+EOF
+chmod 400 "$runtime_authority/deps/libspl_hosted_runtime-fixture.rlib" \
+    "$runtime_authority/hosted-runtime.env"
+chmod 500 "$runtime_authority/deps" "$runtime_authority"
 receiver_log="$scratch/stage2-receiver.log"
 printf 'runtime\n' >"$runtime_snapshot"
 printf 'receiver PASS\n' >"$receiver_log"
@@ -84,14 +100,17 @@ receiver_sha=$(bootstrap_stage3_hash_file "$receiver")
 runtime_sha=$(bootstrap_stage3_hash_file "$runtime_snapshot")
 identity_a=$(bootstrap_stage3_stage2_admission_identity \
     "$candidate_sha" "$source_sha" "$runtime_sha" "$tool_sha" \
-    "$args_sha" "$sanity_sha" "$receiver_sha")
+    "$args_sha" "$sanity_sha" "$receiver_sha" \
+    deps/libspl_hosted_runtime-fixture.rlib "$hosted_sha")
 identity_b=$(bootstrap_stage3_stage2_admission_identity \
     "$candidate_sha" "$source_sha" "$runtime_sha" "$tool_sha" \
-    "$args_sha" "$sanity_sha" "$receiver_sha")
+    "$args_sha" "$sanity_sha" "$receiver_sha" \
+    deps/libspl_hosted_runtime-fixture.rlib "$hosted_sha")
 [ "$identity_a" = "$identity_b" ]
 identity_changed=$(bootstrap_stage3_stage2_admission_identity \
     "$candidate_sha" "$tool_sha" "$runtime_sha" "$tool_sha" \
-    "$args_sha" "$sanity_sha" "$receiver_sha")
+    "$args_sha" "$sanity_sha" "$receiver_sha" \
+    deps/libspl_hosted_runtime-fixture.rlib "$hosted_sha")
 [ "$identity_a" != "$identity_changed" ]
 
 admission="$scratch/admission.env"

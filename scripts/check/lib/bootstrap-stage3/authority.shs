@@ -850,6 +850,29 @@ bootstrap_stage3_copy_seed_tuple() {
     esac
     set -- "$@" "$bootstrap_stage3_tuple_runtime_name"
 
+    # The hosted GPU/backend linker needs the Rust hosted-runtime rlib, but it
+    # must never rediscover it from a mutable Cargo target after admission.
+    # Cargo owns exactly one hash-named product in the selected profile's deps
+    # directory.  Project that one leaf into the immutable generation; reject
+    # missing, duplicate, nested, or symlink candidates.
+    bootstrap_stage3_hosted_deps="$bootstrap_stage3_tuple_source/deps"
+    [ -d "$bootstrap_stage3_hosted_deps" ] &&
+        [ ! -L "$bootstrap_stage3_hosted_deps" ] || return 1
+    bootstrap_stage3_hosted_candidates=
+    bootstrap_stage3_hosted_count=0
+    for bootstrap_stage3_hosted_path in \
+        "$bootstrap_stage3_hosted_deps"/libspl_hosted_runtime-*.rlib; do
+        [ -e "$bootstrap_stage3_hosted_path" ] || continue
+        [ -f "$bootstrap_stage3_hosted_path" ] &&
+            [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
+        bootstrap_stage3_hosted_count=$((bootstrap_stage3_hosted_count + 1))
+        bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_path
+    done
+    [ "$bootstrap_stage3_hosted_count" -eq 1 ] || return 1
+    bootstrap_stage3_hosted_name=deps/$(basename -- \
+        "$bootstrap_stage3_hosted_candidates")
+    set -- "$@" "$bootstrap_stage3_hosted_name"
+
     bootstrap_stage3_tuple_seen='|'
     for bootstrap_stage3_tuple_name in "$@"; do
         [ -n "$bootstrap_stage3_tuple_name" ] || return 1
@@ -948,7 +971,8 @@ bootstrap_stage3_copy_seed_tuple() {
                     or die "unsafe destination parent\n";
             }
             my $target = "$parent/$leaf";
-            sysopen(my $out, $target, O_WRONLY | O_CREAT | O_EXCL, 0600)
+            my $pending = "$target.pending.$$";
+            sysopen(my $out, $pending, O_WRONLY | O_CREAT | O_EXCL, 0600)
                 or die "create target: $!\n";
             binmode($out) or die "binmode target: $!\n";
             seek($in, 0, 0) or die "seek copy: $!\n";
@@ -973,6 +997,7 @@ bootstrap_stage3_copy_seed_tuple() {
             S_IMODE($dst[2]) == $wanted or die "target mode mismatch\n";
             close($out) or die "close target: $!\n";
             close($in) or die "close source: $!\n";
+            rename($pending, $target) or die "publish target: $!\n";
             push @targets, [$target, $wanted, $digest];
             $copied++;
             if ($copied == 1 && ($ENV{BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_TUPLE_COPY} // q{}) eq q{1}) {
@@ -1017,7 +1042,95 @@ bootstrap_stage3_copy_seed_tuple() {
         }
         chmod(0500, $destination) or die "freeze destination: $!\n";
     ' "$bootstrap_stage3_tuple_source" \
-        "$bootstrap_stage3_tuple_destination" "$@"
+        "$bootstrap_stage3_tuple_destination" "$@" || return 1
+
+    # Publish a small receipt beside the frozen capsule.  Consumers resolve
+    # only this authority-relative path; Cargo target/latest/env paths are not
+    # inputs to the contract.
+    chmod 700 "$bootstrap_stage3_tuple_destination" || return 1
+    bootstrap_stage3_hosted_relative=$bootstrap_stage3_hosted_name
+    bootstrap_stage3_hosted_projected=\
+"$bootstrap_stage3_tuple_destination/$bootstrap_stage3_hosted_relative"
+    bootstrap_stage3_hosted_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_hosted_projected") || return 1
+    bootstrap_stage3_hosted_receipt=\
+"$bootstrap_stage3_tuple_destination/hosted-runtime.env"
+    bootstrap_stage3_hosted_pending="${bootstrap_stage3_hosted_receipt}.tmp.$$"
+    [ ! -e "$bootstrap_stage3_hosted_receipt" ] &&
+        [ ! -L "$bootstrap_stage3_hosted_receipt" ] || return 1
+    {
+        echo 'schema=simple-bootstrap-hosted-runtime-authority-v1'
+        echo 'status=frozen'
+        echo "relative_path=$bootstrap_stage3_hosted_relative"
+        echo "sha256=$bootstrap_stage3_hosted_sha"
+    } >"$bootstrap_stage3_hosted_pending" || return 1
+    chmod 400 "$bootstrap_stage3_hosted_pending" || return 1
+    mv "$bootstrap_stage3_hosted_pending" \
+        "$bootstrap_stage3_hosted_receipt" || return 1
+    chmod 500 "$bootstrap_stage3_tuple_destination" || return 1
+    bootstrap_stage3_verify_hosted_runtime_authority \
+        "$bootstrap_stage3_tuple_destination"
+}
+
+bootstrap_stage3_verify_hosted_runtime_authority() {
+    [ "$#" -eq 1 ] || return 64
+    bootstrap_stage3_hosted_root=$1
+    [ -d "$bootstrap_stage3_hosted_root" ] &&
+        [ ! -L "$bootstrap_stage3_hosted_root" ] || return 1
+    bootstrap_stage3_hosted_receipt="$bootstrap_stage3_hosted_root/hosted-runtime.env"
+    [ -f "$bootstrap_stage3_hosted_receipt" ] &&
+        [ ! -L "$bootstrap_stage3_hosted_receipt" ] || return 1
+    awk -F= '
+        $1 == "schema" || $1 == "status" || $1 == "relative_path" ||
+        $1 == "sha256" { count[$1]++; next }
+        { exit 1 }
+        END {
+            if (count["schema"] != 1 || count["status"] != 1 ||
+                count["relative_path"] != 1 || count["sha256"] != 1)
+                exit 1
+        }
+    ' "$bootstrap_stage3_hosted_receipt" || return 1
+    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_hosted_receipt")" = \
+        simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_hosted_receipt")" = \
+        frozen ] || return 1
+    bootstrap_stage3_hosted_relative=$(bootstrap_stage3_manifest_value \
+        relative_path "$bootstrap_stage3_hosted_receipt") || return 1
+    case "$bootstrap_stage3_hosted_relative" in
+        deps/libspl_hosted_runtime-*.rlib) ;;
+        *) return 1 ;;
+    esac
+    case "$bootstrap_stage3_hosted_relative" in *../*|*/..|/*) return 1 ;; esac
+    bootstrap_stage3_hosted_expected=$(bootstrap_stage3_manifest_value \
+        sha256 "$bootstrap_stage3_hosted_receipt") || return 1
+    printf '%s\n' "$bootstrap_stage3_hosted_expected" |
+        grep -Eq '^[0-9a-f]{64}$' || return 1
+    bootstrap_stage3_hosted_path=\
+"$bootstrap_stage3_hosted_root/$bootstrap_stage3_hosted_relative"
+    [ -f "$bootstrap_stage3_hosted_path" ] &&
+        [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_hosted_path")" = \
+        "$bootstrap_stage3_hosted_expected" ] || return 1
+    bootstrap_stage3_hosted_count=$(find "$bootstrap_stage3_hosted_root/deps" \
+        -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' |
+        wc -l | tr -d ' ') || return 1
+    [ "$bootstrap_stage3_hosted_count" -eq 1 ] || return 1
+    [ -z "$(find "$bootstrap_stage3_hosted_root" -perm /0222 -print -quit)" ] || return 1
+    perl -MFcntl=:mode -e '
+        use strict; use warnings;
+        for my $pair (@ARGV) {
+            my ($path, $wanted) = split(/=/, $pair, 2);
+            my @st = lstat($path);
+            @st && !S_ISLNK($st[2]) && S_IMODE($st[2]) == oct($wanted)
+                or exit 1;
+        }
+    ' "$bootstrap_stage3_hosted_root=0500" \
+        "$bootstrap_stage3_hosted_root/deps=0500" \
+        "$bootstrap_stage3_hosted_receipt=0400" \
+        "$bootstrap_stage3_hosted_path=0400" || return 1
+    BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH=$bootstrap_stage3_hosted_relative
+    BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256=$bootstrap_stage3_hosted_expected
+    BOOTSTRAP_STAGE3_HOSTED_RUNTIME_PATH=$bootstrap_stage3_hosted_path
 }
 
 bootstrap_stage3_write_seed_stamp() {

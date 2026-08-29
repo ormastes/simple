@@ -220,11 +220,13 @@ bootstrap_stage3_verify_receiver_evidence_receipt() (
 )
 
 bootstrap_stage3_stage2_admission_identity() {
-    [ "$#" = 7 ] || return 1
-    for bootstrap_stage3_identity_sha in "$@"; do
+    [ "$#" = 9 ] || return 1
+    for bootstrap_stage3_identity_sha in "$1" "$2" "$3" "$4" "$5" \
+        "$6" "$7" "$9"; do
         printf '%s\n' "$bootstrap_stage3_identity_sha" |
             grep -Eq '^[0-9a-f]{64}$' || return 1
     done
+    case "$8" in deps/libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
     {
         echo 'schema=simple-bootstrap-stage2-admission-identity-v1'
         echo "artifact_sha256=$1"
@@ -234,6 +236,8 @@ bootstrap_stage3_stage2_admission_identity() {
         echo "build_args_sha256=$5"
         echo "sanity_evidence_sha256=$6"
         echo "receiver_evidence_sha256=$7"
+        echo "hosted_runtime_relative_path=$8"
+        echo "hosted_runtime_sha256=$9"
     } | bootstrap_stage3_hash_stream
 }
 
@@ -283,6 +287,14 @@ bootstrap_stage3_write_stage2_admission_receipt() (
         "$bootstrap_stage3_admission_sanity") || return 1
     bootstrap_stage3_admission_receiver_sha=$(bootstrap_stage3_hash_file \
         "$bootstrap_stage3_admission_receiver") || return 1
+    bootstrap_stage3_admission_runtime_authority=\
+"$(dirname -- "$bootstrap_stage3_admission_runtime")/stage2-runtime-authority"
+    bootstrap_stage3_verify_hosted_runtime_authority \
+        "$bootstrap_stage3_admission_runtime_authority" || return 1
+    bootstrap_stage3_admission_hosted_relative=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH
+    bootstrap_stage3_admission_hosted_sha=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256
     bootstrap_stage3_admission_identity=$(
         bootstrap_stage3_stage2_admission_identity \
             "$bootstrap_stage3_admission_candidate_sha" \
@@ -291,13 +303,15 @@ bootstrap_stage3_write_stage2_admission_receipt() (
             "$bootstrap_stage3_admission_tool_sha" \
             "$bootstrap_stage3_admission_args_sha" \
             "$bootstrap_stage3_admission_sanity_sha" \
-            "$bootstrap_stage3_admission_receiver_sha"
+            "$bootstrap_stage3_admission_receiver_sha" \
+            "$bootstrap_stage3_admission_hosted_relative" \
+            "$bootstrap_stage3_admission_hosted_sha"
     ) || return 1
     bootstrap_stage3_admission_tmp="${bootstrap_stage3_admission_receipt}.tmp.$$"
     trap 'rm -f "$bootstrap_stage3_admission_tmp"' EXIT INT TERM HUP
     umask 077
     {
-        echo 'schema=simple-bootstrap-stage2-admission-v1'
+        echo 'schema=simple-bootstrap-stage2-admission-v2'
         echo 'status=admitted'
         echo "candidate_path=$bootstrap_stage3_admission_candidate"
         echo "candidate_sha256=$bootstrap_stage3_admission_candidate_sha"
@@ -305,6 +319,9 @@ bootstrap_stage3_write_stage2_admission_receipt() (
         echo "source_snapshot_sha256=$bootstrap_stage3_admission_source_sha"
         echo "runtime_snapshot_path=$bootstrap_stage3_admission_runtime"
         echo "runtime_snapshot_sha256=$bootstrap_stage3_admission_runtime_sha"
+        echo "runtime_authority_path=$bootstrap_stage3_admission_runtime_authority"
+        echo "hosted_runtime_relative_path=$bootstrap_stage3_admission_hosted_relative"
+        echo "hosted_runtime_sha256=$bootstrap_stage3_admission_hosted_sha"
         echo "tool_authority_path=$bootstrap_stage3_admission_tool"
         echo "tool_authority_sha256=$bootstrap_stage3_admission_tool_sha"
         echo "build_args_sha256=$bootstrap_stage3_admission_args_sha"
@@ -342,6 +359,8 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
     for bootstrap_stage3_admission_key in schema status candidate_path \
         candidate_sha256 source_snapshot_path source_snapshot_sha256 \
         runtime_snapshot_path runtime_snapshot_sha256 tool_authority_path \
+        runtime_authority_path hosted_runtime_relative_path \
+        hosted_runtime_sha256 \
         tool_authority_sha256 build_args_sha256 sanity_evidence_path \
         sanity_evidence_sha256 receiver_evidence_path \
         receiver_evidence_sha256 admission_identity \
@@ -351,7 +370,7 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
     done
     [ "$(bootstrap_stage3_manifest_value schema \
         "$bootstrap_stage3_admission_receipt")" = \
-        simple-bootstrap-stage2-admission-v1 ] || return 1
+        simple-bootstrap-stage2-admission-v2 ] || return 1
     [ "$(bootstrap_stage3_manifest_value status \
         "$bootstrap_stage3_admission_receipt")" = admitted ] || return 1
     [ "$(bootstrap_stage3_manifest_value checks_executed_at_admission \
@@ -372,6 +391,23 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
             "$bootstrap_stage3_admission_receipt")" = \
             "$bootstrap_stage3_admission_expected" ] || return 1
     done
+    bootstrap_stage3_admission_runtime_authority=\
+"$(dirname -- "$bootstrap_stage3_admission_runtime")/stage2-runtime-authority"
+    [ "$(bootstrap_stage3_manifest_value runtime_authority_path \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_runtime_authority" ] || return 1
+    bootstrap_stage3_verify_hosted_runtime_authority \
+        "$bootstrap_stage3_admission_runtime_authority" || return 1
+    bootstrap_stage3_admission_hosted_relative=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH
+    bootstrap_stage3_admission_hosted_sha=\
+$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256
+    [ "$(bootstrap_stage3_manifest_value hosted_runtime_relative_path \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_hosted_relative" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value hosted_runtime_sha256 \
+        "$bootstrap_stage3_admission_receipt")" = \
+        "$bootstrap_stage3_admission_hosted_sha" ] || return 1
     bootstrap_stage3_admission_candidate_sha=$(bootstrap_stage3_hash_file \
         "$bootstrap_stage3_admission_candidate") || return 1
     bootstrap_stage3_admission_source_sha=$(bootstrap_stage3_hash_file \
@@ -407,7 +443,9 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
             "$bootstrap_stage3_admission_tool_sha" \
             "$bootstrap_stage3_admission_args_sha" \
             "$bootstrap_stage3_admission_sanity_sha" \
-            "$bootstrap_stage3_admission_receiver_sha"
+            "$bootstrap_stage3_admission_receiver_sha" \
+            "$bootstrap_stage3_admission_hosted_relative" \
+            "$bootstrap_stage3_admission_hosted_sha"
     ) || return 1
     [ "$(bootstrap_stage3_manifest_value admission_identity \
         "$bootstrap_stage3_admission_receipt")" = \

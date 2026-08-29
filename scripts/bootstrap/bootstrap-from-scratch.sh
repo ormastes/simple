@@ -2101,6 +2101,14 @@ else
     echo "error: could not freeze Stage 2 runtime authority" >&2
     exit 1
   }
+  bootstrap_stage3_verify_hosted_runtime_authority \
+    "$(absolute_path "${stage2_runtime_authority}")" || {
+    echo "error: frozen Stage 2 authority lacks one admitted hosted runtime" >&2
+    exit 1
+  }
+  stage2_hosted_runtime_relative_path=\
+${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
+  stage2_hosted_runtime_sha256=${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_origin_after}")" \
     "${runtime_origin_absolute}" || exit 1
@@ -2122,6 +2130,13 @@ else
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" || {
     echo "error: private admitted Rust authority is incomplete" >&2
+    exit 1
+  }
+  [ "${BOOTSTRAP_STAGE4_HOSTED_RUNTIME_RELATIVE_PATH}" = \
+      "${stage2_hosted_runtime_relative_path}" ] &&
+    [ "${BOOTSTRAP_STAGE4_HOSTED_RUNTIME_SHA256}" = \
+      "${stage2_hosted_runtime_sha256}" ] || {
+    echo "error: hosted runtime identity changed while pinning Stage 2 authority" >&2
     exit 1
   }
   stage_runtime_absolute=${BOOTSTRAP_STAGE4_RUNTIME_PATH}
