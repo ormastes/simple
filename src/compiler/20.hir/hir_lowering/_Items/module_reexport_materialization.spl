@@ -16,6 +16,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_syntactically_exports}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.expressions.*
@@ -53,18 +54,6 @@ impl HirLowering:
             return HirReexportSource(found: false, module_index: -1,
                 module_name: "", item_name: "")
         val target = self.module_surfaces.surfaces[target_index]
-        if hir_module_declares_item(target, item_name):
-            return HirReexportSource(found: true, module_index: target_index,
-                module_name: target.preferred_registry_name,
-                item_name: item_name)
-        # A module's private imports are not transitive exports.  The old
-        # fallback chased every import of every wildcard target, so importing
-        # `mir_instruction_kinds.*` also invented routes to the private
-        # `mir_types.*` dependency of that module.  Admit a chase only for a
-        # spelling the target actually exports.
-        if not module_surface_syntactically_exports(target, item_name):
-            return HirReexportSource(found: false, module_index: -1,
-                module_name: "", item_name: "")
         # Materialized facade surfaces can list a re-exported declaration in
         # their ordinary declaration arrays. Resolve the frozen export-origin
         # carrier first; otherwise every facade along one route appears to be
@@ -77,7 +66,7 @@ impl HirLowering:
             val origin = module_surface_export_origin_index_lookup(
                 current.export_origin_index, current_item)
             if not origin.found: break
-            val owner_index = hir_module_surface_index(
+            val owner_index = hir_export_origin_surface_index(
                 self.module_surfaces, origin.owner_module)
             if owner_index < 0 or owner_index >= self.module_surfaces.surfaces.len():
                 return HirReexportSource(found: false, module_index: -1,
@@ -95,6 +84,15 @@ impl HirLowering:
             return HirReexportSource(found: true, module_index: current_index,
                 module_name: terminal.preferred_registry_name,
                 item_name: current_item)
+        # A module's private imports are not transitive exports.  The old
+        # fallback chased every import of every wildcard target, so importing
+        # `mir_instruction_kinds.*` also invented routes to the private
+        # `mir_types.*` dependency of that module. Admit a chase only after
+        # the origin-first/direct-declaration checks above and only for a
+        # spelling the target actually exports.
+        if not module_surface_syntactically_exports(target, item_name):
+            return HirReexportSource(found: false, module_index: -1,
+                module_name: "", item_name: "")
         val hop = self.find_reexport_source(terminal.physical_index, current_item)
         if hop.found: return hop
         HirReexportSource(found: false, module_index: -1,
@@ -127,7 +125,7 @@ impl HirLowering:
         val origin_index: ModuleSurfaceExportOriginIndex = facade_mod.export_origin_index
         val origin_lookup = module_surface_export_origin_index_lookup(origin_index, wanted)
         if origin_lookup.found:
-            val origin_index_value = hir_module_surface_index(
+            val origin_index_value = hir_export_origin_surface_index(
                 self.module_surfaces, origin_lookup.owner_module)
             if origin_index_value < 0 or
                origin_index_value >= self.module_surfaces.surfaces.len():
@@ -1271,6 +1269,17 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
         return true
     if dependency == "bool" or dependency == "char" or dependency == "byte" or
        dependency == "void" or dependency == "nil" or dependency == "Any":
+        return true
+    # `fn` is the bare-callable-type keyword spelling (`h: fn()`), lowered by
+    # `lower_named_kind`'s primitive arm in hir_lowering/types.spl (the
+    # `case "i8" | ... | "String" | "fn":` branch) BEFORE any symbol lookup --
+    # same shape as every other entry above. No user module ever declares,
+    # re-exports, or explicitly imports a type literally named `fn`, so this
+    # fell through to the "not found" advisory and resurfaced downstream as a
+    # hard `unresolved type: fn` error, fabricated against whichever module
+    # happened to import the callable next (never the true owner). See
+    # doc/08_tracking/bug/hir_bare_fn_callable_dep_fabricated_position_2026-08-29.md
+    if dependency == "fn":
         return true
     false
 
