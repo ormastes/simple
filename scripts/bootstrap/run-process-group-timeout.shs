@@ -31,10 +31,28 @@ cleanup() {
 trap 'cleanup; exit 143' TERM INT HUP
 trap cleanup EXIT
 
-setsid "$@" &
+# An asynchronous command inherits /dev/null as stdin in non-interactive POSIX
+# shells unless its stdin is explicitly redirected. Preserve the caller's
+# pipe/file on a dedicated descriptor so protocol servers can be contained
+# without observing an immediate EOF.
+exec 3<&0
+setsid "$@" <&3 &
 leader=$!
+exec 3<&-
 (
-  sleep "$timeout_seconds"
+  timer=0
+  stop_watchdog() {
+    if [ "$timer" -gt 0 ]; then
+      kill "$timer" 2>/dev/null || :
+      wait "$timer" 2>/dev/null || :
+    fi
+    exit 0
+  }
+  trap stop_watchdog TERM INT HUP
+  sleep "$timeout_seconds" &
+  timer=$!
+  wait "$timer" 2>/dev/null || exit 0
+  timer=0
   if kill -0 "-$leader" 2>/dev/null; then
     : >"$timed_out"
     kill -TERM "-$leader" 2>/dev/null || :
