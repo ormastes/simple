@@ -41,10 +41,10 @@ fn counter_lock() -> &'static Mutex<()> {
 }
 
 fn enable_counters() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        std::env::set_var("SIMPLE_PERF_COUNTERS", "1");
-    });
+    // Mechanism tests share this process with a semantic control that may run
+    // first and latch the default-off gate. Override the latch explicitly;
+    // callers hold `counter_lock`, so activation and measurement cannot race.
+    perf_counters::set_enabled(true);
 }
 
 fn run_program(src: &str) -> Result<i32, String> {
