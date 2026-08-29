@@ -1064,7 +1064,23 @@ impl CompilerDriver:
                     for obj in scoped_outputs:
                         if not _sffi_file_exists(obj):
                             outputs_exist = false
-                    if all_in_scope and scoped_outputs.len() > 0 and outputs_exist:
+                    # The interface-only scope witness deliberately preserves
+                    # sibling hits for body-only edits. It cannot by itself
+                    # admit a consumer object: generic/default bodies and
+                    # lowered static initializers may change that consumer's
+                    # MIR without changing either public interface. Bind the
+                    # candidate to the CURRENT MIR/storage capsule receipt.
+                    var capsule_matches = false
+                    if all_in_scope and scoped_outputs.len() == 1 and outputs_exist:
+                        val cached_capsules = ctx.freeze_native_module_capsules_v1(
+                            [name], object_base, backend_name, native_target,
+                            native_cpu, driver_opt_level, is_release)
+                        if cached_capsules.ok:
+                            val cached_capsule = cached_capsules.find(name)
+                            capsule_matches = cached_capsule.ok
+                                and scoped_outputs[0] == cached_capsule.object_path
+                                and driver_native_capsule_result_valid_v1(cached_capsule)
+                    if capsule_matches:
                         print "[NATIVE] cache hit: {name}"
                         cache_hit_count = cache_hit_count + 1
                         # A verified cache hit IS an OK outcome: the objects were
@@ -1077,7 +1093,7 @@ impl CompilerDriver:
                         if low_memory:
                             ctx.evict_mir_module(name)
                         used_cache = true
-                    elif not all_in_scope or not outputs_exist:
+                    elif not all_in_scope or not outputs_exist or not capsule_matches:
                         build_cache.remove_entry(cache_source)
             if not used_cache:
                 uncached_names = uncached_names.push(name)
