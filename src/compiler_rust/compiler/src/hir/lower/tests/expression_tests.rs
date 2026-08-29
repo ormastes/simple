@@ -344,13 +344,13 @@ fn impl_text_self_chars_index_remains_a_string_receiver() {
 "#,
     )
     .unwrap();
-    let function_name = module
-        .impls
+    // Plain impls lower their methods directly; `module.impls` is vtable
+    // metadata and is populated only for trait impls.
+    let function = module
+        .functions
         .iter()
-        .find(|implementation| implementation.type_name == "text")
-        .and_then(|implementation| implementation.methods.get("first_code"))
+        .find(|function| function.name == "text.first_code")
         .expect("impl text first_code method");
-    let function = module.functions.iter().find(|f| &f.name == function_name).unwrap();
     let returned = function
         .body
         .iter()

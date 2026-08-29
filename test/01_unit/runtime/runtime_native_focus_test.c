@@ -311,13 +311,15 @@ int main(void) {
                         (int64_t)(uintptr_t)wide_right));
     SplArray* float_left = rt_array_new(1);
     SplArray* float_right = rt_array_new(1);
-    assert(rt_array_push(float_left, rt_value_float(0)));
-    assert(rt_array_push(float_right, rt_value_float(INT64_MIN)));
+    assert(rt_array_push(float_left, rt_value_float(0.0)));
+    assert(rt_array_push(float_right, rt_value_float(-0.0)));
     assert(rt_native_eq((int64_t)(uintptr_t)float_left,
                         (int64_t)(uintptr_t)float_right));
     int64_t enum_left = rt_enum_new(7, 3, rt_value_int(42));
-    int64_t enum_right = rt_enum_new(9, 3, rt_value_int(42));
+    int64_t enum_right = rt_enum_new(7, 3, rt_value_int(42));
+    int64_t other_enum = rt_enum_new(9, 3, rt_value_int(42));
     assert(rt_native_eq(enum_left, enum_right));
+    assert(!rt_native_eq(enum_left, other_enum));
     SplArray* generic_words = rt_array_new(1);
     for (int64_t i = 0; i < 12; i++) {
         assert(rt_typed_words_u64_push(generic_words, 0x200000 + i * 8));
