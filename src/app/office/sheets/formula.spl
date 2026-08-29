@@ -15,6 +15,12 @@ use std.math.special.{powf, exp_f64, ln_f64, sqrt_f64, gamma_ln, incomplete_beta
 use std.math.distributions.{norm_cdf, norm_inv, t_cdf_2t, t_inv, f_cdf, f_inv, binom_pmf, binom_cdf, lognorm_cdf, hypgeom_pmf, negbinom_pmf, weibull_pdf}
 use std.math.statistics.{mean, covar_pop, linfit, median, mode_single, large, small, percentile_inc, quartile_inc, steyx, rsq, devsq}
 use std.math.financial.{daycount_frac, coup_prev, coup_next, xnpv_at, depreciation_coeff, amorlinc_period, amordegrc_period}
+use app.office.sheets.math_bridge.{
+    excel_sin, excel_cos, excel_tan, excel_atan, excel_asin, excel_acos,
+    excel_sinh, excel_cosh, excel_tanh, excel_log, excel_log10, excel_exp,
+    excel_ln, excel_atan2, excel_var_p, excel_stdev_p, excel_trunc,
+    excel_floor, excel_ceiling, excel_standardize
+}
 
 # =========================================================================
 # Types
@@ -27,6 +33,10 @@ struct EvalResult:
 struct DisplayEvalResult:
     ok: bool
     value: i64
+
+struct FinSolve:
+    ok: bool
+    value: f64
 
 # Maximum cell-reference resolution depth. A chain longer than this (which
 # a circular reference always is) returns a circular-reference error.
@@ -8661,6 +8671,885 @@ fn _first_val(vals: [f64]) -> f64:
     if vals.len() > 0:
         return vals[0]
     0.0
+
+fn _fin_pmt(rate: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64:
+    """Excel PMT closed form including future value and annuity-due (type) term."""
+    if rate == 0.0:
+        return 0.0 - (pv + fv) / nper
+    val g = _pow_f64(1.0 + rate, nper)
+    0.0 - (rate * (pv * g + fv)) / ((1.0 + rate * typ) * (g - 1.0))
+
+fn _fin_fv_bal(rate: f64, n: f64, pmt: f64, pv: f64, typ: f64) -> f64:
+    """Future value / outstanding balance after n periods (money-sign convention)."""
+    if rate == 0.0:
+        return 0.0 - (pv + pmt * n)
+    val g = _pow_f64(1.0 + rate, n)
+    0.0 - (pv * g + pmt * (1.0 + rate * typ) * (g - 1.0) / rate)
+
+fn _fin_ipmt(rate: f64, per: f64, nper: f64, pv: f64, fv: f64, typ: f64) -> f64:
+    """Interest portion of the payment for period `per`.
+
+    Interest = (balance after per-1 payments) * rate; the annuity-due case
+    discounts the first period back by (1 + rate).
+    """
+    val pmt = _fin_pmt(rate, nper, pv, fv, typ)
+    val bal = _fin_fv_bal(rate, per - 1.0, pmt, pv, typ)
+    var ip = bal * rate
+    if typ == 1.0:
+        ip = ip / (1.0 + rate)
+    ip
+
+fn _fin_db(cost: f64, salvage: f64, life: f64, period: f64) -> f64:
+    """Fixed-declining-balance depreciation for `period`.
+
+    Excel rounds the rate = 1 - (salvage/cost)^(1/life) to three decimals.
+    No month argument is supported here: the first year is assumed full (no
+    partial-period proration), matching a DB(...) call with month omitted.
+    """
+    val ratio = salvage / cost
+    val raw_rate = 1.0 - powf(ratio, 1.0 / life)
+    val rate = _round_half_away(raw_rate, 1000.0)
+    var book = cost
+    var dep = 0.0
+    var i = 1.0
+    while i <= period:
+        dep = book * rate
+        book = book - dep
+        i = i + 1.0
+    dep
+
+fn _fin_ddb(cost: f64, salvage: f64, life: f64, period: f64) -> f64:
+    """Double-declining-balance depreciation for `period`.
+
+    Uses factor 2/life and clamps each period's depreciation so book value
+    never falls below salvage.
+    """
+    val factor = 2.0 / life
+    var book = cost
+    var dep = 0.0
+    var i = 1.0
+    while i <= period:
+        dep = book * factor
+        if book - dep < salvage:
+            dep = book - salvage
+            if dep < 0.0:
+                dep = 0.0
+        book = book - dep
+        i = i + 1.0
+    dep
+
+fn _fin_rate(nper: f64, pmt: f64, pv: f64, fv: f64) -> FinSolve:
+    """Solve the annuity rate via Newton's method (guess 0.1, 100 iterations).
+
+    Fails closed (ok = false) when the iteration diverges or fails to converge,
+    which surfaces as #ERR at the call site.
+    """
+    var r = 0.1
+    var i = 0
+    while i < 100:
+        val f = _fin_rate_f(r, nper, pmt, pv, fv)
+        val h = 0.000001
+        val f2 = _fin_rate_f(r + h, nper, pmt, pv, fv)
+        val d = (f2 - f) / h
+        if d == 0.0:
+            return FinSolve(ok: false, value: 0.0)
+        val rn = r - f / d
+        var diff = rn - r
+        if diff < 0.0:
+            diff = 0.0 - diff
+        if diff < 0.000000001:
+            return FinSolve(ok: true, value: rn)
+        r = rn
+        i = i + 1
+    FinSolve(ok: false, value: 0.0)
+
+fn _fin_rate_f(r: f64, nper: f64, pmt: f64, pv: f64, fv: f64) -> f64:
+    """Residual of the annuity equation at rate r (type 0)."""
+    if r == 0.0:
+        return pv + pmt * nper + fv
+    val g = _pow_f64(1.0 + r, nper)
+    pv * g + pmt * (g - 1.0) / r + fv
+
+fn _fin_npv_at(r: f64, flows: [f64]) -> f64:
+    """NPV of undiscounted-period-0 cashflows at rate r."""
+    var s = 0.0
+    var i = 0
+    while i < flows.len():
+        s = s + flows[i] / _pow_f64(1.0 + r, i.to_f64())
+        i = i + 1
+    s
+
+fn _fin_irr(flows: [f64], guess: f64) -> FinSolve:
+    """Internal rate of return via Newton's method with a bisection fallback."""
+    var r = guess
+    var i = 0
+    while i < 100:
+        val f = _fin_npv_at(r, flows)
+        var d = 0.0
+        var k = 1
+        while k < flows.len():
+            d = d - k.to_f64() * flows[k] / _pow_f64(1.0 + r, (k + 1).to_f64())
+            k = k + 1
+        if d == 0.0:
+            i = 100
+        else:
+            val rn = r - f / d
+            var diff = rn - r
+            if diff < 0.0:
+                diff = 0.0 - diff
+            if diff < 0.000000001:
+                return FinSolve(ok: true, value: rn)
+            r = rn
+            i = i + 1
+    # Bisection fallback over a bracketed rate range.
+    var lo = -0.999999
+    var hi = 10.0
+    var flo = _fin_npv_at(lo, flows)
+    var j = 0
+    while j < 200:
+        val mid = (lo + hi) / 2.0
+        val fm = _fin_npv_at(mid, flows)
+        var afm = fm
+        if afm < 0.0:
+            afm = 0.0 - afm
+        if afm < 0.000000001:
+            return FinSolve(ok: true, value: mid)
+        val same = (flo < 0.0) == (fm < 0.0)
+        if same:
+            lo = mid
+            flo = fm
+        else:
+            hi = mid
+        j = j + 1
+    FinSolve(ok: false, value: 0.0)
+
+fn _fin_mirr(flows: [f64], fin_rate: f64, rei_rate: f64) -> FinSolve:
+    """Modified IRR: finance negative flows at fin_rate, reinvest positives at rei_rate."""
+    val n = flows.len()
+    if n < 2:
+        return FinSolve(ok: false, value: 0.0)
+    var pv_neg = 0.0
+    var fv_pos = 0.0
+    var i = 0
+    while i < n:
+        val cf = flows[i]
+        if cf < 0.0:
+            pv_neg = pv_neg + cf / _pow_f64(1.0 + fin_rate, i.to_f64())
+        else:
+            fv_pos = fv_pos + cf * _pow_f64(1.0 + rei_rate, (n - 1 - i).to_f64())
+        i = i + 1
+    if pv_neg == 0.0:
+        return FinSolve(ok: false, value: 0.0)
+    val ratio = fv_pos / (0.0 - pv_neg)
+    if ratio <= 0.0:
+        return FinSolve(ok: false, value: 0.0)
+    FinSolve(ok: true, value: powf(ratio, 1.0 / (n - 1).to_f64()) - 1.0)
+
+fn _is_nonneg_int(v: f64) -> bool:
+    """True when v is a whole number >= 0 (Excel bitwise-op domain)."""
+    v >= 0.0 and v == v.to_i64().to_f64()
+
+fn _pow2_i64(exp: i64) -> i64:
+    """2^exp for exp >= 0."""
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < exp:
+        result = result * 2
+        i = i + 1
+    result
+
+fn _bit_op(a_in: i64, b_in: i64, kind: i32) -> i64:
+    """Bitwise op on two non-negative integers. kind: 0=AND, 1=OR, 2=XOR."""
+    var a = a_in
+    var b = b_in
+    var result: i64 = 0
+    var place: i64 = 1
+    while a > 0 or b > 0:
+        val abit = a % 2
+        val bbit = b % 2
+        var rbit: i64 = 0
+        if kind == 0:
+            rbit = if abit == 1 and bbit == 1: 1 else: 0
+        elif kind == 1:
+            rbit = if abit == 1 or bbit == 1: 1 else: 0
+        else:
+            rbit = if abit != bbit: 1 else: 0
+        result = result + rbit * place
+        place = place * 2
+        a = a / 2
+        b = b / 2
+    result
+
+fn _is_weekday(serial: i64) -> bool:
+    """True when the Excel serial falls Mon..Fri (WEEKDAY 2..6, Sunday=1)."""
+    var wd = serial % 7
+    if wd < 0:
+        wd = wd + 7
+    if wd == 0:
+        wd = 7
+    wd >= 2 and wd <= 6
+
+fn _iso_weekday(serial: i64) -> i64:
+    """ISO weekday Mon=1..Sun=7. serial - 25569 = days since 1970-01-01 (a Thursday)."""
+    val days = serial - 25569
+    ((days % 7) + 10) % 7 + 1
+
+fn _intl_is_weekend(serial: i64, wcode: i64) -> bool:
+    """NETWORKDAYS.INTL/WORKDAY.INTL weekend test for numeric codes.
+
+    1..7 = consecutive day pairs starting Sat/Sun (1) through Fri/Sat (7);
+    11..17 = single days Sunday (11) through Saturday (17)."""
+    val wd = _iso_weekday(serial)
+    if wcode >= 1 and wcode <= 7:
+        val first = (wcode + 4) % 7 + 1
+        val second = first % 7 + 1
+        return wd == first or wd == second
+    if wcode >= 11 and wcode <= 17:
+        val single = (wcode - 5) % 7 + 1
+        return wd == single
+    false
+
+fn _time_total_seconds(serial: f64) -> i64:
+    """Seconds-of-day from a non-negative serial's fraction, rounded to the
+    nearest second (Excel HOUR/MINUTE/SECOND behavior), wrapped mod 86400."""
+    val frac = serial - serial.to_i64().to_f64()
+    (frac * 86400.0 + 0.5).to_i64() % 86400
+
+
+fn _agg_apply(fname: text, vals: [f64]) -> f64:
+    """Apply one of the GROUPBY/PIVOTBY aggregate functions to a flat value
+    list. Caller must have already validated fname is one of the five
+    supported names; unsupported names fall through to 0.0."""
+    if fname == "SUM":
+        return eval_sum(vals)
+    if fname == "AVERAGE":
+        return eval_average(vals)
+    if fname == "COUNT":
+        return vals.len().to_f64()
+    if fname == "MAX":
+        return eval_max(vals)
+    if fname == "MIN":
+        return eval_min(vals)
+    0.0
+
+fn _is_supported_agg_fn(fname: text) -> bool:
+    """True for the five GROUPBY/PIVOTBY aggregate function names."""
+    (fname == "SUM" or fname == "AVERAGE" or fname == "COUNT" or
+     fname == "MAX" or fname == "MIN")
+
+fn _array_groupby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """GROUPBY(row_fields, values, function_name) -> groups rows by key,
+    aggregates values per group, spills [key, aggregate] rows + [Total, grand_total]."""
+    val row_fields_src = _array_read_grid(tokens, pos, sheet)
+    if row_fields_src.len() == 0:
+        return [["#ERR"]]
+    var row_keys: [text] = []
+    for r in row_fields_src:
+        if r.len() > 0:
+            row_keys.push(r[0])
+        else:
+            row_keys.push("")
+    var cur = _skip_comma(tokens, pos + 3)
+    val values_src = _array_read_grid(tokens, cur, sheet)
+    if values_src.len() == 0:
+        return [["#ERR"]]
+    var values: [f64] = []
+    for r in values_src:
+        if r.len() > 0:
+            val v = r[0]
+            if _arr_is_number(v):
+                values.push(v.to_f64())
+            else:
+                values.push(0.0)
+        else:
+            values.push(0.0)
+    if values.len() != row_keys.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val fname_a = _read_fn_name_arg(tokens, cur)
+    if not fname_a.present:
+        return [["#ERR"]]
+    val fname_txt = fname_a.value
+    val fname = fname_txt.upper()
+    var unique_keys: [text] = []
+    var key_indices: [[i32]] = []
+    var ki = 0
+    while ki < row_keys.len():
+        val key = row_keys[ki]
+        var found_idx = -1
+        var uki = 0
+        while uki < unique_keys.len():
+            if unique_keys[uki] == key:
+                found_idx = uki
+            uki = uki + 1
+        if found_idx >= 0:
+            key_indices[found_idx].push(ki)
+        else:
+            unique_keys.push(key)
+            var new_indices: [i32] = []
+            new_indices.push(ki)
+            key_indices.push(new_indices)
+        ki = ki + 1
+    if not _is_supported_agg_fn(fname):
+        return [["#ERR"]]
+    var aggregates: [f64] = []
+    var uki = 0
+    while uki < unique_keys.len():
+        val indices = key_indices[uki]
+        var agg_values: [f64] = []
+        for idx in indices:
+            agg_values.push(values[idx])
+        val agg = _agg_apply(fname, agg_values)
+        aggregates.push(agg)
+        uki = uki + 1
+    val aggregate_sum = _agg_apply(fname, values)
+    var out: [[text]] = []
+    var ri = 0
+    while ri < unique_keys.len():
+        val key = unique_keys[ri]
+        val agg = aggregates[ri]
+        out.push([key, _fmt_num_trim(agg)])
+        ri = ri + 1
+    out.push(["Total", _fmt_num_trim(aggregate_sum)])
+    out
+
+fn _array_pivotby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
+    """PIVOTBY(row_fields, col_fields, values, function_name) -> pivot table grid
+    with row totals, column totals, and grand total."""
+    val row_fields_src = _array_read_grid(tokens, pos, sheet)
+    if row_fields_src.len() == 0:
+        return [["#ERR"]]
+    var row_keys: [text] = []
+    for r in row_fields_src:
+        if r.len() > 0:
+            row_keys.push(r[0])
+        else:
+            row_keys.push("")
+    var cur = _skip_comma(tokens, pos + 3)
+    val col_fields_src = _array_read_grid(tokens, cur, sheet)
+    if col_fields_src.len() == 0:
+        return [["#ERR"]]
+    var col_keys: [text] = []
+    for r in col_fields_src:
+        if r.len() > 0:
+            col_keys.push(r[0])
+        else:
+            col_keys.push("")
+    if col_keys.len() != row_keys.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val values_src = _array_read_grid(tokens, cur, sheet)
+    if values_src.len() == 0:
+        return [["#ERR"]]
+    var values: [f64] = []
+    for r in values_src:
+        if r.len() > 0:
+            val v = r[0]
+            if _arr_is_number(v):
+                values.push(v.to_f64())
+            else:
+                values.push(0.0)
+        else:
+            values.push(0.0)
+    if values.len() != row_keys.len():
+        return [["#ERR"]]
+    cur = _skip_comma(tokens, cur + 3)
+    val fname_a = _read_fn_name_arg(tokens, cur)
+    if not fname_a.present:
+        return [["#ERR"]]
+    val fname_txt = fname_a.value
+    val fname = fname_txt.upper()
+    if not _is_supported_agg_fn(fname):
+        return [["#ERR"]]
+    var unique_rows: [text] = []
+    var unique_cols: [text] = []
+    var i = 0
+    while i < row_keys.len():
+        val rk = row_keys[i]
+        var found = false
+        for ur in unique_rows:
+            if ur == rk:
+                found = true
+        if not found:
+            unique_rows.push(rk)
+        val ck = col_keys[i]
+        var found_c = false
+        for uc in unique_cols:
+            if uc == ck:
+                found_c = true
+        if not found_c:
+            unique_cols.push(ck)
+        i = i + 1
+    var nrows = unique_rows.len()
+    var ncols = unique_cols.len()
+    var pgrid: [[f64]] = []
+    var ri = 0
+    while ri < nrows:
+        val rk = unique_rows[ri]
+        var row: [f64] = []
+        var ci = 0
+        while ci < ncols:
+            val ck = unique_cols[ci]
+            var cell_values: [f64] = []
+            var ii = 0
+            while ii < row_keys.len():
+                if row_keys[ii] == rk and col_keys[ii] == ck:
+                    cell_values.push(values[ii])
+                ii = ii + 1
+            row.push(_agg_apply(fname, cell_values))
+            ci = ci + 1
+        pgrid.push(row)
+        ri = ri + 1
+    # No header row: the spill origin must never cache an empty display (an
+    # empty cached_display makes cell_display_text fall back to the raw
+    # formula text), so the grid starts directly at the first row key.
+    var out: [[text]] = []
+    var rri = 0
+    while rri < nrows:
+        val rk = unique_rows[rri]
+        var row_out: [text] = []
+        row_out.push(rk)
+        var cci = 0
+        while cci < ncols:
+            row_out.push(_fmt_num_trim(pgrid[rri][cci]))
+            cci = cci + 1
+        var row_values: [f64] = []
+        var jj = 0
+        while jj < row_keys.len():
+            if row_keys[jj] == rk:
+                row_values.push(values[jj])
+            jj = jj + 1
+        row_out.push(_fmt_num_trim(_agg_apply(fname, row_values)))
+        out.push(row_out)
+        rri = rri + 1
+    var totals: [text] = []
+    totals.push("Total")
+    var cii = 0
+    while cii < ncols:
+        val ck = unique_cols[cii]
+        var col_values: [f64] = []
+        var kk = 0
+        while kk < col_keys.len():
+            if col_keys[kk] == ck:
+                col_values.push(values[kk])
+            kk = kk + 1
+        totals.push(_fmt_num_trim(_agg_apply(fname, col_values)))
+        cii = cii + 1
+    totals.push(_fmt_num_trim(_agg_apply(fname, values)))
+    out.push(totals)
+    out
+# =========================================================================
+# FORECAST.ETS seasonal decomposition helpers
+# =========================================================================
+
+fn _forecast_ets_decompose(values: [f64], timeline: [f64], seasonality: i32) -> [f64]:
+    """Seasonal decomposition: fit linear trend, extract seasonal offsets.
+    Returns [slope, intercept, offset_0, offset_1, ..., offset_(s-1)].
+    On error, returns empty list.
+
+    Trend fit: when there are >= 2 complete non-overlapping blocks of
+    `seasonality` consecutive points, OLS is fit on PER-BLOCK AVERAGES
+    (block mean x, block mean y) rather than raw points. A single-pass OLS
+    on raw points is contaminated by an exact periodic signal whenever the
+    data isn't symmetric about the window center (e.g. 5,9,5,9,... over
+    x=1..8 has a spurious positive slope under raw OLS even though the
+    series has zero trend) -- averaging over complete cycles first cancels
+    the periodic component before the trend line is fit. Falls back to
+    plain point-wise OLS when seasonality == 1 or there aren't enough whole
+    blocks."""
+    if values.len() != timeline.len() or values.len() < 2 or seasonality < 1:
+        return []
+
+    val n = values.len()
+    val nblocks = n / seasonality
+
+    var slope = 0.0
+    var intercept = 0.0
+
+    if seasonality >= 2 and nblocks >= 2:
+        var bsum_x = 0.0
+        var bsum_y = 0.0
+        var bsum_xx = 0.0
+        var bsum_xy = 0.0
+        var b = 0
+        while b < nblocks:
+            var block_sum_x = 0.0
+            var block_sum_y = 0.0
+            var bi = 0
+            while bi < seasonality:
+                val idx = b * seasonality + bi
+                block_sum_x = block_sum_x + timeline[idx]
+                block_sum_y = block_sum_y + values[idx]
+                bi = bi + 1
+            val bx = block_sum_x / seasonality.to_f64()
+            val by = block_sum_y / seasonality.to_f64()
+            bsum_x = bsum_x + bx
+            bsum_y = bsum_y + by
+            bsum_xx = bsum_xx + bx * bx
+            bsum_xy = bsum_xy + bx * by
+            b = b + 1
+        val bn = nblocks.to_f64()
+        val bmean_x = bsum_x / bn
+        val bmean_y = bsum_y / bn
+        val bvar_x = bsum_xx / bn - bmean_x * bmean_x
+        slope = if bvar_x == 0.0: 0.0 else: (bsum_xy / bn - bmean_x * bmean_y) / bvar_x
+        intercept = bmean_y - slope * bmean_x
+    else:
+        var sum_x = 0.0
+        var sum_y = 0.0
+        var sum_xx = 0.0
+        var sum_xy = 0.0
+        var i = 0
+        while i < n:
+            val x = timeline[i]
+            val y = values[i]
+            sum_x = sum_x + x
+            sum_y = sum_y + y
+            sum_xx = sum_xx + x * x
+            sum_xy = sum_xy + x * y
+            i = i + 1
+
+        val mean_x = sum_x / n.to_f64()
+        val mean_y = sum_y / n.to_f64()
+        val var_x = sum_xx / n.to_f64() - mean_x * mean_x
+
+        slope = if var_x == 0.0: 0.0 else: (sum_xy / n.to_f64() - mean_x * mean_y) / var_x
+        intercept = mean_y - slope * mean_x
+
+    # Extract seasonal offsets: mean residual per phase
+    var offsets: [f64] = []
+    var offset_sum: [f64] = []
+    var offset_count: [i64] = []
+    var j = 0
+    while j < seasonality:
+        offsets.push(0.0)
+        offset_sum.push(0.0)
+        offset_count.push(0)
+        j = j + 1
+
+    var k = 0
+    while k < n:
+        val trend = intercept + slope * timeline[k]
+        val residual = values[k] - trend
+        val phase = k.to_i64() % seasonality.to_i64()
+        offset_sum[phase.to_i32()] = offset_sum[phase.to_i32()] + residual
+        offset_count[phase.to_i32()] = offset_count[phase.to_i32()] + 1
+        k = k + 1
+
+    var m = 0
+    while m < seasonality:
+        if offset_count[m] > 0:
+            offsets[m] = offset_sum[m] / offset_count[m].to_f64()
+        m = m + 1
+
+    var result: [f64] = [slope, intercept]
+    var n_off = 0
+    while n_off < offsets.len():
+        result.push(offsets[n_off])
+        n_off = n_off + 1
+    result
+
+fn _forecast_ets_seasonality_strength(values: [f64], timeline: [f64], seasonality: i32) -> f64:
+    """Seasonal strength: fraction of detrended-residual variance explained by
+    the phase means: 1 - var(residual - phase_mean) / var(residual).
+    Range [0, 1]; threshold 0.5 for significance.
+
+    NOTE: an earlier version compared seasonal_var / (seasonal_var +
+    residual_var), which double-counts the seasonal component in the
+    denominator (residual_var already INCLUDES the seasonal variance) and
+    under-scores clean periodic data (e.g. 5,9,5,9,... over x=1..8 scored
+    ~0.49, just under the 0.5 detection threshold, instead of the correct
+    1.0 for a noise-free periodic series)."""
+    if values.len() != timeline.len() or values.len() < 2 * seasonality or seasonality < 2:
+        return 0.0
+
+    val decomp = _forecast_ets_decompose(values, timeline, seasonality)
+    if decomp.len() < 2 + seasonality:
+        return 0.0
+
+    val slope = decomp[0]
+    val intercept = decomp[1]
+    var offsets: [f64] = []
+    var idx = 2
+    while idx < decomp.len():
+        offsets.push(decomp[idx])
+        idx = idx + 1
+
+    # residual_sum_sq: total variance after removing only the trend.
+    # noise_sum_sq: variance left after ALSO removing the seasonal offset —
+    # this is the "unexplained" part.
+    var residual_sum_sq = 0.0
+    var noise_sum_sq = 0.0
+    var n = values.len()
+    var i = 0
+    while i < n:
+        val trend = intercept + slope * timeline[i]
+        val residual = values[i] - trend
+        residual_sum_sq = residual_sum_sq + residual * residual
+        val phase = i.to_i64() % seasonality.to_i64()
+        val noise = residual - offsets[phase.to_i32()]
+        noise_sum_sq = noise_sum_sq + noise * noise
+        i = i + 1
+
+    if residual_sum_sq == 0.0:
+        return 0.0
+
+    1.0 - noise_sum_sq / residual_sum_sq
+
+
+fn _eval_getpivotdata(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """GETPIVOTDATA(data_field, pivot_anchor_ref, [field1, item1, field2, item2, ...])
+
+    Reads values from a pivot table rendered at pivot_anchor_ref (the top-left cell).
+    No field/item pairs → grand total. One pair → row or column total. Two pairs → intersection.
+    Parses field/item names from sheet display text (no direct pivot module coupling).
+    Returns the numeric value as a CellValue or #ERR."""
+    var cur_pos = pos
+
+    # Parse data_field (first text argument)
+    if cur_pos >= tokens.len() or tokens.get(cur_pos) == ")":
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires data_field"), next_pos: cur_pos)
+    var data_field = ""
+    val first_token = tokens.get(cur_pos)
+    if _is_cell_ref_token(first_token):
+        val data_val = _resolve_cell_value(first_token, sheet, depth)
+        data_field = _format_number(data_val)
+    elif first_token.starts_with("\""):
+        # String literal tokens keep their surrounding quotes ("East" ->
+        # the 6-char token `"East"`, see tokenize_formula) -- strip them so
+        # comparisons against plain sheet text (e.g. pivot_grid cells) match.
+        data_field = first_token.substring(1, first_token.len() - 1)
+    else:
+        data_field = first_token
+    cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+
+    # Parse pivot_anchor_ref (cell reference)
+    if cur_pos >= tokens.len() or not _is_cell_ref_token(tokens.get(cur_pos)):
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires pivot_anchor_ref"), next_pos: cur_pos)
+    val pivot_ref_str = tokens.get(cur_pos)
+    val pivot_anchor = parse_cell_ref(pivot_ref_str)
+    if pivot_anchor == nil:
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA bad pivot_anchor_ref"), next_pos: cur_pos)
+    cur_pos = cur_pos + 1
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+        cur_pos = cur_pos + 1
+
+    # Parse field/item pairs
+    var field_items: [text] = []
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        # Parse field name (text or ref)
+        if cur_pos >= tokens.len():
+            return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA incomplete field/item pair"), next_pos: cur_pos)
+        var field_str = ""
+        val ft = tokens.get(cur_pos)
+        if _is_cell_ref_token(ft):
+            field_str = _format_number(_resolve_cell_value(ft, sheet, depth))
+        elif ft.starts_with("\""):
+            field_str = ft.substring(1, ft.len() - 1)
+        else:
+            field_str = ft
+        cur_pos = cur_pos + 1
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+
+        # Parse item name (text or ref)
+        if cur_pos >= tokens.len():
+            return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA incomplete field/item pair"), next_pos: cur_pos)
+        var item_str = ""
+        val it = tokens.get(cur_pos)
+        if _is_cell_ref_token(it):
+            item_str = _format_number(_resolve_cell_value(it, sheet, depth))
+        elif it.starts_with("\""):
+            item_str = it.substring(1, it.len() - 1)
+        else:
+            item_str = it
+        cur_pos = cur_pos + 1
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+
+        field_items.push(field_str)
+        field_items.push(item_str)
+
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+
+    # Read the pivot grid from the sheet (starting at pivot_anchor).
+    #
+    # Two passes: (1) find the table's true bounds (max_row/max_col) by
+    # scanning for non-empty cells, stopping after 5 consecutive fully-empty
+    # rows/cols past the last content seen; (2) re-read the grid strictly
+    # within those bounds. A single-pass version that pushed every scanned
+    # cell (including trailing blanks) into row_data produced ragged rows
+    # padded to ~100 columns wide whenever a row had ANY content (the
+    # "has_content" flag never reset within a row), which silently corrupted
+    # every "last column"/"last row" lookup (grand total, row/column totals,
+    # intersections all read a blank padding cell instead of the real one).
+    val anchor_col = pivot_anchor.col
+    val anchor_row = pivot_anchor.row
+    var max_col = anchor_col
+    var max_row = anchor_row
+
+    var scan_row = anchor_row
+    var empty_row_streak = 0
+    while scan_row < anchor_row + 100:
+        var scan_col = anchor_col
+        var row_has_content = false
+        var empty_col_streak = 0
+        while scan_col < anchor_col + 100:
+            val cell_key = cell_ref_to_string(CellRef(col: scan_col, row: scan_row))
+            val disp = cell_display_text(sheet.get_cell(cell_key))
+            if disp.len() > 0:
+                row_has_content = true
+                empty_col_streak = 0
+                if scan_col > max_col:
+                    max_col = scan_col
+                if scan_row > max_row:
+                    max_row = scan_row
+            else:
+                empty_col_streak = empty_col_streak + 1
+                if empty_col_streak > 5:
+                    break
+            scan_col = scan_col + 1
+        if row_has_content:
+            empty_row_streak = 0
+        else:
+            empty_row_streak = empty_row_streak + 1
+            if empty_row_streak > 5:
+                break
+        scan_row = scan_row + 1
+
+    if max_col == anchor_col and max_row == anchor_row and cell_display_text(sheet.get_cell(cell_ref_to_string(CellRef(col: anchor_col, row: anchor_row)))).len() == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA empty pivot"), next_pos: cur_pos)
+
+    var pivot_grid: [[text]] = []
+    var pr = anchor_row
+    while pr <= max_row:
+        var row_data: [text] = []
+        var pc = anchor_col
+        while pc <= max_col:
+            val cell_key2 = cell_ref_to_string(CellRef(col: pc, row: pr))
+            row_data.push(cell_display_text(sheet.get_cell(cell_key2)))
+            pc = pc + 1
+        pivot_grid.push(row_data)
+        pr = pr + 1
+
+    if pivot_grid.len() == 0:
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA empty pivot"), next_pos: cur_pos)
+
+    # Determine pivot structure (1D vs 2D)
+    val header_row = pivot_grid[0]
+    val is_2d = header_row.len() > 2 and header_row[0] != "Row"
+
+    # Validate data_field against the pivot's value-column header (the
+    # top-left header cell, e.g. "Amount") before any lookup. Excel returns
+    # #REF for an unrecognized data field rather than silently falling back
+    # to the grand total.
+    if header_row.len() > 0:
+        val value_header = header_row[0]
+        if value_header.lower() != data_field.lower():
+            return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA unknown data_field"), next_pos: cur_pos)
+
+    if field_items.len() == 0:
+        # Grand total: bottom-right cell
+        if pivot_grid.len() > 0 and header_row.len() > 0:
+            val last_row = pivot_grid[pivot_grid.len() - 1]
+            if last_row.len() > 0:
+                val grand_total_str = last_row[last_row.len() - 1]
+                if grand_total_str.len() > 0:
+                    val gt_val = grand_total_str.to_f64()
+                    return EvalResult(value: CellValue.NumberVal(value: gt_val), next_pos: cur_pos)
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA no grand total"), next_pos: cur_pos)
+
+    if field_items.len() == 2:
+        # One field/item pair: row or column total
+        val field_1 = field_items[0]
+        val item_1 = field_items[1]
+
+        if is_2d:
+            # Look in first column for item, check if it's a row key
+            var target_row = -1
+            var r = 1
+            while r < pivot_grid.len():
+                if pivot_grid[r].len() > 0 and pivot_grid[r][0] == item_1:
+                    target_row = r
+                    break
+                r = r + 1
+            if target_row >= 0 and target_row < pivot_grid.len():
+                val data_row = pivot_grid[target_row]
+                if data_row.len() > 0:
+                    val row_total_str = data_row[data_row.len() - 1]
+                    if row_total_str.len() > 0:
+                        val rt_val = row_total_str.to_f64()
+                        return EvalResult(value: CellValue.NumberVal(value: rt_val), next_pos: cur_pos)
+
+            # Otherwise look in header row for column total
+            var target_col = -1
+            var c = 1
+            while c < header_row.len() - 1:
+                if header_row[c] == item_1:
+                    target_col = c
+                    break
+                c = c + 1
+            if target_col >= 0:
+                if pivot_grid.len() > 0:
+                    val last_row = pivot_grid[pivot_grid.len() - 1]
+                    if target_col < last_row.len():
+                        val col_total_str = last_row[target_col]
+                        if col_total_str.len() > 0:
+                            val ct_val = col_total_str.to_f64()
+                            return EvalResult(value: CellValue.NumberVal(value: ct_val), next_pos: cur_pos)
+        else:
+            # 1D pivot: look for row key
+            var r = 1
+            while r < pivot_grid.len():
+                if pivot_grid[r].len() > 0 and pivot_grid[r][0] == item_1:
+                    if pivot_grid[r].len() > 1:
+                        val val_str = pivot_grid[r][1]
+                        if val_str.len() > 0:
+                            val v = val_str.to_f64()
+                            return EvalResult(value: CellValue.NumberVal(value: v), next_pos: cur_pos)
+                r = r + 1
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA field/item not found"), next_pos: cur_pos)
+
+    if field_items.len() == 4:
+        # Two field/item pairs: intersection cell
+        val field_1 = field_items[0]
+        val item_1 = field_items[1]
+        val field_2 = field_items[2]
+        val item_2 = field_items[3]
+
+        if is_2d:
+            # Find row matching item_1 in first column
+            var target_row = -1
+            var r = 1
+            while r < pivot_grid.len() - 1:
+                if pivot_grid[r].len() > 0 and pivot_grid[r][0] == item_1:
+                    target_row = r
+                    break
+                r = r + 1
+
+            # Find column matching item_2 in header row
+            var target_col = -1
+            var c = 1
+            while c < header_row.len() - 1:
+                if header_row[c] == item_2:
+                    target_col = c
+                    break
+                c = c + 1
+
+            if target_row >= 0 and target_col >= 0 and target_row < pivot_grid.len():
+                val data_row = pivot_grid[target_row]
+                if target_col < data_row.len():
+                    val cell_val_str = data_row[target_col]
+                    if cell_val_str.len() > 0:
+                        val cv = cell_val_str.to_f64()
+                        return EvalResult(value: CellValue.NumberVal(value: cv), next_pos: cur_pos)
+
+        return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA intersection not found"), next_pos: cur_pos)
+
+    EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA unsupported field/item count"), next_pos: cur_pos)
 
 fn _eval_display_sum(tokens: [text], sheet: Sheet, depth: i32) -> DisplayEvalResult:
     var total: i64 = 0
