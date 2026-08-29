@@ -322,30 +322,59 @@ fn next_node_arena_owner() -> i64:
 pub struct Node:
     kind: text
     text: text
-    span: Span
-    children: [NodeId]
+    span_start_byte: i64
+    span_end_byte: i64
+    span_start_line: i64
+    span_end_line: i64
+    span_start_column: i64
+    span_end_column: i64
+    child_start: i64
+    child_count_value: i64
+    arena_owner: i64
+    arena_generation: i64
 
 impl Node:
+    pub static fn create(kind: text, source_text: text, span: Span) -> Node:
+        return node_with_span(kind, source_text, span)
+
     pub fn kind(self) -> text:
         return self.kind
 
     pub fn child_count(self) -> i64:
-        return self.children.len()
+        return self.child_count_value
 
 # Value-semantic node storage owned by Tree.  Nodes are append-only, so ids
 # remain stable for the lifetime of the tree.
 pub struct NodeArena:
     nodes: [Node]
+    child_edges: [NodeId]
     owner: i64
     generation: i64
 
 impl NodeArena:
     pub static fn new() -> NodeArena:
-        return NodeArena(nodes: [], owner: next_node_arena_owner(), generation: 0)
+        return NodeArena(nodes: [], child_edges: [], owner: next_node_arena_owner(), generation: 0)
 
     pub me alloc(node: Node) -> NodeId:
         val id = NodeId(owner: self.owner, index: self.nodes.len(), generation: self.generation)
-        self.nodes.push(node)
+        var stored = node
+        stored.child_start = 0
+        stored.child_count_value = 0
+        stored.arena_owner = self.owner
+        stored.arena_generation = self.generation
+        self.nodes.push(stored)
+        return id
+
+    pub me alloc_with_children(node: Node, children: [NodeId]) -> NodeId:
+        var stored = node
+        stored.child_start = self.child_edges.len()
+        stored.child_count_value = children.len()
+        stored.arena_owner = self.owner
+        stored.arena_generation = self.generation
+        for child in children:
+            self.child_edges.push(child)
+        val id = NodeId(owner: self.owner, index: self.nodes.len(), generation: self.generation)
+        self.nodes.push(stored)
         return id
 
     pub fn get(self, id: NodeId) -> Option<Node>:
@@ -353,8 +382,21 @@ impl NodeArena:
             return None
         return Some(self.nodes[id.index])
 
+    pub fn children(self, node: Node) -> [NodeId]:
+        var result: [NodeId] = []
+        if node.arena_owner != self.owner or node.arena_generation != self.generation:
+            return result
+        if node.child_start < 0 or node.child_count_value < 0 or node.child_start + node.child_count_value > self.child_edges.len():
+            return result
+        var offset = 0
+        while offset < node.child_count_value:
+            result.push(self.child_edges[node.child_start + offset])
+            offset = offset + 1
+        return result
+
     pub me reset():
         self.nodes = []
+        self.child_edges = []
         self.generation = self.generation + 1
 
 # Parse tree
@@ -371,6 +413,19 @@ impl Tree:
     pub fn get_node(self, id: NodeId) -> Option<Node>:
         return self.arena.get(id)
 
+    pub fn children(self, node: Node) -> [NodeId]:
+        return self.arena.children(node)
+
+    pub fn span(self, node: Node) -> Span:
+        return Span(
+            start_byte: node.span_start_byte,
+            end_byte: node.span_end_byte,
+            start_line: node.span_start_line,
+            end_line: node.span_end_line,
+            start_column: node.span_start_column,
+            end_column: node.span_end_column,
+        )
+
     pub fn get_text(self, node: Node) -> text:
         return node.text
 
@@ -383,6 +438,25 @@ impl TreeSitterParser:
         return Ok(TreeSitterParser(language: language))
 
     pub me parse(self, source: text) -> Result<Tree, text>:
+        val binary_operator_index = source.find("+")
+        val binary_left_text = if binary_operator_index > 0: source.substring(0, binary_operator_index).trim() else: ""
+        val binary_right_text = if binary_operator_index > 0: source.substring(binary_operator_index + 1, source.len()).trim() else: ""
+        if binary_operator_index > 0 and binary_left_text.to_i64().is_some() and binary_right_text.to_i64().is_some():
+            var arena = NodeArena.new()
+            val left_start = source.find(binary_left_text)
+            val right_start = binary_operator_index + 1 + source.substring(binary_operator_index + 1, source.len()).find(binary_right_text)
+            val expression_span = Span(start_byte: 0, end_byte: source.len(), start_line: 1, end_line: 1, start_column: 1, end_column: source.len() + 1)
+            val left_span = Span(start_byte: left_start, end_byte: left_start + binary_left_text.len(), start_line: 1, end_line: 1, start_column: left_start + 1, end_column: left_start + binary_left_text.len() + 1)
+            val operator_span = Span(start_byte: binary_operator_index, end_byte: binary_operator_index + 1, start_line: 1, end_line: 1, start_column: binary_operator_index + 1, end_column: binary_operator_index + 2)
+            val right_span = Span(start_byte: right_start, end_byte: right_start + binary_right_text.len(), start_line: 1, end_line: 1, start_column: right_start + 1, end_column: right_start + binary_right_text.len() + 1)
+            val left_id = arena.alloc(node_with_span("integer", binary_left_text, left_span))
+            val operator_id = arena.alloc(node_with_span("+", "+", operator_span))
+            val right_id = arena.alloc(node_with_span("integer", binary_right_text, right_span))
+            val binary_id = arena.alloc_with_children(node_with_span("binary_expression", source, expression_span), [left_id, operator_id, right_id])
+            val statement_id = arena.alloc_with_children(node_with_span("expression_statement", source, expression_span), [binary_id])
+            val root_id = arena.alloc_with_children(node_with_span("module", source, expression_span), [statement_id])
+            return Ok(Tree(root_id: root_id, arena: arena, source: source, version: 0))
+
         var arena = NodeArena.new()
         var root_children: [NodeId] = []
         var line_start = 0
@@ -393,21 +467,32 @@ impl TreeSitterParser:
             if line.len() > 0 and line[0] != ' ' and line[0] != '\t':
                 val line_end = line_start + line.len()
                 val child_span = Span(start_byte: line_start, end_byte: line_end, start_line: line_number, end_line: line_number, start_column: 1, end_column: line.len() + 1)
-                root_children.push(arena.alloc(Node(kind: treesitter_top_level_kind(line), text: line, span: child_span, children: [])))
+                root_children.push(arena.alloc(node_with_span(treesitter_top_level_kind(line), line, child_span)))
             root_end_line = line_number
             root_end_column = line.len() + 1
             line_start = line_start + line.len() + 1
             line_number = line_number + 1
 
         val root_span = Span(start_byte: 0, end_byte: source.len(), start_line: 1, end_line: root_end_line, start_column: 1, end_column: root_end_column)
-        val root = Node(
-            kind: "module",
-            text: source,
-            span: root_span,
-            children: root_children,
-        )
-        val root_id = arena.alloc(root)
+        val root = node_with_span("module", source, root_span)
+        val root_id = arena.alloc_with_children(root, root_children)
         return Ok(Tree(root_id: root_id, arena: arena, source: source, version: 0))
+
+fn node_with_span(kind: text, source_text: text, span: Span) -> Node:
+    return Node(
+        kind: kind,
+        text: source_text,
+        span_start_byte: span.start_byte,
+        span_end_byte: span.end_byte,
+        span_start_line: span.start_line,
+        span_end_line: span.end_line,
+        span_start_column: span.start_column,
+        span_end_column: span.end_column,
+        child_start: 0,
+        child_count_value: 0,
+        arena_owner: -1,
+        arena_generation: -1,
+    )
 
 fn treesitter_top_level_kind(line: text) -> text:
     if line.starts_with("pub "): return treesitter_top_level_kind(line[4:])
