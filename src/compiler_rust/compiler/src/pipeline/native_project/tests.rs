@@ -42,8 +42,8 @@ fn terminal_facade_routes_name_physical_callable_owners() {
 
     let routes = [
         (
-            "app.io._CliCompile.native_build",
-            "src/app/io/_CliCompile/native_build.spl",
+            "app.io._CliCompile.compile_targets",
+            "src/app/io/_CliCompile/compile_targets.spl",
             &["cli_native_build"][..],
         ),
         (
@@ -102,8 +102,50 @@ fn terminal_facade_routes_name_physical_callable_owners() {
     }
 
     assert!(!repo_root.join("src/os/qemu_runner_part4.spl").exists());
+    assert!(!cli_facade.contains("app.io._CliCompile.native_build"));
     assert!(!cli_facade.contains("play_cli_main"));
     assert!(!qemu_facade.contains("bootstrap_authorization_receipt_v2"));
+}
+
+#[test]
+fn terminal_facades_use_canonical_cli_contract_and_acyclic_qemu_owners() {
+    let repo_root = repo_root_for_native_project_tests();
+    let cli = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
+    let canonical = std::fs::read_to_string(repo_root.join("src/app/io/_CliCompile/compile_targets.spl")).unwrap();
+    assert!(cli.contains("export use app.io._CliCompile.compile_targets.{cli_native_build}"));
+    assert!(!cli.contains("app.io._CliCompile.native_build"));
+    for contract_marker in [
+        "cli_native_build_option_error(args)",
+        "--emit-archive",
+        "--parse-shard=",
+        "cli_native_build_resolve_output",
+    ] {
+        assert!(canonical.contains(contract_marker), "canonical CLI owner lost {contract_marker}");
+    }
+
+    let layers = [
+        ("runner_targets", &[][..]),
+        ("os_build_run", &["runner_targets"][..]),
+        ("scenario_catalog", &["runner_targets", "os_build_run"][..]),
+        (
+            "scenario_disks",
+            &["runner_targets", "os_build_run", "scenario_catalog"][..],
+        ),
+        (
+            "scenario_exec",
+            &["runner_targets", "os_build_run", "scenario_catalog", "scenario_disks"][..],
+        ),
+    ];
+    for (owner, dependencies) in layers {
+        let source = std::fs::read_to_string(repo_root.join(format!("src/os/_QemuRunner/{owner}.spl"))).unwrap();
+        assert!(!source.contains("use os.qemu_runner"), "{owner} imports its facade");
+        for dependency in dependencies {
+            assert!(
+                source.contains(&format!("use os._QemuRunner.{dependency}.*")),
+                "{owner} misses physical dependency {dependency}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -125,7 +167,10 @@ fn entry_closure_resolver_reaches_terminal_facade_owners_only_when_routed() {
     let cli_files = resolved("src/app/io/cli_compile.spl");
     assert!(cli_files
         .iter()
-        .any(|path| { path.ends_with("src/app/io/_CliCompile/native_build.spl") }));
+        .any(|path| { path.ends_with("src/app/io/_CliCompile/compile_targets.spl") }));
+    assert!(!cli_files
+        .iter()
+        .any(|path| path.ends_with("src/app/io/_CliCompile/native_build.spl")));
 
     let qemu_files = resolved("src/os/qemu_runner.spl");
     for relative in [
