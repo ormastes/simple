@@ -492,23 +492,33 @@ class MustUseSourceScanState:
         while trim_start < line.len() and (line[trim_start] == " " or line[trim_start] == "\t"):
             trim_start = trim_start + 1
         val trimmed = line[trim_start:]
+        # Annotation lines may add one pending action while preserving another
+        # (for example, @must_use followed by @cfg).  Keep annotation
+        # consumption separate from the generic intervening-code cancellation
+        # below so a non-comment annotation never cancels itself.
+        var annotation_consumed: bool = false
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
+            annotation_consumed = true
             must_use_critical_mode = true
         # Check for @tailrec annotation — marks function for tail-call optimization
         if trimmed.starts_with("# @tailrec"):
+            annotation_consumed = true
             self.pending_init = false  # @tailrec isn't @init
             self.pending_teardown = false
             # Simply note the next fn as tailrec-annotated for warning purposes
 
         # Check for @init annotation
         if trimmed.starts_with("# @init"):
+            annotation_consumed = true
             self.pending_init = true
         # Check for @teardown annotation
         if trimmed.starts_with("# @teardown"):
+            annotation_consumed = true
             self.pending_teardown = true
         # Check for @when(condition) conditional compilation (comment form: backward compat)
         if trimmed.starts_with("# @when("):
+            annotation_consumed = true
             # Extract condition: "# @when(condition)"
             var when_cond_chars: [text] = []
             var wci: i64 = 8
@@ -522,6 +532,7 @@ class MustUseSourceScanState:
             self.pending_when = when_cond
         # Check for @cfg(condition) — new proper syntax (no # prefix)
         if trimmed.starts_with("@cfg("):
+            annotation_consumed = true
             var cfg_chars: [text] = []
             var cci: i64 = 5
             var cfg_depth: i64 = 1
@@ -551,6 +562,7 @@ class MustUseSourceScanState:
             self.pending_when = cfg_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
+            annotation_consumed = true
             self.pending_must_use = true
             # Extract reason from @must_use("reason")
             self.pending_reason = ""
@@ -592,7 +604,7 @@ class MustUseSourceScanState:
                     must_use_register(fname, self.pending_reason)
                 self.pending_must_use = false
                 self.pending_reason = ""
-            elif trimmed.starts_with("# ") == false and trimmed != "":
+            elif annotation_consumed == false and trimmed.starts_with("# ") == false and trimmed != "":
                 # Non-comment, non-empty line without fn => cancel pending
                 self.pending_must_use = false
                 self.pending_reason = ""
@@ -623,7 +635,7 @@ class MustUseSourceScanState:
                 self.pending_init = false
                 self.pending_teardown = false
                 self.pending_when = ""
-            elif trimmed.starts_with("# ") == false and trimmed != "":
+            elif annotation_consumed == false and trimmed.starts_with("# ") == false and trimmed != "":
                 self.pending_init = false
                 self.pending_teardown = false
                 self.pending_when = ""
