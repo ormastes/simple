@@ -3549,6 +3549,24 @@ fn test_core_c_runtime_owns_required_ascii_text_family() {
     }
 }
 
+#[test]
+fn test_core_c_runtime_owns_tool_host_service_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let symbols = archive_defined_symbols(&runtime).expect("core-c runtime symbols should be readable");
+    for symbol in [
+        "rt_process_run_owned_observed_bounded_value",
+        "rt_hostname",
+        "rt_unix_socket_connect",
+        "rt_metal_is_available",
+        "rt_coverage_clear",
+        "rt_coverage_dump_sdn",
+        "rt_package_chmod",
+    ] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_struct_receiver_guard_native_contract() {
