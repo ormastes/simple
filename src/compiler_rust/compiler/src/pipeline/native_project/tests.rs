@@ -2780,18 +2780,21 @@ fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
 }
 
 #[test]
-fn pure_simple_runtime_bundle_always_selects_runtime_memory_owner() {
+fn pure_simple_runtime_bundle_separates_memory_and_hosted_ownership() {
     let source = include_str!("../../../../../compiler/70.backend/backend/runtime_compiler.spl");
-    for (standalone_flag, dynload_flag) in [
+    for (memory_flag, standalone_flag, dynload_flag) in [
         (
+            "comp_args.push(\"/DSIMPLE_RUNTIME_MEMORY_OWNER=1\")",
             "comp_args.push(\"/DSIMPLE_CORE_C_STANDALONE=1\")",
             "comp_args.push(\"/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
         ),
         (
+            "comp_args.push(\"-DSIMPLE_RUNTIME_MEMORY_OWNER=1\")",
             "comp_args.push(\"-DSIMPLE_CORE_C_STANDALONE=1\")",
             "comp_args.push(\"-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
         ),
     ] {
+        assert_eq!(source.matches(memory_flag).count(), 1, "memory-owner flag must be emitted once per compiler flavor");
         assert_eq!(
             source.matches(standalone_flag).count(),
             1,
@@ -2803,11 +2806,12 @@ fn pure_simple_runtime_bundle_always_selects_runtime_memory_owner() {
             "dynload-owner flag must be emitted once per compiler flavor"
         );
         assert!(
-            source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap(),
-            "memory ownership must be selected before the include_dynload-only branch"
+            source.find(memory_flag).unwrap() < source.find(standalone_flag).unwrap(),
+            "memory ownership must be selected before the include_dynload-only standalone branch"
         );
+        assert!(source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap());
     }
-    assert!(source.contains("if include_dynload:\n                # runtime_dynload.c is in this bundle"));
+    assert!(source.contains("if include_dynload:\n                # Only the standalone core-C composition"));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]

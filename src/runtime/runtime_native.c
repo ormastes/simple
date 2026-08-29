@@ -5604,10 +5604,11 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
     return found;
 }
 
-/* runtime_memory.c is the canonical allocator/pointer ABI member when the
- * standalone core-C archive is assembled. Keep the hosted runtime_native-only
- * provider for other compositions, but never publish both into one archive. */
-#if !defined(SIMPLE_CORE_C_STANDALONE)
+/* runtime_memory.c is the canonical allocator/pointer ABI member whenever it
+ * is part of the composition.  Keep this ownership flag separate from
+ * SIMPLE_CORE_C_STANDALONE: a native-all link needs the hosted providers below
+ * even though it still compiles runtime_memory.c beside runtime_native.c. */
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
@@ -11128,7 +11129,7 @@ double rt_pow(double a, double b) { return pow(a, b); }
  * Pointer Read/Write Operations (for relocation patching, FFI interop)
  * ================================================================ */
 
-#if !defined(SIMPLE_CORE_C_STANDALONE)
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;

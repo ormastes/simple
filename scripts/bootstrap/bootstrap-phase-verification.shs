@@ -22,8 +22,27 @@ hash_file() {
 validate_hosted_runtime_authority() {
   authority=$1
   [ -n "$authority" ] && [ -d "$authority" ] || return 1
+  capsule_receipt="$authority/phase2-runtime-capsule.env"
   admission=$(dirname "$compiler")/admission.env
-  [ -f "$admission" ] && [ ! -L "$admission" ] || return 1
+  receipt="$authority/hosted-runtime.env"
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  [ "$(manifest_value schema "$receipt")" = simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
+  [ "$(manifest_value status "$receipt")" = frozen ] || return 1
+  relative=$(manifest_value relative_path "$receipt")
+  expected=$(manifest_value sha256 "$receipt")
+  if [ -f "$capsule_receipt" ] && [ ! -L "$capsule_receipt" ]; then
+    "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$authority" >/dev/null || return 1
+    [ "$(manifest_value schema "$capsule_receipt")" = simple-phase2-runtime-capsule-v1 ] || return 1
+    [ "$(manifest_value status "$capsule_receipt")" = frozen ] || return 1
+    [ "$(manifest_value compiler_sha256 "$capsule_receipt")" = "$expected_sha" ] || return 1
+    [ "$(hash_file "$authority/simple")" = "$expected_sha" ] || return 1
+    native_all="$authority/libsimple_native_all.a"
+    [ -f "$native_all" ] && [ ! -L "$native_all" ] || return 1
+    [ "$(hash_file "$native_all")" = "$(manifest_value native_all_sha256 "$capsule_receipt")" ] || return 1
+    [ "$(hash_file "$authority/hosted-runtime.env")" = "$(manifest_value hosted_authority_receipt_sha256 "$capsule_receipt")" ] || return 1
+    runtime_cache_identity=$(manifest_value capsule_identity_sha256 "$capsule_receipt")
+  else
+    [ -f "$admission" ] && [ ! -L "$admission" ] || return 1
   # Stage-2 admission v1 does not bind a hosted runtime.  Do not search mutable
   # Cargo targets or accept an arbitrary --runtime-path: remain explicitly
   # UNSUPPORTED until the producer publishes the v2 frozen-capsule fields.
@@ -32,14 +51,9 @@ validate_hosted_runtime_authority() {
   [ "$(manifest_value candidate_path "$admission")" = "$compiler" ] || return 1
   [ "$(manifest_value candidate_sha256 "$admission")" = "$expected_sha" ] || return 1
   [ "$(manifest_value runtime_authority_path "$admission")" = "$authority" ] || return 1
-  receipt="$authority/hosted-runtime.env"
-  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
-  [ "$(manifest_value schema "$receipt")" = simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
-  [ "$(manifest_value status "$receipt")" = frozen ] || return 1
-  relative=$(manifest_value relative_path "$receipt")
-  expected=$(manifest_value sha256 "$receipt")
   [ "$(manifest_value hosted_runtime_relative_path "$admission")" = "$relative" ] || return 1
   [ "$(manifest_value hosted_runtime_sha256 "$admission")" = "$expected" ] || return 1
+  fi
   case "$relative" in deps/*) ;; *) return 1 ;; esac
   hosted_leaf=${relative#deps/}
   case "$hosted_leaf" in libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
@@ -54,6 +68,9 @@ validate_hosted_runtime_authority() {
   [ "$(stat -c '%a' "$hosted")" = 400 ] || return 1
   [ "$(stat -c '%a' "$receipt")" = 400 ] || return 1
   hosted_runtime_sha=$expected
+  if [ -z "${runtime_cache_identity:-}" ]; then
+    runtime_cache_identity=$hosted_runtime_sha
+  fi
   return 0
 }
 
@@ -136,7 +153,12 @@ fi
 compiler_snapshot="$work_root/compiler.snapshot"
 
 if [ -z "$runtime_path" ]; then
-  candidate_runtime=$(dirname "$(dirname "$compiler")")/stage2-runtime-authority
+  compiler_dir=$(dirname "$compiler")
+  if [ -f "$compiler_dir/phase2-runtime-capsule.env" ]; then
+    candidate_runtime=$compiler_dir
+  else
+    candidate_runtime=$(dirname "$compiler_dir")/stage2-runtime-authority
+  fi
   if [ -d "$candidate_runtime" ]; then
     runtime_path=$candidate_runtime
   fi
@@ -144,6 +166,11 @@ fi
 if [ -n "$runtime_path" ]; then
   [ -d "$runtime_path" ] || die "runtime path is not a directory: $runtime_path"
   runtime_path=$(cd "$runtime_path" && pwd -P)
+fi
+
+if [ "$phase" = stage2 ]; then
+  [ -n "$runtime_path" ] && [ -f "$runtime_path/phase2-runtime-capsule.env" ] ||
+    die "Phase2 verification requires a SHA-qualified runtime capsule"
 fi
 
 : >"$summary"
@@ -304,8 +331,8 @@ else
   else
     echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
     hosted_runtime_ready=1
-    tool_cache="$cache_root/compiler-tools/$snapshot_sha/$hosted_runtime_sha"
-    tool_outputs="$outputs/compiler-tools/$snapshot_sha/$hosted_runtime_sha"
+    tool_cache="$cache_root/compiler-tools/$snapshot_sha/$runtime_cache_identity"
+    tool_outputs="$outputs/compiler-tools/$snapshot_sha/$runtime_cache_identity"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
     mkdir -p "$tool_cache/full-cli" "$tool_cache/test-runner"
@@ -367,8 +394,8 @@ if [ "$phase" = stage1 ]; then
     --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
     --output "$outputs/simple_lsp_mcp_server"
 elif [ "$hosted_runtime_ready" -eq 1 ]; then
-  tool_build_cache="$cache/tool_builds/$snapshot_sha/$hosted_runtime_sha"
-  server_outputs="$outputs/tool-builds/$snapshot_sha/$hosted_runtime_sha"
+  tool_build_cache="$cache/tool_builds/$snapshot_sha/$runtime_cache_identity"
+  server_outputs="$outputs/tool-builds/$snapshot_sha/$runtime_cache_identity"
   mkdir -p "$server_outputs"
   rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
   run_matrix_task mcp_build "$compiler_snapshot" native-build \
