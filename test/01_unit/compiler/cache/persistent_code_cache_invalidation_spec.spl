@@ -36,6 +36,33 @@ extern fn rt_file_write_bytes(path: text, data: [i64]) -> bool
 fn fresh_root() -> text:
     "build/tmp/pcc_inval_spec/{rt_getpid()}-{rt_time_now_unix_micros()}"
 
+fn read_entry(root: text, key: PccKey) -> [i64]:
+    val path = pcc_entry_path(root, pcc_key_digest(key))
+    rt_file_read_bytes(path) ?? []
+
+fn write_entry(root: text, key: PccKey, bytes: [i64]) -> bool:
+    val path = pcc_entry_path(root, pcc_key_digest(key))
+    rt_file_write_bytes(path, bytes)
+
+fn take_bytes(bytes: [i64], count: i64) -> [i64]:
+    var out: [i64] = []
+    var index = 0
+    while index < bytes.len() and index < count:
+        out.push(bytes[index])
+        index = index + 1
+    out
+
+fn flip_byte(bytes: [i64], target: i64) -> [i64]:
+    var out: [i64] = []
+    var index = 0
+    while index < bytes.len():
+        if index == target:
+            out.push(bytes[index] ^ 1)
+        else:
+            out.push(bytes[index])
+        index = index + 1
+    out
+
 fn prepare(source: text) -> [i64]:
     var words: [i64] = []
     words.push(source.len())
@@ -184,7 +211,9 @@ describe "persistent code cache — sabotage falls back to cold":
         val load = pcc_load(root, k)
         expect(load.hit).to_be(false)
         expect(load.words.len()).to_be(0)
-        expect(load.reason).to_be("length-mismatch")
+        # Integrity is checked before body decoding: a forged checksum cannot
+        # use malformed tokens to select a later diagnostic.
+        expect(load.reason).to_be("checksum-mismatch")
 
     it "a corrupted word in the body misses on the checksum":
         val root = fresh_root()
@@ -201,8 +230,10 @@ describe "persistent code cache — sabotage falls back to cold":
         val root = fresh_root()
         val k = pcc_key_new("unit/count", "h", "d")
         pcc_store(root, k, [1, 2, 3])
-        val good = read_entry(root, k)
-        write_entry(root, k, flip_byte(good, 69))
+        val path = pcc_entry_path(root, pcc_key_digest(k))
+        val good = rt_file_read_text(path)
+        # Preserve key and checksum so declared/body length is the first fault.
+        rt_file_write_text(path, good.replace("words=3", "words=2"))
         val load = pcc_load(root, k)
         expect(load.hit).to_be(false)
         expect(load.words.len()).to_be(0)
@@ -212,8 +243,10 @@ describe "persistent code cache — sabotage falls back to cold":
         val root = fresh_root()
         val k = pcc_key_new("unit/sum", "h", "d")
         pcc_store(root, k, [7, 8, 9])
-        val good = read_entry(root, k)
-        write_entry(root, k, flip_byte(good, 77))
+        val path = pcc_entry_path(root, pcc_key_digest(k))
+        val good = rt_file_read_text(path)
+        # Preserve all earlier fields and body; checksum validation owns this miss.
+        rt_file_write_text(path, good.replace("checksum=", "checksum=x"))
         val load = pcc_load(root, k)
         expect(load.hit).to_be(false)
         expect(load.words.len()).to_be(0)
@@ -245,8 +278,11 @@ describe "persistent code cache — sabotage falls back to cold":
         val root = fresh_root()
         val k = pcc_key_new("unit/echo", "h", "d")
         pcc_store(root, k, [1, 2])
-        val good = read_entry(root, k)
-        write_entry(root, k, flip_byte(good, 5))
+        val path = pcc_entry_path(root, pcc_key_digest(k))
+        val good = rt_file_read_text(path)
+        # Preserve valid magic so echoed-key validation has precedence.
+        rt_file_write_text(path, good.replace(
+            "key=" + pcc_key_digest(k), "key=" + ("0" * 64)))
         val load = pcc_load(root, k)
         expect(load.hit).to_be(false)
         expect(load.reason).to_be("key-mismatch")
