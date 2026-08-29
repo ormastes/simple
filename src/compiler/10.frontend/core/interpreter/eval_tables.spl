@@ -24,6 +24,18 @@ var ft_vals: [i64] = []
 var ft_buckets: [i64] = []
 var ft_nexts: [i64] = []
 
+# Caller-aware function ownership.  The historical flat table remains for
+# compatibility, but cannot distinguish two modules which define the same
+# bare name.  Keep the authoritative owner and selective-import routes in
+# parallel arrays; these tables are small during interpretation and lookup is
+# off the parser hot path.
+var fto_owners: [text] = []
+var fto_names: [text] = []
+var fto_vals: [i64] = []
+var fib_callers: [text] = []
+var fib_names: [text] = []
+var fib_owners: [text] = []
+
 # ===== Function Return Types (Hash Map) =====
 var frt_keys: [text] = []
 var frt_vals: [i64] = []
@@ -141,6 +153,10 @@ fn func_table_reset():
     ft_vals = []
     ft_buckets = hm_make_global_buckets()
     ft_nexts = []
+    fto_owners = []
+    fto_names = []
+    fto_vals = []
+    func_import_binding_reset()
     frt_keys = []
     frt_vals = []
     frt_buckets = hm_make_global_buckets()
@@ -274,6 +290,60 @@ fn func_table_lookup(name: text) -> i64:
         if ft_keys[idx] == name:
             return ft_vals[idx]
         idx = ft_nexts[idx]
+    -1
+
+fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    var i = 0
+    while i < fto_names.len():
+        if fto_owners[i] == owner and fto_names[i] == name:
+            fto_vals[i] = decl_id
+            return
+        i = i + 1
+    fto_owners.push(owner)
+    fto_names.push(name)
+    fto_vals.push(decl_id)
+
+fn func_table_lookup_owned(owner: text, name: text) -> i64:
+    var i = fto_names.len()
+    while i > 0:
+        i = i - 1
+        if fto_owners[i] == owner and fto_names[i] == name:
+            return fto_vals[i]
+    -1
+
+fn func_import_binding_reset():
+    fib_callers = []
+    fib_names = []
+    fib_owners = []
+
+fn func_import_binding_register(caller: text, name: text, owner: text):
+    var i = 0
+    while i < fib_names.len():
+        if fib_callers[i] == caller and fib_names[i] == name:
+            fib_owners[i] = owner
+            return
+        i = i + 1
+    fib_callers.push(caller)
+    fib_names.push(name)
+    fib_owners.push(owner)
+
+fn func_import_binding_lookup(caller: text, name: text) -> text:
+    var i = fib_names.len()
+    while i > 0:
+        i = i - 1
+        if fib_callers[i] == caller and fib_names[i] == name:
+            return fib_owners[i]
+    ""
+
+fn func_resolve_for_caller(caller: text, name: text) -> i64:
+    val own = func_table_lookup_owned(caller, name)
+    if own >= 0:
+        return own
+    val imported_owner = func_import_binding_lookup(caller, name)
+    if imported_owner != "":
+        return func_table_lookup_owned(imported_owner, name)
+    # No caller route is safer than silently selecting an unrelated module's
+    # last-write-wins entry.  The call evaluator may apply its legacy fallback.
     -1
 
 fn func_table_remove(name: text) -> bool:
