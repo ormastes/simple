@@ -343,8 +343,11 @@ impl Node:
     pub fn child_count(self) -> i64:
         return self.child_count_value
 
-# Value-semantic node storage owned by Tree.  Nodes are append-only, so ids
-# remain stable for the lifetime of the tree.
+# Value-semantic node storage owned by Tree.  Copying an arena creates a logical
+# snapshot: handles for nodes present at copy time remain valid in both copies,
+# while reset advances only the reset copy's generation.  Callers that intend
+# to build a distinct tree must use new() so it receives a distinct owner.
+# Nodes are append-only between resets, so ids remain stable for that snapshot.
 pub struct NodeArena:
     nodes: [Node]
     child_edges: [NodeId]
@@ -389,6 +392,12 @@ impl NodeArena:
         if node.child_start < 0 or node.child_count_value < 0 or node.child_start + node.child_count_value > self.child_edges.len():
             return result
         var offset = 0
+        while offset < node.child_count_value:
+            val child = self.child_edges[node.child_start + offset]
+            if self.get(child).is_none():
+                return result
+            offset = offset + 1
+        offset = 0
         while offset < node.child_count_value:
             result.push(self.child_edges[node.child_start + offset])
             offset = offset + 1
