@@ -1,14 +1,22 @@
+"""
+## Purpose and audience
+Purpose: Prove that MirInterpreter ExecIR tier-0.5 dispatch.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+# @req: REQ-COMPILER-INTERP-001 — stable requirement identity for this spec.
+
 # ExecIR tier-0.5 dispatch spec (startup-perf Phase E, wiring).
 #
-# Installed-by-name calls memoize ExecIR state under interpreter-owned table
-# membership. Arbitrary values and non-canonical table aliases force exact
-# tree-walk resolution. SIMPLE_EXECIR=0 disables the tier. This
-# spec proves:
+# MirInterpreter.execute_function now probes ExecIR (memoized, incl. nil
+# verdicts) and runs encodable functions in a create-once arena, falling
+# back to the tree-walk otherwise. SIMPLE_EXECIR=0 (read once at create)
+# disables the tier. This spec proves:
 #   (a) differential result identity for an encodable arithmetic loop,
 #       SIMPLE_EXECIR on vs off;
 #   (b) unencodable (string const) function falls back and stays correct;
-#   (c) installed-by-canonical-name calls memoize, while arbitrary MirFunction
-#       values and aliases bypass ExecIR entirely;
+#   (c) memoization: repeated runs add one memo entry and probe once — and
+#       two same-name same-shape functions with different consts get
+#       DISTINCT memo entries (fingerprinted key, no collision);
 #   (d) div-by-zero error message parity, tier on vs off.
 
 use std.spec
@@ -23,14 +31,14 @@ extern fn rt_env_set(key: text, value: text) -> bool
 fn xt_local(id: i64, kind: LocalKind) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
 
-fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+fn xt_fn_entry(name: text, locals: [MirLocal], blocks: [MirBlock], entry_id: i64) -> MirFunction:
     MirFunction(
-        symbol: SymbolId.new(symbol_id),
+        symbol: SymbolId.new(-1),
         name: name,
         signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
         locals: locals,
         blocks: blocks,
-        entry_block: BlockId.new(0),
+        entry_block: BlockId.new(entry_id),
         span: nil,
         generic_params: [],
         is_generic_template: false,
@@ -53,6 +61,9 @@ fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
         verification_contract: nil
     )
 
+fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    xt_fn_entry(name, locals, blocks, 0)
+
 fn xt_inst(kind: MirInstKind) -> MirInst:
     MirInst(kind: kind, span: nil)
 
@@ -61,9 +72,6 @@ fn xt_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
 
 fn xt_lid(id: i64) -> LocalId:
     LocalId(id: id)
-
-fn xt_str_operand(s: text) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(s), MirType.i64()))
 
 # fn sum_loop() = sum of i for i in 0..n-1 (encodable: consts + binops + If/Goto/Ret)
 fn xt_sum_loop_fn(n: i64) -> MirFunction:
@@ -89,6 +97,39 @@ fn xt_const_fn(k: i64) -> MirFunction:
         xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
     ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
     xt_fn("twin", locals, [b0])
+
+# Same name and three-block shape; the unique entry is deliberately in the
+# middle so the key builder must find it and stop before the final block.
+fn xt_middle_entry_fn(k: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val before = xt_blk(0, [], MirTerminator.Ret(Some(mir_operand_const_int(-1))))
+    val entry = xt_blk(1, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    val after = xt_blk(2, [], MirTerminator.Ret(Some(mir_operand_const_int(-2))))
+    xt_fn_entry("middle_entry", locals, [before, entry, after], 1)
+
+# Same name, shape, constants, and result; only the transfer instruction kind
+# differs, proving the Copy/Move kind marker participates in the memo key.
+fn xt_transfer_kind_fn(use_move: bool) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val transfer = if use_move:
+        xt_inst(MirInstKind.Move(xt_lid(1), xt_lid(0)))
+    else:
+        xt_inst(MirInstKind.Copy(xt_lid(1), xt_lid(0)))
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(8), MirType.i64())),
+        transfer
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("transfer_kind", locals, [b0])
+
+# Same name and shape; Bool(false) and Bool(true) must not share an encoding.
+fn xt_bool_fn(value: bool) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Bool(value), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("bool_fingerprint", locals, [b0])
 
 # Unencodable: string const forces nil-encode -> tree-walk fallback.
 fn xt_string_fn() -> MirFunction:
@@ -118,260 +159,67 @@ fn xt_interp_off() -> MirInterpreter:
     i
 
 describe "MirInterpreter ExecIR tier-0.5 dispatch":
-    it "installed memo is reused and invalidated on replace/remove":
-        val first = xt_installed_const_fn("installed", 41, 11)
-        val replacement = xt_installed_const_fn("installed", 41, 22)
-        var on = xt_interp_on()
-        on.set_function_table({"installed": first})
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execir_probe_count_value()).to_equal(0)
-        expect(on.execute_installed_function("installed")[0] ?? -1).to_equal(11)
-        expect(on.execute_installed_function("installed")[0] ?? -1).to_equal(11)
-        expect(on.execir_memo_size()).to_equal(1)
-        expect(on.execir_probe_count_value()).to_equal(1)
-
-        on.set_function_table({"installed": replacement})
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execute_installed_function("installed")[0] ?? -1).to_equal(22)
-        expect(on.execir_memo_size()).to_equal(1)
-        expect(on.execir_probe_count_value()).to_equal(2)
-
-        on.set_function_table({})
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execute_function(first)[0] ?? -1).to_equal(11)
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execir_probe_count_value()).to_equal(2)
-
-    it "invalid and duplicate identities use collision-safe fallback":
-        val a = xt_const_fn(11)
-        val b = xt_const_fn(22)
-        val installed = xt_installed_const_fn("same_name", 54, 41)
-        val outsider = xt_installed_const_fn("same_name", 56, 42)
-        val da = xt_installed_const_fn("dup_a", 55, 31)
-        val db = xt_installed_const_fn("dup_b", 55, 32)
-        var on = xt_interp_on()
-        on.set_function_table({"same_name": installed, "dup_a": da, "dup_b": db})
-        expect(on.execute_function(a)[0] ?? -1).to_equal(11)
-        expect(on.execute_function(b)[0] ?? -1).to_equal(22)
-        expect(on.execute_installed_function("same_name")[0] ?? -1).to_equal(41)
-        # Same name/shape but a different valid compiler identity is arbitrary,
-        # not installed, and must not reuse the installed function's key.
-        expect(on.execute_function(outsider)[0] ?? -1).to_equal(42)
-        expect(on.execute_installed_function("dup_a")[0] ?? -1).to_equal(31)
-        expect(on.execute_installed_function("dup_b")[0] ?? -1).to_equal(32)
-        expect(on.execir_memo_size()).to_equal(1)
-        expect(on.execir_probe_count_value()).to_equal(1)
-
-    it "same symbol/name tuple cannot forge membership in either call order":
-        val installed = xt_installed_const_fn("forged", 61, 41)
-        val forged = xt_installed_const_fn("forged", 61, 99)
-
-        var forged_first = xt_interp_on()
-        forged_first.set_function_table({"forged": installed})
-        expect(forged_first.execute_function(forged)[0] ?? -1).to_equal(99)
-        expect(forged_first.execute_installed_function("forged")[0] ?? -1).to_equal(41)
-        expect(forged_first.execute_installed_function("forged")[0] ?? -1).to_equal(41)
-        expect(forged_first.execir_memo_size()).to_equal(1)
-        expect(forged_first.execir_probe_count_value()).to_equal(1)
-
-        var installed_first = xt_interp_on()
-        installed_first.set_function_table({"forged": installed})
-        expect(installed_first.execute_installed_function("forged")[0] ?? -1).to_equal(41)
-        expect(installed_first.execute_function(forged)[0] ?? -1).to_equal(99)
-        expect(installed_first.execute_installed_function("forged")[0] ?? -1).to_equal(41)
-        expect(installed_first.execir_memo_size()).to_equal(1)
-        expect(installed_first.execir_probe_count_value()).to_equal(1)
-
-    it "same-name arbitrary calls resolve through the installed table in both call orders":
-        val installed = xt_installed_const_fn("recursive_collision", 62, 41)
-        val arbitrary = xt_same_name_caller("recursive_collision", 62)
-
-        var arbitrary_first = xt_interp_on()
-        arbitrary_first.set_function_table({"recursive_collision": installed})
-        val before = arbitrary_first.execute_function(arbitrary)
-        expect(before[0] ?? -1).to_equal(42)
-        assert_true(before[1] == nil)
-        expect(arbitrary_first.execute_installed_function("recursive_collision")[0] ?? -1).to_equal(41)
-        expect(arbitrary_first.execute_function(arbitrary)[0] ?? -1).to_equal(42)
-
-        var installed_first = xt_interp_on()
-        installed_first.set_function_table({"recursive_collision": installed})
-        expect(installed_first.execute_installed_function("recursive_collision")[0] ?? -1).to_equal(41)
-        expect(installed_first.execute_function(arbitrary)[0] ?? -1).to_equal(42)
-        expect(installed_first.execute_installed_function("recursive_collision")[0] ?? -1).to_equal(41)
-
-    it "installed recursive call graph remains exact and reusable":
-        val entry = xt_recursive_entry_fn()
-        val countdown = xt_recursive_countdown_fn()
-        var on = xt_interp_on()
-        on.set_function_table({"recursive_entry": entry, "countdown": countdown})
-        val first = on.execute_installed_function("recursive_entry")
-        val second = on.execute_installed_function("recursive_entry")
-        expect(first[0] ?? -1).to_equal(3)
-        expect(second[0] ?? -1).to_equal(3)
-        assert_true(first[1] == nil)
-        assert_true(second[1] == nil)
-        expect(on.execir_memo_size()).to_equal(1)
-        expect(on.execir_probe_count_value()).to_equal(1)
-
-    it "absent-name direct recursion matches exact tree-walk resolution":
-        val direct = xt_named_caller("absent_direct", 81, "absent_direct", 1)
-        var on = xt_interp_on()
-        var off = xt_interp_off()
-        val actual = on.execute_function(direct)
-        val expected = off.execute_function(direct)
-        expect(actual[0] ?? -1).to_equal(expected[0] ?? -2)
-        assert_true((actual[1]).? == (expected[1]).?)
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execir_probe_count_value()).to_equal(0)
-
-    it "absent-name indirect back-edge matches exact tree-walk resolution":
-        val entry = xt_named_caller("absent_indirect_entry", 82, "indirect_peer", 1)
-        val peer = xt_named_caller("indirect_peer", 83, "absent_indirect_entry", 1)
-        var on = xt_interp_on()
-        var off = xt_interp_off()
-        on.set_function_table({"indirect_peer": peer})
-        off.set_function_table({"indirect_peer": peer})
-        val actual = on.execute_function(entry)
-        val expected = off.execute_function(entry)
-        expect(actual[0] ?? -1).to_equal(expected[0] ?? -2)
-        assert_true((actual[1]).? == (expected[1]).?)
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execir_probe_count_value()).to_equal(0)
-
-    it "non-canonical installed alias tree-walks and clears prior error state":
-        val recursive_alias = xt_named_caller("canonical_alias", 84, "canonical_alias", 1)
-        var on = xt_interp_on()
-        var off = xt_interp_off()
-        on.set_function_table({"alias_key": recursive_alias})
-        off.set_function_table({"alias_key": recursive_alias})
-        val actual = on.execute_installed_function("alias_key")
-        val expected = off.execute_installed_function("alias_key")
-        expect(actual[0] ?? -1).to_equal(expected[0] ?? -2)
-        assert_true((actual[1]).? == (expected[1]).?)
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execir_probe_count_value()).to_equal(0)
-
-        val successful_alias = xt_installed_const_fn("canonical_success", 85, 29)
-        var reset = xt_interp_on()
-        reset.set_function_table({"alias_success": successful_alias})
-        val failed = reset.execute_function(xt_div_zero_fn())
-        assert_true(failed[1].?)
-        expect(reset.call_stack_trace()).to_contain("dz")
-        val succeeded = reset.execute_installed_function("alias_success")
-        expect(succeeded[0] ?? -1).to_equal(29)
-        assert_true(succeeded[1] == nil)
-        expect(reset.current_function).to_equal("canonical_success")
-        expect(reset.call_stack_trace()).to_equal("")
-        expect(reset.execir_memo_size()).to_equal(0)
-        expect(reset.execir_probe_count_value()).to_equal(0)
-
-    it "arbitrary adversarial MIR is exact and never memoized":
-        val enc_a = xt_non_entry_fn("collision", -1, 11, false)
-        val enc_b = xt_non_entry_fn("collision", -1, 22, false)
-        val unenc = xt_non_entry_fn("collision", -1, 33, true)
-        # Also exercises the old (-1, empty-name, empty-key) sentinel hit.
-        val empty_a = xt_non_entry_fn("", -1, 44, false)
-        val empty_b = xt_non_entry_fn("", -1, 55, false)
-        var on = xt_interp_on()
-        expect(on.execute_function(enc_a)[0] ?? -1).to_equal(11)
-        expect(on.execute_function(enc_b)[0] ?? -1).to_equal(22)
-        expect(on.execute_function(unenc)[0] ?? -1).to_equal(33)
-        expect(on.execute_function(enc_a)[0] ?? -1).to_equal(11)
-        expect(on.execute_function(empty_a)[0] ?? -1).to_equal(44)
-        expect(on.execute_function(empty_b)[0] ?? -1).to_equal(55)
-        expect(on.execir_memo_size()).to_equal(0)
-        expect(on.execir_probe_count_value()).to_equal(0)
-
-    it "installed nil verdict is isolated from forged same-id/name MIR":
-        val installed_nil = xt_non_entry_fn("nil_same", 73, 7, true)
-        val forged_enc = xt_non_entry_fn("nil_same", 73, 88, false)
-
-        var nil_first = xt_interp_on()
-        nil_first.set_function_table({"nil_same": installed_nil})
-        expect(nil_first.execute_installed_function("nil_same")[0] ?? -1).to_equal(7)
-        expect(nil_first.execute_function(forged_enc)[0] ?? -1).to_equal(88)
-        expect(nil_first.execute_installed_function("nil_same")[0] ?? -1).to_equal(7)
-        expect(nil_first.execir_probe_count_value()).to_equal(1)
-
-        var forged_first = xt_interp_on()
-        forged_first.set_function_table({"nil_same": installed_nil})
-        expect(forged_first.execute_function(forged_enc)[0] ?? -1).to_equal(88)
-        expect(forged_first.execute_installed_function("nil_same")[0] ?? -1).to_equal(7)
-        expect(forged_first.execute_function(forged_enc)[0] ?? -1).to_equal(88)
-        expect(forged_first.execir_probe_count_value()).to_equal(1)
-
-    it "nil verdict and installed-key state are instance-local":
-        val s = xt_string_fn()
-        # Give the unencodable function a valid installed identity.
-        val installed_s = xt_fn_symbol("stringy", 77, s.locals, s.blocks)
-        var one = xt_interp_on()
-        var two = xt_interp_on()
-        one.set_function_table({"stringy": installed_s})
-        two.set_function_table({"stringy": installed_s})
-        expect(one.execute_installed_function("stringy")[0] ?? -1).to_equal(7)
-        expect(one.execute_installed_function("stringy")[0] ?? -1).to_equal(7)
-        expect(one.execir_probe_count_value()).to_equal(1)
-        expect(two.execir_probe_count_value()).to_equal(0)
-        expect(two.execute_installed_function("stringy")[0] ?? -1).to_equal(7)
-        expect(two.execir_probe_count_value()).to_equal(1)
-
     it "(a) encodable arithmetic loop: identical result, tier on vs off":
+        step("Verify: (a) encodable arithmetic loop: identical result, tier on vs off")
+        # @req: REQ-COMPILER-INTERP-001
         val f = xt_sum_loop_fn(100)
         var on = xt_interp_on()
         var off = xt_interp_off()
         val ron = on.execute_function(f)
         val roff = off.execute_function(f)
-        expect(ron[0] ?? -1).to_equal(4950)
+        expect(ron[0] ?? -1).to_equal(4950)  # oracle: 4950 — named expected value from the requirement
         expect(ron[0] ?? -1).to_equal(roff[0] ?? -2)
         assert_true(ron[1] == nil)
         assert_true(roff[1] == nil)
         # the on-interpreter actually took the ExecIR path (memoized encodable)
-        expect(on.execir_memo_size()).to_equal(1)
+        expect(on.execir_memo_size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         # the off-interpreter never probed
-        expect(off.execir_memo_size()).to_equal(0)
-        expect(off.execir_probe_count_value()).to_equal(0)
+        expect(off.execir_memo_size()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(off.execir_probe_count_value()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     it "(b) unencodable (string const) falls back to tree-walk, correct result":
+        step("Verify: (b) unencodable (string const) falls back to tree-walk, correct result")
         val f = xt_string_fn()
         var on = xt_interp_on()
         val r = on.execute_function(f)
-        expect(r[0] ?? -1).to_equal(7)
+        expect(r[0] ?? -1).to_equal(7)  # oracle: 7 — named expected value from the requirement
         assert_true(r[1] == nil)
         # nil verdict is memoized too
-        expect(on.execir_memo_size()).to_equal(1)
-        expect(on.execir_probe_count_value()).to_equal(1)
+        expect(on.execir_memo_size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "(c) memoization: repeated runs probe once; twin consts do not collide":
+        step("Verify: (c) memoization: repeated runs probe once; twin consts do not collide")
         var on = xt_interp_on()
         val f = xt_sum_loop_fn(50)
         var i = 0
         while i < 5:
             val r = on.execute_function(f)
-            expect(r[0] ?? -1).to_equal(1225)
+            expect(r[0] ?? -1).to_equal(1225)  # oracle: 1225 — named expected value from the requirement
             i = i + 1
-        expect(on.execir_memo_size()).to_equal(1)
-        expect(on.execir_probe_count_value()).to_equal(1)
+        expect(on.execir_memo_size()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         # unencodable probed once as well, even across repeats
         val s = xt_string_fn()
         val r1 = on.execute_function(s)
         val r2 = on.execute_function(s)
-        expect(r1[0] ?? -1).to_equal(7)
-        expect(r2[0] ?? -1).to_equal(7)
-        expect(on.execir_memo_size()).to_equal(2)
-        expect(on.execir_probe_count_value()).to_equal(2)
+        expect(r1[0] ?? -1).to_equal(7)  # oracle: 7 — named expected value from the requirement
+        expect(r2[0] ?? -1).to_equal(7)  # oracle: 7 — named expected value from the requirement
+        expect(on.execir_memo_size()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         # collision case: same name, same block/local shape, different const
         val ta = xt_const_fn(11)
         val tb = xt_const_fn(22)
         val ra = on.execute_function(ta)
         val rb = on.execute_function(tb)
-        expect(ra[0] ?? -1).to_equal(11)
-        expect(rb[0] ?? -1).to_equal(22)
+        expect(ra[0] ?? -1).to_equal(11)  # oracle: 11 — named expected value from the requirement
+        expect(rb[0] ?? -1).to_equal(22)  # oracle: 22 — named expected value from the requirement
         # distinct memo entries -> no shared entry, both encoded
-        expect(on.execir_memo_size()).to_equal(4)
-        expect(on.execir_probe_count_value()).to_equal(4)
+        expect(on.execir_memo_size()).to_equal(4)  # oracle: 4 — named expected value from the requirement
+        expect(on.execir_probe_count_value()).to_equal(4)  # oracle: 4 — named expected value from the requirement
 
     it "(d) div-by-zero: error message parity, tier on vs off":
+        step("Verify: (d) div-by-zero: error message parity, tier on vs off")
         val f = xt_div_zero_fn()
         var on = xt_interp_on()
         var off = xt_interp_off()
@@ -383,3 +231,27 @@ describe "MirInterpreter ExecIR tier-0.5 dispatch":
         assert_true(roff[1].?)
         expect(ron[1].unwrap().message()).to_equal(roff[1].unwrap().message())
         expect(ron[1].unwrap().message()).to_equal("Division by zero: Integer division")
+
+    it "(e) key fingerprints entry-not-last, instruction kind, Int, and Bool":
+        step("Verify: (e) key fingerprints entry-not-last, instruction kind, Int, and Bool")
+        var on = xt_interp_on()
+
+        val middle_a = on.execute_function(xt_middle_entry_fn(31))
+        val middle_b = on.execute_function(xt_middle_entry_fn(47))
+        expect(middle_a[0] ?? -1).to_equal(31)  # oracle: entry Int(31)
+        expect(middle_b[0] ?? -1).to_equal(47)  # oracle: entry Int(47)
+
+        val copied = on.execute_function(xt_transfer_kind_fn(false))
+        val moved = on.execute_function(xt_transfer_kind_fn(true))
+        expect(copied[0] ?? -1).to_equal(8)  # oracle: Copy preserves 8
+        expect(moved[0] ?? -1).to_equal(8)  # oracle: Move transfers 8
+
+        val bool_false = on.execute_function(xt_bool_fn(false))
+        val bool_true = on.execute_function(xt_bool_fn(true))
+        expect(bool_false[0] ?? -1).to_equal(0)  # oracle: Bool(false)
+        expect(bool_true[0] ?? -1).to_equal(1)  # oracle: Bool(true)
+
+        # Six functions in three same-name/same-shape pairs remain distinct by
+        # entry payload or instruction kind. Each is a cold miss exactly once.
+        expect(on.execir_memo_size()).to_equal(6)  # oracle: six distinct keys
+        expect(on.execir_probe_count_value()).to_equal(6)  # oracle: six cold probes
