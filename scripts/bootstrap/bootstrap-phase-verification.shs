@@ -19,6 +19,44 @@ hash_file() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+validate_hosted_runtime_authority() {
+  authority=$1
+  [ -n "$authority" ] && [ -d "$authority" ] || return 1
+  admission=$(dirname "$compiler")/admission.env
+  [ -f "$admission" ] && [ ! -L "$admission" ] || return 1
+  # Stage-2 admission v1 does not bind a hosted runtime.  Do not search mutable
+  # Cargo targets or accept an arbitrary --runtime-path: remain explicitly
+  # UNSUPPORTED until the producer publishes the v2 frozen-capsule fields.
+  [ "$(manifest_value schema "$admission")" = simple-bootstrap-stage2-admission-v2 ] || return 1
+  [ "$(manifest_value status "$admission")" = admitted ] || return 1
+  [ "$(manifest_value candidate_path "$admission")" = "$compiler" ] || return 1
+  [ "$(manifest_value candidate_sha256 "$admission")" = "$expected_sha" ] || return 1
+  [ "$(manifest_value runtime_authority_path "$admission")" = "$authority" ] || return 1
+  receipt="$authority/hosted-runtime.env"
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  [ "$(manifest_value schema "$receipt")" = simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
+  [ "$(manifest_value status "$receipt")" = frozen ] || return 1
+  relative=$(manifest_value relative_path "$receipt")
+  expected=$(manifest_value sha256 "$receipt")
+  [ "$(manifest_value hosted_runtime_relative_path "$admission")" = "$relative" ] || return 1
+  [ "$(manifest_value hosted_runtime_sha256 "$admission")" = "$expected" ] || return 1
+  case "$relative" in deps/*) ;; *) return 1 ;; esac
+  hosted_leaf=${relative#deps/}
+  case "$hosted_leaf" in libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  case "$hosted_leaf" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  hosted="$authority/$relative"
+  [ ! -L "$authority" ] && [ ! -L "$authority/deps" ] || return 1
+  [ -f "$hosted" ] && [ ! -L "$hosted" ] || return 1
+  [ "$(hash_file "$hosted")" = "$expected" ] || return 1
+  [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  [ "$(stat -c '%a' "$authority")" = 500 ] || return 1
+  [ "$(stat -c '%a' "$authority/deps")" = 500 ] || return 1
+  [ "$(stat -c '%a' "$hosted")" = 400 ] || return 1
+  [ "$(stat -c '%a' "$receipt")" = 400 ] || return 1
+  hosted_runtime_sha=$expected
+  return 0
+}
+
 phase=""
 compiler=""
 expected_sha=""
@@ -26,9 +64,12 @@ strategy=normal
 hash_policy=canonical
 work_root=""
 cache_root=""
+runtime_path=${SIMPLE_RUNTIME_PATH:-}
 source_root=$(pwd -P)
 timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-1800}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
+native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
+build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
 
 for arg in "$@"; do
   case "$arg" in
@@ -39,6 +80,7 @@ for arg in "$@"; do
     --hash-policy=*) hash_policy=${arg#*=} ;;
     --work-root=*) work_root=${arg#*=} ;;
     --cache-root=*) cache_root=${arg#*=} ;;
+    --runtime-path=*) runtime_path=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
@@ -50,6 +92,9 @@ case "$strategy" in normal|full) ;; *) die "verification requires normal or full
 case "$hash_policy" in canonical|temporary) ;; *) die "invalid hash policy" ;; esac
 case "$timeout_seconds" in ''|*[!0-9]*|0) die "timeout must be a positive integer" ;; esac
 case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a positive integer" ;; esac
+case "$native_internal_timeout" in ''|*[!0-9]*) die "native internal timeout must be an integer" ;; esac
+[ "$native_internal_timeout" -gt 60 ] || die "native internal timeout must exceed 60 seconds"
+case "$build_threads" in ''|*[!0-9]*|0) die "build threads must be a positive integer" ;; esac
 [ -n "$compiler" ] && [ -x "$compiler" ] || die "compiler is not executable: $compiler"
 [ -n "$expected_sha" ] || die "compiler SHA-256 is required"
 [ -n "$work_root" ] || die "work root is required"
@@ -87,6 +132,17 @@ if [ "$source_before" != "$source_after" ] || [ "$snapshot_sha" != "$expected_sh
 fi
 compiler_snapshot="$work_root/compiler.snapshot"
 
+if [ -z "$runtime_path" ]; then
+  candidate_runtime=$(dirname "$(dirname "$compiler")")/stage2-runtime-authority
+  if [ -d "$candidate_runtime" ]; then
+    runtime_path=$candidate_runtime
+  fi
+fi
+if [ -n "$runtime_path" ]; then
+  [ -d "$runtime_path" ] || die "runtime path is not a directory: $runtime_path"
+  runtime_path=$(cd "$runtime_path" && pwd -P)
+fi
+
 : >"$summary"
 {
   echo "schema=bootstrap-phase-verification-v1"
@@ -96,6 +152,8 @@ compiler_snapshot="$work_root/compiler.snapshot"
   echo "expected_compiler_sha256=$expected_sha"
   echo "actual_compiler_sha256=$snapshot_sha"
   echo "compiler_hash_status=$hash_status"
+  echo "runtime_path=${runtime_path:--}"
+  echo "native_internal_timeout_seconds=$native_internal_timeout"
 } >>"$summary"
 
 run_with_timeout() {
@@ -165,6 +223,7 @@ record_unsupported_task() {
 # its complete, stable list first and contain every spec independently so one
 # timeout cannot discard the remaining inventory or suppress terminal receipts.
 run_compiler_unit_tests() {
+  test_runner=$1
   task=compiler_unit_tests
   log="$logs/$task.log"
   inventory="$logs/${task}.inventory.tsv"
@@ -183,7 +242,7 @@ run_compiler_unit_tests() {
       HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
         SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
         "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-          "$spec_timeout_seconds" 15 "$compiler_snapshot" test "$relative" --mode=interpreter
+          "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable
     ) >>"$log" 2>&1 || status=$?
     result=FAIL
     case "$status" in
@@ -207,6 +266,7 @@ run_compiler_unit_tests() {
 # compiler phase remains independent. Full terminalizes each row and continues
 # all later independent tasks.
 run_matrix_task compiler_version "$compiler_snapshot" --version
+hosted_runtime_ready=0
 if [ "$phase" = stage1 ]; then
   # Stage 1 is the Rust bootstrap seed. It accepts `check`/`test`, but its own
   # authority banner forbids use as the normal tool; applying its older
@@ -222,29 +282,95 @@ if [ "$phase" = stage1 ]; then
     record_unsupported_task compiler_unit_tests bootstrap-seed-not-qualified-for-source-test
   fi
 else
-  run_matrix_task compiler_check "$compiler_snapshot" check src/compiler
-  run_matrix_task compiler_bootstrap_tests "$compiler_snapshot" test test/01_unit/compiler/bootstrap --mode=interpreter
-  run_matrix_task mcp_check "$compiler_snapshot" check src/app/mcp
-  run_matrix_task lsp_check "$compiler_snapshot" check src/app/simple_lsp_mcp
+  # bootstrap_main is a compiler capsule, not the full command-line tool. Build
+  # SHA-bound full-CLI and test-runner artifacts first, then route source checks
+  # and tests through the artifact that actually owns each command surface.
+  # This prevents an unsupported `check`/`test` dispatch from being expanded
+  # into thousands of false source failures.
+  hosted_runtime_sha=""
+  if ! validate_hosted_runtime_authority "$runtime_path"; then
+    record_unsupported_task compiler_cli_build host-gpu-hosted-runtime-authority-unavailable
+    record_unsupported_task test_runner_build host-gpu-hosted-runtime-authority-unavailable
+  else
+    echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
+    hosted_runtime_ready=1
+    tool_cache="$cache_root/compiler-tools/$snapshot_sha/$hosted_runtime_sha"
+    mkdir -p "$tool_cache/full-cli" "$tool_cache/test-runner"
+    run_matrix_task compiler_cli_build "$compiler_snapshot" native-build \
+      --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
+      --cache-dir "$tool_cache/full-cli" --output "$outputs/simple_cli"
+    run_matrix_task test_runner_build "$compiler_snapshot" native-build \
+      --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
+      --cache-dir "$tool_cache/test-runner" --output "$outputs/simple_test_runner"
+  fi
 
-  if [ "$strategy" = full ]; then
-    run_matrix_task library_check "$compiler_snapshot" check src/lib
-    if ! run_compiler_unit_tests; then
+  if [ -x "$outputs/simple_cli" ]; then
+    echo "compiler_cli_sha256=$(hash_file "$outputs/simple_cli")" >>"$summary"
+    run_matrix_task compiler_check "$outputs/simple_cli" check src/compiler
+    run_matrix_task mcp_check "$outputs/simple_cli" check src/app/mcp
+    run_matrix_task lsp_check "$outputs/simple_cli" check src/app/simple_lsp_mcp
+    if [ "$strategy" = full ]; then
+      run_matrix_task library_check "$outputs/simple_cli" check src/lib
+    fi
+  else
+    record_unsupported_task compiler_check full-cli-artifact-not-built
+    record_unsupported_task mcp_check full-cli-artifact-not-built
+    record_unsupported_task lsp_check full-cli-artifact-not-built
+    if [ "$strategy" = full ]; then
+      record_unsupported_task library_check full-cli-artifact-not-built
+    fi
+  fi
+
+  if [ -x "$outputs/simple_test_runner" ]; then
+    echo "test_runner_sha256=$(hash_file "$outputs/simple_test_runner")" >>"$summary"
+    run_matrix_task compiler_bootstrap_tests "$outputs/simple_test_runner" \
+      test/01_unit/compiler/bootstrap --mode=interpreter --unstable
+    if [ "$strategy" = full ] && ! run_compiler_unit_tests "$outputs/simple_test_runner"; then
       matrix_failed=1
+    fi
+  else
+    record_unsupported_task compiler_bootstrap_tests test-runner-artifact-not-built
+    if [ "$strategy" = full ]; then
+      record_unsupported_task compiler_unit_tests test-runner-artifact-not-built
     fi
   fi
 fi
 
-run_matrix_task mcp_build "$compiler_snapshot" native-build \
-  --source src/compiler --source src/app --source src/lib --entry-closure \
-  --entry src/app/mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
-  --output "$outputs/simple_mcp_server"
-run_matrix_task lsp_build "$compiler_snapshot" native-build \
-  --source src/compiler --source src/app --source src/lib --entry-closure \
-  --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
-  --output "$outputs/simple_lsp_mcp_server"
-run_matrix_task mcp_behavior env SIMPLE_LIB=src "$compiler_snapshot" test \
-  test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+if [ "$phase" = stage1 ]; then
+  run_matrix_task mcp_build "$compiler_snapshot" native-build \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry src/app/mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
+    --output "$outputs/simple_mcp_server"
+  run_matrix_task lsp_build "$compiler_snapshot" native-build \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
+    --output "$outputs/simple_lsp_mcp_server"
+elif [ "$hosted_runtime_ready" -eq 1 ]; then
+  tool_build_cache="$cache/tool_builds/$snapshot_sha/$hosted_runtime_sha"
+  run_matrix_task mcp_build "$compiler_snapshot" native-build \
+    --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+    --output "$outputs/simple_mcp_server"
+  run_matrix_task lsp_build "$compiler_snapshot" native-build \
+    --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+    --output "$outputs/simple_lsp_mcp_server"
+else
+  record_unsupported_task mcp_build host-gpu-hosted-runtime-authority-unavailable
+  record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
+fi
+if [ "$phase" != stage1 ] && [ -x "$outputs/simple_test_runner" ]; then
+  run_matrix_task mcp_behavior env SIMPLE_LIB=src "$outputs/simple_test_runner" \
+    test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable
+else
+  record_unsupported_task mcp_behavior test-runner-artifact-not-built
+fi
 
 for tool in simple_mcp_server simple_lsp_mcp_server; do
   if [ -x "$outputs/$tool" ]; then
