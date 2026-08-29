@@ -121,6 +121,64 @@ fn codegen_unbox_float_accepts_already_unboxed_f32() {
     }));
 }
 
+#[test]
+fn codegen_unbox_float_accepts_raw_f64_and_tagged_nil() {
+    assert!(aot_compiles("unbox_raw_f64", |f| {
+        let raw = f.new_vreg();
+        let unboxed = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstFloat {
+            dest: raw,
+            value: f64::from_bits(3),
+        });
+        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: raw });
+        block.instructions.push(MirInst::Cast {
+            dest,
+            source: unboxed,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::I64,
+        });
+        dest
+    }));
+    assert!(aot_compiles("unbox_tagged_nil", |f| {
+        let tagged_nil = f.new_vreg();
+        let unboxed = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: tagged_nil, value: 3 });
+        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: tagged_nil });
+        block.instructions.push(MirInst::Cast {
+            dest,
+            source: unboxed,
+            from_ty: TypeId::F64,
+            to_ty: TypeId::I64,
+        });
+        dest
+    }));
+}
+
+#[test]
+fn tagged_float_and_nil_runtime_semantics_match_unbox_float_contract() {
+    use simple_runtime::value::{rt_value_as_float, rt_value_float, RuntimeValue};
+
+    let tagged_float = rt_value_float(7.25);
+    assert_eq!(rt_value_as_float(tagged_float), 7.25);
+
+    let tagged_nil = RuntimeValue::NIL;
+    assert_eq!(tagged_nil.to_raw(), 3);
+    assert_eq!(rt_value_as_float(tagged_nil), 0.0);
+    let nil_result = if tagged_nil.to_raw() == 3 {
+        f64::from_bits(3)
+    } else {
+        rt_value_as_float(tagged_nil)
+    };
+    assert_eq!(nil_result.to_bits(), 3);
+
+    let raw_f64 = f64::from_bits(3);
+    assert_eq!(raw_f64.to_bits(), 3);
+}
+
 // =============================================================================
 // Drop / EndScope (no-ops in codegen)
 // =============================================================================

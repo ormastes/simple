@@ -1648,7 +1648,11 @@ pub fn compile_instruction<M: Module>(
             // Inlining can expose an already-unboxed float at this MIR
             // boundary. Such a value cannot carry the tagged nil word and
             // must not be passed to an integer/tag decoder (or compared with
-            // `icmp_imm`, which is invalid for F32/F64).
+            // `icmp_imm`, which is invalid for F32/F64). Raw F64 is preserved
+            // bit-for-bit, including `f64::from_bits(3)`: the same bits are the
+            // in-band nil sentinel only when they came from a tagged/optional
+            // value. Callers must therefore retain the source type; no f64
+            // bit pattern can represent nil without colliding with a raw f64.
             let (unboxed, is_nil) = if val_ty == types::F32 {
                 let unboxed = builder.ins().fpromote(types::F64, val);
                 let is_nil = builder.ins().iconst(types::I8, 0);
