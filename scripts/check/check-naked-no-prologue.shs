@@ -145,12 +145,31 @@ EOF
 # backend (LLVM). Using GNU `as` for riscv64 yields a spurious mismatch: LLVM
 # auto-compresses to RVC while GNU as does not — an encoding choice, not a
 # fidelity defect. Registered twins are checked by --twins.
-#   name | srcdir | ref-assembler | objdump | target-triple | trailing-trap
+#   name | srcdir | ref-assembler | objdump | target-triple | trailing-trap | symbol | alias
+# The optional alias column names a one-instruction thunk (`jmp`/`b` to the real
+# entry). Thunks are NOT byte-compared: `as` resolves an intra-object target to a
+# short jmp (ebXX) while codegen emits a rel32 (e9........) to a separate
+# function — a relocation-context encoding choice, like the riscv64 RVC case
+# above. They ARE checked for a leaked @naked epilogue, which is a real defect:
+# without @naked the thunk emits `xor %eax,%eax; ret` after the branch.
+# The symbol column names the REAL naked entry point. It is not always _start:
+# the Windows twins' entry is mainCRTStartup/_mainCRTStartup and their _start /
+# __start are one-instruction alias jumps, so comparing _start there would
+# verify the alias and never the body.
 TWINS="
-linux_x86_64|linux/x86_64|as64|objdump|none|0f0b
-freebsd_x86_64|freebsd/x86_64|as64|objdump|none|0f0b
-linux_riscv64|linux/riscv64|clangrv64|riscv64-linux-gnu-objdump|riscv64-unknown-linux-gnu|9002
+linux_x86_64|linux/x86_64|as64|objdump|none|0f0b|_start
+freebsd_x86_64|freebsd/x86_64|as64|objdump|none|0f0b|_start
+linux_riscv64|linux/riscv64|clangrv64|riscv64-linux-gnu-objdump|riscv64-unknown-linux-gnu|9002|_start
 "
+
+# Batch 2 entries - Windows cross-platform + FreeBSD i386:
+TWINS="$TWINS
+windows_x86|windows/x86|as32|objdump|i386-unknown-linux-gnu|0f0b|_mainCRTStartup|__start
+windows_x86_64|windows/x86_64|as64|objdump|none|0f0b|mainCRTStartup|_start
+freebsd_x86|freebsd/x86|as32|objdump|i386-unknown-linux-gnu|0f0b|_start
+windows_arm64|windows/arm64|clangarm64|aarch64-linux-gnu-objdump|aarch64-unknown-linux-gnu|d43e0000|mainCRTStartup|_start
+"
+
 
 sym_bytes_od() {
     $3 -d "$1" 2>/dev/null | awk -v s="<$2>:" '
@@ -164,6 +183,8 @@ check_twins() {
         name=$(echo "$row" | cut -d'|' -f1); sdir=$(echo "$row" | cut -d'|' -f2)
         asm=$(echo "$row" | cut -d'|' -f3);  od=$(echo "$row" | cut -d'|' -f4)
         triple=$(echo "$row" | cut -d'|' -f5); trap=$(echo "$row" | cut -d'|' -f6)
+        sym=$(echo "$row" | cut -d'|' -f7); [ -n "$sym" ] || sym=_start
+        alias=$(echo "$row" | cut -d'|' -f8)
         [ "$triple" = none ] && triple=""
         SPL="$ROOT/src/runtime/startup/$sdir/start.spl"
         SRC="$ROOT/src/runtime/startup/$sdir/start.S"
@@ -176,12 +197,14 @@ check_twins() {
         # codegen backend. (GNU `as` for riscv64 would mismatch purely because
         # LLVM auto-compresses to RVC and GNU as does not.)
         case "$asm" in
+            as32)     as --32 -o "$D/ref.o" "$SRC" 2>/dev/null ;;
             as64)     as --64 -o "$D/ref.o" "$SRC" 2>/dev/null ;;
+            clangarm64) clang --target=aarch64-unknown-linux-gnu -c -o "$D/ref.o" "$SRC" 2>/dev/null ;;
             clangrv64) clang --target=riscv64-unknown-linux-gnu -c -o "$D/ref.o" "$SRC" 2>/dev/null ;;
             *) err "twin $name: unknown reference assembler token $asm" ;;
         esac
         [ -f "$D/ref.o" ] || err "twin $name: reference assembler failed"
-        REFB=$(sym_bytes_od "$D/ref.o" _start "$od")
+        REFB=$(sym_bytes_od "$D/ref.o" "$sym" "$od")
         [ -n "$REFB" ] || err "twin $name: empty reference disassembly"
         T=""; [ -n "$triple" ] && T="--target $triple"
         SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 SIMPLE_KEEP_NATIVE_OBJS=1 \
@@ -190,19 +213,31 @@ check_twins() {
         KD=$(grep -oE "(Keeping native object files in|Objects kept at:) .*" "$D/build.log" \
             | sed -E "s/^(Keeping native object files in|Objects kept at:) //" | head -1)
         OBJ=""
-        for o in "$KD"/*.o; do nm "$o" 2>/dev/null | grep -qE " T _start\$" && { OBJ=$o; break; }; done
-        [ -n "$OBJ" ] || err "twin $name: no built object defines a global _start"
+        for o in "$KD"/*.o; do nm "$o" 2>/dev/null | grep -qE " T $sym\$" && { OBJ=$o; break; }; done
+        [ -n "$OBJ" ] || err "twin $name: no built object defines a global $sym"
         cp "$OBJ" "$D/twin.o"; rm -rf "$KD"
-        GOTB=$(sym_bytes_od "$D/twin.o" _start "$od")
+        GOTB=$(sym_bytes_od "$D/twin.o" "$sym" "$od")
         [ -n "$GOTB" ] || err "twin $name: empty twin disassembly"
-        nm "$D/twin.o" | grep -qE " T _start\$" || fail "twin $name: _start is not a global text symbol"
-        case "$GOTB" in
+        nm "$D/twin.o" | grep -qE " T $sym\$" || fail "twin $name: $sym is not a global text symbol"
+        case "$trap" in
+            none) GOTB_TRAPOK=1 ;;
+            *) GOTB_TRAPOK=0 ;;
+        esac
+        [ "$GOTB_TRAPOK" = 1 ] || case "$GOTB" in
             *"$trap") : ;;
             *) fail "twin $name: does not end in its trailing trap ($trap) — got tail ${GOTB#${GOTB%??????}}" ;;
         esac
-        n1=$(echo "$GOTB" | sed -E 's/e8[0-9a-f]{8}/e800000000/g')
-        n2=$(echo "$REFB" | sed -E 's/e8[0-9a-f]{8}/e800000000/g')
+        # A leaked @naked epilogue is the defect class this gate exists for.
+        case "$GOTB" in *c3) fail "twin $name: ends with a trailing ret (0xc3) — @naked epilogue leaked" ;; esac
+        n1=$(echo "$GOTB" | sed -E 's/e8[0-9a-f]{8}/e800000000/g; s/e9[0-9a-f]{8}/e900000000/g')
+        n2=$(echo "$REFB" | sed -E 's/e8[0-9a-f]{8}/e800000000/g; s/e9[0-9a-f]{8}/e900000000/g')
         [ "$n1" = "$n2" ] || fail "twin $name: bytes differ from as-assembled original: got $GOTB want $REFB"
+        if [ -n "$alias" ]; then
+            AB=$(sym_bytes_od "$D/twin.o" "$alias" "$od")
+            [ -n "$AB" ] || fail "twin $name: alias thunk $alias missing from twin object"
+            case "$AB" in *c3) fail "twin $name: alias thunk $alias ends with a trailing ret (0xc3) — @naked epilogue leaked" ;; esac
+            echo "twin $name: alias thunk $alias is a bare branch, no leaked epilogue ($AB)"
+        fi
         echo "twin $name: byte-identical to $sdir/start.S modulo call reloc ($GOTB)"
         CHECKED=$((CHECKED + 1))
     done
