@@ -13,6 +13,136 @@ use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
+fn repo_root_for_native_project_tests() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn source_defines_callable(path: &Path, name: &str) -> bool {
+    let source = std::fs::read_to_string(path).unwrap();
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser.parse().unwrap();
+    module.items.iter().any(|item| {
+        matches!(item, simple_parser::ast::Node::Function(def)
+            if def.name == name && !def.body.statements.is_empty())
+    })
+}
+
+#[test]
+fn terminal_facade_routes_name_physical_callable_owners() {
+    let repo_root = repo_root_for_native_project_tests();
+    let cli_facade = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
+    let qemu_facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
+
+    let routes = [
+        (
+            "app.io._CliCompile.native_build",
+            "src/app/io/_CliCompile/native_build.spl",
+            &["cli_native_build"][..],
+        ),
+        (
+            "os._QemuRunner.scenario_catalog",
+            "src/os/_QemuRunner/scenario_catalog.spl",
+            &["test_os", "test_all_architectures", "scenario_by_name_direct"][..],
+        ),
+        (
+            "os._QemuRunner.scenario_exec",
+            "src/os/_QemuRunner/scenario_exec.spl",
+            &[
+                "build_scenario",
+                "run_scenario",
+                "test_scenario",
+                "scenario_test_timeout_ms",
+            ][..],
+        ),
+        (
+            "os._QemuRunner.scenario_disks",
+            "src/os/_QemuRunner/scenario_disks.spl",
+            &[
+                "_is_arm_fs_exec_scenario_name",
+                "_is_arm_fs_exec_scenario",
+                "_is_riscv_fs_exec_scenario_name",
+                "_is_riscv_fs_exec_scenario",
+                "_catalog_platform_name_for_scenario",
+                "_catalog_lane_for_scenario",
+                "_catalog_has_lane_for_scenario",
+                "_catalog_lane_for_scenario_direct",
+            ][..],
+        ),
+    ];
+
+    for (module, relative, callables) in routes {
+        let facade = if module.starts_with("app.") {
+            &cli_facade
+        } else {
+            &qemu_facade
+        };
+        assert!(
+            facade.contains(&format!("export use {module}.{{")),
+            "missing physical route {module}"
+        );
+        let owner = repo_root.join(relative);
+        assert!(
+            owner.is_file(),
+            "physical owner does not exist: {}",
+            owner.display()
+        );
+        for callable in callables {
+            assert!(
+                source_defines_callable(&owner, callable),
+                "terminal {module}.{callable} is absent or has no body"
+            );
+        }
+    }
+
+    assert!(!repo_root.join("src/os/qemu_runner_part4.spl").exists());
+    assert!(!cli_facade.contains("play_cli_main"));
+    assert!(!qemu_facade.contains("bootstrap_authorization_receipt_v2"));
+}
+
+#[test]
+fn entry_closure_resolver_reaches_terminal_facade_owners_only_when_routed() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("src");
+    let resolved = |entry: &str| {
+        NativeProjectBuilder::new(repo_root.clone(), repo_root.join("build/test-terminal-facade"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(source_root.clone())
+            .entry_file(repo_root.join(entry))
+            .discover_files()
+            .unwrap()
+    };
+
+    let cli_files = resolved("src/app/io/cli_compile.spl");
+    assert!(cli_files
+        .iter()
+        .any(|path| { path.ends_with("src/app/io/_CliCompile/native_build.spl") }));
+
+    let qemu_files = resolved("src/os/qemu_runner.spl");
+    for relative in [
+        "src/os/_QemuRunner/scenario_catalog.spl",
+        "src/os/_QemuRunner/scenario_exec.spl",
+        "src/os/_QemuRunner/scenario_disks.spl",
+    ] {
+        assert!(
+            qemu_files.iter().any(|path| path.ends_with(relative)),
+            "resolver missed {relative}"
+        );
+    }
+    assert!(!qemu_files
+        .iter()
+        .any(|path| path.ends_with("src/os/qemu_runner_part4.spl")));
+}
+
 #[test]
 fn simpleos_entry_closure_compatibility_owners_are_explicit() {
     fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
