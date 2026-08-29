@@ -235,10 +235,20 @@ fn interpreter_sources_resolve_the_physical_treesitter_facade() {
         .to_path_buf();
     let treesitter_owner = repo_root.join("src/compiler_rust/lib/std/src/parser/treesitter/__init__.spl");
     let owner_source = std::fs::read_to_string(&treesitter_owner).unwrap();
-    for public_type in ["Tree", "Node", "TreeSitterParser"] {
+    for public_type in ["Tree", "Node", "NodeId", "NodeArena", "TreeSitterParser"] {
         assert!(
             owner_source.contains(&format!("pub struct {public_type}:")),
             "physical treesitter facade does not expose {public_type}"
+        );
+    }
+    for public_api in [
+        "pub fn get_node(self, id: NodeId) -> Option<Node>",
+        "pub fn get_text(self, node: Node) -> text",
+        "children: [NodeId]",
+    ] {
+        assert!(
+            owner_source.contains(public_api),
+            "physical treesitter facade is missing compatibility API {public_api}"
         );
     }
     assert!(!repo_root

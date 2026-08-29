@@ -34,8 +34,8 @@ pub enum TokenKind:
     Import
     Use
     Mod
-    True
-    False
+    TrueLit
+    FalseLit
     Nil
     In
     Not
@@ -283,8 +283,8 @@ impl Lexer:
             case "import": TokenKind.Import
             case "use": TokenKind.Use
             case "mod": TokenKind.Mod
-            case "true": TokenKind.True
-            case "false": TokenKind.False
+            case "true": TokenKind.TrueLit
+            case "false": TokenKind.FalseLit
             case "nil": TokenKind.Nil
             case "in": TokenKind.In
             case "not": TokenKind.Not
@@ -304,30 +304,62 @@ impl Lexer:
             else:
                 break
 
+# Stable handle into a parse tree's node arena.  The generation makes stale
+# handles fail closed if the arena representation is ever reused.
+pub struct NodeId:
+    index: i64
+    generation: i64
+
 # Tree node
 pub struct Node:
-    kind_: text
-    text_: text
-    span_: Span
+    kind: text
+    text: text
     span: Span
-    child_count_value: i64
+    children: [NodeId]
 
 impl Node:
     pub fn kind(self) -> text:
-        return self.kind_
+        return self.kind
 
     pub fn child_count(self) -> i64:
-        return self.child_count_value
+        return self.children.len()
+
+# Value-semantic node storage owned by Tree.  Nodes are append-only, so ids
+# remain stable for the lifetime of the tree.
+pub struct NodeArena:
+    nodes: [Node]
+    generation: i64
+
+impl NodeArena:
+    pub static fn new() -> NodeArena:
+        return NodeArena(nodes: [], generation: 0)
+
+    pub me alloc(node: Node) -> NodeId:
+        val id = NodeId(index: self.nodes.len(), generation: self.generation)
+        self.nodes.push(node)
+        return id
+
+    pub fn get(self, id: NodeId) -> Option<Node>:
+        if id.generation != self.generation or id.index < 0 or id.index >= self.nodes.len():
+            return None
+        return Some(self.nodes[id.index])
 
 # Parse tree
 pub struct Tree:
-    root_node: Node
+    root_id: NodeId
+    arena: NodeArena
     source: text
     version: i64
 
 impl Tree:
     pub fn root(self) -> Option<Node>:
-        return Some(self.root_node)
+        return self.arena.get(self.root_id)
+
+    pub fn get_node(self, id: NodeId) -> Option<Node>:
+        return self.arena.get(id)
+
+    pub fn get_text(self, node: Node) -> text:
+        return node.text
 
 # Tree-sitter parser
 pub struct TreeSitterParser:
@@ -340,13 +372,14 @@ impl TreeSitterParser:
     pub me parse(self, source: text) -> Result<Tree, text>:
         val root_span = Span(start_byte: 0, end_byte: source.len(), start_line: 1, end_line: 1, start_column: 1, end_column: source.len() + 1)
         val root = Node(
-            kind_: "module",
-            text_: source,
-            span_: root_span,
+            kind: "module",
+            text: source,
             span: root_span,
-            child_count_value: treesitter_count_top_level_items(source),
+            children: [],
         )
-        return Ok(Tree(root_node: root, source: source, version: 0))
+        var arena = NodeArena.new()
+        val root_id = arena.alloc(root)
+        return Ok(Tree(root_id: root_id, arena: arena, source: source, version: 0))
 
 fn treesitter_count_top_level_items(source: text) -> i64:
     var count = 0
