@@ -108,7 +108,7 @@ fn terminal_facade_routes_name_physical_callable_owners() {
 }
 
 #[test]
-fn terminal_facades_use_canonical_cli_contract_and_acyclic_qemu_owners() {
+fn terminal_facades_use_canonical_cli_contract_and_explicit_qemu_owner_scc() {
     let repo_root = repo_root_for_native_project_tests();
     let cli = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
     let canonical = std::fs::read_to_string(repo_root.join("src/app/io/_CliCompile/compile_targets.spl")).unwrap();
@@ -123,26 +123,24 @@ fn terminal_facades_use_canonical_cli_contract_and_acyclic_qemu_owners() {
         assert!(canonical.contains(contract_marker), "canonical CLI owner lost {contract_marker}");
     }
 
-    let layers = [
-        ("runner_targets", &[][..]),
-        ("os_build_run", &["runner_targets"][..]),
-        ("scenario_catalog", &["runner_targets", "os_build_run"][..]),
-        (
-            "scenario_disks",
-            &["runner_targets", "os_build_run", "scenario_catalog"][..],
-        ),
-        (
-            "scenario_exec",
-            &["runner_targets", "os_build_run", "scenario_catalog", "scenario_disks"][..],
-        ),
+    // These five files are one real ownership SCC: target constructors use
+    // disk helpers, catalog selection prepares media, and media preparation
+    // can invoke scenario execution. Spell the SCC with physical imports so
+    // entry closure never needs the public facade as an internal back-edge.
+    let owners = [
+        "runner_targets",
+        "os_build_run",
+        "scenario_catalog",
+        "scenario_disks",
+        "scenario_exec",
     ];
-    for (owner, dependencies) in layers {
+    for owner in owners {
         let source = std::fs::read_to_string(repo_root.join(format!("src/os/_QemuRunner/{owner}.spl"))).unwrap();
         assert!(!source.contains("use os.qemu_runner"), "{owner} imports its facade");
-        for dependency in dependencies {
+        for dependency in owners.into_iter().filter(|dependency| *dependency != owner) {
             assert!(
                 source.contains(&format!("use os._QemuRunner.{dependency}.*")),
-                "{owner} misses physical dependency {dependency}"
+                "QEMU owner SCC edge {owner} -> {dependency} is implicit or missing"
             );
         }
     }
