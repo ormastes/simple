@@ -454,7 +454,23 @@ impl NativeProjectBuilder {
         let canonical_entry = canonical_entry.clone();
         let imports = imports.clone();
 
-        entries
+        // Large public aggregation facades spend most of their time resolving
+        // hundreds of re-exports.  Running one beside every LLVM worker made
+        // its bounded wall-clock timeout measure scheduler/memory-bandwidth
+        // starvation instead of compiler progress (compiler.core reproducibly
+        // finishes in 146s alone but exceeded 300s in a 32-way build). Admit
+        // these rare units before broad fanout; cached units never reach here.
+        let (contention_sensitive, regular): (Vec<_>, Vec<_>) = entries
+            .iter()
+            .cloned()
+            .partition(|(_, _, source, _)| is_contention_sensitive_entry(source));
+        let mut results = if contention_sensitive.is_empty() {
+            Vec::new()
+        } else {
+            self.compile_entries_sequential(&contention_sensitive, &temp_dir, &canonical_entry, &imports)
+        };
+
+        let mut parallel_results: Vec<_> = regular
             .par_iter()
             .enumerate()
             .map(|(progress_i, (idx, path, source, cache_path))| {
@@ -493,7 +509,9 @@ impl NativeProjectBuilder {
                     }
                 }
             })
-            .collect()
+            .collect();
+        results.append(&mut parallel_results);
+        results
     }
 
     /// Compile entries sequentially (fallback).
@@ -546,6 +564,18 @@ impl NativeProjectBuilder {
             })
             .collect()
     }
+}
+
+/// True for a source facade whose export-resolution cost is large enough that
+/// competing LLVM workers can consume its entire wall-clock timeout budget.
+/// This is deliberately structural rather than path-based so renamed/new
+/// aggregation modules receive the same admission policy.
+fn is_contention_sensitive_entry(source: &str) -> bool {
+    source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("export "))
+        .count()
+        >= 256
 }
 
 /// Compile a single .spl file to object code.
@@ -1059,7 +1089,7 @@ fn wait_for_compiler_thread(
 
 #[cfg(test)]
 mod native_compile_timeout_tests {
-    use super::wait_for_compiler_thread;
+    use super::{is_contention_sensitive_entry, wait_for_compiler_thread};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1085,6 +1115,19 @@ mod native_compile_timeout_tests {
         });
 
         assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
+    }
+
+    #[test]
+    fn export_heavy_facades_are_admitted_before_parallel_fanout() {
+        let below = "export value\n".repeat(255);
+        let boundary = "export value\n".repeat(256);
+        assert!(!is_contention_sensitive_entry(&below));
+        assert!(is_contention_sensitive_entry(&boundary));
+        assert!(!is_contention_sensitive_entry(&format!(
+            "{}{}",
+            "# export comment\n".repeat(300),
+            "fn main(): 0\n"
+        )));
     }
 }
 
