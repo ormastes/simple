@@ -200,13 +200,17 @@ impl Lowerer {
                 } else {
                     Mutability::Immutable
                 };
+                let previous_bindings: Vec<_> = bindings
+                    .iter()
+                    .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                    .collect();
                 for (name, ty) in &bindings {
                     ctx.add_local(name.clone(), *ty, mutability);
                 }
                 let mut then_block = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                 then_block.extend(self.lower_block(body, ctx)?);
-                for (name, _) in &bindings {
-                    ctx.local_map.remove(name);
+                for (name, previous) in previous_bindings {
+                    ctx.restore_name_binding(&name, previous);
                 }
                 else_block = Some(vec![
                     store,
@@ -581,6 +585,10 @@ impl Lowerer {
                     } else {
                         Mutability::Immutable
                     };
+                    let previous_bindings: Vec<_> = bindings
+                        .iter()
+                        .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                        .collect();
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
@@ -596,8 +604,8 @@ impl Lowerer {
                     then_block.extend(self.lower_block(&if_stmt.then_block, ctx)?);
 
                     // 7. Clean up bindings from scope
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
+                    for (name, previous) in previous_bindings {
+                        ctx.restore_name_binding(&name, previous);
                     }
 
                     // 8. Handle else block (elif branches + else)
@@ -715,6 +723,10 @@ impl Lowerer {
                     } else {
                         Mutability::Immutable
                     };
+                    let previous_bindings: Vec<_> = bindings
+                        .iter()
+                        .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                        .collect();
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
@@ -723,8 +735,8 @@ impl Lowerer {
                         self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                     then_block.extend(self.lower_block(&while_stmt.body, ctx)?);
 
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
+                    for (name, previous) in previous_bindings {
+                        ctx.restore_name_binding(&name, previous);
                     }
 
                     return Ok(vec![HirStmt::Loop {

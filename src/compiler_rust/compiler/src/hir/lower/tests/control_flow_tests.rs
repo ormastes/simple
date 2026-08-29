@@ -33,6 +33,81 @@ fn match_arm_local_does_not_shadow_later_function_call() {
     );
 }
 
+fn assert_returns_outer_local(source: &str, function_name: &str, local_name: &str) -> HirFunction {
+    let module = parse_and_lower(source).unwrap();
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.name == function_name)
+        .expect("test function");
+    let outer_index = func.params.len()
+        + func
+        .locals
+        .iter()
+        .position(|local| local.name == local_name)
+        .expect("outer local slot");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("return statement") else {
+        panic!("expected final return: {:?}", func.body)
+    };
+    assert!(
+        matches!(expr.kind, HirExprKind::Local(index) if index == outer_index),
+        "final reference did not resolve to outer slot {outer_index}: {expr:?}"
+    );
+    func.clone()
+}
+
+#[test]
+fn nested_block_restores_outer_binding_but_retains_slots_and_assignments() {
+    let func = assert_returns_outer_local(
+        "fn probe() -> i64:\n    var value = 1\n    if true:\n        val value = 2\n    if true:\n        value = 3\n    return value\n",
+        "probe",
+        "value",
+    );
+    assert_eq!(
+        func.locals.iter().filter(|local| local.name == "value").count(),
+        2,
+        "shadow slot must remain allocated: {:?}",
+        func.locals
+    );
+    let repr = format!("{:?}", func.body);
+    assert!(repr.contains("Assign { target: HirExpr { kind: Local(0)"), "{repr}");
+}
+
+#[test]
+fn if_elif_and_while_pattern_bindings_restore_shadowed_outer_local() {
+    assert_returns_outer_local(
+        "fn probe(value: i64?) -> i64:\n    val item = 10\n    if val item = value:\n        pass\n    return item\n",
+        "probe",
+        "item",
+    );
+    assert_returns_outer_local(
+        "fn probe(value: i64?) -> i64:\n    val item = 10\n    if false:\n        pass\n    elif val item = value:\n        pass\n    return item\n",
+        "probe",
+        "item",
+    );
+    assert_returns_outer_local(
+        "fn probe(value: i64?) -> i64:\n    val item = 10\n    while val item = value:\n        break\n    return item\n",
+        "probe",
+        "item",
+    );
+}
+
+#[test]
+fn nested_block_lambda_keeps_outer_capture_slot_after_scope_restore() {
+    let module = parse_and_lower(
+        "fn probe() -> i64:\n    val outer = 7\n    if true:\n        val thunk = \\: outer\n        thunk()\n    return outer\n",
+    )
+    .unwrap();
+    let func = &module.functions[0];
+    let repr = format!("{:?}", func.body);
+    assert!(repr.contains("captures: [0]"), "lambda lost outer capture slot: {repr}");
+    assert!(func.locals.iter().any(|local| local.name == "thunk"), "block slot was truncated");
+    assert!(matches!(
+        &func.body.last().unwrap(),
+        HirStmt::Return(Some(HirExpr { kind: HirExprKind::Local(0), .. }))
+    ));
+}
+
 #[test]
 fn test_lower_while_loop() {
     let module =
