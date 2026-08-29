@@ -5604,6 +5604,10 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
     return found;
 }
 
+/* runtime_memory.c is the canonical allocator/pointer ABI member when the
+ * standalone core-C archive is assembled. Keep the hosted runtime_native-only
+ * provider for other compositions, but never publish both into one archive. */
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
@@ -5756,6 +5760,7 @@ void* copy_mem(void* dst, const void* src, int64_t n) {
 void* rt_memset(void* dst, int8_t val, int64_t n) {
     return memset(dst, (int)val, (size_t)n);
 }
+#endif
 
 int64_t rt_memcmp(const void* a, const void* b, int64_t n) {
     return (int64_t)memcmp(a, b, (size_t)n);
@@ -11123,6 +11128,7 @@ double rt_pow(double a, double b) { return pow(a, b); }
  * Pointer Read/Write Operations (for relocation patching, FFI interop)
  * ================================================================ */
 
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;
@@ -11168,6 +11174,7 @@ int64_t rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, in
     memcpy((char*)(uintptr_t)addr + offset, src, (size_t)len);
     return len;
 }
+#endif
 
 /* Call a raw code address as a zero-argument int64_t function. */
 int64_t rt_call_ptr_0(int64_t addr) {

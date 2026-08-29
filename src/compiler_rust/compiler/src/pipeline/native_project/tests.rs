@@ -2742,7 +2742,72 @@ fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
     );
     let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
 
+    let (core_defined, _) = super::tools::archive_global_symbols(&core).unwrap();
+    for symbol in [
+        "copy_mem",
+        "rt_alloc",
+        "rt_free",
+        "rt_mem_guard_stats",
+        "rt_memcpy",
+        "rt_memset",
+        "rt_ptr_read_i32",
+        "rt_ptr_read_i64",
+        "rt_ptr_read_u8",
+        "rt_ptr_write_bytes_raw",
+        "rt_ptr_write_i16",
+        "rt_ptr_write_i32",
+        "rt_ptr_write_i64",
+        "rt_ptr_write_u8",
+        "rt_realloc",
+        "rt_struct_alloc",
+        "rt_struct_receiver_valid",
+    ] {
+        assert_eq!(core_defined.get(symbol), Some(&1), "core-C must have one memory provider for `{symbol}`");
+    }
+    for symbol in [
+        "rt_mem_harden_check_native",
+        "rt_mem_profile_abi_version",
+        "rt_mem_profile_features",
+        "rt_ptr_read_i32",
+        "rt_transient_raw_scope_begin",
+        "rt_transient_raw_scope_end",
+        "spl_i64_is_zero",
+    ] {
+        assert!(core_defined.contains_key(symbol), "core-C must retain runtime_memory export `{symbol}`");
+    }
+
     validate_stage4_cli_c_provider_archive_disjointness(&core, &compiler, &providers).unwrap();
+}
+
+#[test]
+fn pure_simple_runtime_bundle_always_selects_runtime_memory_owner() {
+    let source = include_str!("../../../../../compiler/70.backend/backend/runtime_compiler.spl");
+    for (standalone_flag, dynload_flag) in [
+        (
+            "comp_args.push(\"/DSIMPLE_CORE_C_STANDALONE=1\")",
+            "comp_args.push(\"/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
+        ),
+        (
+            "comp_args.push(\"-DSIMPLE_CORE_C_STANDALONE=1\")",
+            "comp_args.push(\"-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
+        ),
+    ] {
+        assert_eq!(
+            source.matches(standalone_flag).count(),
+            1,
+            "memory-owner flag must be emitted once per compiler flavor"
+        );
+        assert_eq!(
+            source.matches(dynload_flag).count(),
+            1,
+            "dynload-owner flag must be emitted once per compiler flavor"
+        );
+        assert!(
+            source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap(),
+            "memory ownership must be selected before the include_dynload-only branch"
+        );
+    }
+    assert!(source.contains("if include_dynload:\n                # runtime_dynload.c is in this bundle"));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
