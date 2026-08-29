@@ -14,6 +14,40 @@ use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCp
 use super::*;
 
 #[test]
+fn simpleos_entry_closure_compatibility_owners_are_explicit() {
+    fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
+        let tail = source.split_once(marker).unwrap().1;
+        let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
+        body.split(',').map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned).collect()
+    }
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let facade = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build.spl")).unwrap();
+    let part1 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part1.spl")).unwrap();
+    let part2 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part2.spl")).unwrap();
+    let part3 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part3.spl")).unwrap();
+    let catalog = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl")).unwrap();
+    let contracts = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl")).unwrap();
+    let accessors = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl")).unwrap();
+    assert!(part1.contains("build_target_contracts.{") && !part1.contains("build_target_contracts.*"));
+    assert!(part2.contains("platform_target_catalog.{simpleos_platform_targets}") && !part2.contains("platform_target_catalog.*"));
+    assert!(part3.contains("platform_target_accessors.{") && !part3.contains("platform_target_accessors.*"));
+    assert!(!part2.contains("_simpleos_x86_64_platform_target"));
+    assert!(!part3.contains("_simpleos_platform_target_index"));
+    assert!(catalog.contains("_simpleos_x86_64_platform_target, _simpleos_i686_platform_target"));
+    for implementation in [&contracts, &catalog, &accessors] {
+        assert!(!implementation.contains("use os.port.simpleos_multiplatform_build.*"));
+    }
+    assert!(catalog.contains("build_target_contracts.{"));
+    assert!(accessors.contains("build_target_contracts.{"));
+    assert!(accessors.contains("platform_target_catalog.{simpleos_platform_targets}"));
+    assert!(part1.contains("intentionally compatibility-public"));
+    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part1."), explicit_names(&part1, "build_target_contracts."));
+    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part2."), explicit_names(&part2, "platform_target_catalog."));
+    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part3."), explicit_names(&part3, "platform_target_accessors."));
+}
+
+#[test]
 fn pure_simple_lambda_inline_helper_has_both_callers() {
     let lowering = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl");
     let methods = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl");
