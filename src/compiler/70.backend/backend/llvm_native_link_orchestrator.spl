@@ -37,6 +37,29 @@ use compiler.backend.backend.simpleos_native_linkers.{link_simpleos_x86_64, link
 # Main Orchestrator
 # ============================================================================
 
+fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
+        runtime_bundle: text, requires_cross: bool, hosted_os: text,
+        mingw: bool) -> text:
+    """Select native-all without relying on nested branch writeback."""
+    if stage4_requested or runtime_path == "" or requires_cross:
+        return ""
+    if not native_all_allowed_for_runtime_bundle(runtime_bundle):
+        return ""
+    val name = if hosted_os == "windows" and not mingw:
+        "simple_native_all.lib"
+    else:
+        "libsimple_native_all.a"
+    val archive = runtime_path + "/" + name
+    if file_exists(archive):
+        return archive
+    ""
+
+fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
+    """Append one optional provider through return-value ownership."""
+    if path == "":
+        return inputs
+    inputs.push(path)
+
 fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
     """Link LLVM-compiled user objects with C runtime into a native executable.
 
@@ -114,15 +137,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # modules calling seed-owned externs (e.g. bootstrap_main's
     # rt_native_build), which the C runtime objects do not define; without it
     # the link dies with "undefined symbol: rt_native_build" (#146/#79).
-    var bootstrap_native_all = ""
     val runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
     val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
-    if not stage4_requested and runtime_path != "" and not hosted_plan.requires_cross:
-        if native_all_allowed_for_runtime_bundle(runtime_bundle):
-            val native_all_name = if hosted_os == "windows" and not _is_mingw(): "simple_native_all.lib" else: "libsimple_native_all.a"
-            val native_all = runtime_path + "/" + native_all_name
-            if file_exists(native_all):
-                bootstrap_native_all = native_all
+    val bootstrap_native_all = _llvm_bootstrap_native_all_path(
+        stage4_requested, runtime_path, runtime_bundle,
+        hosted_plan.requires_cross, hosted_os, _is_mingw())
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
@@ -471,8 +490,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             runtime_object_i = runtime_object_i + 1
         if bootstrap_support_obj != "":
             all_objects = all_objects.push(bootstrap_support_obj)
-        if bootstrap_native_all != "":
-            all_objects = all_objects.push(bootstrap_native_all)
+        # Caller objects precede the archive so their undefined symbols drive
+        # normal member extraction. Keep the optional append outside a nested
+        # branch: self-hosted branch writeback previously dropped this input.
+        all_objects = _llvm_append_link_input_if_present(
+            all_objects, bootstrap_native_all)
         all_objects = all_objects.push(entry_obj_path)
     # External providers are intentionally not temporary runtime objects: do
     # not pass them to cleanup_runtime_objects or delete them after linking.
