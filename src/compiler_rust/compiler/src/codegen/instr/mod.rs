@@ -316,8 +316,10 @@ fn looks_like_const_data_name(name: &str) -> bool {
 /// appears in `vtable_type_ids` (the authoritative set of types that actually
 /// got a vtable data object emitted). Field access must mirror that shift, or
 /// `obj.field0` loads the vtable slot instead of the field. Keyed on the same
-/// `vtable_type_ids` map so constructor writes and field reads can never
-/// disagree. When the receiver's static type is unknown (not in `vreg_types`)
+/// map the `StructInit` arm prefers (`vtable_data_ids`, keyed on the
+/// collision-free struct NAME; `vtable_type_ids`, keyed on the per-module
+/// `TypeId`, is only the fallback when no name is available) so constructor
+/// writes and field reads can never disagree. When the receiver's static type is unknown (not in `vreg_types`)
 /// or has no vtable, the offset is returned unchanged.
 fn effective_field_offset<M: Module>(
     ctx: &InstrContext<'_, M>,
@@ -369,29 +371,17 @@ pub fn compile_instruction<M: Module>(
             byte_size,
             type_name,
             deep_fields,
+            ..
         } => {
-            // A struct that implements a trait carries an 8-byte vtable header
-            // (StructInit / FieldGet shift by +8, keyed on `vtable_data_ids`).
-            // MIR sizes the copy from the field layout only, so without the
-            // same shift a by-value `self` copy of such a struct copied ONLY
-            // the vtable word and every field read through the copy answered
-            // 0 (`self.base + n` == n). Mirror the shift here.
-            let has_vtable = type_name
-                .as_deref()
-                .is_some_and(|name| ctx.vtable_data_ids.contains_key(name));
-            if has_vtable {
-                let shifted: Vec<crate::mir::AggregateFieldCopy> = deep_fields
-                    .iter()
-                    .map(|f| crate::mir::AggregateFieldCopy {
-                        word_index: f.word_index + 1,
-                        byte_size: f.byte_size,
-                        nested: f.nested.clone(),
-                    })
-                    .collect();
-                closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size + 8, &shifted);
-            } else {
-                closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size, deep_fields);
-            }
+            closures_structs::compile_aggregate_copy(
+                ctx,
+                builder,
+                *dest,
+                *src,
+                *byte_size,
+                type_name.as_deref(),
+                deep_fields,
+            );
         }
 
         MirInst::BinOp { dest, op, left, right } => {

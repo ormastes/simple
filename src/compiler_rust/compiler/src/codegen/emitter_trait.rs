@@ -42,6 +42,7 @@ pub trait CodegenEmitter {
         dest: VReg,
         src: VReg,
         byte_size: u32,
+        type_name: Option<&str>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
     ) -> Result<(), Self::Error>;
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), Self::Error>;

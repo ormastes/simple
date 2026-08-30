@@ -516,6 +516,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     dest: VReg,
     src: VReg,
     byte_size: u32,
+    type_name: Option<&str>,
     deep_fields: &[crate::mir::AggregateFieldCopy],
 ) {
     let Some(&src_tagged) = ctx.vreg_values.get(&src) else {
@@ -530,7 +531,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
         return;
     }
 
-    let tagged = emit_aggregate_block_copy(ctx, builder, src_tagged, byte_size, deep_fields);
+    let tagged = emit_aggregate_block_copy(ctx, builder, src_tagged, byte_size, type_name, deep_fields);
     ctx.vreg_values.insert(dest, tagged);
 }
 
@@ -545,8 +546,24 @@ fn emit_aggregate_block_copy<M: Module>(
     builder: &mut FunctionBuilder,
     src_tagged: cranelift_codegen::ir::Value,
     byte_size: u32,
+    type_name: Option<&str>,
     deep_fields: &[crate::mir::AggregateFieldCopy],
 ) -> cranelift_codegen::ir::Value {
+    // A struct that implements a trait carries an 8-byte vtable pointer at
+    // offset 0: `StructInit` allocates `struct_size + 8` and shifts every
+    // field offset +8, and `effective_field_offset` mirrors that shift on
+    // every read/write. MIR's `byte_size`/`word_index` are the UNSHIFTED
+    // layout, so this copy must apply the identical correction or it copies
+    // the vtable word plus all-but-the-last field and leaves the final slot
+    // outside the allocation — the caller then reads uninitialised memory as
+    // that field. When the field is a class (a pointer), dereferencing it
+    // SIGSEGVs; when it is a scalar the value is silently wrong.
+    // See doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+    let has_vtable = type_name.is_some_and(|n| ctx.vtable_data_ids.contains_key(n));
+    let byte_size = if has_vtable { byte_size + 8 } else { byte_size };
+    // `word_index` indexes THIS block's layout, so it shifts by one word when
+    // THIS block carries a vtable header (independent of each field's own type).
+    let field_word_shift: u32 = if has_vtable { 1 } else { 0 };
     // Round up to whole 8-byte words and never allocate zero.
     let words = byte_size.div_ceil(8).max(1);
     let alloc_bytes = i64::from(words) * 8;
@@ -573,12 +590,20 @@ fn emit_aggregate_block_copy<M: Module>(
     }
 
     for field in deep_fields {
-        let off = (field.word_index * 8) as i32;
-        if field.word_index >= words {
+        let word_index = field.word_index + field_word_shift;
+        let off = (word_index * 8) as i32;
+        if word_index >= words {
             continue; // descriptor out of range — fail closed, keep shallow
         }
         let word = builder.ins().load(types::I64, MemFlags::new(), new_ptr, off);
-        let inner = emit_aggregate_block_copy(ctx, builder, word, field.byte_size, &field.nested);
+        let inner = emit_aggregate_block_copy(
+            ctx,
+            builder,
+            word,
+            field.byte_size,
+            field.type_name.as_deref(),
+            &field.nested,
+        );
         // Replace only a live tagged heap handle; nil (0) and non-handle
         // words keep their original value (the inner alloc is then unused).
         let tag_bit = builder.ins().band(word, tag_mask);
