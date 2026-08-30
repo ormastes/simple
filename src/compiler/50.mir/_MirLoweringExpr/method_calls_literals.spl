@@ -28,17 +28,6 @@ use std.io_runtime.{env_get_opt}
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
 
-@unsafe(reason: "representation-neutral compiler text comparison", capabilities: [ffi])
-extern fn rt_text_cmp_any(left: i64, right: i64) -> i64
-
-@always_inline
-fn mir_compiler_text_eq(left: text, right: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        # `rt_text_cmp_any` is part of the admitted 04ce bootstrap provider;
-        # unlike ordinary staged `text == text`, it normalizes tagged and raw
-        # operands before comparing their bytes.  Equality is strcmp-style 0.
-        rt_text_cmp_any(left, right) == 0
-
 @always_inline
 fn _sffi_method_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
@@ -3672,16 +3661,17 @@ impl MirLowering:
         # Look up function name from symbol table for direct calls
         val sym = self.symbols.get_symbol_raw(symbol.id)
         var name = self.bootstrap_symbol_name(symbol)
+        var builtin_method_tag = BUILTIN_METHOD_NONE
         if sym != nil:
             name = sym.name
+            builtin_method_tag = sym.builtin_method_tag
         name = name.replace("::", ".")
-        # HirSymbol.name crosses the staged compiler boundary without the MIR
-        # local string marker used by ordinary `text == text` lowering. Compare
-        # through the runtime's tagged-or-raw content normalizer explicitly;
-        # never fall back to pointer identity or leaf-name matching.
-        if mir_compiler_text_eq(name, "str.strip"):
+        # MethodResolution transports the resolved SymbolId; HirSymbol carries
+        # the owner-qualified builtin tag. Native lowering branches only on the
+        # scalar tag, never on transported text or a runtime equality extern.
+        if builtin_method_tag == BUILTIN_METHOD_STR_STRIP:
             name = "rt_string_trim"
-        elif mir_compiler_text_eq(name, "str.lines"):
+        elif builtin_method_tag == BUILTIN_METHOD_STR_LINES:
             name = "rt_string_lines"
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"
