@@ -28,6 +28,14 @@ use std.io_runtime.{env_get_opt}
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
 
+@unsafe(reason: "representation-neutral compiler text comparison", capabilities: [ffi])
+extern fn rt_text_eq_any(left: i64, right: i64) -> i64
+
+@always_inline
+fn mir_compiler_text_eq(left: text, right: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_text_eq_any(left, right) != 0
+
 @always_inline
 fn _sffi_method_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
@@ -3664,6 +3672,14 @@ impl MirLowering:
         if sym != nil:
             name = sym.name
         name = name.replace("::", ".")
+        # HirSymbol.name crosses the staged compiler boundary without the MIR
+        # local string marker used by ordinary `text == text` lowering. Compare
+        # through the runtime's tagged-or-raw content normalizer explicitly;
+        # never fall back to pointer identity or leaf-name matching.
+        if mir_compiler_text_eq(name, "str.strip"):
+            name = "rt_string_trim"
+        elif mir_compiler_text_eq(name, "str.lines"):
+            name = "rt_string_lines"
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"
         var signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
