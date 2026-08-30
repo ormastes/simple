@@ -1149,7 +1149,26 @@ bootstrap_stage3_copy_seed_tuple() {
             my $wanted = ($source_mode & 0111) ? 0500 : 0400;
             chmod($wanted, $out) or die "chmod target: $!\n";
             my @dst = stat($out);
-            S_IMODE($dst[2]) == $wanted or die "target mode mismatch\n";
+            my $got = S_IMODE($dst[2]);
+            unless ($got == $wanted) {
+                # Windows has no per-user permission bits and no mode-based
+                # execute bit: MSYS maps any read-only file to 0444 whatever
+                # was requested. Measured on msys perl -- chmod 0400 -> 0444,
+                # chmod 0500 -> 0444 -- so both the owner-only narrowing and
+                # the execute bit are unrepresentable and exact equality can
+                # never hold there.
+                #
+                # The property this check exists to enforce is that the frozen
+                # generation is IMMUTABLE, and that IS representable: assert
+                # the file carries no write bit. Executability is decided by
+                # the PE header on Windows, not by mode, so it is left
+                # unasserted rather than asserted falsely.
+                #
+                # Unix is unchanged: exact equality is still required there.
+                die "target mode mismatch\n"
+                    unless $^O =~ /^(?:MSWin32|msys|cygwin)$/
+                        && ($got & 0222) == 0;
+            }
             close($out) or die "close target: $!\n";
             close($in) or die "close source: $!\n";
             rename($pending, $target) or die "publish target: $!\n";
