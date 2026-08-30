@@ -416,8 +416,15 @@ impl CompilerDriver:
         # creating a fresh array near the terminal module can fail registry
         # growth under peak AST+HIR pressure and leave `errors` invalid.
         dtrace("[DRV] lac-canary=module-surfaces-before")
+        # NEVER `.unwrap()` here. Under the seed's native codegen a BARE
+        # `unwrap` is rebound by name to whichever module in the entry closure
+        # publishes one (`Poll.unwrap`, `FailSafeResult.unwrap`, ...); that
+        # method's match falls through and returns raw 0, so this val became a
+        # null registry and Stage 2 SEGV'd three frames later inside
+        # `module_surface_registry_index`. `??` (and `if val` / `match`) are not
+        # affected. doc/08_tracking/bug/stage2_positional_entry_segv_module_surfaces_null_2026-08-31.md
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.module_surfaces != nil:
-            self.ctx.module_surfaces.unwrap()
+            self.ctx.module_surfaces ?? ModuleSurfacesByName.empty()
         elif self.ctx.sources.len() > 0:
             match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
                 case Ok(value): value

@@ -135,3 +135,128 @@ SIMPLE_BOOTSTRAP=0 SIMPLE_NO_STUB_FALLBACK=1 "$C" native-build \
   scripts/check/cert/redeploy_gate/fixtures/hello_world.spl
 # rc=139; add --entry before the path for rc=0
 ```
+
+---
+
+## ROOT CAUSE FOUND (2026-08-31) — bare `.unwrap()` mis-dispatches to `Poll.unwrap`
+
+**Status: DIAGNOSED. The defect is in the RUST SEED's method-name resolution,
+not in any `.spl` source.**
+
+### What was measured, not inferred
+
+Binary under test: `build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`,
+32010840 bytes, mtime 2026-08-31 04:21,
+sha256 `3db6a922e3d856ef62d25e4e5f494a8afd4e4ad32e7a7b2541809b711809cdd0`.
+
+lldb on the live crash (three runs, same result every run):
+
+1. Breakpoint on `hirlowering_for_module_with_diagnostics` is hit from
+   `lower_and_check_impl+1632` with **`x1 == 0`**. `x1` is the
+   `module_surfaces` argument. So the value is already 0 *before* the
+   `HirLowering` is constructed — the field store is faithful.
+   Disassembly confirms the store: `str x1, [x7, #0x58]`, and `0x58` is
+   field index 11 = `module_surfaces`. Nothing clobbers it later:
+   `begin_module` (context_helpers.spl) writes 0x8..0x50 and 0x60.. and
+   **skips 0x58**, exactly as its comment claims.
+
+2. The `if self.ctx.module_surfaces != nil:` branch IS taken
+   (breakpoint at `lower_and_check_impl+1048` hits). Inside that branch the
+   emitted code is:
+
+   ```
+   ldr  x0, [x5, #0x80]          ; self.ctx.module_surfaces
+   adrp x5, 0x100ae1000 ; add #0x1b4
+   blr  x5                        ; -> lib__nogc_async_mut__async__poll__Poll_dot_unwrap
+   str  x0, [sp, #0x448]          ; retained_module_surfaces
+   ```
+
+   `.unwrap()` on `Option<ModuleSurfacesByName>` was bound to
+   **`lib.nogc_async_mut.async.poll.Poll.unwrap`**. That method matches
+   `Poll.Ready(value)`; an `Option.Some(x)` payload does not match, the native
+   match falls through, and the function returns raw **0**.
+
+### 7-second reproducer (no bootstrap needed)
+
+Built with the Rust seed
+(`build/bootstrap/rust-authority-338539e5.../target/release/simple`,
+mtime 2026-08-31 03:25) using the same flags the bootstrap script uses for
+Stage 2 (`--backend cranelift --runtime-bundle core-c-bootstrap
+--entry-closure --mode one-binary`), 57 files, 6.6s:
+
+```simple
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use std.nogc_async_mut.async.poll.{Poll}          # any bare-`unwrap` provider
+
+class Ctx:
+    module_surfaces: ModuleSurfacesByName?
+    sources: [i64]
+
+fn drive(ctx: Ctx) -> ModuleSurfacesByName:
+    if ctx.module_surfaces != nil:
+        return ctx.module_surfaces.unwrap()       # returns raw 0
+    ModuleSurfacesByName.empty()
+```
+
+Result matrix (each variant built and RUN; counts are per-variant verdicts,
+not a sequence):
+
+| variant | result |
+|---|---|
+| `.unwrap()` on an `Option<Class>` **field**, `Poll` imported | **SIGSEGV (rc=139)** |
+| same, with the `Poll` import removed | rc=0 |
+| same, `use std.nogc_sync_mut.failsafe.core.*` instead of `Poll` | **SIGSEGV (rc=139)** |
+| `.unwrap()` via a typed local `val o: T? = ctx.f` | **SIGSEGV** |
+| `ctx.f ?? T.empty()` | rc=0 |
+| `if val x = ctx.f:` | rc=0 |
+| `match ctx.f: case Some(v)/case None` | rc=0 |
+
+So the hijack is **not specific to `Poll`** — `FailSafeResult.unwrap`
+(`src/lib/nogc_sync_mut/failsafe/core.spl:140`) does it too, and there are 13
+`fn unwrap` definitions under `src/`. Renaming `Poll.unwrap` is therefore NOT
+a fix; it just hands the hijack to the next provider. This was tested, not
+assumed.
+
+### Where the seed defect is
+
+`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`,
+`resolve_method_call_static` (defined :724).
+
+There IS already a guard for bare `unwrap | unwrap_or | unwrap_err | is_some |
+is_none | is_ok | is_err` — its comment even names `FailSafeResult.unwrap` as
+the hazard — but it sits in the **`else` (resolution-FAILED) branch**, after
+`if let Some(resolved) = resolve_name_variants(...)`. When any module in the
+closure publishes a bare `unwrap` entry into the use/import map,
+`resolve_name_variants` **succeeds**, `*func_name` is rebound, and the guard is
+never reached. This is the identical fail-open the string-builtin guard was
+hoisted above `resolve_name_variants` to close on 2026-07-25 (see that guard's
+comment in the same function).
+
+The obvious seed fix — hoist the enum-helper list to the same early position —
+is **known to have been tried and reverted**: the in-file comment records that
+hoisting the enum-helper and numeric lists "broke legitimate resolution-success
+rebinds (the compiled interpreter's own Option helpers printed `<unknown>` for
+every text-option `??`, 2026-07-25)". So the seed fix needs a narrower
+predicate (e.g. hoist only when the resolved candidate's owning type is not the
+receiver's static type, or only for receivers whose static type is a known
+`Option`/`Result`). Not made here: repo rule is not to patch the seed
+unilaterally once the defect is proven to be the seed's.
+
+### Answers to the two hypotheses this bug doc previously carried
+
+- **`ModuleSurfacesByName.empty()` is NOT null-represented.** Disproved
+  directly: probe binaries built against the REAL types
+  (`hirlowering_for_module` / `_with_diagnostics` + `begin_module` +
+  `surface_index_for_name`, 274-file closure) print
+  `ms_nil=false`, `l_ms_nil=false`, `sfn=-1` and exit 0. An all-empty
+  aggregate is a normal non-zero heap value.
+- **Not a lost/never-stored field, and not a struct-layout divergence.** The
+  field store is emitted at the correct offset and the value handed to it is
+  already 0.
+
+### Blast radius
+
+Every `Option.unwrap()` / `Result.unwrap()` call site compiled by the seed in a
+closure that contains any bare-`unwrap` provider is at risk. `src/` has 4254
+`.unwrap()` call sites. Patching them in pure Simple is not a fix; the seed
+resolution is.
