@@ -111,6 +111,20 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 }
 #define clock_gettime rt_msvc_clock_gettime
 #endif
+/* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
+ * defines it, while glibc/libc++ still do. Defining it only when absent keeps
+ * every existing call site and every non-Windows build byte-identical.
+ * `(value)` is exactly the semantics C11 gave it for static initializers.
+ *
+ * This guard existed at 8ca87866c61 and is ABSENT from origin/main: pristine
+ * main fails `gcc -fsyntax-only` on this file with 6 ATOMIC_VAR_INIT errors
+ * under MinGW gcc 15.2.0 (measured 2026-08-30). It was almost certainly lost
+ * to the same "snapshot current development state" commit that deleted
+ * doc/08_tracking/bug/bootstrap_stage2_windows_link_unresolved_rt_and_dup_kernel32_2026-08-24.md
+ * -- the clobber pattern .claude/rules/vcs.md warns about. Restored. */
+#ifndef ATOMIC_VAR_INIT
+#define ATOMIC_VAR_INIT(value) (value)
+#endif
 #if !defined(_WIN32)
 #include <dirent.h>
 #include <netdb.h>
