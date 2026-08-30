@@ -23,6 +23,26 @@ describe "Text builtin rfind MIR lowering", tag: ["only-compiled"]:
         expect(mir.contains("rt_string_to_lower")).to_equal(false)
         expect(mir.contains("DoubleEndedIterator")).to_equal(false)
 
+    it "keeps statically typed text methods on runtime ABI symbols":
+        val source = "fn normalize(value: text) -> [text]:\n    value.strip().lines()\n"
+        val mir = lower_text_rfind_mir(source, "typed_text_runtime_symbols")
+
+        expect(mir).to_contain("rt_string_trim")
+        expect(mir).to_contain("rt_string_replace")
+        expect(mir).to_contain("rt_string_split")
+        expect(mir.contains("str.strip")).to_equal(false)
+        expect(mir.contains("str.lines")).to_equal(false)
+
+    it "keeps custom instance trait UFCS and static strip-lines owners":
+        val source = "struct InstanceTextNames:\n    marker: i64\n\nimpl InstanceTextNames:\n    fn strip(self) -> i64: self.marker\n    fn lines(self) -> i64: self.marker + 1\n\ntrait TraitTextNames:\n    fn strip() -> i64\n    fn lines() -> i64\n\nstruct TraitTextOwner:\n    marker: i64\n\nimpl TraitTextNames for TraitTextOwner:\n    fn strip(self) -> i64: self.marker + 2\n    fn lines(self) -> i64: self.marker + 3\n\nstruct UfcsTextOwner:\n    marker: i64\n\nfn strip(owner: UfcsTextOwner) -> i64: owner.marker + 4\nfn lines(owner: UfcsTextOwner) -> i64: owner.marker + 5\n\nstruct StaticTextNames:\n    marker: i64\n\nimpl StaticTextNames:\n    static fn strip() -> i64: 6\n    static fn lines() -> i64: 7\n\nfn custom_text_names(a: InstanceTextNames, b: TraitTextOwner, c: UfcsTextOwner) -> i64:\n    a.strip() + a.lines() + b.strip() + b.lines() + c.strip() + c.lines() + StaticTextNames.strip() + StaticTextNames.lines()\n"
+        val mir = lower_text_rfind_mir(source, "custom_text_method_owners")
+
+        for owner in ["InstanceTextNames", "TraitTextNames", "strip", "lines", "StaticTextNames"]:
+            expect(mir).to_contain(owner)
+        expect(mir.contains("rt_string_trim")).to_equal(false)
+        expect(mir.contains("rt_string_replace")).to_equal(false)
+        expect(mir.contains("rt_string_split")).to_equal(false)
+
 describe "Primitive text conversion MIR lowering", tag: ["only-compiled"]:
     it "selects each scalar renderer for both aliases":
         val source = "fn render_string(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_string() + \"|\" + f.to_string() + \"|\" + u.to_string() + \"|\" + i.to_string()\n\nfn render_text(b: bool, f: f64, u: u64, i: i64) -> text:\n    b.to_text() + \"|\" + f.to_text() + \"|\" + u.to_text() + \"|\" + i.to_text()\n"
