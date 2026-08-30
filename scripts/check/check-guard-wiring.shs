@@ -77,6 +77,15 @@ scan_wiring() {
     # 1. Enumerate guards. -print into `while IFS= read -r` (never `for f in
     #    $list`): a bare for-loop word-splits on filenames containing spaces and
     #    silently drops them, which has already hidden files from a check here.
+    #    scripts/check/lib/** is EXCLUDED: those files are sourced helper
+    #    libraries (they define shell functions and have no entry point, no
+    #    verdict line and no exit contract), not guards. Counting them made 14
+    #    non-gates show up as unwired debt, and the only ways to clear them were
+    #    to wire a library into CI -- which does nothing -- or to write an
+    #    opt-out line asserting a library is "deliberately not a gate", which is
+    #    a false statement in a file whose whole value is that its statements
+    #    are true. A helper is reached exactly when its caller is, so the caller
+    #    is what this guard must judge. Fixture: st-lib-helper.
     : > "$_wd/guardpaths"
     for _d in "$_root/scripts/check" "$_root/scripts/audit"; do
         [ -d "$_d" ] || continue
@@ -88,6 +97,23 @@ scan_wiring() {
     fi
     sort -u "$_wd/guardpaths" -o "$_wd/guardpaths"
     sed 's#.*/##' "$_wd/guardpaths" | sort -u > "$_wd/guards"
+
+    #    scripts/check/lib/** holds sourced function libraries, not gates: no
+    #    entry point, no verdict line, no exit contract. They must stay in
+    #    "$_wd/guards" so they remain traversable NODES -- a guard named ONLY
+    #    inside a helper reaches a root THROUGH that helper, and dropping the
+    #    helper from the node set silently orphaned three such guards
+    #    (check-aspect-seal, check-critical-release-seal, check-f64-call-abi)
+    #    when this exclusion was first written at the enumeration step. So they
+    #    are subtracted here instead, at the point where orphanhood is decided.
+    #    Judging them as gates made 14 non-gates show up as unwired debt whose
+    #    only remedies were wiring a library into CI (which does nothing) or
+    #    writing "deliberately not a gate" about a library -- a false statement
+    #    in a file whose entire value is that its statements are true.
+    #    Fixtures: st-lib-helper.
+    : > "$_wd/libhelpers"
+    $GREP '/scripts/check/lib/' "$_wd/guardpaths" 2>/dev/null |
+        sed 's#.*/##' | sort -u > "$_wd/libhelpers" || :
 
     # 2. Roots. The installed pre-push hook is NOT under scripts/hooks/ -- it is
     #    scripts/check/pre-push-conflict-tree-guard.shs, which setup.shs installs
@@ -169,7 +195,8 @@ scan_wiring() {
         sort -u "$_wd/frontier" -o "$_wd/frontier"
     done
     sort -u "$_wd/reached" -o "$_wd/reached"
-    comm -23 "$_wd/guards" "$_wd/reached" > "$_wd/orphans"
+    comm -23 "$_wd/guards" "$_wd/reached" > "$_wd/orphans_all"
+    comm -23 "$_wd/orphans_all" "$_wd/libhelpers" > "$_wd/orphans"
 
     # 5. Opt-out list: "<basename><whitespace><reason>". A reason is REQUIRED --
     #    a bare basename is an unexplained skip and is rejected below.
@@ -259,7 +286,8 @@ scan_installed_hooks() {
 # ---------------------------------------------------------------------------
 selftest() {
     _t=$(mktemp -d) || return 1
-    mkdir -p "$_t/scripts/check" "$_t/.github/workflows" "$_t/scripts/hooks"
+    mkdir -p "$_t/scripts/check" "$_t/scripts/check/lib" \
+        "$_t/.github/workflows" "$_t/scripts/hooks"
 
     # direct: named by a workflow.
     echo '#!/bin/sh' > "$_t/scripts/check/st-direct.shs"
@@ -270,6 +298,15 @@ selftest() {
     echo '#!/bin/sh' > "$_t/scripts/check/st-optout.shs"
     # orphan-unjustified: unreferenced and unlisted. MUST fail.
     echo '#!/bin/sh' > "$_t/scripts/check/st-orphan.shs"
+    # lib helper: a sourced function library under scripts/check/lib/. It is
+    # itself unreferenced, so to the old code it looked exactly like
+    # st-orphan.shs. It must NOT be judged as a gate -- but it must still be a
+    # traversable node, because st-viahelper.shs is named ONLY inside it.
+    # Deleting it from the node set orphaned three real guards in the tree.
+    echo '#!/bin/sh' > "$_t/scripts/check/lib/st-lib-helper.shs"
+    echo 'sh scripts/check/st-viahelper.shs' >> "$_t/scripts/check/lib/st-lib-helper.shs"
+    echo '#!/bin/sh' > "$_t/scripts/check/st-viahelper.shs"
+    echo '. scripts/check/lib/st-lib-helper.shs' >> "$_t/scripts/check/st-direct.shs"
     printf 'run: sh scripts/check/st-direct.shs\n' > "$_t/.github/workflows/w.yml"
 
     printf '# fixture\nst-optout.shs  needs real hardware\n' > "$_t/optout.txt"
@@ -286,7 +323,15 @@ selftest() {
     }
     _has() { $GREP -qx "$2" "$_w/$1" && echo yes || echo no; }
 
-    _assert "guards enumerated" 4 "$(wc -l < "$_w/guards" | tr -d ' ')"
+    _assert "guards enumerated" 6 "$(wc -l < "$_w/guards" | tr -d ' ')"
+    _assert "lib helper stays a traversable node" yes \
+        "$(_has guards st-lib-helper.shs)"
+    _assert "lib helper is never judged an orphan" no \
+        "$(_has orphans st-lib-helper.shs)"
+    _assert "guard named only inside a lib helper is still reachable" yes \
+        "$(_has reached st-viahelper.shs)"
+    _assert "guard named only inside a lib helper is not an orphan" no \
+        "$(_has orphans st-viahelper.shs)"
     _assert "direct guard reachable"   yes "$(_has reached st-direct.shs)"
     _assert "indirect guard reachable" yes "$(_has reached st-indirect.shs)"
     _assert "optout guard is an orphan" yes "$(_has orphans st-optout.shs)"
@@ -363,7 +408,7 @@ selftest() {
         echo "Fix the scan. Do NOT delete these fixtures."
         return 1
     fi
-    echo "check-guard-wiring: selftest 16/16 fixtures correct"
+    echo "check-guard-wiring: selftest 20/20 fixtures correct"
     return 0
 }
 
