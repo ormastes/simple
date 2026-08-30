@@ -824,7 +824,22 @@ impl MirLowering:
             if mir_lower_type_probe_seq == 50000:
                 eprint("[mir-lower-type-probe] truncated seq=50000\n")
             else:
-                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={_sffi_hir_type_discriminant(type_.kind)}\n")
+                # kindzero / kindnil discriminate the two candidate mechanisms without
+                # adding a runtime accessor. There is NO scalar tag accessor in the C
+                # runtime (no rt_value_tag / rt_raw_bits), so `type_ & 7` is not
+                # expressible from Simple, and reaching into the object to synthesise one
+                # is the round-2 mistake. Instead use the idiom the codebase already
+                # relies on: copy_local_hir_type_metadata (mir_lowering_types.spl:595)
+                # tests `source_type == nil or source_type == 0` to reject a
+                # "staged-native raw zero". Same test here:
+                #   disc=-1 with kindzero=true  -> the arm-binding guard FAILED and the
+                #     copy came from the freshly rt_alloc'd ZEROED block; the migration is
+                #     the cause and the fix is the tagging / the guard's assumption.
+                #   disc=-1 with kindzero=false -> the guard PASSED and the copy is wrong
+                #     for some other reason; the zeroed-block story is refuted.
+                # Both operands are compared by value; neither reads a field of the
+                # suspect object beyond `kind`, which round 1 proved safe to touch.
+                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil}\n")
         val dict_type_disc = _sffi_hir_type_discriminant(HirTypeKind.Dict(type_, type_))
         if _sffi_hir_type_discriminant(type_.kind) == dict_type_disc:
             match type_.kind:
