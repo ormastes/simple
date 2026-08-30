@@ -1306,15 +1306,46 @@ impl MirLowering:
                             return q_idx
                         q_idx = q_idx + 1
             val sym_id = self.symbol_id_value(found_type_sym)
+            val fm_type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
             if self.field_map.has(sym_id):
                 val fields = self.field_map[sym_id]
-                val n = fields.len()
-                var idx = 0
-                while idx < n:
-                    if fields[idx] == field_name:
-                        return idx
-                    idx = idx + 1
-            val type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
+                # FAIL CLOSED on a cross-module SymbolId collision. field_map is
+                # keyed by per-module numeric SymbolIds, which collide in an
+                # entry-closure build, and the qualified tier above cannot save
+                # us because its key is not normalized across the import
+                # boundary (see mir_qualified_field_key_namespace_mismatch
+                # _2026-08-08.md). A collision here does not fail loudly: it
+                # returns SOME index, so the field is read at another type's
+                # offset. Measured 2026-08-30: CompilerConfig (14 fields, 112
+                # bytes, mcdc_owner_bytes at #10/0x50) was read at #26/0xd0 --
+                # MirLowering's layout -- i.e. 96 bytes past the end of the
+                # allocation, silently.
+                # The name-keyed tier immediately below is right in exactly the
+                # cases this one is wrong, so when the two disagree the honest
+                # move is to distrust the ambiguous key rather than the specific
+                # one. When they agree, or no name-keyed entry exists, behaviour
+                # is unchanged.
+                var fm_trusted = true
+                if fm_type_symbol != nil and self.struct_field_order.has(fm_type_symbol.name):
+                    val fm_named = self.struct_field_order[fm_type_symbol.name]
+                    if fm_named.len() != fields.len():
+                        fm_trusted = false
+                    else:
+                        var fm_i = 0
+                        while fm_i < fm_named.len():
+                            if fm_named[fm_i] != fields[fm_i]:
+                                fm_trusted = false
+                            fm_i = fm_i + 1
+                if fm_trusted:
+                    val n = fields.len()
+                    var idx = 0
+                    while idx < n:
+                        if fields[idx] == field_name:
+                            return idx
+                        idx = idx + 1
+                elif (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+                    print "[field-idx-collision] type={fm_type_symbol.name} field={field_name} sym_id={sym_id} field_map_len={fields.len()}"
+            val type_symbol = fm_type_symbol
             if type_symbol != nil and self.struct_field_order.has(type_symbol.name):
                 val named_fields = self.struct_field_order[type_symbol.name]
                 var named_idx = 0
