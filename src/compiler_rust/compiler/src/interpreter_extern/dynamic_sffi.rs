@@ -393,7 +393,8 @@ fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Opt
                 addr
             }
             None => {
-                sat.symbols.insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                sat.symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                 return None;
             }
         }
@@ -611,7 +612,9 @@ fn try_call_manifest_library(
                 addr
             }
             None => {
-                state.symbols.insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                state
+                    .symbols
+                    .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                 // Symbol not found as a flat function — try class dispatch before failing
                 drop(libraries);
                 if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
@@ -1114,7 +1117,8 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
                         Some(addr)
                     }
                     None => {
-                        rt.symbols.insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
+                        rt.symbols
+                            .insert(name.to_string(), CachedDynamicSymbol { address: 0, arity: 0 });
                         None
                     }
                 }

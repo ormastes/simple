@@ -771,7 +771,8 @@ pub(crate) fn build_import_map(
     // Keyed prefix -> public name -> owners (the same `(prefix, name)` order as
     // one flat map) so the per-binding lookups borrow `&str` keys instead of
     // allocating a `(String, String)` tuple for each of them.
-    type OwnerSets = std::collections::BTreeMap<String, std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>;
+    type OwnerSets =
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>;
     fn forwarded_owners(owner_sets: &OwnerSets, prefix: &str, name: &str) -> Vec<String> {
         owner_sets
             .get(prefix)
@@ -811,7 +812,11 @@ pub(crate) fn build_import_map(
     }
     let owner_sets: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<String>> = owner_sets
         .into_iter()
-        .flat_map(|(prefix, names)| names.into_iter().map(move |(name, owners)| ((prefix.clone(), name), owners)))
+        .flat_map(|(prefix, names)| {
+            names
+                .into_iter()
+                .map(move |(name, owners)| ((prefix.clone(), name), owners))
+        })
         .collect();
 
     let mut package_owner_sets = std::collections::BTreeMap::new();

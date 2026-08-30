@@ -257,7 +257,11 @@ fn combined_run_json(result: &TestRunResult) -> String {
             format!(
                 "{{\"name\":{},\"passed\":{},\"failed\":{},\"skipped\":{},\"pending\":{},\"done_pct\":{}}}",
                 serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into()),
-                p, fl, s, pe, done_pct
+                p,
+                fl,
+                s,
+                pe,
+                done_pct
             )
         })
         .collect();
@@ -1749,12 +1753,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db,
-        platform_tag_matches_mode, targeted_discovery_is_empty,
+        generate_spipe_docs_for_results_with_binary, handle_run_management_with_db, platform_tag_matches_mode,
+        targeted_discovery_is_empty,
     };
-    use crate::cli::test_runner::types::{
-        OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult,
-    };
+    use crate::cli::test_runner::types::{OutputFormat, TestExecutionMode, TestFileResult, TestOptions, TestRunResult};
     use crate::test_db::{TestRunRecord, TestRunStatus, list_runs};
     use crate::unified_db::Database;
 

@@ -1584,9 +1584,7 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower HIR module to MIR module (main entry point)
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
-        if crate::hir::analysis::unsafe_ffi_deny_enabled()
-            && !hir.extern_fn_names.is_empty()
-        {
+        if crate::hir::analysis::unsafe_ffi_deny_enabled() && !hir.extern_fn_names.is_empty() {
             if let Some(violation) = crate::hir::analysis::check_unsafe_ffi(hir).first() {
                 return Err(MirLowerError::Unsupported(format!(
                     "E-SFFI-002: raw extern call '{}' in '{}' requires lexical unsafe(ffi)",

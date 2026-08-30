@@ -75,7 +75,10 @@ mod tests {
     #[test]
     fn named_placeholder_rewrites_to_slot() {
         let idx = vec![(Some("result".to_string()), 0)];
-        assert_eq!(rewrite_asm_placeholders("csrr {result}, sstatus", &idx), "csrr $0, sstatus");
+        assert_eq!(
+            rewrite_asm_placeholders("csrr {result}, sstatus", &idx),
+            "csrr $0, sstatus"
+        );
     }
 
     #[test]

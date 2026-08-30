@@ -317,9 +317,8 @@ pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_open_fd requires 3 arguments"));
     }
     let path = match &args[0] {
-        Value::Str(path) => CString::new(path.as_bytes()).map_err(|_| {
-            CompileError::runtime("rt_open_fd path contains an interior NUL byte")
-        })?,
+        Value::Str(path) => CString::new(path.as_bytes())
+            .map_err(|_| CompileError::runtime("rt_open_fd path contains an interior NUL byte"))?,
         _ => return Err(CompileError::runtime("rt_open_fd path must be text")),
     };
     let flags = args[1].as_int()? as libc::c_int;
@@ -500,7 +499,6 @@ pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-
 /// Interpreter fallback for the runtime cached fsync entrypoint.
 pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
     rt_file_fsync(args)
@@ -549,75 +547,76 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(unix)]
     {
-    let file = {
-        let parent = match target.parent() {
-            Some(value) => value,
-            None => Path::new("."),
-        };
-        let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
-        let mut parent_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if parent_fd < 0 {
-            return Ok(Value::Int(-1));
-        }
-        for component in parent.components() {
-            use std::path::Component;
-            let name = match component {
-                Component::RootDir | Component::CurDir => continue,
-                Component::Normal(value) => value,
-                Component::ParentDir | Component::Prefix(_) => {
+        let file = {
+            let parent = match target.parent() {
+                Some(value) => value,
+                None => Path::new("."),
+            };
+            let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
+            let mut parent_fd =
+                unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+            if parent_fd < 0 {
+                return Ok(Value::Int(-1));
+            }
+            for component in parent.components() {
+                use std::path::Component;
+                let name = match component {
+                    Component::RootDir | Component::CurDir => continue,
+                    Component::Normal(value) => value,
+                    Component::ParentDir | Component::Prefix(_) => {
+                        unsafe { libc::close(parent_fd) };
+                        return Ok(Value::Int(-1));
+                    }
+                };
+                let name = match CString::new(name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        unsafe { libc::close(parent_fd) };
+                        return Ok(Value::Int(-1));
+                    }
+                };
+                let next = unsafe {
+                    libc::openat(
+                        parent_fd,
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                unsafe { libc::close(parent_fd) };
+                if next < 0 {
+                    return Ok(Value::Int(-1));
+                }
+                parent_fd = next;
+            }
+            let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
+                Some(value) => value,
+                None => {
                     unsafe { libc::close(parent_fd) };
                     return Ok(Value::Int(-1));
                 }
             };
-            let name = match CString::new(name.as_bytes()) {
-                Ok(value) => value,
-                Err(_) => {
-                    unsafe { libc::close(parent_fd) };
-                    return Ok(Value::Int(-1));
-                }
-            };
-            let next = unsafe {
+            let fd = unsafe {
                 libc::openat(
                     parent_fd,
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    leaf.as_ptr(),
+                    libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0o600,
                 )
             };
             unsafe { libc::close(parent_fd) };
-            if next < 0 {
+            if fd < 0 {
                 return Ok(Value::Int(-1));
             }
-            parent_fd = next;
-        }
-        let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
-            Some(value) => value,
-            None => {
-                unsafe { libc::close(parent_fd) };
-                return Ok(Value::Int(-1));
-            }
+            unsafe { std::fs::File::from_raw_fd(fd) }
         };
-        let fd = unsafe {
-            libc::openat(
-                parent_fd,
-                leaf.as_ptr(),
-                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        unsafe { libc::close(parent_fd) };
-        if fd < 0 {
+        if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
             return Ok(Value::Int(-1));
         }
-        unsafe { std::fs::File::from_raw_fd(fd) }
-    };
-    if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
-        return Ok(Value::Int(-1));
-    }
-    let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
-    let handle = files.0;
-    files.0 += 1;
-    files.1.insert(handle, file);
-    Ok(Value::Int(handle))
+        let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
+        let handle = files.0;
+        files.0 += 1;
+        files.1.insert(handle, file);
+        Ok(Value::Int(handle))
     }
 }
 
@@ -1041,14 +1040,11 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
 /// Read file bytes through the mmap-named API in interpreter mode.
 pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_file_mmap_read_bytes requires 1 argument",
-        ));
+        return Err(CompileError::runtime("rt_file_mmap_read_bytes requires 1 argument"));
     }
     let path = extract_path(args, 0)?;
-    let bytes = fs::read(&path).map_err(|error| {
-        CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}"))
-    })?;
+    let bytes =
+        fs::read(&path).map_err(|error| CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}")))?;
     Ok(Value::byte_array(bytes))
 }
 
@@ -2138,12 +2134,11 @@ mod tests {
         }
 
         let missing = dir.path().join("missing.bin").to_string_lossy().to_string();
-        let error = rt_file_mmap_read_bytes(&[Value::text(missing)])
-            .expect_err("missing mmap input must not become Nil");
+        let error =
+            rt_file_mmap_read_bytes(&[Value::text(missing)]).expect_err("missing mmap input must not become Nil");
         assert!(error.to_string().contains("rt_file_mmap_read_bytes failed"));
 
-        let arity = rt_file_mmap_read_bytes(&[])
-            .expect_err("mmap byte reader must reject missing arguments");
+        let arity = rt_file_mmap_read_bytes(&[]).expect_err("mmap byte reader must reject missing arguments");
         assert!(arity.to_string().contains("requires 1 argument"));
     }
 
@@ -2920,25 +2915,48 @@ fn safe_artifact_open_root(root: &str) -> Option<i32> {
         return None;
     }
     let components: Vec<&str> = root.split('/').skip(1).filter(|part| !part.is_empty()).collect();
-    if components.iter().any(|part| *part == "." || *part == ".." || part.len() > 255 || part.as_bytes().contains(&0)) {
+    if components
+        .iter()
+        .any(|part| *part == "." || *part == ".." || part.len() > 255 || part.as_bytes().contains(&0))
+    {
         return None;
     }
     let slash = CString::new("/").ok()?;
-    let mut current = unsafe { libc::open(slash.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    if current < 0 { return None }
+    let mut current = unsafe {
+        libc::open(
+            slash.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if current < 0 {
+        return None;
+    }
     for component in components {
         let component = match CString::new(component.as_bytes()) {
             Ok(value) => value,
-            Err(_) => { unsafe { libc::close(current) }; return None; }
+            Err(_) => {
+                unsafe { libc::close(current) };
+                return None;
+            }
         };
         let mut retries = 0;
         let next = loop {
-            let fd = unsafe { libc::openat(current, component.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-            if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 { break fd }
+            let fd = unsafe {
+                libc::openat(
+                    current,
+                    component.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 {
+                break fd;
+            }
             retries += 1;
         };
         if next < 0 || unsafe { libc::close(current) } != 0 {
-            if next >= 0 { unsafe { libc::close(next) }; }
+            if next >= 0 {
+                unsafe { libc::close(next) };
+            }
             return None;
         }
         current = next;
@@ -2956,7 +2974,9 @@ struct SafeArtifactOpenHow {
 
 #[cfg(target_os = "linux")]
 fn safe_artifact_open_beneath(root_fd: i32, relative: &str, flags: i32, mode: u32) -> i32 {
-    let Ok(relative) = CString::new(relative.as_bytes()) else { return -1 };
+    let Ok(relative) = CString::new(relative.as_bytes()) else {
+        return -1;
+    };
     let how = SafeArtifactOpenHow {
         flags: flags as u64,
         mode: mode as u64,
@@ -2966,7 +2986,10 @@ fn safe_artifact_open_beneath(root_fd: i32, relative: &str, flags: i32, mode: u3
     loop {
         let fd = unsafe {
             libc::syscall(
-                libc::SYS_openat2, root_fd, relative.as_ptr(), &how,
+                libc::SYS_openat2,
+                root_fd,
+                relative.as_ptr(),
+                &how,
                 std::mem::size_of::<SafeArtifactOpenHow>(),
             ) as i32
         };
@@ -2982,7 +3005,10 @@ pub fn rt_hosted_safe_artifact_root_open_v1(args: &[Value]) -> Result<Value, Com
     #[cfg(target_os = "linux")]
     let handle = safe_artifact_open_root(&root).map(i64::from).unwrap_or(-1);
     #[cfg(not(target_os = "linux"))]
-    let handle = { let _ = root; -1 };
+    let handle = {
+        let _ = root;
+        -1
+    };
     Ok(Value::Int(handle))
 }
 
@@ -3014,26 +3040,41 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
     }
     #[cfg(unix)]
     {
-        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Nil) }
+        if root_handle < 0 || root_handle > i32::MAX as i64 {
+            return Ok(Value::Nil);
+        }
         let root_fd = root_handle as i32;
         let mut retries = 0;
         let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 { return Ok(Value::Nil) }
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 {
+            return Ok(Value::Nil);
+        }
         #[cfg(target_os = "linux")]
         let fd = safe_artifact_open_beneath(root_fd, &relative, libc::O_RDONLY | libc::O_CLOEXEC, 0);
         #[cfg(not(target_os = "linux"))]
         let fd = -1;
         let mut ok = fd >= 0;
         let mut before: libc::stat = unsafe { std::mem::zeroed() };
-        if ok { ok = unsafe { libc::fstat(fd, &mut before) } == 0 }
-        if ok { ok = before.st_dev == root_identity.st_dev && (before.st_mode & libc::S_IFMT) == libc::S_IFREG && before.st_size >= 0 && before.st_size <= max_bytes }
+        if ok {
+            ok = unsafe { libc::fstat(fd, &mut before) } == 0
+        }
+        if ok {
+            ok = before.st_dev == root_identity.st_dev
+                && (before.st_mode & libc::S_IFMT) == libc::S_IFREG
+                && before.st_size >= 0
+                && before.st_size <= max_bytes
+        }
         let wanted = if ok { before.st_size as usize } else { 0 };
         let mut bytes = vec![0u8; wanted];
         let mut used = 0usize;
         retries = 0;
         while ok && used < wanted {
             let count = unsafe { libc::read(fd, bytes[used..].as_mut_ptr().cast(), wanted - used) };
-            if count > 0 { used += count as usize; retries = 0; continue; }
+            if count > 0 {
+                used += count as usize;
+                retries = 0;
+                continue;
+            }
             if count < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
                 retries += 1;
                 continue;
@@ -3041,17 +3082,30 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
             ok = false;
         }
         let mut after: libc::stat = unsafe { std::mem::zeroed() };
-        if ok { ok = unsafe { libc::fstat(fd, &mut after) } == 0 }
         if ok {
-            ok = before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
-                before.st_mode == after.st_mode && before.st_size == after.st_size &&
-                before.st_mtime == after.st_mtime && before.st_ctime == after.st_ctime;
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            { ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec; }
-            #[cfg(target_os = "macos")]
-            { ok = ok && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec; }
+            ok = unsafe { libc::fstat(fd, &mut after) } == 0
         }
-        if fd >= 0 && unsafe { libc::close(fd) } != 0 { ok = false }
+        if ok {
+            ok = before.st_dev == after.st_dev
+                && before.st_ino == after.st_ino
+                && before.st_mode == after.st_mode
+                && before.st_size == after.st_size
+                && before.st_mtime == after.st_mtime
+                && before.st_ctime == after.st_ctime;
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                ok = ok
+                    && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec
+                    && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec;
+            }
+        }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 {
+            ok = false
+        }
         if ok {
             Ok(Value::byte_array(bytes))
         } else {
@@ -3067,7 +3121,9 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
 pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, CompileError> {
     let root_handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
     let relative = extract_path(args, 1)?;
-    let Some(payload) = args.get(2).and_then(Value::byte_array_view) else { return Ok(Value::Int(-1)) };
+    let Some(payload) = args.get(2).and_then(Value::byte_array_view) else {
+        return Ok(Value::Int(-1));
+    };
     let max_bytes = match args.get(3) {
         Some(value) => value.as_int()?,
         None => -1,
@@ -3082,34 +3138,58 @@ pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, Compi
     }
     #[cfg(target_os = "linux")]
     {
-        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Int(-1)) }
+        if root_handle < 0 || root_handle > i32::MAX as i64 {
+            return Ok(Value::Int(-1));
+        }
         let root_fd = root_handle as i32;
         let (parent_path, leaf_text) = match relative.rsplit_once('/') {
             Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (parent, leaf),
             None => (".", relative.as_str()),
             _ => return Ok(Value::Int(-1)),
         };
-        let Ok(leaf) = CString::new(leaf_text.as_bytes()) else { return Ok(Value::Int(-1)) };
+        let Ok(leaf) = CString::new(leaf_text.as_bytes()) else {
+            return Ok(Value::Int(-1));
+        };
         let parent_fd = safe_artifact_open_beneath(
-            root_fd, parent_path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC, 0);
-        if parent_fd < 0 { return Ok(Value::Int(-1)) }
+            root_fd,
+            parent_path,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            0,
+        );
+        if parent_fd < 0 {
+            return Ok(Value::Int(-1));
+        }
         let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
         let mut parent_identity: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 ||
-            unsafe { libc::fstat(parent_fd, &mut parent_identity) } != 0 ||
-            root_identity.st_dev != parent_identity.st_dev {
-            unsafe { libc::close(parent_fd); }
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0
+            || unsafe { libc::fstat(parent_fd, &mut parent_identity) } != 0
+            || root_identity.st_dev != parent_identity.st_dev
+        {
+            unsafe {
+                libc::close(parent_fd);
+            }
             return Ok(Value::Int(-1));
         }
         let dot = CString::new(".").expect("literal has no NUL");
-        let fd = unsafe { libc::openat(parent_fd, dot.as_ptr(), libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC, 0o600) };
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                dot.as_ptr(),
+                libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
         let mut status = if fd < 0 { -3 } else { -1 };
         let mut published = false;
         let mut used = 0usize;
         let mut retries = 0;
         while fd >= 0 && used < payload.len() {
             let written = unsafe { libc::write(fd, payload[used..].as_ptr().cast(), payload.len() - used) };
-            if written > 0 { used += written as usize; retries = 0; continue; }
+            if written > 0 {
+                used += written as usize;
+                retries = 0;
+                continue;
+            }
             if written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
                 retries += 1;
                 continue;
@@ -3117,9 +3197,15 @@ pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, Compi
             break;
         }
         let mut identity: libc::stat = unsafe { std::mem::zeroed() };
-        if fd >= 0 && used == payload.len() && unsafe { libc::fdatasync(fd) } == 0 &&
-            unsafe { libc::fsync(fd) } == 0 && unsafe { libc::fstat(fd, &mut identity) } == 0 &&
-            identity.st_dev == root_identity.st_dev && (identity.st_mode & libc::S_IFMT) == libc::S_IFREG && identity.st_size == payload.len() as i64 {
+        if fd >= 0
+            && used == payload.len()
+            && unsafe { libc::fdatasync(fd) } == 0
+            && unsafe { libc::fsync(fd) } == 0
+            && unsafe { libc::fstat(fd, &mut identity) } == 0
+            && identity.st_dev == root_identity.st_dev
+            && (identity.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && identity.st_size == payload.len() as i64
+        {
             let empty = CString::new("").expect("literal has no NUL");
             if unsafe { libc::linkat(fd, empty.as_ptr(), parent_fd, leaf.as_ptr(), libc::AT_EMPTY_PATH) } == 0 {
                 status = if unsafe { libc::fsync(parent_fd) } == 0 { 0 } else { -4 };
@@ -3128,8 +3214,12 @@ pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, Compi
                 status = -2;
             }
         }
-        if fd >= 0 && unsafe { libc::close(fd) } != 0 { status = if published { -4 } else { -5 } }
-        if unsafe { libc::close(parent_fd) } != 0 { status = if published { -4 } else { -5 } }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 {
+            status = if published { -4 } else { -5 }
+        }
+        if unsafe { libc::close(parent_fd) } != 0 {
+            status = if published { -4 } else { -5 }
+        }
         Ok(Value::Int(status))
     }
 }

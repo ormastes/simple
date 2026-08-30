@@ -291,7 +291,13 @@ pub fn rt_cranelift_declare_global_data_v2(args: &[Value]) -> Result<Value, Comp
     validate_raw_span(name_ptr, name_len, "rt_cranelift_declare_global_data_v2")?;
     let handle = unsafe {
         cranelift_sffi::rt_cranelift_declare_global_data_v2(
-            module, name_ptr, name_len, type_code, initial_bits, linkage, alignment,
+            module,
+            name_ptr,
+            name_len,
+            type_code,
+            initial_bits,
+            linkage,
+            alignment,
         )
     };
     Ok(Value::Int(handle))

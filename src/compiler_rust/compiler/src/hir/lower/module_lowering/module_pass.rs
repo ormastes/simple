@@ -948,7 +948,11 @@ impl Lowerer {
             match attr.name.as_str() {
                 "section" => {
                     placed = true;
-                    section = attr.args.as_ref().and_then(|args| args.first()).and_then(const_string_of);
+                    section = attr
+                        .args
+                        .as_ref()
+                        .and_then(|args| args.first())
+                        .and_then(const_string_of);
                     if section.is_none() {
                         return Err(LowerError::Unsupported(format!(
                             "E-ASM-DIRECTIVE: @section on `{name}` needs a string section name"
@@ -978,7 +982,11 @@ impl Lowerer {
         if !placed {
             return Ok(None);
         }
-        if is_global && !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$') {
+        if is_global
+            && !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$')
+        {
             return Err(LowerError::Unsupported(format!(
                 "E-GLOBAL-MANGLE: `{name}` is not a valid assembler symbol name"
             )));
@@ -1008,7 +1016,8 @@ impl Lowerer {
                 )))
             }
         };
-        let zeroed = matches!(value, Expr::Call { callee, .. } if matches!(&**callee, Expr::Identifier(f) if f == "zeroed"));
+        let zeroed =
+            matches!(value, Expr::Call { callee, .. } if matches!(&**callee, Expr::Identifier(f) if f == "zeroed"));
         let values = if zeroed {
             Vec::new()
         } else if let Some(values) = try_const_array_eval(value) {

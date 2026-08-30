@@ -418,10 +418,7 @@ impl Lowerer {
     /// instead of appearing with no source location at all.
     pub(super) fn record_lenient_global(&mut self, name: &str, kind: LenientGlobalKind) {
         let entry = LenientGlobal {
-            file: self
-                .current_file
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            file: self.current_file.as_ref().map(|path| path.display().to_string()),
             function: self.current_function_name.clone(),
             function_line: self.current_function_line,
             name: name.to_string(),
@@ -780,8 +777,7 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
-            let Some((importer, local_name, source_owner, source_name)) =
-                decode_import_binding_marker(&marker.name)
+            let Some((importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
             };

@@ -1419,7 +1419,10 @@ impl Lowerer {
         if enum_name == "_" {
             let mut candidates: Vec<(String, Option<Vec<TypeId>>)> = Vec::new();
             for (_, hir_type) in self.module.types.iter() {
-                if let HirType::Enum { name: owner, variants, .. } = hir_type {
+                if let HirType::Enum {
+                    name: owner, variants, ..
+                } = hir_type
+                {
                     for (name, fields) in variants {
                         if name == variant_name {
                             candidates.push((owner.clone(), fields.clone()));
@@ -1442,7 +1445,12 @@ impl Lowerer {
             // rather than silent; the deterministic order keeps it stable.
             candidates.sort_by(|a, b| a.0.cmp(&b.0));
             if crate::hir::lower::trace_field_get_enabled() {
-                let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                let fpath = self
+                    .current_file
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
                 let owners: Vec<&str> = candidates.iter().map(|(o, _)| o.as_str()).collect();
                 eprintln!("[ENUM-AMBIG] variant `{variant_name}` owned by {owners:?} with DIFFERING payloads; guessing `{}` in {fpath}", owners[0]);
             }
@@ -1644,7 +1652,12 @@ impl Lowerer {
                             .and_then(|types| types.get(i).copied())
                             .unwrap_or(TypeId::ANY);
                         if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                            let fpath = self
+                                .current_file
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
                             eprintln!("[PB] {enum_name}.{variant_name} slot{i} expected_ty={:?} field_ty={:?} ({:?}) in {fpath}", expected_ty, field_ty, self.module.types.get(field_ty), );
                         }
                         self.collect_pattern_bindings(p, field_ty, bindings);
@@ -2379,22 +2392,17 @@ impl Lowerer {
         // only below the absent branch so evaluation remains lazy at runtime.
         let default_hir = self.lower_expr(default, ctx)?;
 
-        let (check, payload_ty, extract_enum_payload) =
-            match self.module.types.get(subject_ty).cloned() {
-            Some(HirType::Enum { name, .. }) if name == "Result" => {
-                (
-                    AbsentCheck::Err,
-                    self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
-                    true,
-                )
-            }
-            Some(HirType::Enum { name, .. }) if name == "Option" => {
-                (
-                    AbsentCheck::None,
-                    self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
-                    true,
-                )
-            }
+        let (check, payload_ty, extract_enum_payload) = match self.module.types.get(subject_ty).cloned() {
+            Some(HirType::Enum { name, .. }) if name == "Result" => (
+                AbsentCheck::Err,
+                self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                true,
+            ),
+            Some(HirType::Enum { name, .. }) if name == "Option" => (
+                AbsentCheck::None,
+                self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                true,
+            ),
             Some(HirType::Pointer { inner, .. }) => {
                 // A nullable scalar/string remains a tagged RuntimeValue after
                 // unwrapping. Object-like values keep their concrete type so
@@ -2425,10 +2433,14 @@ impl Lowerer {
             Some(HirType::Any) | None => (AbsentCheck::NoneOrErr, TypeId::ANY, false),
             // The interpreter treats every other value as already present.
             _ => return Ok(inner_hir),
-            };
+        };
 
         let subject_idx = ctx.locals.len();
-        ctx.add_local("$unwrap_or_return_subject".to_string(), subject_ty, Mutability::Immutable);
+        ctx.add_local(
+            "$unwrap_or_return_subject".to_string(),
+            subject_ty,
+            Mutability::Immutable,
+        );
         let subject_ref = HirExpr {
             kind: HirExprKind::Local(subject_idx),
             ty: subject_ty,

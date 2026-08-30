@@ -273,26 +273,20 @@ fn exec_block_while(
         // Ordinary boolean loops take the `None` arm and allocate nothing.
         // Pattern loops snapshot only the source-sized set of names actually
         // bound by this successful match.
-        let iteration_scope = match evaluate_block_while_condition(
-            while_stmt,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )? {
-            WhileConditionDecision::Stop => break,
-            WhileConditionDecision::Run => None,
-            WhileConditionDecision::RunWithBindings(bindings) => {
-                let mut saved = Vec::with_capacity(bindings.len());
-                for (name, value) in bindings {
-                    saved.push((name.clone(), env.get(&name).cloned()));
-                    env.enter_block_local(name.clone());
-                    env.insert(name, value);
+        let iteration_scope =
+            match evaluate_block_while_condition(while_stmt, env, functions, classes, enums, impl_methods)? {
+                WhileConditionDecision::Stop => break,
+                WhileConditionDecision::Run => None,
+                WhileConditionDecision::RunWithBindings(bindings) => {
+                    let mut saved = Vec::with_capacity(bindings.len());
+                    for (name, value) in bindings {
+                        saved.push((name.clone(), env.get(&name).cloned()));
+                        env.enter_block_local(name.clone());
+                        env.insert(name, value);
+                    }
+                    Some(saved)
                 }
-                Some(saved)
-            }
-        };
+            };
 
         let body_result = exec_block_closure_mut(
             &while_stmt.body.statements,
@@ -1212,14 +1206,7 @@ pub(super) fn exec_block_closure_into(
                 last_value = Value::Nil;
             }
             Node::While(while_stmt) => {
-                match exec_block_while(
-                    while_stmt,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                ) {
+                match exec_block_while(while_stmt, &mut local_env, functions, classes, enums, impl_methods) {
                     Ok(Some(value)) => last_value = value,
                     Ok(None) => {}
                     Err(error) => {
@@ -1912,14 +1899,7 @@ fn exec_block_closure_mut_inner(
                 last_value = Value::Nil;
             }
             Node::While(while_stmt) => {
-                if let Some(value) = exec_block_while(
-                    while_stmt,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )? {
+                if let Some(value) = exec_block_while(while_stmt, local_env, functions, classes, enums, impl_methods)? {
                     last_value = value;
                 }
             }

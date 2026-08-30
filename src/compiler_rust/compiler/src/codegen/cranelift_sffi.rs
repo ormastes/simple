@@ -595,9 +595,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data(
     type_code: i64,
     initial_bits: i64,
 ) -> i64 {
-    rt_cranelift_declare_global_data_v2(
-        module, name_ptr, name_len, type_code, initial_bits, 2, 0,
-    )
+    rt_cranelift_declare_global_data_v2(module, name_ptr, name_len, type_code, initial_bits, 2, 0)
 }
 
 fn cranelift_data_linkage_from_code(code: i64) -> Option<Linkage> {
@@ -638,10 +636,7 @@ pub unsafe extern "C" fn rt_cranelift_declare_global_data_v2(
     let natural_alignment = bytes.len().min(8) as u64;
     let requested_alignment = if alignment == 0 {
         natural_alignment
-    } else if alignment > 0
-        && (alignment as u64).is_power_of_two()
-        && (alignment as u64) <= CL_STATIC_MAX_ALIGNMENT
-    {
+    } else if alignment > 0 && (alignment as u64).is_power_of_two() && (alignment as u64) <= CL_STATIC_MAX_ALIGNMENT {
         alignment as u64
     } else {
         return 0;
@@ -2212,11 +2207,8 @@ mod tests {
             assert_eq!(cranelift_data_linkage_from_code(1), None);
 
             let module_name = "test_global_addr_v2";
-            let module = rt_cranelift_new_module(
-                module_name.as_ptr() as i64,
-                module_name.len() as i64,
-                CL_TARGET_X86_64,
-            );
+            let module =
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
             assert!(module > 0);
             let data_name = "aligned_counter";
             let data = rt_cranelift_declare_global_data_v2(
@@ -2233,9 +2225,7 @@ mod tests {
             let sig = rt_cranelift_new_signature(0);
             rt_cranelift_sig_set_return(sig, CL_TYPE_I64);
             let fname = "global_address";
-            let ctx = rt_cranelift_begin_function(
-                module, fname.as_ptr() as i64, fname.len() as i64, sig,
-            );
+            let ctx = rt_cranelift_begin_function(module, fname.as_ptr() as i64, fname.len() as i64, sig);
             let entry = rt_cranelift_create_block(ctx);
             rt_cranelift_switch_to_block(ctx, entry);
             rt_cranelift_seal_block(ctx, entry);
@@ -2245,11 +2235,8 @@ mod tests {
             assert!(rt_cranelift_define_function(module, func_id, ctx));
             rt_cranelift_finalize_module(module);
 
-            let fptr = rt_cranelift_get_function_ptr(
-                module, fname.as_ptr() as i64, fname.len() as i64,
-            );
-            let function: extern "C" fn() -> i64 =
-                std::mem::transmute(fptr as *const ());
+            let fptr = rt_cranelift_get_function_ptr(module, fname.as_ptr() as i64, fname.len() as i64);
+            let function: extern "C" fn() -> i64 = std::mem::transmute(fptr as *const ());
             let first = function();
             let second = function();
             assert_eq!(first, second, "GlobalAddr must preserve data identity");
@@ -2265,24 +2252,57 @@ mod tests {
     fn test_global_data_v2_rejects_invalid_metadata_decisions() {
         unsafe {
             let module_name = "test_global_addr_v2_invalid";
-            let module = rt_cranelift_new_module(
-                module_name.as_ptr() as i64,
-                module_name.len() as i64,
-                CL_TARGET_X86_64,
-            );
+            let module =
+                rt_cranelift_new_module(module_name.as_ptr() as i64, module_name.len() as i64, CL_TARGET_X86_64);
             let name = "invalid";
-            assert_eq!(rt_cranelift_declare_global_data_v2(
-                module, name.as_ptr() as i64, name.len() as i64,
-                CL_TYPE_I64, 0, 99, 8), 0);
-            assert_eq!(rt_cranelift_declare_global_data_v2(
-                module, name.as_ptr() as i64, name.len() as i64,
-                CL_TYPE_I64, 0, 2, -1), 0);
-            assert_eq!(rt_cranelift_declare_global_data_v2(
-                module, name.as_ptr() as i64, name.len() as i64,
-                CL_TYPE_I64, 0, 2, 3), 0);
-            assert_eq!(rt_cranelift_declare_global_data_v2(
-                module, name.as_ptr() as i64, name.len() as i64,
-                CL_TYPE_I64, 0, 2, 8192), 0);
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    99,
+                    8
+                ),
+                0
+            );
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    2,
+                    -1
+                ),
+                0
+            );
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    2,
+                    3
+                ),
+                0
+            );
+            assert_eq!(
+                rt_cranelift_declare_global_data_v2(
+                    module,
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    CL_TYPE_I64,
+                    0,
+                    2,
+                    8192
+                ),
+                0
+            );
             rt_cranelift_free_module(module);
         }
     }

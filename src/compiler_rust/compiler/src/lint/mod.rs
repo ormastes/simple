@@ -1720,9 +1720,9 @@ fn my_function():
     pass
 "#;
         let diagnostics = check_code(code);
-        assert!(diagnostics.iter().all(|d| {
-            d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute
-        }));
+        assert!(diagnostics
+            .iter()
+            .all(|d| { d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute }));
     }
 
     #[test]

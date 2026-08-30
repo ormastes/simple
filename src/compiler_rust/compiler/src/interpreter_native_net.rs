@@ -1109,18 +1109,16 @@ pub fn rt_io_udp_set_nonblocking_interp(args: &[Value]) -> Result<Value, Compile
 pub fn rt_io_udp_set_multicast_loop_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let enabled = extract_bool(args, 1)?;
-    Ok(Value::Bool(with_udp_socket(handle, |socket| {
-        match socket.local_addr()?.ip() {
+    Ok(Value::Bool(
+        with_udp_socket(handle, |socket| match socket.local_addr()?.ip() {
             std::net::IpAddr::V4(_) => socket.set_multicast_loop_v4(enabled),
             std::net::IpAddr::V6(_) => socket.set_multicast_loop_v6(enabled),
-        }
-    }).is_ok()))
+        })
+        .is_ok(),
+    ))
 }
 
-fn rt_io_udp_multicast_membership_interp(
-    args: &[Value],
-    join: bool,
-) -> Result<Value, CompileError> {
+fn rt_io_udp_multicast_membership_interp(args: &[Value], join: bool) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
     let address = match args.get(1) {
         Some(Value::Str(address)) => address.parse::<std::net::IpAddr>().ok(),
@@ -1129,22 +1127,25 @@ fn rt_io_udp_multicast_membership_interp(
     let Some(address) = address else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(with_udp_socket(handle, |socket| match address {
-        std::net::IpAddr::V4(address) => {
-            if join {
-                socket.join_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
-            } else {
-                socket.leave_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+    Ok(Value::Bool(
+        with_udp_socket(handle, |socket| match address {
+            std::net::IpAddr::V4(address) => {
+                if join {
+                    socket.join_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+                } else {
+                    socket.leave_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+                }
             }
-        }
-        std::net::IpAddr::V6(address) => {
-            if join {
-                socket.join_multicast_v6(&address, 0)
-            } else {
-                socket.leave_multicast_v6(&address, 0)
+            std::net::IpAddr::V6(address) => {
+                if join {
+                    socket.join_multicast_v6(&address, 0)
+                } else {
+                    socket.leave_multicast_v6(&address, 0)
+                }
             }
-        }
-    }).is_ok()))
+        })
+        .is_ok(),
+    ))
 }
 
 pub fn rt_io_udp_join_multicast_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -1518,11 +1519,7 @@ mod tcp_read_contract_tests {
 
     #[test]
     fn tcp_accept_timeout_rejects_invalid_budget_before_polling() {
-        assert!(rt_io_tcp_accept_timeout_interp(&[
-            Value::Int(-1),
-            Value::text("bad"),
-        ])
-        .is_err());
+        assert!(rt_io_tcp_accept_timeout_interp(&[Value::Int(-1), Value::text("bad"),]).is_err());
         assert!(matches!(
             rt_io_tcp_accept_timeout_interp(&[Value::Int(-1), Value::Int(0)]),
             Ok(Value::Int(-1))
@@ -1550,11 +1547,7 @@ mod tcp_read_contract_tests {
 
     #[test]
     fn udp_timeout_rejects_non_scalar_bridge_values() {
-        assert!(rt_io_udp_set_read_timeout_interp(&[
-            Value::Int(-1),
-            Value::text("not milliseconds"),
-        ])
-        .is_err());
+        assert!(rt_io_udp_set_read_timeout_interp(&[Value::Int(-1), Value::text("not milliseconds"),]).is_err());
     }
 
     #[test]
@@ -1604,9 +1597,6 @@ mod tcp_read_contract_tests {
             rt_io_udp_send_interp(&[Value::Int(-1), Value::array(Vec::new())]),
             Ok(Value::Int(-1))
         ));
-        assert!(matches!(
-            rt_io_udp_local_addr_interp(&[Value::Int(-1)]),
-            Ok(Value::Nil)
-        ));
+        assert!(matches!(rt_io_udp_local_addr_interp(&[Value::Int(-1)]), Ok(Value::Nil)));
     }
 }

@@ -61,9 +61,7 @@ fn indirect_call_carries_the_lambda_result_type() {
 #[test]
 fn typed_predicate_parameter_carries_its_declared_signature() {
     assert_eq!(
-        indirect_call_types(
-            "fn apply(pred: fn(i64) -> bool) -> bool:\n    return pred(1)\n",
-        ),
+        indirect_call_types("fn apply(pred: fn(i64) -> bool) -> bool:\n    return pred(1)\n",),
         vec![(vec![TypeId::I64], TypeId::BOOL)]
     );
 }

@@ -46,9 +46,7 @@ fn array_empty() {
 
 #[test]
 fn bootstrap_parity_array_destructuring_recursively_assigns_nested_lvalues() {
-    let source = include_str!(
-        "../../../../../../../../test/fixtures/compiler/array_destructuring_assignment.spl"
-    );
+    let source = include_str!("../../../../../../../../test/fixtures/compiler/array_destructuring_assignment.spl");
     let mir = compile_to_mir(source).expect("array-pattern assignments must lower to MIR");
 
     for (function_name, expected_gets) in [("single", 1), ("pair", 2), ("nested", 6)] {
@@ -62,16 +60,12 @@ fn bootstrap_parity_array_destructuring_recursively_assigns_nested_lvalues() {
                 .blocks
                 .iter()
                 .flat_map(|block| &block.instructions)
-                .filter(|inst| {
-                    matches!(inst, MirInst::Call { target, .. } if target == &CallTarget::from_name(name))
-                })
+                .filter(|inst| matches!(inst, MirInst::Call { target, .. } if target == &CallTarget::from_name(name)))
                 .count()
         };
         assert_eq!(count_call("rt_array_get"), expected_gets);
         assert_eq!(
-            count_call("rt_array_copy")
-                + count_call("rt_array_new")
-                + count_call("rt_array_with_capacity"),
+            count_call("rt_array_copy") + count_call("rt_array_new") + count_call("rt_array_with_capacity"),
             0,
             "{function_name} destructuring must not allocate or copy an aggregate"
         );

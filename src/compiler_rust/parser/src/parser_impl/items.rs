@@ -610,11 +610,9 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
-            TokenKind::Type
-            | TokenKind::Newtype
-            | TokenKind::Extend
-            | TokenKind::Bitfield
-            | TokenKind::Asm => self.parse_item(),
+            TokenKind::Type | TokenKind::Newtype | TokenKind::Extend | TokenKind::Bitfield | TokenKind::Asm => {
+                self.parse_item()
+            }
             // Handle attributes followed by empty block (Dedent/Eof)
             // This happens in conditional compilation or stub files
             TokenKind::Dedent | TokenKind::Eof => Ok(Node::Pass(PassStmt {

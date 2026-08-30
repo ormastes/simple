@@ -421,7 +421,11 @@ pub fn spl_dlsym_process_checked(args: &[Value]) -> Result<Value, CompileError> 
     }
     let output = match &args[1] {
         Value::BorrowMut(value) => value,
-        _ => return Err(CompileError::runtime("spl_dlsym_process_checked: output must be &mut i64")),
+        _ => {
+            return Err(CompileError::runtime(
+                "spl_dlsym_process_checked: output must be &mut i64",
+            ))
+        }
     };
     *output.inner_mut() = Value::Int(0);
     let name = match &args[0] {
@@ -668,13 +672,7 @@ pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> 
         return Ok(Value::array(vec![Value::Int(2), Value::Int(0)]));
     }
     let supplied = match &args[1] {
-        Value::Array(values)
-            if values
-                .iter()
-                .all(|value| matches!(value, Value::Int(_))) =>
-        {
-            values.len()
-        }
+        Value::Array(values) if values.iter().all(|value| matches!(value, Value::Int(_))) => values.len(),
         _ => return Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
     };
     let nargs = match args[2] {
@@ -855,7 +853,9 @@ pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> 
     }
     let supplied = match &args[1] {
         Value::Array(values)
-            if values.iter().all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
+            if values
+                .iter()
+                .all(|value| matches!(value, Value::Float(_) | Value::Int(_))) =>
         {
             values.len()
         }
@@ -875,10 +875,7 @@ pub fn spl_wffi_call_f64_checked(args: &[Value]) -> Result<Value, CompileError> 
         return Ok(Value::array(vec![Value::Int(1), Value::Int(0)]));
     }
     match spl_wffi_call_f64(args)? {
-        Value::Float(value) => Ok(Value::array(vec![
-            Value::Int(0),
-            Value::Int(value.to_bits() as i64),
-        ])),
+        Value::Float(value) => Ok(Value::array(vec![Value::Int(0), Value::Int(value.to_bits() as i64)])),
         _ => Ok(Value::array(vec![Value::Int(1), Value::Int(0)])),
     }
 }
@@ -1008,12 +1005,7 @@ mod tests {
     #[test]
     fn integer_bridge_rejects_boolean_coercion() {
         let values = Value::Array(Arc::new(vec![Value::Bool(true)]));
-        assert!(spl_wffi_call_i64(&[
-            Value::Int(return_i64 as usize as i64),
-            values,
-            Value::Int(1),
-        ])
-        .is_err());
+        assert!(spl_wffi_call_i64(&[Value::Int(return_i64 as usize as i64), values, Value::Int(1),]).is_err());
     }
 
     #[cfg(unix)]

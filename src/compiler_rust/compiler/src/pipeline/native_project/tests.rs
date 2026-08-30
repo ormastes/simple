@@ -88,11 +88,7 @@ fn terminal_facade_routes_name_physical_callable_owners() {
             "missing physical route {module}"
         );
         let owner = repo_root.join(relative);
-        assert!(
-            owner.is_file(),
-            "physical owner does not exist: {}",
-            owner.display()
-        );
+        assert!(owner.is_file(), "physical owner does not exist: {}", owner.display());
         for callable in callables {
             assert!(
                 source_defines_callable(&owner, callable),
@@ -140,7 +136,11 @@ fn qemu_facade_preserves_exact_historical_public_surface_on_physical_owners() {
         ("os._QemuRunner.scenario_exec.", "ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
     ];
     for (owner, historical_surface) in expected {
-        assert_eq!(explicit_names(&facade, owner), names(historical_surface), "public facade parity changed for {owner}");
+        assert_eq!(
+            explicit_names(&facade, owner),
+            names(historical_surface),
+            "public facade parity changed for {owner}"
+        );
     }
 }
 
@@ -157,7 +157,10 @@ fn terminal_facades_use_canonical_cli_contract_and_explicit_qemu_owner_scc() {
         "--parse-shard=",
         "cli_native_build_resolve_output",
     ] {
-        assert!(canonical.contains(contract_marker), "canonical CLI owner lost {contract_marker}");
+        assert!(
+            canonical.contains(contract_marker),
+            "canonical CLI owner lost {contract_marker}"
+        );
     }
 
     // These five files are one real ownership SCC: target constructors use
@@ -303,19 +306,39 @@ fn simpleos_entry_closure_compatibility_owners_are_explicit() {
     fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
         let tail = source.split_once(marker).unwrap().1;
         let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
-        body.split(',').map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned).collect()
+        body.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let facade = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build.spl")).unwrap();
     let part1 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part1.spl")).unwrap();
     let part2 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part2.spl")).unwrap();
     let part3 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part3.spl")).unwrap();
-    let catalog = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl")).unwrap();
-    let contracts = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl")).unwrap();
-    let accessors = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl")).unwrap();
+    let catalog =
+        std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl"))
+            .unwrap();
+    let contracts =
+        std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl"))
+            .unwrap();
+    let accessors = std::fs::read_to_string(
+        repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl"),
+    )
+    .unwrap();
     assert!(part1.contains("build_target_contracts.{") && !part1.contains("build_target_contracts.*"));
-    assert!(part2.contains("platform_target_catalog.{simpleos_platform_targets}") && !part2.contains("platform_target_catalog.*"));
+    assert!(
+        part2.contains("platform_target_catalog.{simpleos_platform_targets}")
+            && !part2.contains("platform_target_catalog.*")
+    );
     assert!(part3.contains("platform_target_accessors.{") && !part3.contains("platform_target_accessors.*"));
     assert!(!part2.contains("_simpleos_x86_64_platform_target"));
     assert!(!part3.contains("_simpleos_platform_target_index"));
@@ -327,9 +350,18 @@ fn simpleos_entry_closure_compatibility_owners_are_explicit() {
     assert!(accessors.contains("build_target_contracts.{"));
     assert!(accessors.contains("platform_target_catalog.{simpleos_platform_targets}"));
     assert!(part1.contains("intentionally compatibility-public"));
-    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part1."), explicit_names(&part1, "build_target_contracts."));
-    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part2."), explicit_names(&part2, "platform_target_catalog."));
-    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part3."), explicit_names(&part3, "platform_target_accessors."));
+    assert_eq!(
+        explicit_names(&facade, "simpleos_multiplatform_build_part1."),
+        explicit_names(&part1, "build_target_contracts.")
+    );
+    assert_eq!(
+        explicit_names(&facade, "simpleos_multiplatform_build_part2."),
+        explicit_names(&part2, "platform_target_catalog.")
+    );
+    assert_eq!(
+        explicit_names(&facade, "simpleos_multiplatform_build_part3."),
+        explicit_names(&part3, "platform_target_accessors.")
+    );
 }
 
 #[test]
@@ -3081,7 +3113,11 @@ fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
         "rt_struct_alloc",
         "rt_struct_receiver_valid",
     ] {
-        assert_eq!(core_defined.get(symbol), Some(&1), "core-C must have one memory provider for `{symbol}`");
+        assert_eq!(
+            core_defined.get(symbol),
+            Some(&1),
+            "core-C must have one memory provider for `{symbol}`"
+        );
     }
     for symbol in [
         "rt_mem_harden_check_native",
@@ -3092,7 +3128,10 @@ fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
         "rt_transient_raw_scope_end",
         "spl_i64_is_zero",
     ] {
-        assert!(core_defined.contains_key(symbol), "core-C must retain runtime_memory export `{symbol}`");
+        assert!(
+            core_defined.contains_key(symbol),
+            "core-C must retain runtime_memory export `{symbol}`"
+        );
     }
 
     validate_stage4_cli_c_provider_archive_disjointness(&core, &compiler, &providers).unwrap();
@@ -3113,7 +3152,11 @@ fn pure_simple_runtime_bundle_separates_memory_and_hosted_ownership() {
             "comp_args.push(\"-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
         ),
     ] {
-        assert_eq!(source.matches(memory_flag).count(), 1, "memory-owner flag must be emitted once per compiler flavor");
+        assert_eq!(
+            source.matches(memory_flag).count(),
+            1,
+            "memory-owner flag must be emitted once per compiler flavor"
+        );
         assert_eq!(
             source.matches(standalone_flag).count(),
             1,

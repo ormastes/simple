@@ -2873,14 +2873,23 @@ mod tests {
 
         // The importer's own tree has no project root at all.
         assert_eq!(project_root_ancestor(&scratch), None);
-        assert_eq!(project_root_ancestor(&project.join("src/compiler")), Some(project.clone()));
+        assert_eq!(
+            project_root_ancestor(&project.join("src/compiler")),
+            Some(project.clone())
+        );
 
-        let parts: Vec<String> = ["compiler", "common", "diagnostics", "span"].iter().map(|s| s.to_string()).collect();
+        let parts: Vec<String> = ["compiler", "common", "diagnostics", "span"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let import = use_stmt(
             &["compiler", "common", "diagnostics", "span"],
             ImportTarget::Group(vec![ImportTarget::Single("Span".to_string())]),
         );
-        assert_eq!(resolve_parts_from_project_root(&project, &parts, &import), Some(span_file));
+        assert_eq!(
+            resolve_parts_from_project_root(&project, &parts, &import),
+            Some(span_file)
+        );
 
         // Stdlib imports keep their own project-rooted search; never served here.
         let std_parts: Vec<String> = ["std", "io"].iter().map(|s| s.to_string()).collect();
@@ -2901,14 +2910,23 @@ mod tests {
         fs::create_dir_all(model.parent().unwrap()).unwrap();
         fs::write(&model, "fn env_scenario_selection_error() -> i64:\n    1\n").unwrap();
 
-        let lib_parts: Vec<String> = ["lib", "common", "env_access", "model"].iter().map(|s| s.to_string()).collect();
+        let lib_parts: Vec<String> = ["lib", "common", "env_access", "model"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let lib_import = use_stmt(
             &["lib", "common", "env_access", "model"],
             ImportTarget::Group(vec![ImportTarget::Single("env_scenario_selection_error".to_string())]),
         );
-        assert_eq!(resolve_from_stdlib_root(&root, &lib_parts, &lib_import), Some(model.clone()));
+        assert_eq!(
+            resolve_from_stdlib_root(&root, &lib_parts, &lib_import),
+            Some(model.clone())
+        );
 
-        let std_parts: Vec<String> = ["std", "common", "env_access", "model"].iter().map(|s| s.to_string()).collect();
+        let std_parts: Vec<String> = ["std", "common", "env_access", "model"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let std_import = use_stmt(&["std", "common", "env_access", "model"], ImportTarget::Glob);
         assert_eq!(resolve_from_stdlib_root(&root, &std_parts, &std_import), Some(model));
     }
@@ -2930,16 +2948,13 @@ mod tests {
 
         let parts = ["std".to_string(), "probe".to_string()];
         let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
-        assert_eq!(resolve_from_stdlib_root(&runtime_root, &parts, &import), Some(runtime_module.clone()));
+        assert_eq!(
+            resolve_from_stdlib_root(&runtime_root, &parts, &import),
+            Some(runtime_module.clone())
+        );
         assert_eq!(resolve_from_stdlib_root(&seed_root, &parts, &import), Some(seed_module));
 
-        let resolved = resolve_from_stdlib_fallbacks(
-            runtime_root,
-            &seed_manifest,
-            &parts,
-            &import,
-        )
-        .unwrap();
+        let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
 
         assert_eq!(resolved, runtime_module);
     }

@@ -123,15 +123,17 @@ thread_local! {
 
 fn write_test_result_evidence(path: &Path) {
     let (passed, failed) = BDD_TEST_RESULTS.with(|cell| {
-        cell.borrow().iter().fold((0, 0), |(passed, failed), (_, _, ok, skipped)| {
-            if *skipped {
-                (passed, failed)
-            } else if *ok {
-                (passed + 1, failed)
-            } else {
-                (passed, failed + 1)
-            }
-        })
+        cell.borrow()
+            .iter()
+            .fold((0, 0), |(passed, failed), (_, _, ok, skipped)| {
+                if *skipped {
+                    (passed, failed)
+                } else if *ok {
+                    (passed + 1, failed)
+                } else {
+                    (passed, failed + 1)
+                }
+            })
     });
     let _ = std::fs::write(path, format!("simple-bdd-v1\n{passed}\n{failed}\n"));
 }
@@ -1045,7 +1047,8 @@ pub(super) fn eval_bdd_builtin(
                             let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
                             if !value.truthy() {
                                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
-                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
+                                BDD_PROVISIONAL_SEQ
+                                    .with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                                 BDD_PROVISIONAL_MSG.with(|cell| {
                                     *cell.borrow_mut() = Some(format!(
                                         "expected {} {} {} to hold",
@@ -1074,7 +1077,7 @@ pub(super) fn eval_bdd_builtin(
                     // (mirrors the ordered-comparison and call-expr paths).
                     if !matched {
                         BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
-                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
+                        BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                         BDD_PROVISIONAL_MSG.with(|cell| {
                             *cell.borrow_mut() = Some(format!(
                                 "expected {} to {} {}",
@@ -1146,7 +1149,7 @@ pub(super) fn eval_bdd_builtin(
                 // may be exactly what the matcher expects). If no matcher follows,
                 // it stands as a hollow-expect failure at example end.
                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
-                                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
+                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|seq| *seq.borrow()));
                 BDD_PROVISIONAL_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!(
                         "expected subject to be truthy, got {}",
@@ -1720,8 +1723,7 @@ pub(super) fn eval_bdd_builtin(
             if val.is_nil_like() {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() =
-                        Some(format!("assert_not_nil failed: got {}", val.to_display_string()));
+                    *cell.borrow_mut() = Some(format!("assert_not_nil failed: got {}", val.to_display_string()));
                 });
             }
             Ok(Some(Value::Nil))

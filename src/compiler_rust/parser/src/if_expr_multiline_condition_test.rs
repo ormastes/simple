@@ -58,7 +58,10 @@ mod if_expr_multiline_condition {
                    \x20   val x = if 1 == 1 or\n\
                    \x20       1 == 2: \"a\"\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "if-expression with no else, continued condition, must parse");
+        assert!(
+            parses(src),
+            "if-expression with no else, continued condition, must parse"
+        );
     }
 
     /// The `if`-expression used directly as a call argument (matches the
@@ -68,7 +71,10 @@ mod if_expr_multiline_condition {
         let src = "fn main():\n\
                    \x20   print(if 1 == 1 or\n\
                    \x20       1 == 2: \"a\" else: \"b\")\n";
-        assert!(parses(src), "if-expression as call argument, continued condition, must parse");
+        assert!(
+            parses(src),
+            "if-expression as call argument, continued condition, must parse"
+        );
     }
 
     /// Parenthesized continuation neighbor: the condition itself wraps in
@@ -165,7 +171,10 @@ mod if_expr_multiline_condition {
                    \x20   else:\n\
                    \x20       0\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "block-form equal-column with multi-statement body must parse");
+        assert!(
+            parses(src),
+            "block-form equal-column with multi-statement body must parse"
+        );
     }
 
     /// The riscv_scalar_csr_owner.spl block-form shape reproduced verbatim.
@@ -194,5 +203,3 @@ mod if_expr_multiline_condition {
         assert!(parses(src), "original triage report shape must parse");
     }
 }
-
-

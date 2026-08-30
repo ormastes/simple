@@ -831,7 +831,10 @@ impl NativeProjectBuilder {
         }
 
         if rust_trace {
-            eprintln!("[native-rust-trace] step 2 incremental state: {:.3}s", step_start.elapsed().as_secs_f64());
+            eprintln!(
+                "[native-rust-trace] step 2 incremental state: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
         }
 
         // 3. Stage .o files beside the cache so system-temp and cache cleanup cannot remove them.
@@ -843,7 +846,10 @@ impl NativeProjectBuilder {
             .ok_or_else(|| "tempdir unexpectedly missing".to_string())?;
 
         if rust_trace {
-            eprintln!("[native-rust-trace] step 3 stage dir: {:.3}s", step_start.elapsed().as_secs_f64());
+            eprintln!(
+                "[native-rust-trace] step 3 stage dir: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
         }
 
         // 4. Read all source files and determine dirty set

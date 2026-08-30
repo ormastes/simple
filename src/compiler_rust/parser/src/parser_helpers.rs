@@ -68,11 +68,10 @@ impl<'a> Parser<'a> {
             && self.pending_tokens.len() < 2
             && matches!(self.current.kind, TokenKind::LBracket)
             && matches!(self.previous.kind, TokenKind::Identifier { .. })
-            && self
-                .pending_tokens
-                .front()
-                .is_some_and(|t| matches!(&t.kind, TokenKind::Identifier { name, .. }
-                    if name.chars().next().is_some_and(|c: char| c.is_uppercase())))
+            && self.pending_tokens.front().is_some_and(|t| {
+                matches!(&t.kind, TokenKind::Identifier { name, .. }
+                    if name.chars().next().is_some_and(|c: char| c.is_uppercase()))
+            })
         {
             self.pending_tokens.push_back(self.lexer.next_token());
         }
@@ -82,7 +81,7 @@ impl<'a> Parser<'a> {
         if !skip_check {
             if let Some(mistake) =
                 detect_common_mistake_lookahead(&self.current, &self.previous, next_token, after_next_token)
-                .filter(|m| !self.is_spurious_match_arm_fat_arrow(m))
+                    .filter(|m| !self.is_spurious_match_arm_fat_arrow(m))
             {
                 // Determine error hint level based on mistake type.
                 // Shared classification - see CommonMistake::hint_level.

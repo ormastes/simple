@@ -240,11 +240,7 @@ struct BoxHelperRefs {
 }
 
 impl BoxHelperIds {
-    fn resolve<M: Module>(
-        backend: &CodegenBackend<M>,
-        params: &[TypeId],
-        ret: TypeId,
-    ) -> BackendResult<Self> {
+    fn resolve<M: Module>(backend: &CodegenBackend<M>, params: &[TypeId], ret: TypeId) -> BackendResult<Self> {
         let need = |pred: &dyn Fn(TypeId) -> bool| params.iter().copied().any(pred) || pred(ret);
         let get = |name: &'static str| backend.runtime_funcs.get(name).copied();
         let _ = need;
@@ -267,11 +263,7 @@ impl BoxHelperIds {
         Ok(ids)
     }
 
-    fn in_func<M: Module>(
-        &self,
-        module: &mut M,
-        func: &mut cranelift_codegen::ir::Function,
-    ) -> BoxHelperRefs {
+    fn in_func<M: Module>(&self, module: &mut M, func: &mut cranelift_codegen::ir::Function) -> BoxHelperRefs {
         BoxHelperRefs {
             unbox_int: self.unbox_int.map(|id| module.declare_func_in_func(id, func)),
             as_float: self.as_float.map(|id| module.declare_func_in_func(id, func)),

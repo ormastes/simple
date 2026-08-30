@@ -120,8 +120,7 @@ fn candidate_paths() -> Vec<String> {
 }
 
 static HANDLE: AtomicUsize = AtomicUsize::new(0);
-static SYMBOLS: [AtomicUsize; SDL3_FNS.len()] =
-    [const { AtomicUsize::new(0) }; SDL3_FNS.len()];
+static SYMBOLS: [AtomicUsize; SDL3_FNS.len()] = [const { AtomicUsize::new(0) }; SDL3_FNS.len()];
 static LOAD_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn load_error_slot() -> &'static Mutex<String> {

@@ -4,8 +4,8 @@
 
 use crate::error::CompileError;
 use crate::interpreter::{
-    bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint,
-    sync_owned_captured_globals, Enums, ImplMethods,
+    bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint, sync_owned_captured_globals,
+    Enums, ImplMethods,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
@@ -27,7 +27,11 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
             let cache_ref = cache.borrow();
             if let Some(class_cache) = cache_ref.get(class_name) {
                 if let Some(idx) = class_cache.get(method_name).copied() {
-                    if class_def.methods.get(idx).is_some_and(|method| method.name == method_name) {
+                    if class_def
+                        .methods
+                        .get(idx)
+                        .is_some_and(|method| method.name == method_name)
+                    {
                         return Some(idx);
                     }
                 }
@@ -410,7 +414,16 @@ pub fn find_and_exec_method_with_self_owned_values(
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             return exec_function_with_self_return_values(
-                func, arg_vals, arg_exprs, env, functions, classes, enums, impl_methods, class, fields,
+                func,
+                arg_vals,
+                arg_exprs,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                class,
+                fields,
             )
             .map(Some);
         }
@@ -419,7 +432,16 @@ pub fn find_and_exec_method_with_self_owned_values(
         if let Some(idx) = lookup_impl_method_index(methods, class, method) {
             let func = &methods[idx];
             return exec_function_with_self_return_values(
-                func, arg_vals, arg_exprs, env, functions, classes, enums, impl_methods, class, fields,
+                func,
+                arg_vals,
+                arg_exprs,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                class,
+                fields,
             )
             .map(Some);
         }
@@ -438,7 +460,14 @@ pub fn evaluate_call_args(
 ) -> Result<Vec<Value>, CompileError> {
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
-        vals.push(crate::interpreter::evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+        vals.push(crate::interpreter::evaluate_expr(
+            &arg.value,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?);
     }
     Ok(vals)
 }
@@ -476,9 +505,10 @@ mod tests {
 
     #[test]
     fn class_method_index_rebuilds_when_methods_reorder_or_shrink() {
-        let module = Parser::new("class MethodIndexClassFixture:\n    fn alpha():\n        1\n\n    fn beta():\n        2\n")
-            .parse()
-            .expect("parse method-index fixture");
+        let module =
+            Parser::new("class MethodIndexClassFixture:\n    fn alpha():\n        1\n\n    fn beta():\n        2\n")
+                .parse()
+                .expect("parse method-index fixture");
         let mut class_def = module
             .items
             .into_iter()

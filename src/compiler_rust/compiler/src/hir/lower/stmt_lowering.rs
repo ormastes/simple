@@ -16,7 +16,6 @@ use super::lowerer::Lowerer;
 /// this must move with it.
 const OPTION_ENUM_ID: i64 = 1;
 
-
 /// Map an augmented-assignment operator to the binary operator it desugars to.
 ///
 /// Returns `None` for a plain `=` and for `~=` — neither carries an arithmetic
@@ -66,8 +65,8 @@ pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
         _ => {}
     }
     const X86: [&str; 24] = [
-        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
-        "r14", "r15", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
     ];
     if X86.contains(&name) {
         return true;
