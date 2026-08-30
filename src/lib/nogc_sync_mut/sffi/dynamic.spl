@@ -47,13 +47,10 @@ extern fn rt_file_hash_sha256(path: text) -> text
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 @unsafe(reason: "checked integer-only foreign call ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
-@unsafe(reason: "allocation-free checked integer status/out ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
 
-@unsafe(reason: "minimal allocation-free raw status/out scope", capabilities: [ffi, raw_ptr])
-fn _sffi_try_call_i64_out(fptr: i64, args: [i64], out_value: *mut i64) -> i64:
-    unsafe(capabilities: [ffi, raw_ptr]):
-        spl_wffi_try_call_i64_out(fptr, args, args.len(), out_value)
+@unsafe(reason: "minimal raw dynamic FFI scope; caller validates status and result shape", capabilities: [ffi])
+fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
+    spl_wffi_call_i64_checked(fptr, args, args.len())
 
 @unsafe(reason: "checked loader returns an unverified raw provider handle", capabilities: [ffi, raw_ptr])
 fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
@@ -94,10 +91,12 @@ impl DynI64FnSlot:
     fn call_checked(args: [i64]) -> Result<i64, text>:
         if args.len() != self.arity:
             return Err("E-SFFI-003: {self.symbol} expects {self.arity} i64 arguments, got {args.len()}")
-        var value: i64 = 0
-        val status = _sffi_try_call_i64_out(self.fptr, args, &mut value)
+        val result = _sffi_call_i64_raw_checked(self.fptr, args)
+        if result.len() != 2:
+            return Err("E-SFFI-017: corrupt checked transport result: {self.symbol}")
+        val status = result[0]
         if status == 0:
-            return Ok(value)
+            return Ok(result[1])
         Err("E-SFFI-014: foreign bridge rejected {self.symbol} with status {status}")
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
@@ -320,8 +319,8 @@ impl DynLib:
         val nargs = args.len()
         spl_wffi_call_i64(fptr, args, nargs)
 
-    # Canonical allocation-free checked dispatch. Scalar status/out preserves a
-    # valid foreign zero without allocating a result array.
+    # Canonical checked dispatch. The raw transport returns [status, value]
+    # so a valid foreign zero remains distinct from a bridge failure.
     @unsafe(reason: "checked transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
         if self.handle <= 0:
@@ -329,10 +328,12 @@ impl DynLib:
         val fptr = match _sffi_dlsym_checked(self.handle, name):
             case Ok(symbol): symbol
             case Err(error): return Err(error)
-        var value: i64 = 0
-        val status = _sffi_try_call_i64_out(fptr, args, &mut value)
+        val result = _sffi_call_i64_raw_checked(fptr, args)
+        if result.len() != 2:
+            return Err("E-SFFI-017: corrupt checked transport result: {name}")
+        val status = result[0]
         if status == 0:
-            return Ok(value)
+            return Ok(result[1])
         Err("E-SFFI-014: foreign bridge rejected {name} with status {status}")
 
     # Resolve one exact integer-only ABI slot. Callers cache the returned slot
