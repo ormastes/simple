@@ -811,6 +811,9 @@ echo "Platform: ${PLATFORM}"
 exe_suffix=""
 archive_prefix="lib"
 archive_suffix=".a"
+# Empty off Windows: the expansion below then contributes no arguments at all,
+# leaving the Linux/macOS/FreeBSD invocations byte-identical.
+bootstrap_windows_abi_env=""
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
   case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
@@ -825,6 +828,17 @@ if [ "${os}" = "windows" ]; then
   SIMPLE_WINDOWS_ABI="${PLATFORM_ABI}"
   SIMPLE_LINKER_FLAVOR="${windows_linker_abi}"
   export SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
+  # Stage 2/3 run the compiler under a HERMETIC env that forwards only an
+  # explicit allowlist. `Target` carries arch+os but NO abi field, so
+  # `x86_64-pc-windows-msvc` and `...-gnu` parse identically and
+  # `Target::linker_flavor()` (common/src/target.rs:744) decides Windows flavor
+  # from the ENVIRONMENT: SIMPLE_LINKER_FLAVOR first, else an `MSYSTEM`
+  # heuristic. Dropping the variable therefore did not fall back to the
+  # requested target -- it fell back to MSYSTEM, which is always set under Git
+  # Bash, so an explicit `--target x86_64-pc-windows-msvc` silently built with
+  # GNU flavour and invoked `g++` for the main stub (measured 2026-08-30:
+  # "Failed to compile main stub (g++)"). Forward the explicit choice.
+  bootstrap_windows_abi_env="SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR}"
   if [ "${PLATFORM_ABI}" = "msvc" ]; then
     archive_prefix=""
     archive_suffix=".lib"
@@ -2330,6 +2344,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
+    ${bootstrap_windows_abi_env} \
     SIMPLE_BINARY="${stage2_seed_absolute}" -- \
     "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
@@ -2637,6 +2652,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+    ${bootstrap_windows_abi_env} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \
