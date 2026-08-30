@@ -7,11 +7,53 @@ use compiler.backend.linker.linker_wrapper.{
     native_effective_link_os,
     native_linker_abi_for_target
 }
+use compiler.backend.build_native_types.{BuildLinkConfig, BuildOutputFormat, native_link_config_from_build}
+use compiler.backend.backend.llvm_native_link.{NativeLinkOptions}
 use testing.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Native linker hardening":
+    it "preserves an explicit runtime provider across the build-link boundary":
+        val build = BuildLinkConfig(
+            output_format: BuildOutputFormat.Native,
+            output_path: "/tmp/program",
+            libraries: [],
+            library_paths: [],
+            pie: true,
+            debug: false,
+            verbose: false,
+            allow_deferred: false,
+            optimization_level: 0,
+            target_flags: [],
+            linker_flags: [],
+            runtime_path: "/admitted/runtime"
+        )
+        expect(native_link_config_from_build(build).runtime_path).to_equal("/admitted/runtime")
+
+    it "selects the complete admitted aggregate runtime when the monolith is absent":
+        expect(native_runtime_archive_names(false, true, true)).to_equal([
+            "libsimple_compiler_backfill.a", "libsimple_native_all.a"
+        ])
+        expect(native_runtime_archive_names(true, true, true)).to_equal(["libsimple_compiler.a"])
+        expect(native_runtime_archive_names(false, false, false)).to_equal([])
+
+    it "carries runtime authority explicitly through the active AOT link options":
+        val options = NativeLinkOptions(
+            target_triple: "x86_64-unknown-linux-gnu",
+            debug: false,
+            verbose: false,
+            pie: true,
+            bare_metal: false,
+            opt_level: 0,
+            stage4_backend: "cranelift",
+            stage4_compiler_hash: "compiler-sha",
+            runtime_path: "/admitted/runtime",
+            runtime_bundle: "host-gpu"
+        )
+        expect(options.runtime_path).to_equal("/admitted/runtime")
+        expect(options.runtime_bundle).to_equal("host-gpu")
+
     it "keeps object-format flags and cross-target dispatch explicit":
         expect(native_direct_platform_flags("linux", "lld")).to_equal([
             "--eh-frame-hdr", "--build-id", "--hash-style=gnu",

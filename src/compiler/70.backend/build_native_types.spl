@@ -10,6 +10,7 @@
 use compiler.backend.linker.linker_wrapper.{link_to_native as lw_link_to_native, NativeLinkConfig}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult, objtaker_new, objtaker_with_defaults, objtakerconfig_default, objtaker_take_object}
 use compiler.types.simd_capabilities.{SimdFeatureSet}
+use std.io_runtime.{env_get}
 
 # ============================================================================
 # Link Pipeline Types (defined locally because linker/link.spl has deps
@@ -32,6 +33,7 @@ struct BuildLinkConfig:
     optimization_level: i32
     target_flags: [text]
     linker_flags: [text]
+    runtime_path: text = ""
 
 struct BuildLinkStats:
     output_size: i64
@@ -80,10 +82,22 @@ impl BuildLinker:
 
 fn build_link_native(smf_files: [text], output: text, config: BuildLinkConfig) -> Result<text, text>:
     """Link SMF files to a native binary using linker_wrapper (SMF-aware)."""
-    var native_cfg = NativeLinkConfig(
+    val native_cfg = native_link_config_from_build(config)
+
+    val result = lw_link_to_native(smf_files, output, native_cfg)
+    match result:
+        case Ok(path): Ok(path)
+        case Err(msg): Err(msg)
+
+fn native_link_config_from_build(config: BuildLinkConfig) -> NativeLinkConfig:
+    """Preserve the selected runtime provider across the build/link boundary."""
+    var runtime_path = config.runtime_path
+    if runtime_path == "":
+        runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    NativeLinkConfig(
         libraries: config.libraries,
         library_paths: config.library_paths,
-        runtime_path: "",
+        runtime_path: runtime_path,
         pie: config.pie,
         debug: config.debug,
         verbose: config.verbose,
@@ -92,11 +106,6 @@ fn build_link_native(smf_files: [text], output: text, config: BuildLinkConfig) -
         retained_symbols: [],
         extra_flags: config.linker_flags
     )
-
-    val result = lw_link_to_native(smf_files, output, native_cfg)
-    match result:
-        case Ok(path): Ok(path)
-        case Err(msg): Err(msg)
 
 # ============================================================================
 # Build Configuration
@@ -118,6 +127,7 @@ struct BuildConfig:
     linker_flags: [text]        # Extra linker flags
     backend: text?              # Backend: nil/"smf" = SMF pipeline, "llvm" = LLVM pipeline
     host_simd: SimdFeatureSet?  # Detected host SIMD capabilities (populated at native gen time)
+    runtime_path: text = ""     # Explicit runtime archive directory; empty consults SIMPLE_RUNTIME_PATH
 
 impl BuildConfig:
     static fn default(entry: text, output: text) -> BuildConfig:
