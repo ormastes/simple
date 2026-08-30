@@ -2951,18 +2951,17 @@ impl MirLowering:
         # Derive loop counter type from bound HirExpr types before emitting any code.
         # This preserves u64 (and other non-i64 integer) counter types end-to-end.
         var loop_ty = MirType.i64()
+        # NOT `case Some(...)`. HirExpr.type_ is declared `HirType` -- FLAT, not
+        # even nullable (hir_definitions.spl:529), with `has_type_` as "the
+        # authoritative presence bit" per its own docstring. An Option arm can
+        # therefore NEVER match here, which made the u64 preservation promised
+        # by the comment above dead code: loop_ty always kept its i64 default.
         if val end_expr = end:
-            match end_expr.type_:
-                case Some(end_type):
-                    loop_ty = self.lower_type(end_type)
-                case nil:
-                    ()
+            if end_expr.has_type_:
+                loop_ty = self.lower_type(end_expr.type_)
         elif val start_expr = start:
-            match start_expr.type_:
-                case Some(start_type):
-                    loop_ty = self.lower_type(start_type)
-                case nil:
-                    ()
+            if start_expr.has_type_:
+                loop_ty = self.lower_type(start_expr.type_)
 
         # Lower start value (default to typed 0)
         var start_local: LocalId = 0
@@ -3106,12 +3105,12 @@ impl MirLowering:
         # Step 1: Lower the iterable expression
         val collection_local = self.lower_expr(iter)
         var element_type = MirType.i64()
+        # HirSymbol.type_ is `HirType?` (hir_types.spl:106) and is a MIXED
+        # population -- only 13 of 56 `symbols.define(` sites box it -- so the
+        # `.?`/`.unwrap()` shape is required here, not an Option arm.
         if val loop_symbol = self.symbols.get_symbol_raw(var_.id):
-            match loop_symbol.type_:
-                case Some(loop_symbol_type):
-                    element_type = self.lower_type(loop_symbol_type)
-                case nil:
-                    ()
+            if loop_symbol.type_.?:
+                element_type = self.lower_type(loop_symbol.type_.unwrap())
 
         # The loop-variable symbol's HIR type is frequently nil on this
         # pipeline (native-build's lower_to_mir runs without a full
