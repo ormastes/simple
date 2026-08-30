@@ -113,6 +113,63 @@ Both rejections now name the offending token on stderr. Support for MSVC-style
 tokens is NOT implemented — declaring it unsupported out loud is the honest
 state, and a gnu-ABI `llvm-config` is the correct input for a gnu lane anyway.
 
+## Defect 4 (BLOCKED) — the gnu lane cannot build the Rust seed on this host
+
+Not a code defect; a host capability gap, recorded because the Windows plan
+requires a blocked lane to be stated rather than quietly abandoned.
+
+With the fingerprint fixed and gcc repaired (see the host note below), the seed
+build reached the **link** step and failed there for two INDEPENDENT reasons:
+
+1. **No gnu-ABI LLVM 18.** `src/compiler_rust/compiler/Cargo.toml:123` pins
+   `inkwell = { version = "0.5", features = ["llvm18-0"] }`. This host has
+   msys2 LLVM **21** (gnu) and LLVM **18** (MSVC-built) — no gnu 18. `llvm-sys`
+   therefore linked against 21 and inkwell's 18-era entry points are gone:
+
+   ```
+   undefined reference to `LLVMDIBuilderInsertDeclareAtEnd'
+   undefined reference to `LLVMConstFCmp' / `LLVMConstNSWMul' / `LLVMConstICmp'
+   ```
+
+   plus `ffi_*` (no libffi) and `__imp_isblank`.
+
+2. **Mixed mingw C runtimes.** Independent of LLVM, and it would survive a
+   backend change:
+
+   ```
+   multiple definition of `pthread_self';
+     msys2 libpthread.a(libwinpthread_la-thread.o)
+     vs libpthread.dll.a(libwinpthread_1_dll_d000123.o) first defined here
+   ```
+
+   Rust's bundled mingw runtime and msys2's system gcc runtime both supply it.
+
+Note the ring build log records `HOST=x86_64-pc-windows-msvc` /
+`TARGET=x86_64-pc-windows-gnu` — the gnu lane is a CROSS build on this host.
+
+**Resolution: the gnu lane is blocked here and the MSVC lane is used instead.**
+The MSVC lane is internally consistent on this machine: rustc host is
+`x86_64-pc-windows-msvc`, the available LLVM 18 is MSVC-built, VS 2022 is
+installed, and `lld-link` is present — target, LLVM ABI and linker all agree.
+Unblocking gnu needs a gnu-ABI LLVM 18 (or an inkwell pin that admits a newer
+LLVM) plus a single consistent mingw runtime; neither is a change this lane owns.
+
+## Host note — a silent `gcc` caused by DLL shadowing
+
+Before the link failure above, the seed build died in `ring`'s build script with
+`gcc -E` returning 1 and **zero bytes of stderr**; `cc1.exe --version` printed
+nothing and returned 0. Cause: `PATH` position 2 is `/mingw64/bin`, a DIFFERENT
+msys2 root that ships no `gcc.exe` but does ship `libgmp-10.dll`, `zlib1.dll`,
+`libzstd.dll` and `libwinpthread-1.dll`. `gcc` resolved from the real toolchain
+at position 35 while its DLLs resolved from position 2, so `cc1.exe` loaded
+mismatched support libraries and died mutely. Putting the real
+`/c/dev/tool/msys2/mingw64/bin` first fixes it.
+
+This is precisely what the plan's **W0 host-qualification** gate exists to catch
+("tool discovery ... fail before cache use on an ABI/tool mismatch"). A W0 check
+that compiled a two-line C file would have caught it in under a second instead of
+after a full seed fingerprint plus a partial cargo build. W0 is not implemented.
+
 ## Reproduction
 
 ```sh
