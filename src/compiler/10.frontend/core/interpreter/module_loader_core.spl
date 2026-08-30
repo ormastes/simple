@@ -43,6 +43,7 @@ fn gc_warning_trace_enabled() -> bool:
     _gc_warning_trace_state == 1
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
 use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
+use compiler.core.interpreter.eval_decls.{eval_decl}
 
 # AST Declaration Tags (from ast.spl)
 val DECL_FN = 1
@@ -53,6 +54,8 @@ val DECL_VAR = 5
 val DECL_USE = 6
 val DECL_EXPORT = 7
 val DECL_ENUM = 8
+val DECL_IMPL = 9
+val DECL_CLI = 13
 val DECL_AOP_ADVICE = 14
 val DECL_ARCH_RULE = 16
 
@@ -80,6 +83,12 @@ fn get_decl_info(did: i64) -> ModuleDeclInfo:
 # Parallel arrays to track loaded modules (no generics at runtime)
 var loaded_module_paths: [text] = []
 var loaded_module_file_paths: [text] = []
+
+fn loaded_module_paths_snapshot() -> [text]:
+    loaded_module_paths
+
+fn loaded_module_file_paths_snapshot() -> [text]:
+    loaded_module_file_paths
 var loaded_module_exports: [[text]] = []
 # Dict for O(1) module loaded check
 var loaded_module_set = {}
@@ -280,14 +289,12 @@ fn parse_module_ast(source: text, path: text) -> i64:
         return 1
     0
 
-fn extract_module_exports() -> [text]:
+fn extract_module_exports(decls: [i64]) -> [text]:
     # Extract exported function names from parsed module
     # Scans all declarations for DECL_EXPORT statements
 
     var exports: [text] = []
     var export_all = 0
-
-    val decls = module_get_decls()
 
     # First pass: check for export statements
     for did in decls:
@@ -313,12 +320,9 @@ fn extract_module_exports() -> [text]:
 
     exports
 
-fn register_module_functions():
+fn register_module_functions(decls: [i64], mod_path: text):
     # Register all module functions in interpreter's function table
     # This makes them available for calls
-
-    val decls = module_get_decls()
-    val mod_path = module_get_path()
 
     for did in decls:
         val tag = decl_get_tag(did)
@@ -414,14 +418,18 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
         _module_load_depth = _module_load_depth - 1
         return 0
 
+    val decl_start = module_get_decls().len()
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
         _module_load_depth = _module_load_depth - 1
         return 0
 
     irt_begin_module(module_name)
-    val exports = extract_module_exports()
-    register_module_functions()
+    val appended_decls = module_get_decls()[decl_start:module_get_decls().len()]
+    for appended_did in appended_decls:
+        decl_owner_file_set(appended_did, resolved_path)
+    val exports = extract_module_exports(appended_decls)
+    register_module_functions(appended_decls, resolved_path)
     module_mark_loaded(module_name, resolved_path, exports)
 
     _module_load_depth = _module_load_depth - 1
@@ -466,6 +474,7 @@ fn load_module(module_name: text, current_file: text) -> i64:
         return 0
 
     # Parse module (append mode — preserves caller's AST)
+    val decl_start = module_get_decls().len()
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
         _module_load_depth = _module_load_depth - 1
@@ -474,14 +483,70 @@ fn load_module(module_name: text, current_file: text) -> i64:
     # Begin tracking this module for selective unload
     irt_begin_module(module_name)
 
+    # Snapshot dependency declarations before recursive loads append another
+    # module to the shared AST arena. Facade modules commonly consist only of
+    # `export use ...`; registering their local declarations without loading
+    # those owners leaves every re-export undefined at execution time.
+    var dependency_modules: [text] = []
+    var dependency_imports: [[text]] = []
+    val appended_decls = module_get_decls()[decl_start:module_get_decls().len()]
+    # Every declaration, including use/val/var declarations, needs immutable
+    # provenance. Function-only attribution is insufficient once recursive
+    # imports append several modules to the shared AST arena.
+    for appended_did in appended_decls:
+        decl_owner_file_set(appended_did, resolved_path)
+    for dependency_did in appended_decls:
+        if decl_get_tag(dependency_did) == DECL_USE:
+            dependency_modules.push(decl_get_name(dependency_did))
+            dependency_imports.push(decl_get_imports(dependency_did))
+
     # Extract exports
-    val exports = extract_module_exports()
+    val exports = extract_module_exports(appended_decls)
 
     # Register functions (also hooks into irt_track_*)
-    register_module_functions()
+    register_module_functions(appended_decls, resolved_path)
 
     # Mark as loaded
     module_mark_loaded(module_name, resolved_path, exports)
+
+    # Resolve the snapshotted dependencies after marking this owner so cyclic
+    # facades terminate, but before returning success to the importing module.
+    var dependency_index: i64 = 0
+    for dependency_module in dependency_modules:
+        val requested = dependency_imports[dependency_index]
+        var dependency_ok = if requested.len() == 0:
+            load_module(dependency_module, resolved_path)
+        else:
+            load_module_selective(dependency_module, requested, resolved_path)
+        # The core AST represents `use owner.member` as a dotted module with
+        # no explicit item list. Apply the same parent-selective fallback here
+        # as entry-module use evaluation; recursive facade loading must not
+        # reinterpret a member as a child file.
+        if dependency_ok == 0 and requested.len() == 0:
+            val dependency_dot = dependency_module.last_index_of(".")
+            if dependency_dot > 0 and dependency_dot + 1 < dependency_module.len():
+                val dependency_owner = dependency_module[0:dependency_dot]
+                val dependency_member = dependency_module[dependency_dot + 1:dependency_module.len()]
+                dependency_ok = load_module_selective(dependency_owner, [dependency_member], resolved_path)
+        if dependency_ok == 0:
+            val dependency_path = resolve_module_path(dependency_module, resolved_path)
+            print "error: module dependency failed: {module_name} -> {dependency_module} ({dependency_path})"
+            _module_load_depth = _module_load_depth - 1
+            return 0
+        dependency_index = dependency_index + 1
+
+    # Imported modules own their global declarations. Registering functions is
+    # insufficient: their functions immediately read val/var state (the SPipe
+    # owner begins with suite_stack/current_suite), so initialize those owners
+    # once the dependency graph is registered.
+    for init_did in appended_decls:
+        val init_tag = decl_get_tag(init_did)
+        if init_tag == DECL_VAL or init_tag == DECL_VAR or init_tag == DECL_ENUM or init_tag == DECL_IMPL or init_tag == DECL_CLI:
+            val _ = eval_decl(init_did)
+            if eval_had_error:
+                print "error: module initialization failed: {module_name} ({resolved_path})"
+                _module_load_depth = _module_load_depth - 1
+                return 0
 
     _module_load_depth = _module_load_depth - 1
     1
@@ -492,6 +557,14 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
 
     # Check if already loaded
     if module_is_loaded(module_name) == 1:
+        # Loading and binding are distinct. A facade may have loaded the owner
+        # earlier, but this caller still needs its explicit names mapped to
+        # that owner's file; otherwise the flat bare-name table selects an
+        # unrelated later definition (observed: std.io_runtime.file_write
+        # dispatched to io.file_ops and called rt_file_write_text_at).
+        val existing_owner_file = module_get_file_path(module_name)
+        for existing_imported_name in imported_names:
+            func_import_binding_register(current_file, existing_imported_name, existing_owner_file)
         return 1
 
     # Full load FIRST. The requested module's own definitions must win.

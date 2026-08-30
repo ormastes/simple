@@ -132,10 +132,13 @@ fn _execute_it(name: text, block: fn()):
         test_pending > pending_before
     ):
         # pending(reason); return marks this example without inflating passes.
-        pass
+        _write_test_result_evidence(passed, failed)
     elif current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
+        # Persist before any later nested call can restore the caller's global
+        # snapshot and stale the local tally under interpreter writeback.
+        _write_test_result_evidence(passed, failed)
         print "{indent}  it {name} ... ok"
     else:
         # A failing example has one outcome: failure wins over an earlier
@@ -144,12 +147,14 @@ fn _execute_it(name: text, block: fn()):
             test_pending = pending_before
         failed = failed + 1
         test_failed = failed
+        # The error formatting below performs nested calls (join/push).  In
+        # pure interpreter mode those calls may restore the pre-call global
+        # snapshot, so serialize the authoritative local counters first.
+        _write_test_result_evidence(passed, failed)
         print "{indent}  it {name} ... FAILED"
         val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
-    # global write is not visible to callees until return — pass the tallies
-    _write_test_result_evidence(passed, failed)
 
 pub fn it(name: text, block: fn()):
     if not _run_test("normal"):

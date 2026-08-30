@@ -11,6 +11,7 @@
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 use compiler.common.assurance.policy_names.normalize_profile_name
+use compiler.core.interpreter.eval_tables.{decl_owner_file_get, decl_owner_file_set}
 use std.io_runtime.{env_get_opt}
 
 # ===== Declaration Evaluation =====
@@ -124,7 +125,12 @@ fn eval_decl(did: i64) -> i64:
         # Load module and register its exports
         val module_path = d_node.name
         val imported_names = d_node.imports
-        val current_file = module_get_path()
+        # Append-mode parsing shares one declaration arena across the entry
+        # file and every imported module.  module_get_path() remains the entry
+        # path, so import resolution must use the immutable owner recorded when
+        # this declaration was appended.
+        val declared_owner = decl_owner_file_get(did)
+        val current_file = if declared_owner != "": declared_owner else: module_get_path()
 
         # Check if this is a lazy import — defer loading
         val is_lazy = decl_get_is_lazy(did)
@@ -137,6 +143,17 @@ fn eval_decl(did: i64) -> i64:
         var load_result: i64 = 0
         if imported_names.len() == 0:
             load_result = load_module(module_path, current_file)
+            # Compact single-symbol imports (`use a.b.member`) are represented
+            # by the core AST as a dotted path with no explicit import list.
+            # If no module exists at that full path, retry its parent module
+            # selectively instead of rejecting valid source such as
+            # `use std.spec.step`.
+            if load_result == 0:
+                val last_dot = module_path.last_index_of(".")
+                if last_dot > 0 and last_dot + 1 < module_path.len():
+                    val owner_path = module_path[0:last_dot]
+                    val member_name = module_path[last_dot + 1:module_path.len()]
+                    load_result = load_module_selective(owner_path, [member_name], current_file)
         else:
             load_result = load_module_selective(module_path, imported_names, current_file)
 
@@ -213,6 +230,12 @@ fn eval_decl(did: i64) -> i64:
 
 fn eval_module() -> i64:
     val decls = module_get_decls()
+    val entry_path = module_get_path()
+
+    # Establish provenance before evaluating any use declaration. Recursive
+    # module loads append more declarations to this same arena.
+    for did in decls:
+        decl_owner_file_set(did, entry_path)
 
     # Phase 1: Register all functions and structs
     for did in decls:

@@ -9166,6 +9166,29 @@ int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     return rt_string_new(path_ptr, (uint64_t)slash);
 }
 
+/* Canonical dirname ABI used by the pure-Simple module resolver. Unlike the
+ * older path_parent helper, a separator-free relative path has an empty
+ * parent, matching Path::parent in the bootstrap runtime. */
+int64_t rt_path_dirname(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len == 0) return rt_string_new(NULL, 0);
+    uint64_t end = path_len;
+    while (end > 1 && (path_ptr[end - 1] == '/' || path_ptr[end - 1] == '\\')) {
+        end--;
+    }
+    if (end == 1 && (path_ptr[0] == '/' || path_ptr[0] == '\\')) {
+        return rt_string_new(NULL, 0);
+    }
+    uint64_t slash = end;
+    while (slash > 0) {
+        slash--;
+        if (path_ptr[slash] == '/' || path_ptr[slash] == '\\') {
+            if (slash == 0) return rt_string_new(path_ptr, 1);
+            return rt_string_new(path_ptr, slash);
+        }
+    }
+    return rt_string_new(NULL, 0);
+}
+
 int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
     if (!path_ptr || path_len > (uint64_t)SIZE_MAX - 1) {
         return rt_string_new(NULL, 0);
