@@ -850,17 +850,26 @@ impl MirLowering:
                                     case _:
                                         pass
                             return
-                        val mir_type = match let_type:
-                            case Some(type_value):
-                                match type_value.kind:
-                                    case HirTypeKind.Infer(_, _): MirType.i64()
-                                    case _: self.lower_type(type_value)
-                            case nil:
-                                MirType.i64()
+                        # NOT `case Some(...)`. This slot is a mixed population:
+                        # of the 56 `symbols.define(` call sites only 13 pass a
+                        # `Some(...)` box, so an Option arm binding is wrong for
+                        # the majority AND its payload deep-copy corrupts the
+                        # HirType for the minority (disc=-1 at lower_type).
+                        # `.?` + `.unwrap()` is the idiom the sibling reader of
+                        # this same slot already uses successfully
+                        # (declaration_lowering.spl:469), and it unwraps a box
+                        # while passing a bare value through.
+                        val mir_type = if let_type.?:
+                            val type_value = let_type.unwrap()
+                            match type_value.kind:
+                                case HirTypeKind.Infer(_, _): MirType.i64()
+                                case _: self.lower_type(type_value)
+                        else:
+                            MirType.i64()
 
                         var init_local = self.lower_expr(let_init)
-                        match let_type:
-                            case Some(declared_type):
+                        if let_type.?:
+                                val declared_type = let_type.unwrap()
                                 # The staged native lane can preserve the
                                 # optional discriminant while dropping its
                                 # struct payload after an earlier match of the
@@ -889,8 +898,6 @@ impl MirLowering:
                                             init_local = self.box_runtime_value(init_local)
                                         case _:
                                             ()
-                            case nil:
-                                ()
                         val annotated_narrow_int = match mir_type.kind:
                             case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: true
                             case _: false
