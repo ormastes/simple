@@ -1026,20 +1026,18 @@ impl MirLowering:
         if type_ == nil:
             self.error_fatal("E-MIR-TYPE-NilType: lower_type received a NIL HirType (not an unknown kind) while lowering '{fn_ctx}' -- the CALLER needs a nil guard", nil)
             return MirType.i64()
-        # Round 2 (2026-08-30). Round 1 established the value is NON-nil with a
-        # non-enum `kind`. What is still unknown is WHICH source construct built
-        # it, and a control experiment cannot answer that: the pre-migration
-        # binary SIGSEGVs (rc=139, measured) on any function containing a `val`,
-        # so no run of it can reach MIR lowering with a `Let` present. Report the
-        # HirType's own span instead -- that names the construct directly, and a
-        # zero/empty span is itself the answer (the HirType was SYNTHESISED, not
-        # parsed). Concatenation is deliberately interpolation-only: a 3+ operand
-        # `+` chain silently drops operands on the freestanding/native lane.
-        val sp = type_.span
-        if sp == nil:
-            self.error_fatal("E-MIR-TYPE-Unknown: disc={_sffi_hir_type_discriminant(type_.kind)} kind={type_.kind} span=<NIL-SPAN, synthesised> while lowering '{fn_ctx}'", nil)
-            return MirType.i64()
-        self.error_fatal("E-MIR-TYPE-Unknown: disc={_sffi_hir_type_discriminant(type_.kind)} kind={type_.kind} at {sp.file}:{sp.line}:{sp.col} (start={sp.start} len={sp.length}) while lowering '{fn_ctx}'", Some(sp))
+        # Round 2 REVERTED (2026-08-30). This block briefly read five MORE
+        # fields off `type_.span` -- including `.file`, a `text` -- to localise
+        # the construct. That was labelled "diagnostic-only, no behaviour
+        # change", and that label was WRONG: round 1 had already PROVEN this
+        # object is corrupt (`kind` is not an enum, disc=-1), so dereferencing
+        # further fields of the same object is not a safe read. With it in
+        # place the entry-module lowering stopped producing any output at all
+        # and the worker exited 1 silently, losing the 20 informative lines
+        # round 1 gave us. Only report fields round 1 already proved safe to
+        # touch: the rendered `kind`, its discriminant, and the span passed BY
+        # REFERENCE to error_fatal (never field-read here).
+        self.error_fatal("E-MIR-TYPE-Unknown: unreachable HirTypeKind disc={_sffi_hir_type_discriminant(type_.kind)}: {type_.kind} while lowering '{fn_ctx}'", Some(type_.span))
         MirType.i64()
 
     me lower_block(block: HirBlock) -> LocalId?:
