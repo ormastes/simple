@@ -5,6 +5,7 @@ extern fn sys_get_args() -> [text]
 extern fn rt_cli_get_args() -> [text]
 use std.io_runtime.{file_exists, file_read, file_write}
 use app.io.sqlite_sffi.{sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get}
+use std.db.dbfs_engine.fts.{FtsInvertedIndex, FtsSearchResult, fts_bm25_search}
 
 fn _context_file_exists_impl(path: text) -> bool:
     file_exists(path)
@@ -312,3 +313,93 @@ fn context_sql_query_packs_by_source(paths: [text], target: text, query: text, s
 
 fn context_sql_query_packs(paths: [text], target: text, query: text, db_path: text, format: text) -> text:
     context_sql_query_packs_by_source(paths, target, query, "", db_path, format)
+
+# ── BM25 log summary ──────────────────────────────────────────────────────────
+#
+# Treats each LINE of a log as a document, indexes them with the existing FTS
+# inverted index, and ranks with the existing BM25 search. The raw log is never
+# echoed: only the top-ranked lines are emitted, truncated to a column width.
+
+fn _context_log_truncate(line: text, width: i64) -> text:
+    var out: text = ""
+    var n: i64 = 0
+    for ch in line.chars():
+        if n >= width:
+            return out + "..."
+        out = out + ch
+        n = n + 1
+    out
+
+fn _context_log_percent(raw_bytes: i64, summary_bytes: i64) -> i64:
+    if raw_bytes <= 0:
+        return 0
+    (raw_bytes - summary_bytes) * 100 / raw_bytes
+
+fn context_log_summary(content: text, source_path: text, purpose: text,
+                       query: text, top_n: i64) -> text:
+    val lines = content.split("\n")
+    var index = FtsInvertedIndex.new()
+    var total_lines: i64 = 0
+    var li: i64 = 0
+    while li < lines.len():
+        val line = lines[li as i32]
+        if line != "" or li + 1 < lines.len():
+            total_lines = total_lines + 1
+            # Blank lines are zero-token documents: indexing them inflates N and
+            # drags avgdl down, skewing BM25 for every real line.
+            if line != "":
+                index.index_document(li, line)
+        li = li + 1
+
+    var effective_query = query
+    if effective_query == "":
+        effective_query = purpose
+    val results = fts_bm25_search(index, effective_query)
+
+    var limit = top_n
+    if limit <= 0:
+        limit = 10
+
+    var body: text = ""
+    body = body + "# Context Log Summary\n"
+    body = body + "purpose: {purpose}\n"
+    body = body + "source: {source_path}\n"
+    body = body + "query: {effective_query}\n"
+    body = body + "total_lines: {total_lines}\n"
+    val raw_bytes = content.len() as i64
+    body = body + "total_bytes: {raw_bytes}\n"
+    val matched = results.len()
+    body = body + "matched_lines: {matched}\n"
+    body = body + "top_lines:\n"
+
+    var ri: i64 = 0
+    while ri < results.len() and ri < limit:
+        val res = results[ri as i32]
+        val line_no = res.doc_id + 1
+        val text_line = _context_log_truncate(lines[res.doc_id as i32], 160)
+        body = body + "  {line_no}: {text_line}\n"
+        ri = ri + 1
+    if results.len() == 0:
+        body = body + "  (no lines matched)\n"
+
+    # The trailer's own size is included so the reported figure is honest.
+    # The trailer text depends on the number it reports, so iterate to a fixed
+    # point (converges in one or two rounds at any realistic size).
+    var total: i64 = body.len() as i64
+    var tail: text = ""
+    var round: i64 = 0
+    while round < 8:
+        val pct = _context_log_percent(raw_bytes, total)
+        tail = "context_log_summary: raw_bytes={raw_bytes} summary_bytes={total} reduction={pct}%\n"
+        val next_total = (body.len() as i64) + (tail.len() as i64)
+        if next_total == total:
+            round = 8
+        else:
+            total = next_total
+            round = round + 1
+    body + tail
+
+fn context_log_summary_file(path: text, purpose: text, query: text, top_n: i64) -> text:
+    if not file_exists(path):
+        return ""
+    context_log_summary(_context_file_read_impl(path), path, purpose, query, top_n)
