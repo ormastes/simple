@@ -6873,6 +6873,23 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     return 1;
 }
 
+/* Canonical half-open integer range `[start, end)`, matching the RuntimeValue
+ * array contract used by MIR range lowering. */
+int64_t rt_range(int64_t start, int64_t end) {
+    if (end <= start) return (int64_t)(uintptr_t)rt_array_new(0);
+    uint64_t len = (uint64_t)end - (uint64_t)start;
+    if (len > (uint64_t)INT64_MAX) return rt_core_nil();
+    SplArray* result = rt_array_new((int64_t)len);
+    if (!result) return rt_core_nil();
+    for (int64_t value = start; value < end; value++) {
+        if (!rt_array_push(result, rt_value_int(value))) {
+            rt_array_free(result);
+            return rt_core_nil();
+        }
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
 /* Receiver-dispatched push parity with the hosted RuntimeValue provider.
  * Arrays mutate in place and return their receiver; text remains immutable and
  * returns the concatenated value. Other receiver kinds fail closed to nil. */
