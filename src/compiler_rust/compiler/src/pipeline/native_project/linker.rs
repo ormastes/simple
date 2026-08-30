@@ -21,8 +21,28 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+/// Whole-archive arguments for the **clang-cl** driver.
+///
+/// clang-cl is an MSVC-compatible driver and rejects both GNU-style spellings.
+/// Measured against clang-cl 18.1.8 (MSVC-built), linking a real archive:
+///
+/// | form | result |
+/// |---|---|
+/// | `-Xlinker /WHOLEARCHIVE:lib` | FAILS -- "unknown argument ignored in clang-cl: '-Xlinker'", then the value is taken as a filename |
+/// | `-Wl,/WHOLEARCHIVE:lib` | FAILS -- parsed as a WARNING option ("unknown warning option"), never reaches the linker |
+/// | `/WHOLEARCHIVE:lib` (bare) | FAILS -- "no such file or directory" |
+/// | `/link /WHOLEARCHIVE:lib` | **works** |
+///
+/// `/link` forwards the remainder to the linker. Repeating it for a second
+/// archive costs one `LNK4044: unrecognized option '/link'` warning and still
+/// applies -- verified by linking two archives that way -- so each call stays
+/// self-contained rather than requiring callers to order a single trailing
+/// `/link` group.
+///
+/// The sibling `else if is_msvc` branches keep `-Wl,/WHOLEARCHIVE:`: those run
+/// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
 fn clang_cl_whole_archive_args(path: &Path) -> [String; 2] {
-    ["-Xlinker".to_string(), format!("/WHOLEARCHIVE:{}", path.display())]
+    ["/link".to_string(), format!("/WHOLEARCHIVE:{}", path.display())]
 }
 
 /// Linker stdout+stderr, with source attribution appended for any undefined
@@ -2551,7 +2571,7 @@ mod linker_tests {
     fn clang_cl_retains_each_required_archive() {
         assert_eq!(
             clang_cl_whole_archive_args(Path::new("simple_native_all.lib")),
-            ["-Xlinker", "/WHOLEARCHIVE:simple_native_all.lib"]
+            ["/link", "/WHOLEARCHIVE:simple_native_all.lib"]
         );
     }
 
