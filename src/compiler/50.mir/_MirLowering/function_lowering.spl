@@ -48,6 +48,15 @@ fn _sffi_hir_type_discriminant(value: Any) -> i64:
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
 
+# Cached [mir-lower-type-probe] gate (-1 unknown, 0 off, 1 on). Default OFF.
+# `mir_trace_enabled` (mir_data.spl:89) states in its own docstring that hot-path
+# callers MUST read it once and cache it, never per receipt; `lower_type` is the
+# hottest such path, so the env read happens at most once per process.
+var mir_lower_type_probe_state: i64 = -1
+# Monotonic record counter for the probe, and a hard output bound so a
+# pathological run cannot flood the log.
+var mir_lower_type_probe_seq: i64 = 0
+
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 
@@ -783,6 +792,39 @@ impl MirLowering:
         if type_ == nil:
             self.error_fatal("missing HIR type during MIR lowering", nil)
             return MirType(kind: MirTypeKind.I64)
+        # [mir-lower-type-probe] -- DIAGNOSTIC, default OFF, gated by
+        # SIMPLE_MIRB_TRACE via mir_trace_enabled().
+        #
+        # Why here: three independent 20-vs-4 log pairs differ ONLY in the
+        # E-MIR-TYPE error lines (OTHER=0), so the run-to-run divergence is
+        # invisible to every existing receipt. The sequence of lower_type calls
+        # is the only thing between the last agreeing line and the disagreeing
+        # ones, so that sequence is what has to be recorded.
+        #
+        # SAFETY: this reads `type_.kind` and NOTHING else off `type_` -- no
+        # `.span`, no other field. Round 1 proved rendering the kind and its
+        # discriminant is safe even when the object is corrupt; round 2
+        # dereferenced `.span`'s fields as well and killed the worker silently.
+        # The nil guard above runs first, so `.kind` is never read off nil.
+        #
+        # FORMAT is fixed and greppable for mechanical diffing -- exactly three
+        # fields, always in this order, no timings and no addresses:
+        #   [mir-lower-type-probe] seq=<n> fn=<name> disc=<d>
+        if mir_lower_type_probe_state < 0:
+            if mir_trace_enabled():
+                mir_lower_type_probe_state = 1
+            else:
+                mir_lower_type_probe_state = 0
+        if mir_lower_type_probe_state == 1 and mir_lower_type_probe_seq < 50000:
+            mir_lower_type_probe_seq = mir_lower_type_probe_seq + 1
+            val probe_fn = if self.current_function_names.len() > 0:
+                self.current_function_names[self.current_function_names.len() - 1]
+            else:
+                "<none>"
+            if mir_lower_type_probe_seq == 50000:
+                eprint("[mir-lower-type-probe] truncated seq=50000\n")
+            else:
+                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={_sffi_hir_type_discriminant(type_.kind)}\n")
         val dict_type_disc = _sffi_hir_type_discriminant(HirTypeKind.Dict(type_, type_))
         if _sffi_hir_type_discriminant(type_.kind) == dict_type_disc:
             match type_.kind:
