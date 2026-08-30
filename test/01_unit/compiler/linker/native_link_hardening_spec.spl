@@ -2,13 +2,38 @@
 
 use compiler.backend.linker.linker_wrapper.{
     unresolved_symbol_flags_for_unix_linker,
-    unresolved_symbol_flags_for_cc
+    unresolved_symbol_flags_for_cc,
+    native_direct_platform_flags,
+    native_effective_link_os,
+    native_linker_abi_for_target
 }
 use testing.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Native linker hardening":
+    it "keeps object-format flags and cross-target dispatch explicit":
+        expect(native_direct_platform_flags("linux", "lld")).to_equal([
+            "--eh-frame-hdr", "--build-id", "--hash-style=gnu",
+            "-z", "relro", "-z", "now", "--gc-sections", "--icf=all"
+        ])
+        expect(native_direct_platform_flags("darwin", "ld64")).to_equal(["-dead_strip"])
+        expect(native_direct_platform_flags("windows-mingw", "ld")).to_equal([])
+        expect(native_direct_platform_flags("windows-msvc", "msvc")).to_equal([])
+        expect(native_linker_abi_for_target("x86_64-pc-windows-gnu")).to_equal("windows-gnu")
+        expect(native_linker_abi_for_target("x86_64-pc-windows-msvc")).to_equal("windows-msvc")
+        expect(native_effective_link_os("linux", "x86_64-pc-windows-gnu", "windows-gnu")).to_equal("windows-mingw")
+        expect(native_effective_link_os("linux", "x86_64-pc-windows-msvc", "windows-msvc")).to_equal("windows-msvc")
+
+    it "transports native target from CLI options into the linker config":
+        val cli = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_aot_native_output.spl") ?? ""
+        val orchestrator = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl") ?? ""
+        expect(cli).to_contain("options.native_target = native_target")
+        expect(driver).to_contain("val native_target = ctx.native_target")
+        expect(orchestrator).to_contain("val hosted_target = options.target_triple")
+        expect(orchestrator.contains("val hosted_target = env_get")).to_equal(false)
+
     it "recognizes only strong Vulkan provider definitions":
         expect(llvm_nm_output_has_strong_definition(
             "weak.o:\n                 w rt_vulkan_provider_is_available\nstrong.o:\n0000000000000000 T rt_vulkan_provider_is_available\n",
