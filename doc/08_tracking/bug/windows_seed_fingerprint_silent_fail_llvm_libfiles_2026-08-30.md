@@ -91,6 +91,28 @@ the build), or the build and fingerprint share one resolver. Workaround in the
 meantime is to put the intended LLVM's `bin` first on PATH — fragile and
 undocumented, which is why this is filed rather than left as tribal knowledge.
 
+## Defect 3 (OPEN) — MSVC-style `--system-libs` tokens are unresolvable, and were also silent
+
+With the libfiles guard fixed, putting the **MSVC-built LLVM 18** first on PATH
+advances past all 183 libraries and then fails in the system-libs loop. The two
+`llvm-config` builds on this host disagree in FORM, not just version:
+
+```
+MSVC LLVM 18 : psapi.lib shell32.lib ole32.lib uuid.lib advapi32.lib ws2_32.lib libxml2s.lib
+msys2 LLVM 21: -lpsapi -lshell32 -lole32 -luuid -ladvapi32 -lws2_32 -lntdll -lpthread -lz -lzstd.dll -lxml2
+```
+
+The token loop handles `-lfoo`, an absolute path, and `-framework`; everything
+else fell through to `-*) return 1 ;;` / `*) return 1 ;;` — silent again. Bare
+`<name>.lib` tokens resolve against the Windows SDK library path, which this
+authority never captures (only macOS SDK identity is recorded, via `xcrun`), so
+binding them is not possible today without deciding how SDK identity enters the
+receipt.
+
+Both rejections now name the offending token on stderr. Support for MSVC-style
+tokens is NOT implemented — declaring it unsupported out loud is the honest
+state, and a gnu-ABI `llvm-config` is the correct input for a gnu lane anyway.
+
 ## Reproduction
 
 ```sh
