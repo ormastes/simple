@@ -1297,14 +1297,41 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' |
         wc -l | tr -d ' ') || return 1
     [ "$bootstrap_stage3_hosted_count" -eq 1 ] || return 1
-    [ -z "$(find "$bootstrap_stage3_hosted_root" -perm /0222 -print -quit)" ] || return 1
+    # Nothing in a frozen generation may be writable. On Windows that is only
+    # enforceable for FILES: MSYS cannot clear the write bit on a directory.
+    # Measured on this staging tree after the chmod 0500 freeze --
+    #   simple.exe 555, *.lib 444, hosted-runtime.env 444   (correctly frozen)
+    #   every directory                            755      (freeze ignored)
+    # -- so the unrestricted scan reports the directories and nothing else.
+    #
+    # Restrict the scan to regular files there rather than skipping it: the
+    # artifacts this guard exists to protect are files, they DO freeze, and a
+    # writable one still fails. Directory immutability is simply not
+    # representable on this platform and is not claimed.
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            [ -z "$(find "$bootstrap_stage3_hosted_root" -type f -perm /0222                 -print -quit)" ] || return 1
+            ;;
+        *)
+            [ -z "$(find "$bootstrap_stage3_hosted_root" -perm /0222 -print -quit)" ] || return 1
+            ;;
+    esac
     perl -MFcntl=:mode -e '
         use strict; use warnings;
+        # Windows cannot represent these modes: MSYS reports 0444 for any
+        # read-only file (losing both the owner-only narrowing and the execute
+        # bit) and ignores the freeze on directories entirely, leaving them
+        # 0755. Measured on a frozen staging tree. Assert what IS representable
+        # -- the entry exists, is not a symlink, and no FILE is writable -- and
+        # do not claim directory immutability the platform cannot provide.
+        my $win = $^O =~ /^(?:MSWin32|msys|cygwin)$/;
         for my $pair (@ARGV) {
             my ($path, $wanted) = split(/=/, $pair, 2);
             my @st = lstat($path);
-            @st && !S_ISLNK($st[2]) && S_IMODE($st[2]) == oct($wanted)
-                or exit 1;
+            @st && !S_ISLNK($st[2]) or exit 1;
+            next if S_IMODE($st[2]) == oct($wanted);
+            exit 1 unless $win;
+            exit 1 if !S_ISDIR($st[2]) && (S_IMODE($st[2]) & 0222);
         }
     ' "$bootstrap_stage3_hosted_root=0500" \
         "$bootstrap_stage3_hosted_root/deps=0500" \
