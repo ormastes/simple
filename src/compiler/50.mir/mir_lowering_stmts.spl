@@ -870,7 +870,7 @@ impl MirLowering:
                         # presence test is unchanged. Only the bare method call
                         # was affected.
                         val mir_type = if let_type.?:
-                            val type_value = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                            val type_value: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                             match type_value.kind:
                                 case HirTypeKind.Infer(_, _): MirType.i64()
                                 case _: self.lower_type(type_value)
@@ -879,7 +879,7 @@ impl MirLowering:
 
                         var init_local = self.lower_expr(let_init)
                         if let_type.?:
-                                val declared_type = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                                val declared_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                 # The staged native lane can preserve the
                                 # optional discriminant while dropping its
                                 # struct payload after an earlier match of the
@@ -1158,7 +1158,7 @@ impl MirLowering:
                                     # the bare writers nor survives the boxed
                                     # ones' payload arm-binding copy.
                                     if let_type.?:
-                                        val declared_type = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                                        val declared_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                         self.remember_local_hir_type(local.id, declared_type, 0, 0)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced, touched per the
@@ -1705,7 +1705,8 @@ impl MirLowering:
             self.builder = get_builder
             if val raw_element = raw_result:
                 val element_type = if target_element.has_type_:
-                    self.lower_type(target_element.type_)
+                    val tgt_elem_ty: HirType = target_element.type_
+                    self.lower_type(tgt_elem_ty)
                 else:
                     MirType.i64()
                 val decoded_element = self.decode_runtime_value(raw_element, element_type)
@@ -2044,7 +2045,13 @@ impl MirLowering:
                     case _:
                         ()
         if not resolved_type and base.has_type_ == true and base.type_ != nil:
-            match base.type_.kind:
+            # Typed rebind before touching `.kind`: matching on a FIELD ACCESS
+            # reads through an ANY-erased receiver, which mis-resolves the enum
+            # tag/payload and yields disc=-1 (hir_lowering/types.spl:573-580,
+            # and the same fix already applied at :1333). The arm bindings
+            # inherit the erasure, so element_type/value_type were erased too.
+            val base_hir_ty: HirType = base.type_
+            match base_hir_ty.kind:
                 case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
                     result = self.lower_type(element_type)
                     resolved_type = true
@@ -2968,10 +2975,12 @@ impl MirLowering:
         # by the comment above dead code: loop_ty always kept its i64 default.
         if val end_expr = end:
             if end_expr.has_type_:
-                loop_ty = self.lower_type(end_expr.type_)
+                val end_ty: HirType = end_expr.type_
+                loop_ty = self.lower_type(end_ty)
         elif val start_expr = start:
             if start_expr.has_type_:
-                loop_ty = self.lower_type(start_expr.type_)
+                val start_ty: HirType = start_expr.type_
+                loop_ty = self.lower_type(start_ty)
 
         # Lower start value (default to typed 0)
         var start_local: LocalId = 0
@@ -3120,7 +3129,8 @@ impl MirLowering:
         # `.?`/`.unwrap()` shape is required here, not an Option arm.
         if val loop_symbol = self.symbols.get_symbol_raw(var_.id):
             if loop_symbol.type_.?:
-                element_type = self.lower_type(loop_symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty()))
+                val loop_elem_ty: HirType = loop_symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                element_type = self.lower_type(loop_elem_ty)
 
         # The loop-variable symbol's HIR type is frequently nil on this
         # pipeline (native-build's lower_to_mir runs without a full
