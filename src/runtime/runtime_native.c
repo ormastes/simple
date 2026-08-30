@@ -8791,6 +8791,43 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     return result;
 }
 
+/* Memory-map a file and copy its bytes into the canonical runtime string.
+ * The mapping is released before return; rt_string_new owns its copy. */
+int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
+#if defined(_WIN32)
+    int fd = _open(path, _O_RDONLY | _O_BINARY);
+    if (fd < 0) return rt_core_nil();
+    struct _stat64 st;
+    if (_fstat64(fd, &st) != 0 || st.st_size <= 0) { _close(fd); return rt_core_nil(); }
+    intptr_t os_handle = _get_osfhandle(fd);
+    if (os_handle == -1) { _close(fd); return rt_core_nil(); }
+    HANDLE mapping = CreateFileMappingA((HANDLE)os_handle, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mapping) { _close(fd); return rt_core_nil(); }
+    const uint8_t* data = (const uint8_t*)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!data) { CloseHandle(mapping); _close(fd); return rt_core_nil(); }
+    int64_t result = rt_string_new(data, (uint64_t)st.st_size);
+    UnmapViewOfFile(data);
+    CloseHandle(mapping);
+    _close(fd);
+    return result;
+#else
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return rt_core_nil();
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return rt_core_nil(); }
+    if ((uint64_t)st.st_size > (uint64_t)SIZE_MAX) { close(fd); return rt_core_nil(); }
+    size_t len = (size_t)st.st_size;
+    const uint8_t* data = (const uint8_t*)mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) { close(fd); return rt_core_nil(); }
+    int64_t result = rt_string_new(data, (uint64_t)len);
+    munmap((void*)data, len);
+    close(fd);
+    return result;
+#endif
+}
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
