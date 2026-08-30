@@ -63,6 +63,53 @@
 #endif
 #endif
 
+/* OS CSPRNG bytes encoded as lowercase hexadecimal.  This is the native
+ * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. */
+const char* rt_random_hex(int64_t len) {
+    static const char hex[] = "0123456789abcdef";
+    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return NULL;
+    size_t byte_len = (size_t)len;
+    unsigned char* random_bytes = NULL;
+    if (byte_len > 0) {
+        random_bytes = (unsigned char*)malloc(byte_len);
+        if (!random_bytes) return NULL;
+#if defined(_WIN32)
+        typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+        if (byte_len > 0xffffffffu) { free(random_bytes); return NULL; }
+        HMODULE library = LoadLibraryA("bcrypt.dll");
+        if (!library) { free(random_bytes); return NULL; }
+        BCryptGenRandomFn fill = (BCryptGenRandomFn)GetProcAddress(library, "BCryptGenRandom");
+        long status = fill ? fill(NULL, random_bytes, (unsigned long)byte_len, 0x00000002) : -1;
+        FreeLibrary(library);
+        if (status != 0) { free(random_bytes); return NULL; }
+#else
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) { free(random_bytes); return NULL; }
+        size_t offset = 0;
+        while (offset < byte_len) {
+            ssize_t count = read(fd, random_bytes + offset, byte_len - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                close(fd);
+                free(random_bytes);
+                return NULL;
+            }
+            offset += (size_t)count;
+        }
+        close(fd);
+#endif
+    }
+    char* encoded = (char*)malloc(byte_len * 2 + 1);
+    if (!encoded) { free(random_bytes); return NULL; }
+    for (size_t i = 0; i < byte_len; i++) {
+        encoded[i * 2] = hex[random_bytes[i] >> 4];
+        encoded[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
+    }
+    encoded[byte_len * 2] = '\0';
+    free(random_bytes);
+    return encoded;
+}
+
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
 bool rt_dir_create_cpath(const char* path, bool recursive) {
