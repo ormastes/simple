@@ -385,19 +385,7 @@ impl Lowerer {
                     // degrade the expression type to ANY so method
                     // dispatch stays bare and tag-dispatches at runtime.
                     let ambiguous_field = self.is_ambiguous_global_field(field);
-                    // FAIL-CLOSED (2026-08-30): degrading only the TYPE to ANY
-                    // while keeping the receiver-blind "most fields wins" INDEX
-                    // fail-opens the byte offset. `mcdc_owner_bytes` is field 10
-                    // of CompilerConfig, 22 of CompileOptions, 26 of MirLowering
-                    // -- the 97-field MirLowering won, so `CompileContext.create`
-                    // read [0xd0] out of a 112-byte CompilerConfig. An ambiguous
-                    // name must resolve by receiver or not at all.
-                    let global_field_info = if ambiguous_field {
-                        None
-                    } else {
-                        self.resolve_global_field_info(field)
-                    };
-                    if let Some((field_index, field_ty, _count, _sname)) = global_field_info {
+                    if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
                         if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}"); }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
@@ -419,12 +407,6 @@ impl Lowerer {
                                 }
                             }
                         }
-                    }
-                    if ambiguous_field {
-                        // Same fail-closed rule as the NKM-GLOBAL block above:
-                        // never emit a receiver-blind byte offset for a name
-                        // whose defining structs disagree on the index.
-                        best = None;
                     }
                     if let Some((field_index, field_ty, _)) = best {
                         if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] NKM-LOCALBEST/{field} idx={field_index} in {fpath}"); }
@@ -684,12 +666,25 @@ impl Lowerer {
     fn try_resolve_receiver_struct_name_from_expr(&mut self, receiver: &Expr, ctx: &FunctionContext) -> Option<String> {
         match receiver {
             Expr::Identifier(name) => {
-                let ty = if let Some(idx) = ctx.lookup(name) {
-                    ctx.locals.get(idx).map(|local| local.ty)
-                } else {
-                    self.globals.get(name).copied()
-                }?;
-                self.try_named_struct_name_for_type(ty)
+                let local = ctx.lookup(name).and_then(|idx| ctx.locals.get(idx));
+                let ty = match local {
+                    Some(local) => local.ty,
+                    None => self.globals.get(name).copied()?,
+                };
+                if let Some(struct_name) = self.try_named_struct_name_for_type(ty) {
+                    return Some(struct_name);
+                }
+                // The TypeId erased to ANY, but a PARAMETER still carries its
+                // AUTHORED type name (`LocalVar::type_name_hint`, set from
+                // `param.ty` in module_lowering/function.rs). Using it here is
+                // what keeps a declared-type receiver off the receiver-blind
+                // "most fields wins" fallback: `CompileContext.create(options:
+                // CompileOptions)` was resolving `options.mcdc_owner_bytes`
+                // through that fallback to MirLowering's index 26 (0xd0, past
+                // the end of the object) instead of CompileOptions' 22 (0xb0).
+                // Purely additive -- an unusable hint simply fails the caller's
+                // subsequent field lookup and falls back to today's behaviour.
+                local.and_then(|local| local.type_name_hint.clone())
             }
             Expr::FieldAccess { receiver: base, field } => {
                 let base_struct_name = self.try_resolve_receiver_struct_name_from_expr(base, ctx)?;

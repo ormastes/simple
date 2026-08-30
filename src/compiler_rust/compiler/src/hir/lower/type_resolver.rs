@@ -631,33 +631,17 @@ impl Lowerer {
         // When ambiguous, prefer the struct with the most fields (best guess)
         if struct_ty == TypeId::ANY {
             let mut best: Option<(usize, TypeId, usize)> = None; // (idx, ty, field_count)
-            // FAIL-CLOSED: "most fields wins" is receiver-BLIND. When two
-            // locally-registered structs place this field name at DIFFERENT
-            // indices, picking either one emits a raw `index * 8` byte offset
-            // that is wrong for the other, i.e. an out-of-bounds read on the
-            // smaller object. Observed: `mcdc_owner_bytes` is field 10 of
-            // CompilerConfig (14 fields), 22 of CompileOptions and 26 of
-            // MirLowering (97 fields) -- MirLowering won every ANY receiver in
-            // `CompileContext.create`, reading 0xd0 out of a 0x70 allocation.
-            // Same index in several structs is still harmless (same offset).
-            let mut disagreeing_index = false;
             for (_, hir_ty) in self.module.types.iter() {
                 if let HirType::Struct { fields, .. } = hir_ty {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
                             let count = fields.len();
-                            if best.as_ref().is_some_and(|(best_idx, _, _)| *best_idx != idx) {
-                                disagreeing_index = true;
-                            }
                             if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
                                 best = Some((idx, *field_ty, count));
                             }
                         }
                     }
                 }
-            }
-            if disagreeing_index {
-                best = None;
             }
             if let Some((idx, ty, count)) = best {
                 if crate::hir::lower::trace_field_get_enabled() {
@@ -882,13 +866,6 @@ impl Lowerer {
                                 }
                                 _ => {}
                             }
-                        }
-                        // Fail-closed, same rule as the ANY branch: the local
-                        // "most fields wins" search is receiver-blind, so a name
-                        // whose defining structs disagree on the index must not
-                        // produce a byte offset here either.
-                        if self.is_ambiguous_global_field(field) {
-                            best = None;
                         }
                         if let Some((idx, ty, _)) = best {
                             return Ok((idx, ty));
