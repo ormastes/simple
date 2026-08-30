@@ -850,33 +850,13 @@ impl MirLowering:
                                     case _:
                                         pass
                             return
-                        # `let_type` is `HirType?` from get_symbol_type_raw -- a FLAT
-                        # NULLABLE, not an Option box. The repo rule is explicit
-                        # (statements.spl:409/580, module_declarations_bootstrap.spl:435,
-                        # bug doc 2026-07-23): "a nullable is not an Option box"; bind it
-                        # with a nil guard, never `case Some(...)`.
-                        # MEASURED: right after the get_symbol_type_raw read the value is
-                        # letnil=false letzero=false letkindzero=false -- i.e. `.kind` read
-                        # DIRECTLY off the handle is a valid enum, which is only true of a
-                        # bare HirType. By the time lower_type received it, kind was 0
-                        # (kindzero=true, 20/20). Intact at the source, destroyed in between,
-                        # and the only thing in between was this destructuring.
-                        # The `case Some(...)` arm binding performs a guarded aggregate copy
-                        # that requires the heap tag; a bare nullable handle fails that guard
-                        # and the copy yields a pointer to a ZEROED aggregate instead of the
-                        # value -- kind == 0, so `_sffi_hir_type_discriminant` answers -1 and
-                        # lower_type reports "unreachable HirTypeKind disc=-1: 0".
-                        # The sibling consumer below already documents this exact damage
-                        # ("the staged native lane can preserve the optional discriminant
-                        # while dropping its struct payload AFTER AN EARLIER MATCH of the
-                        # same flat optional") -- this WAS that earlier match.
-                        # The nil guard destructures nothing, so no copy is emitted at all.
-                        val mir_type = if let_type != nil:
-                            match let_type.kind:
-                                case HirTypeKind.Infer(_, _): MirType.i64()
-                                case _: self.lower_type(let_type)
-                        else:
-                            MirType.i64()
+                        val mir_type = match let_type:
+                            case Some(type_value):
+                                match type_value.kind:
+                                    case HirTypeKind.Infer(_, _): MirType.i64()
+                                    case _: self.lower_type(type_value)
+                            case nil:
+                                MirType.i64()
 
                         var init_local = self.lower_expr(let_init)
                         match let_type:
