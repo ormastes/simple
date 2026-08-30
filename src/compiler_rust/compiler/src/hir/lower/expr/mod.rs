@@ -294,16 +294,6 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
-        } else if let Some(symbol) = self.resolve_duplicate_fn_symbol(name)? {
-            // A bare name with 2+ co-compiled definitions: every definition was
-            // emitted owner-mangled, and this caller's module resolved it (own
-            // definition, explicit import binding, or unique glob source) —
-            // see `resolve_duplicate_fn_symbol`.
-            let ty = self.named_callable_value_type(name).unwrap_or(TypeId::ANY);
-            Ok(HirExpr {
-                kind: HirExprKind::Global(symbol),
-                ty,
-            })
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names
