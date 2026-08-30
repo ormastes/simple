@@ -216,6 +216,9 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         ast::Expr::Tuple(exprs) | ast::Expr::Array(exprs) | ast::Expr::VecLiteral(exprs) => {
             exprs.iter().any(expr_uses_self)
         }
+        ast::Expr::Dict(pairs) => pairs
+            .iter()
+            .any(|(key, value)| expr_uses_self(key) || expr_uses_self(value)),
         ast::Expr::ArrayRepeat { value, count } => expr_uses_self(value) || expr_uses_self(count),
         ast::Expr::StructInit { fields, spread, .. } => {
             fields.iter().any(|(_, value)| expr_uses_self(value))
@@ -240,6 +243,22 @@ fn fstring_parts_use_self(parts: &[ast::FStringPart]) -> bool {
         ast::FStringPart::Expr(expr) => expr_uses_self(expr),
         ast::FStringPart::ExprWithFormat(expr, _) => expr_uses_self(expr),
     })
+}
+
+#[cfg(test)]
+mod implicit_receiver_tests {
+    use super::expr_uses_self;
+    use simple_parser::ast::Expr;
+
+    #[test]
+    fn dict_literals_retain_implicit_receiver_from_keys_and_values() {
+        let self_expr = || Expr::Identifier("self".to_string());
+        let literal = |value: &str| Expr::String(value.to_string());
+
+        assert!(expr_uses_self(&Expr::Dict(vec![(self_expr(), literal("value"))])));
+        assert!(expr_uses_self(&Expr::Dict(vec![(literal("key"), self_expr())])));
+        assert!(!expr_uses_self(&Expr::Dict(vec![(literal("key"), literal("value"))])));
+    }
 }
 
 fn driver_manifest_attr(attrs: &[ast::Attribute]) -> Option<&ast::Attribute> {
