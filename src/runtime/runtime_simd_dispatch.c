@@ -29,7 +29,7 @@
 
 #if !defined(SIMPLE_RUNTIME_OPENCL_ONLY)
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
 #  include <immintrin.h>
 #endif
 
@@ -735,7 +735,13 @@ static inline int32_t mlkem_modq_i64(int64_t value) {
     return (int32_t)(reduced < 0 ? reduced + 3329 : reduced);
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+/* SIMD_CAN_AVX2 rather than raw arch macros: it carries the clang-cl exclusion
+ * (see runtime_simd_dispatch.h). clang-cl does not honour
+ * __attribute__((target("avx2"))) under -fms-compatibility, so these AVX2
+ * bodies do not compile there -- `unknown type name '__m256i'` -- and the whole
+ * core-C archive fails with them. The callers below already fall back to the
+ * portable path when the AVX2 helpers are absent. */
+#if SIMD_CAN_AVX2
 /* Exact q=3329 reduction for the reachable NTT butterfly interval.
  *
  * Butterfly inputs are canonical [0,q), so every pre-reduction value lies in
@@ -932,7 +938,7 @@ static void mlkem_inverse_scale_rvv(int32_t* coefficients) {
 #endif
 
 int64_t rt_mlkem_ntt_simd_backend(void) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     return simd_detect_avx2() ? 1 : 0;
 #elif defined(__aarch64__) || defined(_M_ARM64)
     return 2;
@@ -971,7 +977,7 @@ static uint64_t mlkem_ntt_one(int32_t* f, bool inverse, int64_t backend) {
             const int end = start + len;
             while (j < end) {
                 uint64_t executed_chunks = 0;
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
                 if (backend == 1) {
                 while (j + 8 <= end) {
                     mlkem_butterfly8_avx2(
@@ -1019,7 +1025,7 @@ static uint64_t mlkem_ntt_one(int32_t* f, bool inverse, int64_t backend) {
         len = inverse ? len * 2 : len / 2;
     }
     if (inverse) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
         if (backend == 1) {
             mlkem_inverse_scale_avx2(f);
         } else
@@ -1085,7 +1091,7 @@ SplArray* rt_mlkem_ntt_simd_batch(SplArray* coefficients, bool inverse) {
 
 /* MLKEM_SIMD_END */
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
 SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
@@ -1120,7 +1126,7 @@ static void engine2d_fill_into(int64_t* out, int64_t n, int64_t color) {
     for (; i + 2 <= n; i += 2) {
         vst1q_u64((uint64_t*)(void*)(out + i), v);
     }
-#elif defined(__x86_64__) || defined(_M_X64)
+#elif SIMD_CAN_AVX2
     if (simd_detect_avx2()) {
         engine2d_fill_u32_avx2(out, n, color_word);
         return;
@@ -1144,7 +1150,7 @@ static void engine2d_copy_into(int64_t* out, const int64_t* src, int64_t n) {
         uint64x2_t v = vld1q_u64((const uint64_t*)(const void*)(src + i));
         vst1q_u64((uint64_t*)(void*)(out + i), v);
     }
-#elif defined(__x86_64__) || defined(_M_X64)
+#elif SIMD_CAN_AVX2
     memmove(out, src, (size_t)n * sizeof(int64_t));
     return;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -1174,7 +1180,7 @@ static inline int64_t engine2d_blend_pixel(int64_t s, int64_t d) {
     return (int64_t)(uint64_t)out;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
 static uint32_t engine2d_blend_sse2_pixel(uint32_t s, uint32_t d) {
     uint32_t sa = (s >> 24) & 0xFFu;
     uint32_t da = (d >> 24) & 0xFFu;
@@ -1310,7 +1316,7 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
     for (; i < n; i++) {
         out[i] = engine2d_blend_pixel(src[i], dst[i]);
     }
-#elif defined(__x86_64__) || defined(_M_X64)
+#elif SIMD_CAN_AVX2
     if (simd_detect_avx2()) {
         engine2d_blend_into_avx2(out, dst, src, n);
         return;
@@ -1554,7 +1560,7 @@ SplArray* rt_engine2d_simd_blend_row_u32(SplArray* dst, SplArray* src) {
     return a;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color) {
     __m128i v = _mm_set_epi64x(color, color);
     int64_t i = 0;
@@ -1615,7 +1621,7 @@ int64_t rt_engine2d_simd_fill_u32(SplArray* dst, int64_t offset, int64_t count, 
     if (!data) return 0;
     int64_t color_word = engine2d_box_pixel((uint32_t)color);
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     if (simd_detect_avx2()) {
         engine2d_fill_u32_avx2(data + off, n, color_word);
         return n;
@@ -1664,7 +1670,7 @@ int64_t rt_engine2d_simd_copy_u32(SplArray* dst, int64_t dst_off, SplArray* src,
         return n;
     }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     memmove(dst_start, src_start, (size_t)n * sizeof(int64_t));
     return n;
 #elif defined(__riscv) && defined(__riscv_vector)
@@ -1686,7 +1692,7 @@ SplArray* rt_engine2d_simd_copy_span_u32(SplArray* dst, int64_t dst_off,
     return dst;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
 /* Blend boxed Simple pixels in place. Opaque destinations are the dominant
  * framebuffer case and admit exact /255 channel math; mixed-alpha chunks stay
  * on engine2d_blend_pixel so straight-alpha semantics never approximate. */
@@ -2063,7 +2069,7 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     if (!dst_data || !src_data) return dst;
     int backwards = (dst_data == src_data && d_off > s_off &&
                      d_off - s_off < n);
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     if (!backwards) {
         if (simd_detect_avx2()) {
             engine2d_blend_boxed_avx2(dst_data + d_off, src_data + s_off,
@@ -2128,7 +2134,7 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
         engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
         return dst;
     }
-#if defined(__x86_64__) || defined(_M_X64)
+#if SIMD_CAN_AVX2
     if (simd_detect_avx2()) {
         engine2d_blend_boxed_avx2(dst_data + off, NULL, n, s, 1);
     } else {
