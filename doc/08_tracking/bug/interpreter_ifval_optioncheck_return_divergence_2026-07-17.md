@@ -2,8 +2,7 @@
 
 **Lane:** S35 (parallel bug-fix campaign, tasks #182/#183)
 **Date:** 2026-07-17
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** notable finding, not itself fixed — documents a pre-existing, already-known
 class of interpreter bug that the S35 task brief unknowingly relied on as "ground truth".
 
 **Identity note:** `env -u SIMPLE_BOOTSTRAP bin/simple run <file>.spl` (the task

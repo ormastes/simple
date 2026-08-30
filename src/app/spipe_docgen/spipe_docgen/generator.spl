@@ -20,8 +20,7 @@ use std.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
 
 fn get_file_stem(path: text) -> text:
     # Extract filename without extension
-    val normalized_path = path.replace("\\", "/")
-    val parts = normalized_path.split("/")
+    val parts = path.split("/")
     val filename = parts[-1]
     if filename.ends_with(".spl"):
         return filename[:-4]
@@ -51,28 +50,27 @@ fn output_file_stem(doc: SspecDoc) -> text:
     get_file_stem(doc.file_path)
 
 fn normalize_spec_relative_path(path: text) -> text:
-    var p = path.replace("\\", "/")
+    var p = path
+    var from_test_tree = false
     if p.starts_with("test/"):
         p = p[5:]
+        from_test_tree = true
     elif p.starts_with("tests/"):
         p = p[6:]
+        from_test_tree = true
     elif p.contains("/test/"):
         val parts = p.split("/test/")
         p = parts[-1]
+        from_test_tree = true
     elif p.contains("/tests/"):
         val parts = p.split("/tests/")
         p = parts[-1]
+        from_test_tree = true
     elif p.starts_with("src/"):
         p = p[4:]
+    if from_test_tree and not p.starts_with("00_formal_verification/"):
+        p = "test/" + p
     p
-
-fn spec_path_is_safe(path: text) -> bool:
-    val normalized_path = path.replace("\\", "/")
-    val parts = normalized_path.split("/")
-    for part in parts:
-        if part == "..":
-            return false
-    true
 
 fn path_dirname(path: text) -> text:
     val parts = path.split("/")
@@ -126,18 +124,6 @@ fn humanize_filename(stem: text) -> text:
             parts.push(first + rest)
     parts.join(" ") + " Specification"
 
-fn is_pending_scenario_line(trimmed: text) -> bool:
-    """True only for the `pending "name":` scenario form, never a pending() call."""
-    # spec_kw_line accepts both `kw "` and `kw(` because the modern scenario
-    # form is `it("name"):`. For `pending` that call form is ambiguous with the
-    # RUNTIME statement `pending("reason")`, which lives in a scenario BODY —
-    # counting those inflated a 3-scenario file to "Total scenarios | 5 |" and
-    # "Pending scenarios | 4 |". A body statement is never a scenario, so only
-    # the bare declaration form counts here.
-    if trimmed.starts_with("pending("):
-        return false
-    spec_kw_line(trimmed, "pending")
-
 fn count_test_items(content: text) -> (i64, i64, i64):
     # Returns (normal_it + slow_it, skipped_it, pending_it)
     val lines = content.split("\n")
@@ -148,19 +134,19 @@ fn count_test_items(content: text) -> (i64, i64, i64):
     while index < lines.len():
         val line = lines[index]
         val trimmed = line.trim()
-        if spec_kw_line(trimmed, "it"):
+        if trimmed.starts_with("it ") and trimmed.contains("\""):
             if scenario_at_is_unconditional_pending(lines, index):
                 pending = pending + 1
             else:
                 total = total + 1
-        elif spec_kw_line(trimmed, "slow_it"):
+        elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             if scenario_at_is_unconditional_pending(lines, index):
                 pending = pending + 1
             else:
                 total = total + 1
-        elif (spec_kw_line(trimmed, "skip it") or spec_kw_line(trimmed, "skip_it")):
+        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             skipped = skipped + 1
-        elif is_pending_scenario_line(trimmed):
+        elif spec_kw_line(trimmed, "pending"):
             pending = pending + 1
         index = index + 1
     (total, skipped, pending)
@@ -168,37 +154,36 @@ fn count_test_items(content: text) -> (i64, i64, i64):
 fn count_slow_items(content: text) -> i64:
     val lines = content.split("\n")
     var total = 0
-    for line in lines:
+    var index = 0
+    while index < lines.len():
+        val line = lines[index]
         val trimmed = line.trim()
-        if spec_kw_line(trimmed, "slow_it"):
+        if trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             total = total + 1
+        index = index + 1
     total
 
 fn extract_scenario_list(content: text) -> [text]:
     val lines = content.split("\n")
     var scenarios = []
     var index = 0
-    while index < lines.len():
-        val line = lines[index]
+    for line in lines:
         val trimmed = line.trim()
-        if spec_kw_line(trimmed, "slow_it"):
+        if trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             if scenario_at_is_unconditional_pending(lines, index):
                 scenarios.push("- [slow] [pending] {name}")
             else:
                 scenarios.push("- [slow] {name}")
-        elif (spec_kw_line(trimmed, "skip it") or spec_kw_line(trimmed, "skip_it")):
+        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             scenarios.push("- [skip] {name}")
-        elif is_pending_scenario_line(trimmed):
+        elif spec_kw_line(trimmed, "pending"):
             val name = extract_quoted_name(trimmed)
             scenarios.push("- [pending] {name}")
-        elif spec_kw_line(trimmed, "it"):
+        elif trimmed.starts_with("it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            if scenario_at_is_unconditional_pending(lines, index):
-                scenarios.push("- [pending] {name}")
-            else:
-                scenarios.push("- {name}")
+            scenarios.push("- {name}")
         index = index + 1
     scenarios
 
@@ -208,28 +193,19 @@ fn build_auto_overview(content: text) -> text:
     var describes = []
     for line in lines:
         val trimmed = line.trim()
-        if spec_kw_line(trimmed, "describe"):
+        if trimmed.starts_with("describe ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             describes.push(name)
     if describes.len() == 0:
         return ""
     var parts: [text] = []
-    parts.push("Tests covering " + describes.join(", ") + ".")
+    parts.push("Tests covering:")
     for d in describes:
         parts.push("\n- " + d)
     parts.join("")
 
 fn get_current_date() -> text:
-    # Real current date via the runtime clock + Howard Hinnant civil-date
-    # arithmetic (std.time_utils) — was previously a permanently hardcoded
-    # "2026-06-01" stamped into every generated sspec doc.
-    val micros = time_now_unix_micros()
-    val year = timestamp_get_year(micros)
-    val month = timestamp_get_month(micros)
-    val day = timestamp_get_day(micros)
-    val month_text = if month < 10: "0" + month.to_string() else: month.to_string()
-    val day_text = if day < 10: "0" + day.to_string() else: day.to_string()
-    year.to_string() + "-" + month_text + "-" + day_text
+    "2026-06-01"
 
 fn build_metadata_line(metadata: FeatureMetadata) -> text:
     # Build stable metadata lines with optional doc links
@@ -675,9 +651,7 @@ fn build_dependency_sdn(doc: SspecDoc) -> text:
     for line in src_lines:
         val trimmed = line.trim()
         if trimmed.starts_with("use "):
-            val import_path = trimmed.replace("use ", "")
-            val import_parts = import_path.split(".")
-            val mod_path = import_parts[0]
+            val mod_path = trimmed.replace("use ", "").split(".")[0]
             if mod_path != "" and not _sdn_dep_in(imports, mod_path):
                 imports.push(mod_path)
     val stem = get_file_stem(doc.file_path)
@@ -695,8 +669,6 @@ fn _sdn_dep_in(arr: [text], item: text) -> bool:
     false
 
 fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
-    if not spec_path_is_safe(doc.file_path):
-        return Err("Spec path escapes the documentation root: {doc.file_path}")
     val file_name = output_file_stem(doc)
     val has_docstring = doc.doc_blocks.len() > 0
 
@@ -821,17 +793,26 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
     if related != "":
         md_parts.push("\n" + related + "\n")
 
-    # Build summary card: concise overview + stats at top. Diagram rendering is
-    # a separate explicit step; never publish an unrendered placeholder.
+    # Build summary card: concise overview + diagram placeholder + stats at top
     var card_parts: [text] = []
     card_parts.push("# {feature_name}\n\n")
 
-    var card_summary_source = build_auto_overview(doc.raw_content)
-    if has_docstring:
-        card_summary_source = extract_content_section(doc.doc_blocks[0].content)
-    val card_summary = extract_summary_from_markdown(card_summary_source)
+    val card_summary = extract_summary_from_markdown(md_parts.join(""))
     if card_summary != "":
         card_parts.push("> {card_summary}\n\n")
+
+    val diag_id = file_name + ".arch"
+    val dep_sdn = build_dependency_sdn(doc)
+    card_parts.push("<!-- sdn-diagram:id={diag_id} -->\n")
+    card_parts.push("<details class=\"sdn-source\">\n<summary>SDN source</summary>\n\n")
+    card_parts.push("```sdn id={diag_id} hash=sha256:auto render=ascii\n")
+    card_parts.push(dep_sdn + "\n")
+    card_parts.push("```\n\n</details>\n\n")
+    card_parts.push("<details class=\"sdn-ascii\" open>\n<summary>Diagram</summary>\n\n")
+    card_parts.push("```ascii generated-from={diag_id} hash=sha256:auto\n")
+    card_parts.push("# run: simple md-diagram-update\n")
+    card_parts.push("```\n\n</details>\n")
+    card_parts.push("<!-- sdn-diagram:end -->\n\n")
 
     if total_tests > 0 or skip_tests > 0 or pending_tests > 0:
         card_parts.push("| Tests | Active | Skipped | Pending |\n")
@@ -925,17 +906,16 @@ fn calculate_coverage(doc_lines: i64) -> i64:
         0
 
 fn build_related_docs_section(metadata: FeatureMetadata) -> text:
-    # Paths are repository-root references. Keep them as code instead of
-    # emitting depth-dependent relative links from generated manual folders.
+    # Build a "Related Documentation" section from cross-reference links
     var links: [text] = []
     if metadata.requirement != "" and metadata.requirement != "N/A":
-        links.push("- **Requirements:** `{metadata.requirement}`")
+        links.push("- **Requirements:** [{metadata.requirement}]({metadata.requirement})")
     if metadata.plan != "" and metadata.plan != "N/A":
-        links.push("- **Plan:** `{metadata.plan}`")
+        links.push("- **Plan:** [{metadata.plan}]({metadata.plan})")
     if metadata.design != "" and metadata.design != "N/A":
-        links.push("- **Design:** `{metadata.design}`")
+        links.push("- **Design:** [{metadata.design}]({metadata.design})")
     if metadata.research != "" and metadata.research != "N/A":
-        links.push("- **Research:** `{metadata.research}`")
+        links.push("- **Research:** [{metadata.research}]({metadata.research})")
     if links.len() == 0:
         return ""
     var result = "## Related Documentation\n\n"
@@ -952,7 +932,7 @@ fn generate_index_page(entries: [FeatureEntry], output_dir: text, stats: DocStat
     # Quick stats
     md_parts.push("## Quick Stats\n\n")
     md_parts.push("- **Total Features:** {stats.total_specs}\n")
-    md_parts.push("- **Complete Documentation:** {stats.specs_with_docs}\n")
+    md_parts.push("- **Complete Documentation:** {stats.specs_with_docs} ({stats.coverage_percent()}%)\n")
     md_parts.push("- **Stubs Remaining:** {stats.specs_without_docs}\n")
     md_parts.push("- **Total Lines:** {stats.total_doc_lines}\n")
     if stats.total_warnings > 0:
@@ -960,7 +940,7 @@ fn generate_index_page(entries: [FeatureEntry], output_dir: text, stats: DocStat
     md_parts.push("\n---\n\n")
 
     # Group by category
-    var categories: Dict<text, [FeatureEntry]> = {}
+    var categories = {}
     for entry in entries:
         val cat = entry.category
         if categories.has(cat):

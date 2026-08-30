@@ -1,6 +1,29 @@
 # Macos Smf Dynlib Numeric Guard Specification
 
-> Tests covering macos smf dynlib evidence numeric guard.
+> <details>
+
+<!-- sdn-diagram:id=macos_smf_dynlib_numeric_guard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=macos_smf_dynlib_numeric_guard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+macos_smf_dynlib_numeric_guard_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=macos_smf_dynlib_numeric_guard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,13 @@
 
 #### falls back when evidence numeric fields fail to parse
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- falls back when evidence numeric fields fail to parse
-   - Expected: source does not contain `to_int() as i64`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("falls back when evidence numeric fields fail to parse")
 val source = rt_file_read_text("src/app/gui_perf/macos_smf_dynlib_evidence_core.spl") ?? ""
 
 expect(source).to_contain("gui_mac_smf_dynlib_row_value(row, key).to_int() ?? -1")
@@ -50,12 +63,12 @@ expect(source.contains("to_int() as i64")).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering macos smf dynlib evidence numeric guard.
+Tests covering:
 - macos smf dynlib evidence numeric guard
 
 ## Scenario Summary
@@ -70,49 +83,3 @@ Tests covering macos smf dynlib evidence numeric guard.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e22f9f3e71fbf9247f18fbcd414c98772e3d43866e5cdf8a54a1535b612d0364`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e22f9f3e71fbf9247f18fbcd414c98772e3d43866e5cdf8a54a1535b612d0364`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e22f9f3e71fbf9247f18fbcd414c98772e3d43866e5cdf8a54a1535b612d0364`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.spl
-mirror: doc/06_spec/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.md (current)
-findings: 4 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=85; blocker cap makes effective=49
-doc/06_spec/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/app/gui_perf/macos_smf_dynlib_numeric_guard_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'falls back when evidence numeric fields fail to parse' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

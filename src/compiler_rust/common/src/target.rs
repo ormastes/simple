@@ -539,6 +539,8 @@ impl fmt::Display for WasmRuntime {
 pub struct Target {
     pub arch: TargetArch,
     pub os: TargetOS,
+    /// Explicit object/link ABI carried by a parsed target triple.
+    pub linker_flavor_hint: Option<LinkerFlavor>,
     /// WebAssembly runtime environment (only applicable for WASM targets)
     pub wasm_runtime: Option<WasmRuntime>,
 }
@@ -549,6 +551,7 @@ impl Target {
         Self {
             arch,
             os,
+            linker_flavor_hint: None,
             wasm_runtime: None,
         }
     }
@@ -558,6 +561,7 @@ impl Target {
         Self {
             arch,
             os: TargetOS::None,
+            linker_flavor_hint: None,
             wasm_runtime: Some(runtime),
         }
     }
@@ -567,6 +571,7 @@ impl Target {
         Self {
             arch: TargetArch::host(),
             os: TargetOS::host(),
+            linker_flavor_hint: None,
             wasm_runtime: None,
         }
     }
@@ -653,7 +658,24 @@ impl Target {
             }
         };
 
-        Ok(Self { arch, os, wasm_runtime })
+        let linker_flavor_hint = if os == TargetOS::Windows {
+            if os_joined.ends_with("-gnu") {
+                Some(LinkerFlavor::Gnu)
+            } else if os_joined.ends_with("-msvc") {
+                Some(LinkerFlavor::Msvc)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            arch,
+            os,
+            linker_flavor_hint,
+            wasm_runtime,
+        })
     }
 
     /// Get the triple string for Cranelift.
@@ -688,11 +710,17 @@ impl Target {
             (TargetArch::Arm, TargetOS::SimpleOS) => "armv7a-unknown-none-eabihf",
             // OS-aware targets
             (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
-            (TargetArch::X86_64, TargetOS::Windows) => "x86_64-pc-windows-msvc",
+            (TargetArch::X86_64, TargetOS::Windows) => match self.linker_flavor_hint {
+                Some(LinkerFlavor::Gnu) => "x86_64-pc-windows-gnu",
+                _ => "x86_64-pc-windows-msvc",
+            },
             (TargetArch::X86_64, TargetOS::MacOS) => "x86_64-apple-darwin",
             (TargetArch::X86_64, TargetOS::FreeBSD) => "x86_64-unknown-freebsd",
             (TargetArch::Aarch64, TargetOS::Linux) => "aarch64-unknown-linux-gnu",
-            (TargetArch::Aarch64, TargetOS::Windows) => "aarch64-pc-windows-msvc",
+            (TargetArch::Aarch64, TargetOS::Windows) => match self.linker_flavor_hint {
+                Some(LinkerFlavor::Gnu) => "aarch64-pc-windows-gnu",
+                _ => "aarch64-pc-windows-msvc",
+            },
             (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
             (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
             (TargetArch::Riscv64, TargetOS::Linux) => "riscv64gc-unknown-linux-gnu",
@@ -742,6 +770,9 @@ impl Target {
     /// Supports `SIMPLE_LINKER_FLAVOR` env var override (`gnu`/`mingw` or `msvc`)
     /// to force a specific toolchain without depending on auto-detection.
     pub fn linker_flavor(&self) -> LinkerFlavor {
+        if let Some(flavor) = self.linker_flavor_hint {
+            return flavor;
+        }
         // Allow explicit override via environment variable
         if let Ok(flavor) = std::env::var("SIMPLE_LINKER_FLAVOR") {
             match flavor.to_lowercase().as_str() {
@@ -781,7 +812,7 @@ impl Target {
 }
 
 /// Linker flavor determines which linker/link conventions to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkerFlavor {
     /// GNU-style linker (ld, lld) - Linux, macOS, FreeBSD
     Gnu,

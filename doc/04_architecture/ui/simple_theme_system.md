@@ -14,8 +14,7 @@ Old `.simple-theme` files are compatibility/import inputs only. Runtime GUI, Web
 - Family/theme package resolution.
 - Validation for missing files, broken references, widget coverage, icon coverage, token layer rules, and unresolved `var(--token)` references.
 - Process cache and startup/load-time fingerprints.
-- The immutable `ThemeRenderSnapshot`, including package/material identity and
-  the CSS/scalar projections required by render adapters.
+- Shared structs for resolved CSS, token maps, widget CSS maps, icons, numeric colors, `UITheme`, `GlassDesignTokens`, and compositor glass config values.
 
 GUI, Web, WM, and Engine2D modules are adapters. They must not parse theme files or copy visual constants when a resolved package field exists.
 
@@ -26,9 +25,8 @@ theme.sdn registry
   -> family package
   -> concrete theme package
   -> ResolvedThemePackage
-  -> immutable ThemeRenderSnapshot
   -> GUI CSS, Chromium/Electron CSS, Simple Web CSS, BrowserBackend colors,
-     hosted WM, generated SimpleOS WM, Engine2D WM, icon defaults
+     hosted WM glass config, Engine2D WM numeric colors, icon defaults
 ```
 
 CSS composition order is:
@@ -54,44 +52,11 @@ host-native WM appearance.
 
 `os.compositor.browser_backend.BrowserBackend` resolves numeric colors and package CSS at backend construction. Rendering uses cached fields, sets theme metadata on the DOM root, and does not reread theme files on the hot path.
 
-Hosted startup installs the default snapshot through
-`install_default_host_wm_theme` before the first frame. Generated SimpleOS
-startup installs its generated snapshot through
-`install_generated_simpleos_wm_theme` before the first frame. Those installers,
-not legacy `GlassConfig`/`GlassPortConfig` defaults or runtime key switching,
-are the production WM authority.
-
-Runtime package switching is not yet an admitted architecture. A valid hosted
-implementation requires a process-entry-owned theme session that survives
-bootstrap and is available before renderer-worker dispatch. Its mutex may
-publish only one canonical immutable wire aggregate. Readers copy that wire
-while locked, then decode private `ThemeRenderSnapshot` material after unlock;
-public candidates and transaction reads must not expose package maps, arrays,
-or aggregate aliases. See
-[the transaction sync-owner blocker](../../08_tracking/bug/theme_package_transaction_sync_owner_blocker_2026-07-27.md).
-
-Canonical `theme-package-install-wire-v1` text is now implemented in
-`common.ui.theme_package_wire` and statically accepted. Native aggregate
-encoder/decoder use still requires its incremental ABI probe. Exactly-once
-source preparation remains design-blocked; see
-[the source-capture hard stop](../../08_tracking/bug/theme_package_source_capture_design_hard_stop_2026-07-27.md).
-
-The numeric/text Glass token twins and Obsidian presets remain compatibility or
-standalone APIs. They do not replace the registry/package/snapshot path for
-hosted or SimpleOS production rendering. See
-[WM glass theme design](../../05_design/wm_glass_theme_host_simpleos.md) and
-[system-test plan](../../03_plan/sys_test/wm_glass_theme_host_simpleos.md) for
-active implementation and evidence constraints; the
-[agent plan](../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md) records
-current ownership.
+Hosted WM and Engine2D WM entrypoints load the registry default and pass resolved numeric/glass values into compositor, splash, taskbar, dock, and window chrome drawing paths.
 
 ## Cache Policy
 
 `load_theme_package(id)` resolves aliases once per call, caches by canonical id, and records source paths plus a startup fingerprint. Render paths receive `ResolvedThemePackage` fields or cached helper values. Explicit reload may refresh package data; render loops must not parse CSS or scan theme folders.
-
-These legacy caches are startup/compatibility state, not an atomic runtime
-transaction store. They must not be relabeled as transactional or mutated
-sequentially during a live theme change.
 
 ## Failure Policy
 

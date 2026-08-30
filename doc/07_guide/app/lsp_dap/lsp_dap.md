@@ -387,6 +387,29 @@ vim.keymap.set('n', '<leader>dt', dapui.toggle)
 
 ## DAP Debugging
 
+### Debug service boundary
+
+DAP is the IDE-facing protocol for the unified debugging architecture. The
+authoritative owner of mutable debug sessions is `DebugServiceV1`; clients use
+`DebugSessionId`, and existing `DebugAdapter`, `DebugTarget`, `ProfileTarget`,
+and legacy `DebugBackend` implementations are adapters beneath that boundary.
+See
+[`Simple Unified Debugging and Evidence Architecture`](../../../04_architecture/simple_unified_debugging_evidence.md).
+
+The current DAP server and its backend adapters are operational, but their
+full migration to `DebugServiceV1` is still in progress. The V1 contracts,
+central registry, policy/receipt path, probes, normalized evidence manifests,
+wire dispatch, and legacy backend bridge exist. DAP handler routing, stable
+out-of-process adapters, native evidence bundles, and complete domain support
+remain release gaps. Do not infer support from an adapter file: use
+`simple debug doctor [program.spl]` and distinguish `Native | Emulated |
+Unavailable` from `LiveVerified | FixtureVerified | Unverified | Blocked`.
+
+The standalone debug-service CLI currently validates the minimal `inspect`,
+`probe`, `reproduce`, and `replay` command shapes, then fails closed when no
+live service-issued session/executor is available. Successful parsing is not a
+successful debug operation.
+
 ### DAP Features
 
 - **Breakpoints** -- Line, conditional, and hit-count breakpoints

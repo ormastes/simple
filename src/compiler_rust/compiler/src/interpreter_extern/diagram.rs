@@ -140,7 +140,11 @@ pub fn rt_diagram_generate_arch(args: &[Value]) -> Result<Value, CompileError> {
 /// Free a string (no-op in interpreter, for SFFI compatibility)
 pub fn rt_diagram_free_string(args: &[Value]) -> Result<Value, CompileError> {
     require_arity(args, 1, "rt_diagram_free_string")?;
-    let _handle = args[0].as_int()?;
+    let Value::Int(_handle) = args[0] else {
+        return Err(CompileError::runtime(
+            "rt_diagram_free_string requires an i64 handle",
+        ));
+    };
     // No-op in interpreter - memory is managed by Rust
     Ok(Value::Nil)
 }

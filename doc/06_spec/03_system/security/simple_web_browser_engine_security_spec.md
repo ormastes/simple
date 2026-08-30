@@ -20,7 +20,7 @@ Treats pages, scripts, URLs, redirects, responses, and renderer messages as
 | Category | Security |
 | Status | Active |
 | Source | `test/03_system/security/simple_web_browser_engine_security_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Treats pages, scripts, URLs, redirects, responses, and renderer messages as
@@ -33,33 +33,172 @@ renderer without ambient host capabilities.
 
 #### should isolate positive-owner rendering and input behind exact-window frames
 
-**Scenario capture:** protocol after_step
+- "<script>document body setAttribute
+   - Protocol capture: after_step
+- Render owner-zero web content through the local control lane
+   - Protocol capture: after_step
+- 1, 0, COMP CREATE WINDOW to i64
+   - Protocol capture: after_step
+- local pure simple pixel buffer
+   - Protocol capture: after_step
+- local raster shutdown
+   - Protocol capture: after_step
+- Keep positive-owner hostile content blank without a renderer frame
+   - Protocol capture: after_step
+- 1, 77, COMP CREATE WINDOW to i64
+   - Protocol capture: after_step
+- remote pure simple pixel buffer
+   - Protocol capture: after_step
+- Route positive-owner input only to an admitted renderer registry
+   - Protocol capture: after_step
+- remote pointer move
+   - Protocol capture: after_step
+- remote handle mouse wheel
+   - Protocol capture: after_step
+   - Evidence: protocol response verified by 3 expected checks
+   - Expected: remote.scroll_offset_for(1) equals `0.0`
+   - Expected: denied.callback_count equals `0`
+   - Expected: denied.reason equals `renderer-unavailable`
+- Paint only an admitted frame bound to the exact window
+   - Protocol capture: after_step
+- default theme id
+   - Protocol capture: after_step
+- remote pure simple pixel buffer
+   - Protocol capture: after_step
+- remote pure simple pixel buffer
+   - Protocol capture: after_step
+- remote raster shutdown
+   - Protocol capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-WEB-BROWSER-010..019
+val hostile = (
+    "<style>body{background-color:#ef4444}</style>" +
+    "<script>document.body.setAttribute('data-ran','yes')</script>"
+)
+
+step("Render owner-zero web content through the local control lane")
+var local = HostCompositor.new_headless(Size(
+    width: 160u64, height: 120u64
+))
+local.apply_bridge_request(
+    1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Local",
+    8, 8, 100, 80, hostile, 1, "hosted-web-event"
+)
+expect(local.requires_external_web_frame(1)).to_be(false)
+val local_raster = Engine2dCompositorBackend.create_named(
+    160, 120, "software"
+)
+expect(local.render_frame_engine2d(local_raster)).to_be(true)
+expect(_csp_alias_color_count(
+    local.pure_simple_pixel_buffer(), 0xFFEF4444u32
+)).to_be_greater_than(0)
+local_raster.shutdown()
+
+step("Keep positive-owner hostile content blank without a renderer frame")
+var remote = HostCompositor.new_headless(Size(
+    width: 160u64, height: 200u64
+))
+remote.apply_bridge_request(
+    1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Remote",
+    8, 8, 112, 160, hostile, 77, "browser"
+)
+expect(remote.requires_external_web_frame(1)).to_be(true)
+val remote_raster = Engine2dCompositorBackend.create_named(
+    160, 200, "software"
+)
+expect(remote.render_frame_engine2d(remote_raster)).to_be(false)
+expect(_csp_alias_color_count(
+    remote.pure_simple_pixel_buffer(), 0xFFEF4444u32
+)).to_equal(0)
+
+step("Route positive-owner input only to an admitted renderer registry")
+remote.pointer_move(16, 80)
+remote.handle_mouse_wheel(0.0, 1.0)
+expect(remote.scroll_offset_for(1)).to_equal(0.0)
+var renderers = HostedBrowserRendererRegistry.create(
+    "", "https://example.test/"
+)
+val denied = renderers.dispatch_pointer(41, 1, 8, 8, true)
+expect(denied.callback_count).to_equal(0)
+expect(denied.reason).to_equal("renderer-unavailable")
+
+step("Paint only an admitted frame bound to the exact window")
+expect(remote.require_external_web_frame(1)).to_be(true)
+val revision = simple_web_content_revision_with_theme(
+    default_theme_id(), "Remote", hostile, 104, 80, 0
+)
+val admitted = _browser_security_external_frame(
+    "1", revision, 0xFF123456u32
+)
+expect(remote.set_external_web_frame(2, admitted)).to_be(false)
+expect(remote.set_external_web_frame(1, admitted)).to_be(true)
+expect(remote.render_frame_engine2d(remote_raster)).to_be(true)
+expect(_csp_alias_color_count(
+    remote.pure_simple_pixel_buffer(), 0xFF123456u32
+)).to_be_greater_than(5000)
+expect(_csp_alias_color_count(
+    remote.pure_simple_pixel_buffer(), 0xFFEF4444u32
+)).to_equal(0)
+remote_raster.shutdown()
 ```
 
 </details>
 
 #### should persist shared preloaded HSTS without trusting generic responses
 
-- should persist shared preloaded HSTS without trusting generic responses
-   - Protocol capture: after_step
 - Navigate through verified HTTPS
    - Protocol capture: after_step
+- BrowserHstsSnapshot create
+   - Protocol capture: after_step
 - Share secondary-window HSTS through the existing registry
+   - Protocol capture: after_step
+- var secondary = HostedBrowserRendererProcess create
+   - Protocol capture: after_step
+- registry hsts snapshot
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
    - Expected: untrusted.error equals ``
    - Expected: registry.hsts_revision() equals `0`
 - Persist shared HSTS before every browser window closes
+   - Protocol capture: after_step
+- var profile = match BrowserProfileStore memory
+   - Protocol capture: after_step
+- Err
+   - Protocol capture: after_step
+- fail
+   - Protocol capture: after_step
+- Ok
+   - Protocol capture: after_step
+- registry hsts snapshot
+   - Protocol capture: after_step
+- Err
+   - Protocol capture: after_step
+- fail
+   - Protocol capture: after_step
+- Ok
+   - Protocol capture: after_step
+- pass dn
+   - Protocol capture: after_step
+- Err
+   - Protocol capture: after_step
+- fail
+   - Protocol capture: after_step
+- Ok
+   - Protocol capture: after_step
+- Err
+   - Protocol capture: after_step
+- fail
+   - Protocol capture: after_step
+- Ok
+   - Protocol capture: after_step
+- pass dn
    - Protocol capture: after_step
    - Evidence: protocol response verified by 1 expected check
    - Expected: restarted.hsts_revision() equals `0`
@@ -68,12 +207,10 @@ Reproduction: this block contains the complete executable scenario source.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 99 lines folded for reproduction.
+Runnable source: 97 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should persist shared preloaded HSTS without trusting generic responses")
 step("Navigate through verified HTTPS")
 val now_ms: i64 = 100000
 val artifact = _production_browser_artifact()
@@ -177,9 +314,13 @@ expect(restarted.close()).to_be(true)
 
 #### should learn HSTS only from the completed platform HTTPS job
 
-- should learn HSTS only from the completed platform HTTPS job
+-  two origin https fixture
    - Protocol capture: after_step
 - Reject generic mock and ordinary HTTPS finalization
+   - Protocol capture: after_step
+- var broker = HostedBrowserRendererProcess create
+   - Protocol capture: after_step
+- url: Url parse or opaque
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
    - Expected: mock.status equals `200`
@@ -193,12 +334,10 @@ expect(restarted.close()).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should learn HSTS only from the completed platform HTTPS job")
 _two_origin_https_fixture()
 step("Reject generic mock and ordinary HTTPS finalization")
 var broker = HostedBrowserRendererProcess.create(43, 64, 48)
@@ -233,18 +372,20 @@ fail(
 
 #### should validate opaque renderer initiators before cookie writes
 
-- should validate opaque renderer initiators before cookie writes
+- var broker = HostedBrowserRendererProcess create
+-  broker initiator request
+-  broker initiator request
+-  broker initiator request
+-  broker initiator request
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should validate opaque renderer initiators before cookie writes")
 var broker = HostedBrowserRendererProcess.create(44, 64, 48)
 broker.document_url = "https://trusted.test/app"
 broker.document_origin = "https://trusted.test"
@@ -272,21 +413,27 @@ expect(broker._renderer_initiator_valid(
 
 #### should replace a forged CORS Origin with the requester origin
 
-- should replace a forged CORS Origin with the requester origin
-   - Protocol capture: after_step
 - Construct browser-owned CORS request identity
+   - Protocol capture: after_step
+- Logger new
+   - Protocol capture: after_step
+- url: Url parse or opaque
+   - Protocol capture: after_step
+- Err
+   - Protocol capture: after_step
+- fail
+   - Protocol capture: after_step
+- Ok
    - Protocol capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should replace a forged CORS Origin with the requester origin")
 step("Construct browser-owned CORS request identity")
 var fetch = FetchEngine.new_for_origin(
     Logger.new("cors-origin", BrowserLogLevel.Error),
@@ -297,7 +444,7 @@ val request = FetchRequest(
     method: "GET",
     headers: (
         "Origin: https://attacker.test\r\n" +
-        "Accept: text/plain\r\n"
+        "X-Trace: retained\r\n"
     ),
     body: [],
     mode: RequestMode.Cors,
@@ -308,7 +455,7 @@ match fetch.prepare_single_hop(request):
         fail(error.message)
     Ok(prepared):
         expect(prepared.request.headers).to_equal(
-            "Accept: text/plain\r\n" +
+            "X-Trace: retained\r\n" +
             "Origin: https://app.test\r\n"
         )
         expect(prepared.request.headers.contains(
@@ -320,9 +467,15 @@ match fetch.prepare_single_hop(request):
 
 #### should apply head meta CSP in source order to every active resource
 
-- should apply head meta CSP in source order to every active resource
-   - Protocol capture: after_step
 - Enforce CSP host paths and head meta policies
+   - Protocol capture: after_step
+- var session = BrowserSession new
+   - Protocol capture: after_step
+- "@import '/before-import css';  before{background-image:url
+   - Protocol capture: after_step
+- " imported{background-image:url
+   - Protocol capture: after_step
+- "<style> after{background-image:url
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
    - Expected: first_image.kind equals `image`
@@ -332,12 +485,10 @@ match fetch.prepare_single_hop(request):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 83 lines folded for reproduction.
+Runnable source: 81 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should apply head meta CSP in source order to every active resource")
 step("Enforce CSP host paths and head meta policies")
 var session = BrowserSession.new()
 session.register_resource(
@@ -428,19 +579,18 @@ expect(session.warnings.join("|")).to_contain(
 
 #### should bound malformed meta CSP without widening following loads
 
-- should bound malformed meta CSP without widening following loads
 - Enforce CSP host paths and head meta policies
+- var session = BrowserSession new
+- "x" repeat
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should bound malformed meta CSP without widening following loads")
 step("Enforce CSP host paths and head meta policies")
 var session = BrowserSession.new()
 expect(session.open_html(
@@ -465,11 +615,13 @@ expect(session.warnings.join("|")).to_contain(
 
 #### should enforce response-header sandbox capabilities before runtime creation
 
-- should enforce response-header sandbox capabilities before runtime creation
 - Intersect repeated sandbox headers before admitting scripts
+- var denied = BrowserSession new
    - Expected: denied.document_cookie() equals ``
    - Expected: denied_dispatch.actions.len() equals `0`
 - Allow script execution while retaining opaque-origin gates
+- var scripted = BrowserSession new
+- "fetch
    - Expected: scripted.current_title equals `script-ran`
    - Expected: scripted.document_cookie() equals ``
    - Expected: opaque_fetch.initiator_origin equals `null`
@@ -482,12 +634,10 @@ expect(session.warnings.join("|")).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should enforce response-header sandbox capabilities before runtime creation")
 step("Intersect repeated sandbox headers before admitting scripts")
 var denied = BrowserSession.new()
 expect(denied.begin_network_navigation(
@@ -567,13 +717,14 @@ expect(scripted.warnings.join("|")).to_contain(
 
 #### should apply final document CSP to body inline event handlers
 
-- should apply final document CSP to body inline event handlers
 - Enforce CSP host paths and head meta policies
+- var denied = BrowserSession new
    - Expected: denied_dispatch.actions.len() equals `0`
    - Expected: denied_dispatch.event.default_prevented is false
    - Expected: denied_dispatch.default_action_allowed is true
    - Expected: denied_dispatch.default_action equals `navigate:/default`
    - Expected: denied.pending_request_count() equals `1`
+- var allowed = BrowserSession new
    - Expected: allowed_dispatch.actions equals `["prevent-default"]`
    - Expected: allowed_dispatch.event.default_prevented is true
    - Expected: allowed_dispatch.default_action_allowed is false
@@ -583,12 +734,10 @@ expect(scripted.warnings.join("|")).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should apply final document CSP to body inline event handlers")
 step("Enforce CSP host paths and head meta policies")
 var denied = BrowserSession.new()
 expect(denied.open_html(
@@ -631,9 +780,15 @@ expect(allowed.pending_request_count()).to_equal(0)
 
 #### should bind identical image URLs to each node CSP decision
 
-- should bind identical image URLs to each node CSP decision
-   - Artifact capture: after_step
 - Load the earlier identical image under its source-position CSP
+   - Artifact capture: after_step
+- var session = BrowserSession new
+   - Artifact capture: after_step
+-  csp alias png hex
+   - Artifact capture: after_step
+- "background-image:url
+   - Artifact capture: after_step
+- "background-image:url
    - Artifact capture: after_step
    - Evidence: artifact verified by 2 expected checks
    - Expected: session.image_resources.len() equals `1`
@@ -647,12 +802,10 @@ expect(allowed.pending_request_count()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should bind identical image URLs to each node CSP decision")
 step("Load the earlier identical image under its source-position CSP")
 var session = BrowserSession.new()
 session.register_resource(
@@ -711,27 +864,39 @@ expect(_csp_alias_color_count(
 
 #### should retain CSP image identity after DOM removal and reorder
 
-- should retain CSP image identity after DOM removal and reorder
-   - Artifact capture: after_step
 - Keep opaque node bindings out of authored DOM serialization
+   - Artifact capture: after_step
+- var removed =  csp alias inline session
    - Artifact capture: after_step
 - Remove the allowed node without admitting the blocked twin
    - Artifact capture: after_step
+- removed render html document
+   - Artifact capture: after_step
 - Reorder both nodes without swapping their CSP decisions
    - Artifact capture: after_step
+- var reordered =  csp alias inline session
+   - Artifact capture: after_step
+- reordered render html document
+   - Artifact capture: after_step
 - Keep stylesheet-source admission independent of body order
+   - Artifact capture: after_step
+- var stylesheet = BrowserSession new
+   - Artifact capture: after_step
+-  csp alias png hex
+   - Artifact capture: after_step
+- "background-image:url
+   - Artifact capture: after_step
+- stylesheet render html document
    - Artifact capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 66 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should retain CSP image identity after DOM removal and reorder")
 step("Keep opaque node bindings out of authored DOM serialization")
 var removed = _csp_alias_inline_session()
 val authored = be_dom_serialize_html(removed.current_dom)
@@ -802,21 +967,21 @@ expect(_csp_alias_command_index(
 
 #### should navigate trusted HTTPS and reject invalid certificate identities
 
-- should navigate trusted HTTPS and reject invalid certificate identities
+-  two origin https fixture
    - Log capture: after_step
 - Inspect TLS chain service identity HSTS and failure evidence
+   - Log capture: after_step
+-  require production security evidence
    - Log capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should navigate trusted HTTPS and reject invalid certificate identities")
 _two_origin_https_fixture()
 step("Inspect TLS chain service identity HSTS and failure evidence")
 _require_production_security_evidence()
@@ -826,19 +991,23 @@ _require_production_security_evidence()
 
 #### should enforce origin CORS CSP redirect and mixed-content policy
 
-- should enforce origin CORS CSP redirect and mixed-content policy
+-  two origin https fixture
+   - Protocol capture: after_step
+-  hostile page fixture
+   - Protocol capture: after_step
+-  check security denial
+   - Protocol capture: after_step
+-  require production security evidence
    - Protocol capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should enforce origin CORS CSP redirect and mixed-content policy")
 _two_origin_https_fixture()
 _hostile_page_fixture()
 _check_security_denial()
@@ -852,27 +1021,48 @@ _require_production_security_evidence()
 
 #### should partition cookies and storage and enforce cookie attributes
 
-- should partition cookies and storage and enforce cookie attributes
+- var store = CookieStore new
 - Admit one bounded host-only network cookie
+- origin, "/account/view", Some
 - Reject transport site path origin and expiry violations
+- insecure, "/account/view", Some
+- origin, "/public", Some
+- origin, "/account/view", Some
+- subdomain, "/account/view", Some
+- origin, "/account/view", Some
 - Key a Secure Domain cookie by the top-level partition
    - Expected: first_partition equals `https://example.test`
+- subdomain, "/", Some
+- subdomain, "/", Some
 - Keep partitioned and unpartitioned names distinct
+- subdomain, "/", Some
+- subdomain, "/", Some
    - Expected: other_header does not contain `scope=partition`
    - Expected: other_script does not contain `scope=partition`
 - Carry a network-only cookie across a real redirect
+- var registry = MockResponseRegistry create
+- Pair
+- registry register
+- set mock registry
+- Logger new
+- url: Url parse or opaque
    - Expected: fetch.fetch(request).is_ok() is true
+- Some
+- fail
+- redirect origin, "/", Some
+- cookie partition key
+- redirect origin, "/", Some
+- cookie partition key
+- set mock registry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 184 lines folded for reproduction.
+Runnable source: 182 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should partition cookies and storage and enforce cookie attributes")
 val now: i64 = 1000
 val origin = Origin(
     scheme: "https", host: "api.example.test", port: 443
@@ -1064,7 +1254,7 @@ set_mock_registry(MockResponseRegistry.create())
 
 #### should enforce partitioned cookies through BrowserSession production paths
 
-- should enforce partitioned cookies through BrowserSession production paths
+- var session = BrowserSession new
    - Protocol capture: after_step
 - Store same-name network cookies under the active top-level site
    - Protocol capture: after_step
@@ -1085,12 +1275,10 @@ set_mock_registry(MockResponseRegistry.create())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 95 lines folded for reproduction.
+Runnable source: 93 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should enforce partitioned cookies through BrowserSession production paths")
 var session = BrowserSession.new()
 expect(session.open_html(
     "https://shop.example.test/app",
@@ -1193,22 +1381,23 @@ expect(session.document_cookie().contains(
 
 #### should bound retained broker cookie bytes without replacing a partition
 
-- should bound retained broker cookie bytes without replacing a partition
+- var store = CookieStore new
+- "edge=" + "x" repeat
+- "edge=" + "y" repeat
 - Admit exactly 4096 serialized cookie bytes
 - Reject 4097 bytes before replacing the partition identity
    - Expected: store.count() equals `1`
+- origin, "/", Some
    - Expected: retained.len() equals `4096`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should bound retained broker cookie bytes without replacing a partition")
 val origin = Origin(
     scheme: "https", host: "api.example.test", port: 443
 )
@@ -1255,19 +1444,22 @@ expect(retained.contains("edge=yyyy")).to_be(false)
 
 #### should serialize cookies by path length then stable creation order
 
-- should serialize cookies by path length then stable creation order
+- var store = CookieStore new
+- parse set cookie
+- parse set cookie
+- parse set cookie
+- parse set cookie
 - Retain stable tie order while excluding HttpOnly from script
+- origin, path, Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should serialize cookies by path length then stable creation order")
 val origin = Origin(
     scheme: "https", host: "example.com", port: 443
 )
@@ -1329,19 +1521,21 @@ expect(store.script_cookie_header(
 
 #### should deny Node native filesystem process socket environment and IPC access
 
-- should deny Node native filesystem process socket environment and IPC access
+-  hostile page fixture
+   - Protocol capture: after_step
+-  check security denial
+   - Protocol capture: after_step
+-  require production security evidence
    - Protocol capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should deny Node native filesystem process socket environment and IPC access")
 _hostile_page_fixture()
 _check_security_denial()
 _require_production_security_evidence()
@@ -1354,19 +1548,18 @@ _require_production_security_evidence()
 
 #### should deny unaudited file data javascript custom and external schemes
 
-- should deny unaudited file data javascript custom and external schemes
+-  hostile page fixture
 - Exercise every supported and denied navigation scheme
+-  require production security evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should deny unaudited file data javascript custom and external schemes")
 _hostile_page_fixture()
 step("Exercise every supported and denied navigation scheme")
 _require_production_security_evidence()
@@ -1379,19 +1572,21 @@ _require_production_security_evidence()
 
 #### should run the site renderer in the required platform sandbox
 
-- should run the site renderer in the required platform sandbox
+-  platform evidence row
+   - Log capture: after_step
+-  check security denial
+   - Log capture: after_step
+-  require platform renderer sandbox evidence
    - Log capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should run the site renderer in the required platform sandbox")
 _platform_evidence_row()
 _check_security_denial()
 _require_platform_renderer_sandbox_evidence()
@@ -1401,7 +1596,17 @@ _require_platform_renderer_sandbox_evidence()
 
 #### should replace the renderer before exposing a cross-site document
 
-- should replace the renderer before exposing a cross-site document
+-  two origin https fixture
+   - Binary capture: after_step
+-  platform evidence row
+   - Binary capture: after_step
+- var mocks = MockResponseRegistry create
+   - Binary capture: after_step
+- mocks register
+   - Binary capture: after_step
+- mocks register
+   - Binary capture: after_step
+- set mock registry
    - Binary capture: after_step
 - Start one sandbox generation and commit the source site
    - Binary capture: after_step
@@ -1409,19 +1614,27 @@ _require_platform_renderer_sandbox_evidence()
    - Binary capture: after_step
 - Navigate cross-site and observe the first target request
    - Binary capture: after_step
+- Some
+   - Binary capture: after_step
+-
+   - Binary capture: after_step
+- renderers document url
+   - Binary capture: after_step
+- thread sleep ms
+   - Binary capture: after_step
 - Reject the old generation before target bytes or credentials
+   - Binary capture: after_step
+- set mock registry
    - Binary capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 95 lines folded for reproduction.
+Runnable source: 93 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should replace the renderer before exposing a cross-site document")
 _two_origin_https_fixture()
 _platform_evidence_row()
 val artifact = _production_browser_artifact()
@@ -1524,19 +1737,18 @@ set_mock_registry(MockResponseRegistry.create())
 
 #### should reject malformed late duplicate and oversized renderer messages
 
-- should reject malformed late duplicate and oversized renderer messages
+-  hostile page fixture
 - Send bounded IPC and Draw IR adversarial cases
+-  require production security evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should reject malformed late duplicate and oversized renderer messages")
 _hostile_page_fixture()
 step("Send bounded IPC and Draw IR adversarial cases")
 _require_production_security_evidence()
@@ -1552,19 +1764,18 @@ _require_production_security_evidence()
 
 #### should contain renderer crash timeout memory and restart-rate failures
 
-- should contain renderer crash timeout memory and restart-rate failures
+-  platform evidence row
 - Crash and exhaust only the hostile renderer
+-  require production security evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should contain renderer crash timeout memory and restart-rate failures")
 _platform_evidence_row()
 step("Crash and exhaust only the hostile renderer")
 _require_production_security_evidence()
@@ -1580,20 +1791,18 @@ _require_production_security_evidence()
 
 #### should account for pinned conformance and fuzz corpora
 
-- should account for pinned conformance and fuzz corpora
 - Load pinned WPT Test262 and fuzz manifests
 - Retain minimized reproducers for every failure
+-  require production security evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should account for pinned conformance and fuzz corpora")
 step("Load pinned WPT Test262 and fuzz manifests")
 step("Retain minimized reproducers for every failure")
 _require_production_security_evidence()
@@ -1616,82 +1825,3 @@ _require_production_security_evidence()
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-WEB-BROWSER-011`
-- `REQ-WEB-BROWSER-010..019`
-- `REQ-SSPEC-SYSTEM..019`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `24fcc815a01c2b00358d96159e40717c633f701728c16dba55e1bec33f12ccd1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `24fcc815a01c2b00358d96159e40717c633f701728c16dba55e1bec33f12ccd1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `24fcc815a01c2b00358d96159e40717c633f701728c16dba55e1bec33f12ccd1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/security/simple_web_browser_engine_security_spec.spl
-mirror: doc/06_spec/03_system/security/simple_web_browser_engine_security_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
-doc/06_spec/03_system/security/simple_web_browser_engine_security_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/security/simple_web_browser_engine_security_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:275:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should isolate positive-owner rendering and input behind exact-window frames' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:275:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should isolate positive-owner rendering and input behind exact-window frames' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:353:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should persist shared preloaded HSTS without trusting generic responses' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:353:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should persist shared preloaded HSTS without trusting generic responses' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:457:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should learn HSTS only from the completed platform HTTPS job' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:457:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should learn HSTS only from the completed platform HTTPS job' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:491:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate opaque renderer initiators before cookie writes' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:491:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should validate opaque renderer initiators before cookie writes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:519:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should replace a forged CORS Origin with the requester origin' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/security/simple_web_browser_engine_security_spec.spl:553:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should apply head meta CSP in source order to every active resource' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

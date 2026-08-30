@@ -2,6 +2,29 @@
 
 > End-to-end system test covering complete subsystem workflows. Tests all public APIs, error paths, and integration points.
 
+<!-- sdn-diagram:id=logging_system_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=logging_system_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+logging_system_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=logging_system_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 33 | 33 | 0 | 0 |
@@ -22,7 +45,7 @@ End-to-end system test covering complete subsystem workflows. Tests all public A
 | Difficulty | 5/5 |
 | Status | Implemented |
 | Source | `test/03_system/infrastructure/logging_system_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -39,18 +62,18 @@ Tests all public APIs, error paths, and integration points.
 
 #### workflow 1 - happy path _(slow)_
 
-- workflow 1 - happy path
+1. verify
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("workflow 1 - happy path")
 # Test successful execution path
 val input = "test input"
 verify(input.len() > 0)
@@ -73,18 +96,17 @@ verify(result.len() > 0)
 
 #### workflow 2 - error handling _(slow)_
 
-- workflow 2 - error handling
+1. verify
+2. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("workflow 2 - error handling")
 # Test error recovery
 val invalid_input = ""
 verify(invalid_input.len() == 0)
@@ -94,7 +116,7 @@ var error = nil
 if invalid_input.len() == 0:
     error = "Empty input"
 
-verify(error != nil)
+verify(error.? == true)
 ```
 
 </details>
@@ -107,18 +129,16 @@ verify(error != nil)
 
 #### workflow 3 - edge cases _(slow)_
 
-- workflow 3 - edge cases
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("workflow 3 - edge cases")
 # Test boundary conditions
 val edge_cases = [
     "",
@@ -142,18 +162,18 @@ for c in edge_cases:
 
 #### workflow 4 - stress test _(slow)_
 
-- workflow 4 - stress test
+1. items = items append
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("workflow 4 - stress test")
 # Test with large inputs
 var items = []
 for i in 0..100:
@@ -179,18 +199,18 @@ verify(processed == 100)
 
 #### workflow 5 - concurrent operations _(slow)_
 
-- workflow 5 - concurrent operations
+1. operations = operations append
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("workflow 5 - concurrent operations")
 # Test multiple operations
 var operations = []
 
@@ -222,18 +242,17 @@ verify(completed == 50)
 
 #### branch 1 - if true
 
-- branch 1 - if true
+1. verify
+2. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 1 - if true")
 
 val condition = true
 if condition:
@@ -246,18 +265,17 @@ else:
 
 #### branch 2 - if false
 
-- branch 2 - if false
+1. verify
+2. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 2 - if false")
 
 val condition = false
 if condition:
@@ -270,18 +288,18 @@ else:
 
 #### branch 3 - nested if true/true
 
-- branch 3 - nested if true/true
+1. verify
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 3 - nested if true/true")
 
 if true:
     if true:
@@ -296,18 +314,18 @@ else:
 
 #### branch 4 - nested if true/false
 
-- branch 4 - nested if true/false
+1. verify
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 4 - nested if true/false")
 
 if true:
     if false:
@@ -322,18 +340,18 @@ else:
 
 #### branch 5 - nested if false
 
-- branch 5 - nested if false
+1. verify
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 5 - nested if false")
 
 if false:
     verify(false)
@@ -348,18 +366,18 @@ else:
 
 #### branch 6 - match some
 
-- branch 6 - match some
+1. Some
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 6 - match some")
 
 val opt = Some(42)
 match opt:
@@ -373,18 +391,18 @@ match opt:
 
 #### branch 7 - match nil
 
-- branch 7 - match nil
+1. Some
+2. verify
+3. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 7 - match nil")
 
 val opt = nil
 match opt:
@@ -398,18 +416,16 @@ match opt:
 
 #### branch 8 - match multiple patterns
 
-- branch 8 - match multiple patterns
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 8 - match multiple patterns")
 
 val value = 2
 val result = match value:
@@ -428,18 +444,16 @@ verify(result == "two")
 
 #### branch 9 - while loop executed
 
-- branch 9 - while loop executed
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 9 - while loop executed")
 val count = 5
 
 verify(count == 5)
@@ -455,18 +469,16 @@ verify(count == 5)
 
 #### branch 10 - while loop not executed
 
-- branch 10 - while loop not executed
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 10 - while loop not executed")
 
 var count = 10
 while count < 5:
@@ -485,18 +497,16 @@ verify(count == 10)
 
 #### branch 11 - for loop with items
 
-- branch 11 - for loop with items
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 11 - for loop with items")
 
 var sum = 0
 for i in [1, 2, 3]:
@@ -515,18 +525,16 @@ verify(sum == 6)
 
 #### branch 12 - for loop empty
 
-- branch 12 - for loop empty
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 12 - for loop empty")
 
 var count = 0
 for i in []:
@@ -542,18 +550,17 @@ verify(count == 0)
 
 #### branch 13 - early return
 
-- branch 13 - early return
+1. verify
+2. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 13 - early return")
 
 val value = 10
 if value > 5:
@@ -569,18 +576,16 @@ else:
 
 #### branch 14 - break in loop
 
-- branch 14 - break in loop
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 14 - break in loop")
 val count = 10
 
 verify(count == 10)
@@ -596,18 +601,16 @@ verify(count == 10)
 
 #### branch 15 - continue in loop
 
-- branch 15 - continue in loop
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("branch 15 - continue in loop")
 val even_count = 10
 
 verify(even_count == 10)
@@ -622,18 +625,16 @@ verify(even_count == 10)
 
 #### error 1 - null input
 
-- error 1 - null input
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 1 - null input")
 
 val input = nil
 verify(input == nil)
@@ -643,18 +644,16 @@ verify(input == nil)
 
 #### error 2 - empty input
 
-- error 2 - empty input
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 2 - empty input")
 
 val input = ""
 verify(input.len() == 0)
@@ -664,18 +663,16 @@ verify(input.len() == 0)
 
 #### error 3 - invalid type
 
-- error 3 - invalid type
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 3 - invalid type")
 
 val value = 42
 verify(value > 0)
@@ -685,18 +682,16 @@ verify(value > 0)
 
 #### error 4 - out of bounds
 
-- error 4 - out of bounds
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 4 - out of bounds")
 
 val arr = [1, 2, 3]
 verify(arr.len() == 3)
@@ -706,39 +701,35 @@ verify(arr.len() == 3)
 
 #### error 5 - missing key
 
-- error 5 - missing key
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 5 - missing key")
 
 val dict = {"a": 1}
-verify(dict.get("b") == nil)
+verify(dict.get("b").? == false)
 ```
 
 </details>
 
 #### error 6 - division by zero handling
 
-- error 6 - division by zero handling
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 6 - division by zero handling")
 
 val numerator = 10
 val denominator = 1  # Avoid actual div by zero
@@ -749,18 +740,16 @@ verify(denominator != 0)
 
 #### error 7 - overflow handling
 
-- error 7 - overflow handling
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 7 - overflow handling")
 
 val large = 999999999
 verify(large > 0)
@@ -770,18 +759,16 @@ verify(large > 0)
 
 #### error 8 - underflow handling
 
-- error 8 - underflow handling
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("error 8 - underflow handling")
 
 val small = -999999999
 verify(small < 0)
@@ -793,18 +780,16 @@ verify(small < 0)
 
 #### integration 1 - module A to B
 
-- integration 1 - module A to B
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("integration 1 - module A to B")
 
 val data = "test"
 verify(data.len() == 4)
@@ -814,18 +799,16 @@ verify(data.len() == 4)
 
 #### integration 2 - module B to C
 
-- integration 2 - module B to C
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("integration 2 - module B to C")
 
 val processed = "test" + "_processed"
 verify(processed.ends_with("_processed"))
@@ -835,18 +818,16 @@ verify(processed.ends_with("_processed"))
 
 #### integration 3 - round trip
 
-- integration 3 - round trip
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("integration 3 - round trip")
 
 val original = "data"
 val encoded = original + "_encoded"
@@ -858,18 +839,16 @@ verify(decoded == original)
 
 #### integration 4 - pipeline
 
-- integration 4 - pipeline
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("integration 4 - pipeline")
 
 val input = "start"
 val step1 = input + "_1"
@@ -883,18 +862,16 @@ verify(step3 == "start_1_2_3")
 
 #### integration 5 - error propagation
 
-- integration 5 - error propagation
+1. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("integration 5 - error propagation")
 
 var error = nil
 
@@ -920,51 +897,3 @@ verify(error.?)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `3bf7d49ea07d8da925b313f6b5ab765596b465f8f301292340180a1719737cb9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `3bf7d49ea07d8da925b313f6b5ab765596b465f8f301292340180a1719737cb9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `3bf7d49ea07d8da925b313f6b5ab765596b465f8f301292340180a1719737cb9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/infrastructure/logging_system_spec.spl
-mirror: doc/06_spec/03_system/infrastructure/logging_system_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/infrastructure/logging_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/infrastructure/logging_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/infrastructure/logging_system_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'workflow 1 - happy path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infrastructure/logging_system_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'workflow 2 - error handling' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infrastructure/logging_system_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'workflow 3 - edge cases' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

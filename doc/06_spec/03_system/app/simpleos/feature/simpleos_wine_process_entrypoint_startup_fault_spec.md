@@ -1,6 +1,29 @@
 # Simpleos Wine Process Entrypoint Startup Fault Specification
 
-> Tests covering REQ-045: process imported entrypoint startup fault rollback.
+> <details>
+
+<!-- sdn-diagram:id=simpleos_wine_process_entrypoint_startup_fault_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_wine_process_entrypoint_startup_fault_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_wine_process_entrypoint_startup_fault_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_wine_process_entrypoint_startup_fault_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,38 +40,35 @@
 
 #### records SEH rollback after import-bound entrypoint handoff while keeping PE code non-executing
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-045
+val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
+val result = wine_process_record_imported_entrypoint_startup_fault(plan, _known_hello_with_second_import_descriptor(), 4, 8, fault)
+expect(result.ok).to_equal(true)
+expect(result.status).to_equal("imported-entrypoint-startup-fault-rollback-recorded")
+expect(result.rollback_count).to_equal(2)
+expect(result.evidence).to_contain("imported-entrypoint-handoff-ready")
+expect(result.evidence).to_contain("seh-dispatch-recorded")
+expect(result.evidence).to_contain("no-arbitrary-execution")
 ```
 
 </details>
 
 #### requires PEB/TEB VM byte-write readback before import-bound entrypoint rollback
 
-- requires PEB/TEB VM byte-write readback before import-bound entrypoint rollback
-   - Expected: result.ok is true
-   - Expected: result.status equals `imported-entrypoint-startup-fault-rollback-recorded`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("requires PEB/TEB VM byte-write readback before import-bound entrypoint rollback")
 val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
 val init = wine_peb_teb_init_default()
 val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -68,25 +88,13 @@ expect(result.evidence).to_contain("no-arbitrary-execution")
 
 #### blocks import-bound entrypoint rollback without carrying mapped state when PEB/TEB VM byte writes fail
 
-- blocks import-bound entrypoint rollback without carrying mapped state when PEB/TEB VM byte writes fail
-   - Expected: result.ok is false
-   - Expected: result.error equals `imported-entrypoint-handoff:peb-teb-vm-write:vm-write:NtTib.StackBase:page-fa... (full value in folded executable source)`
-   - Expected: result.mapped_base equals `0`
-   - Expected: result.mapped_size equals `0`
-   - Expected: result.entry_address equals `0`
-   - Expected: result.module_count equals `0`
-   - Expected: result.rollback_count equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("blocks import-bound entrypoint rollback without carrying mapped state when PEB/TEB VM byte writes fail")
 val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
 val init = wine_peb_teb_init_default()
 val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -116,12 +124,12 @@ expect(result.evidence).to_contain("no-arbitrary-execution")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering REQ-045: process imported entrypoint startup fault rollback.
+Tests covering:
 - REQ-045: process imported entrypoint startup fault rollback
 
 ## Scenario Summary
@@ -136,55 +144,3 @@ Tests covering REQ-045: process imported entrypoint startup fault rollback.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-045`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1348104907cca02cb2d62e3a3eda89d2442aa1fa5bed86dcbc4b9a771dd5204b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1348104907cca02cb2d62e3a3eda89d2442aa1fa5bed86dcbc4b9a771dd5204b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1348104907cca02cb2d62e3a3eda89d2442aa1fa5bed86dcbc4b9a771dd5204b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl
-mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=90 oracle=70
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl:91:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'records SEH rollback after import-bound entrypoint handoff while keeping PE code non-executing' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires PEB/TEB VM byte-write readback before import-bound entrypoint rollback' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'blocks import-bound entrypoint rollback without carrying mapped state when PEB/TEB VM byte writes fail' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

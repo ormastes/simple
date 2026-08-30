@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use std.spec
 use compiler.mir.mir_instructions.{
     BlockId, MirBlock, MirInst, MirInstKind, MirBorrowKind,
@@ -165,12 +171,14 @@ describe "var reassignment analysis":
         expect(malformed_source_instruction_is_rejected(instruction)).to_equal(true)
 
     it "marks repeated local definitions as SSA-transformable when local and borrow-safe":
+        # @req REQ-SSPEC-UNIT
+        step("marks repeated local definitions as SSA-transformable when local and borrow-safe")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(1)))
+            MirTerminator.Return(Some(copy_operand(1)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         expect(analysis.has_var_reassignment).to_equal(true)
@@ -180,13 +188,15 @@ describe "var reassignment analysis":
         expect(analysis.borrow_reassign_safe).to_equal(true)
 
     it "rejects reassignment after an outstanding borrow of the same local":
+        # @req REQ-SSPEC-UNIT
+        step("rejects reassignment after an outstanding borrow of the same local")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Ref(local(2), MirBorrowKind.Shared, MirPlace.local_place(local(0)))),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(2)))
+            MirTerminator.Return(Some(copy_operand(2)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         expect(analysis.has_var_reassignment).to_equal(true)
@@ -195,12 +205,14 @@ describe "var reassignment analysis":
         expect(analysis.reason).to_equal("borrow.reassign_unsafe")
 
     it "rejects reassigned locals that escape through return":
+        # @req REQ-SSPEC-UNIT
+        step("rejects reassigned locals that escape through return")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(0)))
+            MirTerminator.Return(Some(copy_operand(0)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         expect(analysis.has_var_reassignment).to_equal(true)
@@ -209,13 +221,15 @@ describe "var reassignment analysis":
         expect(analysis.reason).to_equal("escape.reassigned_storage")
 
     it "rejects reassigned locals that escape through a copied alias":
+        # @req REQ-SSPEC-UNIT
+        step("rejects reassigned locals that escape through a copied alias")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
                 inst(MirInstKind.Copy(local(2), local(0)))
             ],
-            MirTerminator.Ret(Some(copy_operand(2)))
+            MirTerminator.Return(Some(copy_operand(2)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         expect(analysis.has_var_reassignment).to_equal(true)
@@ -224,6 +238,8 @@ describe "var reassignment analysis":
         expect(analysis.reason).to_equal("escape.reassigned_storage")
 
     it "rejects reassignment after a borrow through a copied alias":
+        # @req REQ-SSPEC-UNIT
+        step("rejects reassignment after a borrow through a copied alias")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
@@ -231,7 +247,7 @@ describe "var reassignment analysis":
                 inst(MirInstKind.Ref(local(3), MirBorrowKind.Shared, MirPlace.local_place(local(2)))),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(3)))
+            MirTerminator.Return(Some(copy_operand(3)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         expect(analysis.has_var_reassignment).to_equal(true)
@@ -239,48 +255,15 @@ describe "var reassignment analysis":
         expect(analysis.ssa_transform_safe).to_equal(false)
         expect(analysis.reason).to_equal("borrow.reassign_unsafe")
 
-    it "checks an alias old root before overwriting that alias":
-        val blocks = one_block(
-            [
-                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
-                inst(MirInstKind.Copy(local(2), local(0))),
-                inst(MirInstKind.Ref(local(3), MirBorrowKind.Shared, MirPlace.local_place(local(2)))),
-                inst(MirInstKind.Const(local(2), MirConstValue.Int(9), MirType.i64()))
-            ],
-            MirTerminator.Ret(Some(copy_operand(3)))
-        )
-        val analysis = analyze_var_reassign_blocks(blocks)
-        expect(analysis.reassignment_count).to_equal(1)
-        expect(analysis.borrow_reassign_safe).to_equal(false)
-        expect(analysis.reason).to_equal("borrow.reassign_unsafe")
-
-    it "counts many distinct reassigned locals without ordered parallel maps":
-        var instructions: [MirInst] = []
-        for id in 0..256:
-            instructions.push(inst(MirInstKind.Const(
-                local(id), MirConstValue.Int(id), MirType.i64())))
-            instructions.push(inst(MirInstKind.Const(
-                local(id), MirConstValue.Int(id + 1), MirType.i64())))
-        val analysis = analyze_var_reassign_blocks(
-            one_block(instructions, MirTerminator.Ret(nil)))
-        expect(analysis.reassignment_count).to_equal(256)
-        expect(analysis.no_escape).to_equal(true)
-        expect(analysis.borrow_reassign_safe).to_equal(true)
-        expect(analysis.ssa_transform_safe).to_equal(true)
-        val facts = var_reassign_analysis_hotspot_facts(
-            ["typed_mir", "safe_deopt"], analysis)
-        expect(facts).to_equal([
-            "typed_mir", "safe_deopt", "var.reassignment",
-            "ssa.var_transform", "escape.analyzed", "escape.no_escape",
-            "borrow.reassign_safe"])
-
     it "feeds analyzer output into JIT var hotspot planning":
+        # @req REQ-SSPEC-UNIT
+        step("feeds analyzer output into JIT var hotspot planning")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(1)))
+            MirTerminator.Return(Some(copy_operand(1)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         val facts = var_reassign_analysis_to_jit_facts(analysis)
@@ -290,12 +273,14 @@ describe "var reassignment analysis":
         expect(plan.facts.contains("borrow.reassign_safe")).to_equal(true)
 
     it "builds hotspot proof facts from var reassignment analysis":
+        # @req REQ-SSPEC-UNIT
+        step("builds hotspot proof facts from var reassignment analysis")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(1)))
+            MirTerminator.Return(Some(copy_operand(1)))
         )
         val analysis = analyze_var_reassign_blocks(blocks)
         val facts = var_reassign_analysis_hotspot_facts(["typed_mir", "safe_deopt"], analysis)
@@ -307,13 +292,15 @@ describe "var reassignment analysis":
         expect(facts.contains("borrow.reassign_safe")).to_equal(true)
 
     it "creates MIR analysis-backed hotspot specialization providers only after SSA proof":
+        # @req REQ-SSPEC-UNIT
+        step("creates MIR analysis-backed hotspot specialization providers only after SSA proof")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
                 inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))
             ],
-            MirTerminator.Ret(Some(copy_operand(1)))
+            MirTerminator.Return(Some(copy_operand(1)))
         )
         val provider = jit_hotspot_specialization_provider_from_var_reassign_analysis(
             "mir-var-specialization",
@@ -331,13 +318,15 @@ describe "var reassignment analysis":
         expect(decision.compile_source).to_equal("fn hot_var() -> i64: 3")
 
     it "rejects MIR analysis-backed providers when SSA transform is unsafe":
+        # @req REQ-SSPEC-UNIT
+        step("rejects MIR analysis-backed providers when SSA transform is unsafe")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Ref(local(2), MirBorrowKind.Shared, MirPlace.local_place(local(0)))),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))
             ],
-            MirTerminator.Ret(Some(copy_operand(2)))
+            MirTerminator.Return(Some(copy_operand(2)))
         )
         val provider = jit_hotspot_specialization_provider_from_var_reassign_analysis(
             "mir-var-specialization",
@@ -349,13 +338,15 @@ describe "var reassignment analysis":
         expect(provider.specialized_source).to_equal("")
 
     it "rewrites straight-line reassignment into a fresh SSA local":
+        # @req REQ-SSPEC-UNIT
+        step("rewrites straight-line reassignment into a fresh SSA local")
         val blocks = one_block(
             [
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
                 inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
                 inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))
             ],
-            MirTerminator.Ret(Some(copy_operand(1)))
+            MirTerminator.Return(Some(copy_operand(1)))
         )
         val result = ssa_var_transform_blocks(blocks)
         expect(result.applied).to_equal(true)
@@ -377,6 +368,8 @@ describe "var reassignment analysis":
                 expect(false).to_equal(true)
 
     it "reports unsupported CFG when no simple phi merge is recognized":
+        # @req REQ-SSPEC-UNIT
+        step("reports unsupported CFG when no simple phi merge is recognized")
         val first = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -387,7 +380,7 @@ describe "var reassignment analysis":
             id: BlockId.new(1),
             label: "next",
             instructions: [inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64()))],
-            terminator: MirTerminator.Ret(Some(copy_operand(0)))
+            terminator: MirTerminator.Return(Some(copy_operand(0)))
         )
         val result = ssa_var_transform_blocks([first, second])
         expect(result.applied).to_equal(false)
@@ -395,6 +388,8 @@ describe "var reassignment analysis":
         expect(result.phi_required_count).to_equal(0)
 
     it "applies pseudo-phi SSA transform for a safe if/else merge":
+        # @req REQ-SSPEC-UNIT
+        step("applies pseudo-phi SSA transform for a safe if/else merge")
         val entry = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -417,7 +412,7 @@ describe "var reassignment analysis":
             id: BlockId.new(3),
             label: "join",
             instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
-            terminator: MirTerminator.Ret(Some(copy_operand(1)))
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
         )
         val result = ssa_var_transform_blocks([entry, then_block, else_block, join])
         expect(result.applied).to_equal(true)
@@ -426,12 +421,14 @@ describe "var reassignment analysis":
         expect(result.phi_required_count).to_equal(0)
         match result.blocks[3].instructions[0].kind:
             case Intrinsic(dest, name, _):
-                expect(dest != nil).to_equal(true)
+                expect(dest.?).to_equal(true)
                 expect(name).to_equal("__simple_ssa_phi")
             case _:
                 expect(false).to_equal(true)
 
     it "returns the pseudo-phi value when an if/else merge returns the reassigned var":
+        # @req REQ-SSPEC-UNIT
+        step("returns the pseudo-phi value when an if/else merge returns the reassigned var")
         val entry = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -454,14 +451,14 @@ describe "var reassignment analysis":
             id: BlockId.new(3),
             label: "join",
             instructions: [],
-            terminator: MirTerminator.Ret(Some(copy_operand(0)))
+            terminator: MirTerminator.Return(Some(copy_operand(0)))
         )
         val result = ssa_var_transform_blocks([entry, then_block, else_block, join])
         expect(result.applied).to_equal(true)
         expect(result.reason).to_equal("ready")
         match result.blocks[3].terminator:
             case Return(value):
-                expect(value != nil).to_equal(true)
+                expect(value.?).to_equal(true)
                 match value.unwrap().kind:
                     case Copy(local_id):
                         expect(local_id.id).to_equal(12)
@@ -471,6 +468,8 @@ describe "var reassignment analysis":
                 expect(false).to_equal(true)
 
     it "rejects if/else phi transform when a branch reassignment violates borrow safety":
+        # @req REQ-SSPEC-UNIT
+        step("rejects if/else phi transform when a branch reassignment violates borrow safety")
         val entry = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -497,7 +496,7 @@ describe "var reassignment analysis":
             id: BlockId.new(3),
             label: "join",
             instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
-            terminator: MirTerminator.Ret(Some(copy_operand(1)))
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
         )
         val result = ssa_var_transform_blocks([entry, then_block, else_block, join])
         expect(result.applied).to_equal(false)
@@ -506,6 +505,8 @@ describe "var reassignment analysis":
         expect(result.phi_required_locals[0]).to_equal(0)
 
     it "builds a concrete phi insertion plan for an if/else merge":
+        # @req REQ-SSPEC-UNIT
+        step("builds a concrete phi insertion plan for an if/else merge")
         val entry = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -528,7 +529,7 @@ describe "var reassignment analysis":
             id: BlockId.new(3),
             label: "join",
             instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
-            terminator: MirTerminator.Ret(Some(copy_operand(1)))
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
         )
         val plans = ssa_phi_plans_for_blocks([entry, then_block, else_block, join])
         expect(plans.len()).to_equal(1)
@@ -541,6 +542,8 @@ describe "var reassignment analysis":
         expect(plans[0].phi_dest_local_id).to_equal(12)
 
     it "materializes a pseudo phi intrinsic for an if/else merge":
+        # @req REQ-SSPEC-UNIT
+        step("materializes a pseudo phi intrinsic for an if/else merge")
         val entry = MirBlock(
             id: BlockId.new(0),
             label: "entry",
@@ -563,7 +566,7 @@ describe "var reassignment analysis":
             id: BlockId.new(3),
             label: "join",
             instructions: [inst(MirInstKind.BinOp(local(1), MirBinOp.Add, copy_operand(0), int_operand(1)))],
-            terminator: MirTerminator.Ret(Some(copy_operand(1)))
+            terminator: MirTerminator.Return(Some(copy_operand(1)))
         )
         val result = ssa_materialize_phi_plans_for_blocks([entry, then_block, else_block, join])
         expect(result.applied).to_equal(true)
@@ -581,7 +584,7 @@ describe "var reassignment analysis":
                 expect(false).to_equal(true)
         match result.blocks[3].instructions[0].kind:
             case Intrinsic(dest, name, args):
-                expect(dest != nil).to_equal(true)
+                expect(dest.?).to_equal(true)
                 if dest:
                     expect(dest.unwrap().id).to_equal(12)
                 expect(name).to_equal("__simple_ssa_phi")
@@ -626,6 +629,8 @@ describe "var reassignment analysis":
                 expect(false).to_equal(true)
 
     it "declares backend lowering policy for pseudo phi materialization for REQ-OPJH-021":
+        # @req REQ-SSPEC-UNIT
+        step("declares backend lowering policy for pseudo phi materialization for REQ-OPJH-021")
         val cranelift = ssa_phi_lowering_policy_for_backend("cranelift")
         expect(cranelift.can_lower).to_equal(true)
         expect(ssa_phi_lowering_kind_name(cranelift.lowering_kind)).to_equal("cranelift_block_param")

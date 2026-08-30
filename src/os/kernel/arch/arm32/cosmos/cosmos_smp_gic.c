@@ -14,6 +14,7 @@
 #include "cosmos_hal.h"
 #endif
 #include "cosmos_pcie_regs.h"
+#include "cosmos_smp_gic_policy.h"
 
 #define GICD_CTLR       0x000U
 #define GICD_TYPER      0x004U
@@ -31,13 +32,8 @@
 #define GICC_IAR        0x00CU
 #define GICC_EOIR       0x010U
 
-#define COSMOS_GIC_MAX_WORDS 32U
 #define COSMOS_GIC_ENABLE     1U
 #define COSMOS_GIC_PRIORITY   0xA0A0A0A0U
-#define COSMOS_GIC_PCI_PRIORITY 0xA0U
-#define COSMOS_GIC_CPU0       0x01010101U
-#define COSMOS_GIC_CPU0_TARGET 0x01U
-#define COSMOS_GIC_IRQ_ID_MASK 0x3FFU
 #define COSMOS_GIC_SPURIOUS_MIN 1020U
 #define COSMOS_ZYNQ_CPU1_START 0xFFFFFFF0U
 
@@ -50,135 +46,6 @@
 #define COSMOS_SMP_RELEASED   2U
 #define COSMOS_SMP_ACKED      3U
 #define COSMOS_SMP_CANCELLED  4U
-
-static unsigned int cosmos_gic_limit_words(unsigned int words) {
-    return words != 0U && words <= COSMOS_GIC_MAX_WORDS ? words : 0U;
-}
-
-static unsigned int cosmos_gic_words_from_typer(unsigned int typer) {
-    return cosmos_gic_limit_words((typer & 0x1FU) + 1U);
-}
-
-static unsigned int cosmos_gic_target_for_word(unsigned int word) {
-    return word == 0U ? 0U : COSMOS_GIC_CPU0;
-}
-
-static unsigned int cosmos_smp_next_generation(unsigned int generation) {
-    generation++;
-    return generation == 0U ? 1U : generation;
-}
-
-static int cosmos_smp_release_request_valid(
-    unsigned int cpu_id,
-    unsigned int entry,
-    unsigned int stack_top
-) {
-    return cpu_id == 0U && entry != 0U && stack_top != 0U &&
-        (entry & 3U) == 0U && (stack_top & 7U) == 0U;
-}
-
-static int cosmos_smp_ready_observed(unsigned int state) {
-    return state == COSMOS_SMP_READY;
-}
-
-static unsigned int cosmos_smp_secondary_state(int result) {
-    return result == COSMOS_OK ? COSMOS_SMP_ACKED : COSMOS_SMP_CANCELLED;
-}
-
-static int cosmos_smp_ack_observed(
-    unsigned int state,
-    unsigned int ack,
-    unsigned int generation
-) {
-    return state == COSMOS_SMP_ACKED && ack == generation;
-}
-
-static int cosmos_smp_poll_allowed(unsigned int poll) {
-    return poll < COSMOS_POLL_LIMIT;
-}
-
-static unsigned int cosmos_gic_irq_id(unsigned int acknowledge) {
-    return acknowledge & COSMOS_GIC_IRQ_ID_MASK;
-}
-
-static int cosmos_gic_irq_is_spurious(unsigned int interrupt_id) {
-    return interrupt_id >= COSMOS_GIC_SPURIOUS_MIN;
-}
-
-static unsigned int cosmos_gic_disable_offset(unsigned int interrupt_id) {
-    return GICD_ICENABLER + (interrupt_id / 32U) * 4U;
-}
-
-static unsigned int cosmos_gic_disable_mask(unsigned int interrupt_id) {
-    return 1U << (interrupt_id & 31U);
-}
-
-static unsigned int cosmos_gic_byte_shift(unsigned int interrupt_id) {
-    return (interrupt_id & 3U) * 8U;
-}
-
-static unsigned int cosmos_gic_config_shift(unsigned int interrupt_id) {
-    return (interrupt_id & 15U) * 2U;
-}
-
-static unsigned int cosmos_gic_priority_offset(unsigned int interrupt_id) {
-    return GICD_IPRIORITYR + (interrupt_id / 4U) * 4U;
-}
-
-static unsigned int cosmos_gic_target_offset(unsigned int interrupt_id) {
-    return GICD_ITARGETSR + (interrupt_id / 4U) * 4U;
-}
-
-static unsigned int cosmos_gic_config_offset(unsigned int interrupt_id) {
-    return GICD_ICFGR + (interrupt_id / 16U) * 4U;
-}
-
-static unsigned int cosmos_gic_priority_value(
-    unsigned int current,
-    unsigned int interrupt_id
-) {
-    unsigned int shift = cosmos_gic_byte_shift(interrupt_id);
-    unsigned int mask = 0xFFU << shift;
-
-    return (current & ~mask) | (COSMOS_GIC_PCI_PRIORITY << shift);
-}
-
-static unsigned int cosmos_gic_target_cpu0_value(
-    unsigned int current,
-    unsigned int interrupt_id
-) {
-    unsigned int shift = cosmos_gic_byte_shift(interrupt_id);
-    unsigned int mask = 0xFFU << shift;
-
-    return (current & ~mask) | (COSMOS_GIC_CPU0_TARGET << shift);
-}
-
-static unsigned int cosmos_gic_level_config_value(
-    unsigned int current,
-    unsigned int interrupt_id
-) {
-    return current & ~(3U << cosmos_gic_config_shift(interrupt_id));
-}
-
-static int cosmos_gic_pcie_irq_in_range(unsigned int words) {
-    return cosmos_gic_limit_words(words) != 0U &&
-        (COSMOS_PCIE_PL_IRQ_ID / 32U) < words;
-}
-
-static int cosmos_gic_eoir_required(unsigned int interrupt_id) {
-    return !cosmos_gic_irq_is_spurious(interrupt_id);
-}
-
-static unsigned int cosmos_gic_quiesce_kind(
-    unsigned int interrupt_id,
-    int handler_result
-) {
-    if (handler_result == COSMOS_OK ||
-        cosmos_gic_irq_is_spurious(interrupt_id)) {
-        return COSMOS_GIC_QUIESCE_NONE;
-    }
-    return interrupt_id < 16U ? COSMOS_GIC_QUIESCE_CPU : COSMOS_GIC_QUIESCE_LINE;
-}
 
 _Static_assert(COSMOS_GIC_SPURIOUS_MIN == 1020U,
     "GICv1 IDs 1020..1023 are reserved/spurious");

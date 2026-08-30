@@ -23,6 +23,7 @@ Resource wrapper for TcpSocket — WP-J pilot migration
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 Resource wrapper for TcpSocket — WP-J pilot migration
 
 Tests the TcpSocket wrapper class with resource ownership pattern:
@@ -39,6 +40,7 @@ use std.spec.step
 
 extern call.
 
+```
 ## Scenarios
 
 ### TcpSocket resource wrapper

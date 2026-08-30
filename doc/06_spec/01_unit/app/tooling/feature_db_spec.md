@@ -1,6 +1,29 @@
-# Feature Db Specification
+# Feature Database Specification
 
-> Tests covering Feature Database Module, filename extraction, SPipe file detection, filter for SPipe files, failed test detection, error option check, filter failed results, map to extract paths, Result handling, match on Result for error, list append, counter increment, string formatting, struct construction with error, filter and map chain.
+> Tests for feature database utility functions that manage feature tracking, status updates, and result filtering in the documentation generation system.
+
+<!-- sdn-diagram:id=feature_db_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=feature_db_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+feature_db_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=feature_db_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,53 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Feature Db Specification
+# Feature Database Specification
+
+Tests for feature database utility functions that manage feature tracking, status updates, and result filtering in the documentation generation system.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #XXX |
+| Category | Tooling |
+| Difficulty | 2/5 |
+| Status | In Progress |
+| Source | `test/01_unit/app/tooling/feature_db_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests for feature database utility functions that manage feature tracking,
+status updates, and result filtering in the documentation generation system.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Spec File Detection | Identifying test files with `_spec.spl` suffix |
+| Result Filtering | Extracting failed tests and error conditions |
+| Path Extraction | Parsing filesystem paths to get filenames |
+| Database Updates | Recording test results and error states |
+
+## Behavior
+
+The feature database module provides:
+- SPipe file detection and filtering
+- Result set processing and error detection
+- Path parsing for test file identification
+- Chaining operations (filter + map) for data transformation
+
+## Examples
+
+```simple
+describe "Feature Database Operations":
+it "filters spec files correctly":
+val files = ["test_spec.spl", "example.spl"]
+val specs = files.filter(\f: f.ends_with("_spec.spl"))
+expect specs.len() == 1
+```
 
 ## Scenarios
 
@@ -17,22 +86,13 @@
 
 #### compiles successfully
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- compiles successfully
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("compiles successfully")
 expect 1 + 1 == 2
 ```
 
@@ -42,18 +102,13 @@ expect 1 + 1 == 2
 
 #### extracts filename from path
 
-- extracts filename from path
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts filename from path")
 val path = "test/unit/example_spec.spl"
 val parts = path.split("/")
 val filename = parts[parts.len() - 1]
@@ -64,18 +119,13 @@ expect filename == "example_spec.spl"
 
 #### handles path without directory
 
-- handles path without directory
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles path without directory")
 val path = "example_spec.spl"
 val parts = path.split("/")
 val filename = if parts.len() > 0: parts[parts.len() - 1] else: path
@@ -88,18 +138,16 @@ expect filename == "example_spec.spl"
 
 #### detects _spec.spl files
 
-- detects _spec.spl files
+1. expect filename ends with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects _spec.spl files")
 val filename = "example_spec.spl"
 expect filename.ends_with("_spec.spl") == true
 ```
@@ -108,18 +156,16 @@ expect filename.ends_with("_spec.spl") == true
 
 #### rejects non-spec files
 
-- rejects non-spec files
+1. expect filename ends with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects non-spec files")
 val filename = "example.spl"
 expect filename.ends_with("_spec.spl") == false
 ```
@@ -128,18 +174,16 @@ expect filename.ends_with("_spec.spl") == false
 
 #### rejects other extensions
 
-- rejects other extensions
+1. expect filename ends with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects other extensions")
 val filename = "example_spec.rs"
 expect filename.ends_with("_spec.spl") == false
 ```
@@ -150,18 +194,16 @@ expect filename.ends_with("_spec.spl") == false
 
 #### filters spec files from list
 
-- filters spec files from list
+1. expect specs len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("filters spec files from list")
 val files = ["test_spec.spl", "example.spl", "other_spec.spl"]
 val specs = files.filter(_1.ends_with("_spec.spl"))
 expect specs.len() == 2
@@ -171,18 +213,16 @@ expect specs.len() == 2
 
 #### empty list when no specs
 
-- empty list when no specs
+1. expect specs len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("empty list when no specs")
 val files = ["example.spl", "test.rs"]
 val specs = files.filter(_1.ends_with("_spec.spl"))
 expect specs.len() == 0
@@ -194,18 +234,13 @@ expect specs.len() == 0
 
 #### detects failed tests
 
-- detects failed tests
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects failed tests")
 val failed_count = 1
 expect failed_count > 0 == true
 ```
@@ -214,18 +249,13 @@ expect failed_count > 0 == true
 
 #### detects no failures
 
-- detects no failures
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects no failures")
 val failed_count = 0
 expect failed_count > 0 == false
 ```
@@ -236,18 +266,16 @@ expect failed_count > 0 == false
 
 #### Some indicates error
 
-- Some indicates error
+1. expect error is some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Some indicates error")
 val error = Some("error message")
 expect error.is_some() == true
 ```
@@ -256,18 +284,13 @@ expect error.is_some() == true
 
 #### None indicates no error
 
-- None indicates no error
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("None indicates no error")
 val error_opt = None
 val has_error = false
 expect has_error == false
@@ -279,18 +302,16 @@ expect has_error == false
 
 #### OR condition for failed or error
 
-- OR condition for failed or error
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("OR condition for failed or error")
 val failed = 1
 val has_error = true
 expect (failed > 0 or has_error) == true
@@ -300,18 +321,16 @@ expect (failed > 0 or has_error) == true
 
 #### failed but no error
 
-- failed but no error
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("failed but no error")
 val failed = 1
 val has_error = false
 expect (failed > 0 or has_error) == true
@@ -321,18 +340,16 @@ expect (failed > 0 or has_error) == true
 
 #### no failed and no error
 
-- no failed and no error
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("no failed and no error")
 val failed = 0
 val has_error = false
 expect (failed > 0 or has_error) == false
@@ -344,18 +361,16 @@ expect (failed > 0 or has_error) == false
 
 #### extracts path field
 
-- extracts path field
+1. expect paths len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts path field")
 val paths = ["path1", "path2", "path3"]
 expect paths.len() == 3
 ```
@@ -366,18 +381,16 @@ expect paths.len() == 3
 
 #### Ok result check
 
-- Ok result check
+1. expect Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Ok result check")
 expect Ok("updated").is_ok() == true
 ```
 
@@ -385,18 +398,16 @@ expect Ok("updated").is_ok() == true
 
 #### Err result check
 
-- Err result check
+1. expect Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Err result check")
 expect Err("failed").is_err() == true
 ```
 
@@ -406,18 +417,17 @@ expect Err("failed").is_err() == true
 
 #### matches Err and increments counter
 
-- matches Err and increments counter
+1. Err
+2. Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches Err and increments counter")
 val result = Err("db error")
 val total_failed = 5
 val matched = match result:
@@ -430,18 +440,17 @@ expect matched == 6
 
 #### matches Ok and keeps counter
 
-- matches Ok and keeps counter
+1. Err
+2. Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches Ok and keeps counter")
 val result = Ok("success")
 val total_failed = 5
 val matched = match result:
@@ -456,18 +465,16 @@ expect matched == 5
 
 #### adds element to list
 
-- adds element to list
+1. expect new list len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds element to list")
 var list = [1, 2, 3]
 val new_list = list.append(4)
 expect new_list.len() == 4
@@ -479,18 +486,13 @@ expect new_list.len() == 4
 
 #### increments total_failed
 
-- increments total_failed
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("increments total_failed")
 val total_failed = 5
 val new_total = total_failed + 1
 expect new_total == 6
@@ -502,18 +504,16 @@ expect new_total == 6
 
 #### interpolates error message
 
-- interpolates error message
+1. expect msg contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("interpolates error message")
 val e = "database error"
 val msg = "feature db update failed: {e}"
 expect msg.contains("database error") == true
@@ -523,18 +523,16 @@ expect msg.contains("database error") == true
 
 #### interpolates path
 
-- interpolates path
+1. expect msg contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("interpolates path")
 val path = "doc/features/feature_db.sdn"
 val msg = "Would update {path}"
 expect msg.contains("feature_db.sdn") == true
@@ -546,18 +544,16 @@ expect msg.contains("feature_db.sdn") == true
 
 #### constructs with Some error
 
-- constructs with Some error
+1. expect error msg is some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("constructs with Some error")
 val path = "test.spl"
 val error_msg = Some("error")
 expect path == "test.spl"
@@ -570,18 +566,16 @@ expect error_msg.is_some() == true
 
 #### chains filter then map
 
-- chains filter then map
+1. expect mapped len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("chains filter then map")
 val numbers = [1, 2, 3, 4, 5]
 val filtered = numbers.filter(_1 > 2)
 val mapped = filtered.map(_1 * 2)
@@ -589,35 +583,6 @@ expect mapped.len() == 3
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/tooling/feature_db_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Feature Database Module, filename extraction, SPipe file detection, filter for SPipe files, failed test detection, error option check, filter failed results, map to extract paths, Result handling, match on Result for error, list append, counter increment, string formatting, struct construction with error, filter and map chain.
-- Feature Database Module
-- filename extraction
-- SPipe file detection
-- filter for SPipe files
-- failed test detection
-- error option check
-- filter failed results
-- map to extract paths
-- Result handling
-- match on Result for error
-- list append
-- counter increment
-- string formatting
-- struct construction with error
-- filter and map chain
 
 ## Scenario Summary
 
@@ -631,51 +596,3 @@ Tests covering Feature Database Module, filename extraction, SPipe file detectio
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c18efe0d3029c4a9001903ffb378b2cb7848f7b3c50b7eacc2876eb0aae9962b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c18efe0d3029c4a9001903ffb378b2cb7848f7b3c50b7eacc2876eb0aae9962b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c18efe0d3029c4a9001903ffb378b2cb7848f7b3c50b7eacc2876eb0aae9962b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/feature_db_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/feature_db_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/feature_db_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/feature_db_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/feature_db_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles successfully' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/feature_db_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts filename from path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/feature_db_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles path without directory' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

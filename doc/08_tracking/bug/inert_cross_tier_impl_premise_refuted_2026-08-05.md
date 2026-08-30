@@ -1,8 +1,7 @@
 # The "278 orphaned methods in inert cross-tier impl blocks" finding is REFUTED
 
 Date: 2026-08-05
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: finding invalid; guard retired; real defect restated below.
 
 ## What was claimed
 

@@ -2,6 +2,29 @@
 
 > `gemm(alpha, A, B, beta, C)` computes `C := alpha * A * B + beta * C` (BLAS Level-3 dgemm). All matrices are typed: `Float64`, `Matrix<Float64>`.
 
+<!-- sdn-diagram:id=blas_gemm_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=blas_gemm_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+blas_gemm_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=blas_gemm_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -24,7 +47,7 @@
 | Plan | doc/03_plan/agent_tasks/scilib_port_blas.md |
 | Design | doc/05_design/scilib_port_architecture.md |
 | Source | `test/03_system/feature/scilib/blas_gemm_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -63,19 +86,21 @@ T-BLAS-12 (gemm Layer C public API), T-BLAS-13 (operand-swap correctness spec).
 
 #### returns C[0,0]=58.0
 
-- returns C[0,0]=58.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(58.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[0,0]=58.0")
 # T-BLAS-11, T-BLAS-13
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
@@ -93,19 +118,21 @@ expect(c.get_at([Index.new(0), Index.new(0)])).to_equal(Float64.new(58.0))
 
 #### returns C[0,1]=64.0
 
-- returns C[0,1]=64.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(64.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[0,1]=64.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -122,19 +149,21 @@ expect(c.get_at([Index.new(0), Index.new(1)])).to_equal(Float64.new(64.0))
 
 #### returns C[1,0]=139.0
 
-- returns C[1,0]=139.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(1), Index.new(0)]) equals `Float64.new(139.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[1,0]=139.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -151,19 +180,21 @@ expect(c.get_at([Index.new(1), Index.new(0)])).to_equal(Float64.new(139.0))
 
 #### returns C[1,1]=154.0
 
-- returns C[1,1]=154.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(154.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[1,1]=154.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -180,7 +211,11 @@ expect(c.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(154.0))
 
 #### result has shape 2x2
 
-- result has shape 2x2
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.rows() equals `Index.new(2)`
    - Expected: c.cols() equals `Index.new(2)`
 
@@ -188,12 +223,10 @@ expect(c.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(154.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("result has shape 2x2")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -215,19 +248,21 @@ expect(c.cols()).to_equal(Index.new(2))
 
 #### returns C[0,0]=119.0
 
-- returns C[0,0]=119.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(119.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[0,0]=119.0")
 # T-BLAS-12: beta-accumulate path
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
@@ -245,19 +280,21 @@ expect(c.get_at([Index.new(0), Index.new(0)])).to_equal(Float64.new(119.0))
 
 #### returns C[0,1]=131.0
 
-- returns C[0,1]=131.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(131.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[0,1]=131.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -274,19 +311,21 @@ expect(c.get_at([Index.new(0), Index.new(1)])).to_equal(Float64.new(131.0))
 
 #### returns C[1,0]=281.0
 
-- returns C[1,0]=281.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(1), Index.new(0)]) equals `Float64.new(281.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[1,0]=281.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -303,19 +342,21 @@ expect(c.get_at([Index.new(1), Index.new(0)])).to_equal(Float64.new(281.0))
 
 #### returns C[1,1]=311.0
 
-- returns C[1,1]=311.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: c.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(311.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[1,1]=311.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -336,7 +377,13 @@ expect(c.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(311.0))
 
 #### result has shape 3x2
 
-- result has shape 3x2
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
+6. [Float64 new
+7. [Float64 new
    - Expected: c.rows() equals `Index.new(3)`
    - Expected: c.cols() equals `Index.new(2)`
 
@@ -344,12 +391,10 @@ expect(c.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(311.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("result has shape 3x2")
 # T-BLAS-13: non-square operand-swap invariant
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0), Float64.new(0.0)],
@@ -370,7 +415,13 @@ expect(c.cols()).to_equal(Index.new(2))
 
 #### returns C[0,0]=1.0 and C[0,1]=2.0
 
-- returns C[0,0]=1.0 and C[0,1]=2.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
+6. [Float64 new
+7. [Float64 new
    - Expected: c.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(1.0)`
    - Expected: c.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(2.0)`
 
@@ -378,12 +429,10 @@ expect(c.cols()).to_equal(Index.new(2))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[0,0]=1.0 and C[0,1]=2.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0), Float64.new(0.0)],
     [Float64.new(0.0), Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
@@ -403,7 +452,13 @@ expect(c.get_at([Index.new(0), Index.new(1)])).to_equal(Float64.new(2.0))
 
 #### returns C[2,0]=5.0 and C[2,1]=6.0
 
-- returns C[2,0]=5.0 and C[2,1]=6.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
+6. [Float64 new
+7. [Float64 new
    - Expected: c.get_at([Index.new(2), Index.new(0)]) equals `Float64.new(5.0)`
    - Expected: c.get_at([Index.new(2), Index.new(1)]) equals `Float64.new(6.0)`
 
@@ -411,12 +466,10 @@ expect(c.get_at([Index.new(0), Index.new(1)])).to_equal(Float64.new(2.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns C[2,0]=5.0 and C[2,1]=6.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0), Float64.new(0.0)],
     [Float64.new(0.0), Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
@@ -438,19 +491,21 @@ expect(c.get_at([Index.new(2), Index.new(1)])).to_equal(Float64.new(6.0))
 
 #### returns an error when A.cols != B.rows
 
-- returns an error when A.cols != B.rows
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error when A.cols != B.rows")
 # T-BLAS-12: dimension guard on inner dimension
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0)],
@@ -468,19 +523,21 @@ expect(r.is_err()).to_equal(true)
 
 #### returns an error when C dimensions don't match A.rows x B.cols
 
-- returns an error when C dimensions don't match A.rows x B.cols
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error when C dimensions don't match A.rows x B.cols")
 # T-BLAS-12: C output dimension guard
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
@@ -509,56 +566,8 @@ expect(r.is_err()).to_equal(true)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/scilib_port_blas.md`
-- **Design:** `doc/05_design/scilib_port_architecture.md`
+- **Plan:** [doc/03_plan/agent_tasks/scilib_port_blas.md](doc/03_plan/agent_tasks/scilib_port_blas.md)
+- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ace645dfd5d988ebd17fd778020ea74c59a500408d8d6aa3c6a4a90571ad0d50`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ace645dfd5d988ebd17fd778020ea74c59a500408d8d6aa3c6a4a90571ad0d50`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ace645dfd5d988ebd17fd778020ea74c59a500408d8d6aa3c6a4a90571ad0d50`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/scilib/blas_gemm_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/blas_gemm_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/blas_gemm_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/blas_gemm_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/blas_gemm_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns C[0,0]=58.0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/blas_gemm_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns C[0,1]=64.0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/blas_gemm_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns C[1,0]=139.0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

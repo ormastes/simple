@@ -1,15 +1,21 @@
-# completion_wait_set_spec
+# SOSIX typed completion and wait-set contract
 
-> REQ-SQ-002/015: typed completion queue and notification wait-set state.
+This unit contract covers REQ-SQ-002 and REQ-SQ-015 for the canonical
+asynchronous operation core.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+It verifies that:
 
-<details>
-<summary>Full Scenario Manual</summary>
+- terminal operation slots become typed completions without losing partial
+  progress;
+- decoding a completion as another API is rejected;
+- the bounded FIFO rejects overflow without overwriting unread data;
+- only a watched `(slot, generation)` may publish a notification;
+- duplicate notifications are suppressed; and
+- consuming a completion removes its watch so the bounded wait set is reusable.
 
-# completion_wait_set_spec
+The state machine contains no sleep, polling loop, environment access, or
+process execution. Platform adapters are responsible for signaling and waiting
+through their native notification primitive.
 
 REQ-SQ-002/015: typed completion queue and notification wait-set state.
 

@@ -1,0 +1,73 @@
+use std.spec.{describe, it, expect, step}
+use std.common.llm.knowledge_selector.*
+
+fn features() -> [KnowledgeFeatureRoute]:
+    [KnowledgeFeatureRoute(feature_id: "simpleos_vulkan_cuda_adreno", group_id: "rendering_ui",
+        group_path: "doc/00_llm_process/feature_group/rendering_ui/skill.md",
+        expert_path: "doc/00_llm_process/feature_expert/gpu_offload_check/skill.md")]
+
+fn layers() -> [KnowledgeLayerRoute]:
+    [KnowledgeLayerRoute(prefix: "src", group_id: "app_editor_tooling",
+        group_path: "doc/00_llm_process/layer_base/app_editor_tooling/skill.md", expert_path: "", architecture_profile: "mdsoc_plus"),
+     KnowledgeLayerRoute(prefix: "src/os", group_id: "os_userland",
+        group_path: "doc/00_llm_process/layer_base/os_userland/skill.md", expert_path: "", architecture_profile: "mdsoc_plus"),
+     KnowledgeLayerRoute(prefix: "src/os/kernel", group_id: "os_kernel",
+        group_path: "doc/00_llm_process/layer_base/os_kernel/skill.md", expert_path: "", architecture_profile: "mdsoc_only"),
+     KnowledgeLayerRoute(prefix: "src/os/drivers", group_id: "os_drivers",
+        group_path: "doc/00_llm_process/layer_base/os_drivers/skill.md", expert_path: "", architecture_profile: "mdsoc_only")]
+
+describe "deterministic implementation knowledge selection":
+    it "should retrieve both feature and longest-prefix layer knowledge":
+        # @covers KS_FEATURE_COUNT_ZERO:false KS_FEATURE_COUNT_MULTI:false KS_SOURCE_EMPTY:false
+        # @covers KS_BEST_MISSING:false KS_BEST_AMBIG:false KS_FORCE_MDSOC:true
+        # @covers KS_UNSAFE_PROFILE:false KS_EXPERT_PRESENT:true
+        step("Resolve exact feature knowledge")
+        val selected = select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno",
+            ["src/os/kernel/arch/arm64/gpu.spl"], features(), layers())
+        step("Resolve longest-prefix layer knowledge")
+        expect(selected.reason).to_equal("ok")
+        expect(selected.path_selections[0].matched_prefix).to_equal("src/os/kernel")
+        expect(selected.path_selections[0].layer_group_id).to_equal("os_kernel")
+        expect(selected.knowledge_paths).to_contain("doc/00_llm_process/feature_group/rendering_ui/skill.md")
+        expect(selected.knowledge_paths).to_contain("doc/00_llm_process/layer_base/os_kernel/skill.md")
+
+    it "should force kernel and driver paths to MDSOC only":
+        step("Enforce MDSOC-only safety profiles")
+        val selected = select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno",
+            ["src/os/kernel/main.spl", "src/os/drivers/gpu/adreno.spl"], features(), layers())
+        expect(selected.architecture_profile).to_equal("mdsoc_only")
+        expect(selected.path_selections[0].architecture_profile).to_equal("mdsoc_only")
+        expect(selected.path_selections[1].architecture_profile).to_equal("mdsoc_only")
+
+    it "should fail closed for missing ambiguous and unsafe routes":
+        # @covers KS_FEATURE_COUNT_ZERO:true KS_FEATURE_COUNT_MULTI:true KS_UNSAFE_PROFILE:true
+        step("Reject unresolved knowledge selection")
+        expect(select_implementation_knowledge("1", "missing", ["src/main.spl"], features(), layers()).reason).to_equal("feature-route-missing")
+        val duplicate = features() + features()
+        expect(select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno", ["src/main.spl"], duplicate, layers()).reason).to_equal("feature-route-ambiguous")
+        val unsafe_layers = [KnowledgeLayerRoute(prefix: "src/os/kernel", group_id: "os_kernel",
+            group_path: "kernel-base", expert_path: "", architecture_profile: "mdsoc_plus")]
+        expect(select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno", ["src/os/kernel/main.spl"], features(), unsafe_layers).reason).to_start_with("mdsoc-only-route-required")
+        expect(select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno", [], features(), layers()).reason).to_equal("source-paths-empty")
+        # @covers KS_SOURCE_EMPTY:true
+        val no_match = [KnowledgeLayerRoute(prefix: "src/os/kernel", group_id: "os_kernel",
+            group_path: "kernel-base", expert_path: "", architecture_profile: "mdsoc_only")]
+        expect(select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno", ["src/app/main.spl"], features(), no_match).reason).to_start_with("layer-route-missing")
+        # @covers KS_BEST_MISSING:true
+        val ambiguous_layers = [
+            KnowledgeLayerRoute(prefix: "src/app", group_id: "app_a", group_path: "a", expert_path: "", architecture_profile: "mdsoc_plus"),
+            KnowledgeLayerRoute(prefix: "src/app", group_id: "app_b", group_path: "b", expert_path: "", architecture_profile: "mdsoc_plus")]
+        expect(select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno", ["src/app/main.spl"], features(), ambiguous_layers).reason).to_start_with("layer-route-ambiguous")
+        # @covers KS_BEST_AMBIG:true
+
+    it "should serialize a stable auditable receipt":
+        # @covers KS_FORCE_MDSOC:false KS_EXPERT_PRESENT:false
+        step("Record deterministic knowledge receipt")
+        val feature_without_expert = [KnowledgeFeatureRoute(feature_id: "simpleos_vulkan_cuda_adreno", group_id: "rendering_ui",
+            group_path: "doc/00_llm_process/feature_group/rendering_ui/skill.md", expert_path: "")]
+        val selected = select_implementation_knowledge("1", "simpleos_vulkan_cuda_adreno",
+            ["src/main.spl"], feature_without_expert, layers())
+        val receipt = knowledge_selection_receipt(selected)
+        expect(receipt).to_contain("registry_version=1")
+        expect(receipt).to_contain("architecture_profile=mdsoc_plus")
+        expect(receipt).to_contain("source_path=src/main.spl|prefix=src")

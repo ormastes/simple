@@ -102,7 +102,7 @@ scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 scripts/setup/setup.shs
 
 # Windows (Git Bash / MSYS2)
-scripts/bootstrap/bootstrap-windows.sh --deploy
+scripts/bootstrap/bootstrap-from-scratch.sh windows-entry --deploy
 scripts/setup/setup.shs
 ```
 
@@ -421,8 +421,8 @@ bin/simple build --release          # Optimized build
 bin/simple test                     # Run all tests
 bin/simple test path/to/spec.spl   # Run a specific test
 bin/simple build fmt                # Format code
-bin/simple lint <changed .spl files> # Run the pure-Simple source linter
-bin/simple build check              # Rust clippy + rustfmt check + Rust tests
+bin/simple build lint               # Run linter
+bin/simple build check              # All quality checks (lint + fmt --check + tests)
 ```
 
 ### Bootstrap

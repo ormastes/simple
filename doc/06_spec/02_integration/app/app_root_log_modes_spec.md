@@ -1,6 +1,29 @@
-# app_root_log_modes_spec
+# App Root Log Modes Specification
 
-> Purpose: This spec proves app root log mode CLI options.
+> <details>
+
+<!-- sdn-diagram:id=app_root_log_modes_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=app_root_log_modes_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+app_root_log_modes_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=app_root_log_modes_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,23 +32,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# app_root_log_modes_spec
-
-Purpose: This spec proves app root log mode CLI options.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/02_integration/app/app_root_log_modes_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Purpose: This spec proves app root log mode CLI options.
-Audience: Maintainers of the Simple integration suite reviewing this behavior.
+# App Root Log Modes Specification
 
 ## Scenarios
 
@@ -33,24 +40,13 @@ Audience: Maintainers of the Simple integration suite reviewing this behavior.
 
 #### keeps plain invocation quiet
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- keeps plain invocation quiet
-   - Expected: code equals `0`
-   - Expected: out equals ``
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-APPROOTLOGMODES-001
-step("keeps plain invocation quiet")
 val (out, err, code) = _run_app_root([])
 expect(code).to_equal(0)
 expect(out).to_equal("")
@@ -60,21 +56,13 @@ expect(out).to_equal("")
 
 #### shows shared log options in help
 
-- shows shared log options in help
-- shows shared log options in help
-   - Expected: code equals `0`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("shows shared log options in help")
-step("shows shared log options in help")
 val (out, err, code) = _run_app_root(["--help"])
 expect(code).to_equal(0)
 expect(out).to_contain("Simple app root entrypoint")
@@ -86,21 +74,13 @@ expect(out).to_contain("--progress")
 
 #### supports log-mode json for ready output
 
-- supports log-mode json for ready output
-- supports log-mode json for ready output
-   - Expected: code equals `0`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("supports log-mode json for ready output")
-step("supports log-mode json for ready output")
 val (out, err, code) = _run_app_root(["--log-mode=json"])
 expect(code).to_equal(0)
 expect(out).to_contain("\"command\":\"app-root\"")
@@ -111,21 +91,13 @@ expect(out).to_contain("\"status\":\"ready\"")
 
 #### supports dot progress for help output
 
-- supports dot progress for help output
-- supports dot progress for help output
-   - Expected: code equals `0`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("supports dot progress for help output")
-step("supports dot progress for help output")
 val (out, err, code) = _run_app_root(["--progress=dot", "--help"])
 expect(code).to_equal(0)
 expect(out).to_start_with(".")
@@ -136,26 +108,33 @@ expect(out).to_contain("Simple app root entrypoint")
 
 #### rejects invalid log mode
 
-- rejects invalid log mode
-- rejects invalid log mode
-   - Expected: code equals `1`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects invalid log mode")
-step("rejects invalid log mode")
 val (out, err, code) = _run_app_root(["--log-mode=noisy"])
 expect(code).to_equal(1)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/02_integration/app/app_root_log_modes_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- app root log mode CLI options
 
 ## Scenario Summary
 
@@ -169,55 +148,3 @@ expect(code).to_equal(1)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-- `REQ-APPROOTLOGMODES-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `86b563664bd34f7eb59251aefd3f0b7b408574297945ce58aead9e3a753a9d4c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `86b563664bd34f7eb59251aefd3f0b7b408574297945ce58aead9e3a753a9d4c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `86b563664bd34f7eb59251aefd3f0b7b408574297945ce58aead9e3a753a9d4c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/02_integration/app/app_root_log_modes_spec.spl
-mirror: doc/06_spec/02_integration/app/app_root_log_modes_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/app_root_log_modes_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/app_root_log_modes_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/app/app_root_log_modes_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/app/app_root_log_modes_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps plain invocation quiet' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/app_root_log_modes_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shows shared log options in help' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/app_root_log_modes_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports log-mode json for ready output' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

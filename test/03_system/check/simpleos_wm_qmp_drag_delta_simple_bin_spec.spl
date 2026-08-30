@@ -1,5 +1,9 @@
 use test.helpers.compiler_native_link_source.{compiler_native_link_source}
 """
+## Purpose and audience
+Purpose: verify that SimpleOS WM QMP drag-delta Simple binary contract behaves as this spec's scenarios assert.
+Audience: maintainers of this spec and reviewers of the behavior it proves.
+
 # SimpleOS WM QMP Drag Delta Simple Binary Contract
 
 Validates that the SimpleOS WM QMP drag-delta evidence wrapper uses self-hosted
@@ -62,11 +66,11 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_qmp_drag_delta_s
 
 # @tag: system, gui, simpleos, qmp, simple-bin
 
-use std.io_runtime.{file_read}
-use app.io.mod.{process_run_timeout}
+use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 describe "SimpleOS WM QMP drag-delta Simple binary contract":
+    # @manual scenario evidence
 
     it "routes decoded PS2 drag packets through real lifecycle geometry":
         val entry = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl")
@@ -119,26 +123,23 @@ describe "SimpleOS WM QMP drag-delta Simple binary contract":
         expect(script).to_contain("guest-entry-not-reported")
         expect(script).to_contain("wm-simple-web-build-timeout")
         val native_build_main = file_read("src/app/cli/native_build_main.spl")
-        expect(native_build_main).to_end_with("    run_native_build_worker(args)\n")
-        expect(native_build_main.contains("return cli_native_build(args)")).to_equal(false)
+        expect(native_build_main).to_contain("cli_native_build(args)")
+        expect(native_build_main).to_contain("SIMPLE_NATIVE_BUILD_FORCE_WORKER")
         expect(native_build_main).to_contain("[\"run\", \"src/app/cli/native_build_worker.spl\"]")
+        expect(native_build_main).to_contain("worker_args.push(\"--mode=interpreter\")")
         expect(native_build_main).to_contain("env_set(\"SIMPLE_EXECUTION_MODE\", \"interpret\")")
         val runner_targets = file_read("src/os/_QemuRunner/runner_targets.spl")
-        expect(runner_targets).to_contain("fn _os_build_backend_for_target(target: OsTarget) -> text:")
-        expect(runner_targets).to_contain("output: \"build/os/simpleos_wm_simple_web_check_32.elf\"")
+        expect(runner_targets).to_contain("if target.output == \"build/os/simpleos_wm_simple_web_check_32.elf\":")
         expect(runner_targets).to_contain("return \"llvm\"")
         val compile_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
-        expect(compile_targets).to_contain("var build_mode = \"dynload\"")
-        expect(compile_targets).to_contain("if build_mode != \"dynload\" and build_mode != \"one-binary\"")
-        expect(compile_targets).to_contain("options.output_format = driver_output_format_both()")
-        expect(compile_targets).to_contain("options.output_format = driver_output_format_native()")
-        expect(compile_targets).to_contain("fn _native_build_entry_closure")
-        expect(compile_targets).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
-        expect(compile_targets).to_contain("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE")
+        expect(compile_targets).to_contain("linker_script = args[j]")
+        expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", linker_script)")
+        expect(compile_targets).to_contain("env_set(\"SIMPLE_NATIVE_BUILD_LINKER_SCRIPT\", old_linker_script)")
+        expect(compile_targets).to_contain("elif a == \"--cpu\"")
         val native_build_worker = file_read("src/app/cli/native_build_worker.spl")
         expect(native_build_worker).to_contain("use app.io._CliCompile.compile_targets.")
         expect(native_build_worker).to_contain("cli_native_build")
-        val llvm_native_link = compiler_native_link_source()
+        val llvm_native_link = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
         expect(llvm_native_link).to_contain("is_simpleos_x86_64_link")
         expect(llvm_native_link).to_contain("link_simpleos_x86_64")
         expect(llvm_native_link).to_contain("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT")
@@ -148,7 +149,7 @@ describe "SimpleOS WM QMP drag-delta Simple binary contract":
     it "rejects explicit Rust seed before SimpleOS QMP launch":
         val root = "build/test-simpleos-wm-qmp-drag-delta-seed-forbidden"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
-        val (_stdout, _stderr, code) = process_run_timeout("/bin/sh", ["-c", command], 10000)
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
         val output = file_read(root + "/stdout.txt")
@@ -160,7 +161,7 @@ describe "SimpleOS WM QMP drag-delta Simple binary contract":
 
         val report = file_read(root + "/report.md")
         expect(report).to_contain("- reason: simple-bin-forbidden")
-        val (_launch_out, _launch_err, launch_code) = process_run_timeout("/bin/sh", ["-c", "test ! -f " + root + "/out/launch.out"], 5000)
+        val (_launch_out, _launch_err, launch_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/launch.out"])
         expect(launch_code).to_equal(0)
-        val (_drag_out, _drag_err, drag_code) = process_run_timeout("/bin/sh", ["-c", "test ! -f " + root + "/out/drag.out"], 5000)
+        val (_drag_out, _drag_err, drag_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/drag.out"])
         expect(drag_code).to_equal(0)

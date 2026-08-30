@@ -29,6 +29,7 @@ A matched location with a non-static handler_type must reach the REGISTERED hand
 
 ## Overview
 
+```simple
 A matched location with a non-static handler_type must reach the REGISTERED
 handler through the handler registry, under a server-established security
 context — never the inline static file handler (assessment finding P0-D:
@@ -42,6 +43,7 @@ it observes the transport-established security identity while running, the
 context is cleared after dispatch returns, and an unregistered type answers
 501 instead of silently falling back to static file serving.
 
+```
 ## Dispatch decision
 
 | location.handler_type | Path taken |

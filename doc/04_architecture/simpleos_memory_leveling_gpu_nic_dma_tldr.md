@@ -18,5 +18,6 @@ memory_leveling_architecture:
 - Pinned, mapped, in-flight, or device-owned memory is not reclaimable.
 - Swap preserves allocation identity and verifies content before restore.
 - Pressure consumes bounded candidate queues, not full PMM scans.
-- QEMU proves virtio ownership and swap only, not physical GPUDirect/IOMMU.
-
+- QEMU proves virtio-net TX/RX, virtio-gpu command/scanout ownership, protected
+  DMA lifecycles, and swap. It does not prove physical GPUDirect, RDMA paging,
+  cache-coherency maintenance, or IOMMU isolation.

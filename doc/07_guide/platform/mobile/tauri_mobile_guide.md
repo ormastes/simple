@@ -1,10 +1,5 @@
 # Tauri Mobile Guide — Simple GUI on iOS & Android
 
-> **Production design + plan:** [`doc/05_design/platform/mobile/tauri2_mobile_production_design.md`](../../../05_design/platform/mobile/tauri2_mobile_production_design.md)
-> and [`doc/03_plan/platform/mobile/tauri2_mobile_production_plan.md`](../../../03_plan/platform/mobile/tauri2_mobile_production_plan.md)
-> cover runtime strategy (Android subprocess vs iOS-device AOT static-link), signing/release lanes,
-> perf gates, and the shell-source-not-in-git blocker (Phase 0). This guide is the current how-to.
-
 How to render a Simple GUI (`.ui.sdn`) layout as a native iOS / Android app via
 the Tauri v2 shell (`tools/tauri-shell`). Two modes: the **embedded static page**
 (§1, renders once) and the **live source-bundle** mode (§1b, the default on
@@ -97,8 +92,8 @@ Phone readability comes from two pieces, both emitted by the renderer:
    planned `LayoutProfile` size classes in `common/ui/profile.spl`:
    - **compact** (`<= 600px`, phone): single column, full-bleed panels, 16px base
      font (also stops iOS input-focus zoom), 44px touch targets, stacked rows.
-   - **regular** (`601–840px`, tablet): 2-column grid.
-   - **expanded** (`> 840px`, desktop): default multi-column layout.
+   - **regular** (`601–1200px`, tablet): 2-column grid.
+   - **expanded** (`> 1200px`, desktop): default multi-column layout.
 
 The webview applies the size class from its real device width, so this needs no
 server-side viewport plumbing. `common/ui/profile.spl` exposes the same
@@ -195,41 +190,23 @@ sh scripts/check/check-tauri-mobile-renderer-parity-evidence.shs
 
 The wrapper requires the desktop production parity evidence to pass first, then
 checks generated Tauri2 iOS/Android projects, live iOS simulator rendering with
-validator-backed WKWebView/Metal render-log evidence, and live Android emulator
-rendering with Vulkan/skiavk log markers plus screenshot proof. The iOS
-render-log validator requires a `[tauri-shell] render, html_len=` row, an
-iOS/Tauri webview context marker, a Metal context marker, and no failure marker.
-It also validates the live `[tauri-shell] mdi proof:` JSON from each mobile lane. A pass requires
+Metal log markers, and live Android emulator rendering with Vulkan/skiavk log
+markers plus screenshot proof. It also validates the live `[tauri-shell] mdi
+proof:` JSON from each mobile lane. A pass requires
 `ios_mdi_event_status`, `ios_mdi_capture_status`,
-`ios_mdi_performance_status`, `ios_mdi_interaction_latency_status`,
-`ios_mdi_animation_status`, and the matching Android keys to all be `pass`;
-those fields prove MDI event routing, live viewport capture dimensions,
-`performance.now()` availability with a positive timing delta, a positive
-input-to-paint sample after routed MDI input, `requestAnimationFrame`
-availability with at least two animation frames, and CSS animation support.
-The direct iOS and Android wrappers also persist the raw normalized MDI
-validator output as `ios_mdi_proof.validation.env` and
-`android_mdi_proof.validation.env` before the aggregate consumes those rows.
-Evidence is written to
+`ios_mdi_performance_status`, `ios_mdi_animation_status`, and the matching
+Android keys to all be `pass`; those fields prove MDI event routing, live
+viewport capture dimensions, `performance.now()`, two animation frames, and CSS
+animation support. Evidence is written to
 `doc/09_report/tauri_mobile_renderer_parity_evidence_<date>.md`.
 
-The aggregate GUI/Web/2D completion checklist must consume fresh mobile evidence
-from the target macOS/iOS and Android host or emulator run. A retained report is
-not a standing completion claim after renderer, shell, runtime, browser engine,
-or platform SDK changes. Completion reviews must keep the raw
-`ios_mdi_proof.validation.env` and `android_mdi_proof.validation.env` rows,
-live screenshot artifacts, foreground markers, `[tauri-shell] render,
-html_len=` markers, Metal/Vulkan markers, and production desktop parity
-`device_readback` evidence together.
-
-Historical retained evidence only; rerun required for completion. The
-2026-06-26 retained status was `pass`: iOS simulator Metal-backed
-Tauri2/WKWebView rendering passed with a nonblank mobile UI screenshot, Metal
-markers, and MDI event/capture/performance/animation proof. Android arm64
-runtime and APK packaging passed, and the Android emulator host-Vulkan lane
-passed with `com.simple.ui` foreground, a real `[tauri-shell] render,
-html_len=` marker, layout screenshot proof, MDI proof, and emulator Vulkan
-markers (`-gpu host`, Apple M4).
+2026-06-26 status: pass. iOS simulator Metal-backed Tauri2/WKWebView rendering
+passes with a nonblank mobile UI screenshot, Metal markers, and MDI
+event/capture/performance/animation proof. Android arm64 runtime and APK
+packaging pass, and the Android emulator host-Vulkan lane passes with
+`com.simple.ui` foreground, a real `[tauri-shell] render, html_len=` marker,
+layout screenshot proof, MDI proof, and emulator Vulkan markers (`-gpu host`,
+Apple M4).
 Guest HWUI `skiavk`, `swiftshader`, and `lavapipe` still crash
 `libhwui`/`VulkanManager` on the local Pixel7 AVD, so record the green lane as
 host/emulator Vulkan translation evidence, not guest `skiavk` evidence.

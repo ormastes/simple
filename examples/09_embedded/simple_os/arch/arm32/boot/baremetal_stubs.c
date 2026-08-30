@@ -95,7 +95,7 @@ RuntimeValue arm32_harden_print_canary(void)
 #define TAG_SPECIAL 0x3U
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)(v) >> 3)
+#define DECODE_INT(v)  ((int32_t)((uint32_t)(v) >> 3))
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint32_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint32_t)(v) & ~TAG_MASK))
@@ -108,32 +108,6 @@ RuntimeValue arm32_harden_print_canary(void)
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
 #define TRUE_VALUE     ENCODE_INT(1)
 #define FALSE_VALUE    ENCODE_INT(0)
-
-extern uint32_t rt_arm32_boot_dtb_physical_storage;
-
-RuntimeValue rt_arm32_boot_dtb_low16(void)
-{
-    return ENCODE_INT(rt_arm32_boot_dtb_physical_storage & 0xffffU);
-}
-
-RuntimeValue rt_arm32_boot_dtb_high16(void)
-{
-    return ENCODE_INT(rt_arm32_boot_dtb_physical_storage >> 16);
-}
-
-RuntimeValue rt_arm32_mrc_mpidr_low16(void)
-{
-    uint32_t mpidr;
-    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
-    return ENCODE_INT(mpidr & 0xffffU);
-}
-
-RuntimeValue rt_arm32_mrc_mpidr_high16(void)
-{
-    uint32_t mpidr;
-    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
-    return ENCODE_INT(mpidr >> 16);
-}
 
 typedef struct {
     uint32_t type;
@@ -171,12 +145,8 @@ static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
 {
-    if (sz > sizeof(_heap) - 15) {
-        serial_puts("[PANIC] heap exhausted\r\n");
-        for(;;) __asm__ volatile("wfe");
-    }
     sz = (sz + 15) & ~(size_t)15;
-    if (_heap_off > sizeof(_heap) - sz) {
+    if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted\r\n");
         for(;;) __asm__ volatile("wfe");
     }
@@ -368,7 +338,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     /* Parameters are raw (untagged) per the Rust runtime ABI.
        len_val is the raw byte count, data is a raw pointer. */
     int32_t len = len_val;
-    if (len < 0 || len > 0x100000) return NIL_VALUE;
+    if (len <= 0 || len > 0x100000) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -397,19 +367,19 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return 0;
+    if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return 0;
-    return (RuntimeValue)s->len;
+    if (!s) return ENCODE_INT(0);
+    return ENCODE_INT(s->len);
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return NIL_VALUE;
+    if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int32_t i = (int32_t)idx;
-    if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
-    return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
+    int32_t i = DECODE_INT(idx);
+    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
+    return ENCODE_INT((int32_t)(unsigned char)s->data[i]);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -506,12 +476,11 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
+    int32_t i = DECODE_INT(idx);
     if (h->type == HEAP_STRING) {
-        if (!IS_INT(idx)) return NIL_VALUE;
-        return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));
+        return rt_string_char_at(v, idx);
     }
     if (h->type == HEAP_ARRAY) {
-        int32_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
@@ -790,56 +759,10 @@ S2(rt_string_index_of) S2(rt_string_last_index_of)
 S2(rt_string_substr) S2(rt_string_split)
 S1(rt_string_trim) S1(rt_string_trim_start) S1(rt_string_trim_end)
 S1(rt_string_to_upper) S1(rt_string_to_lower)
-S2(rt_string_repeat)
+S2(rt_string_replace) S3(rt_string_replace_all) S2(rt_string_repeat)
 S2(rt_string_pad_start) S2(rt_string_pad_end)
-S1(rt_string_reverse) S1(rt_string_bytes)
+S1(rt_string_reverse) S1(rt_string_chars) S1(rt_string_bytes)
 S1(rt_string_is_empty) S2(rt_string_compare) S2(rt_string_format)
-
-RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
-{
-    if (!IS_HEAP(str) || !IS_HEAP(old_val) || !IS_HEAP(new_val)) return NIL_VALUE;
-    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
-    RuntimeString *o = IS_HEAP(old_val) ? (RuntimeString *)DECODE_PTR(old_val) : (RuntimeString *)0;
-    RuntimeString *n = IS_HEAP(new_val) ? (RuntimeString *)DECODE_PTR(new_val) : (RuntimeString *)0;
-    if (!s || !o || !n || s->hdr.type != HEAP_STRING || o->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) return NIL_VALUE;
-    if (o->len == 0 || o->len > s->len) return str;
-    uint32_t nlen = n->len;
-    uint32_t count = 0;
-    for (uint32_t i = 0; o->len <= s->len - i;) {
-        uint32_t j;
-        for (j = 0; j < o->len; j++) if (s->data[i + j] != o->data[j]) break;
-        if (j == o->len) { count++; i += o->len; } else i++;
-    }
-    if (count == 0) return str;
-    uint64_t result_len_wide = (uint64_t)s->len - (uint64_t)count * o->len + (uint64_t)count * nlen;
-    if (result_len_wide > 0x100000U) return str;
-    uint32_t result_len = (uint32_t)result_len_wide;
-    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
-    if (!r) return str;
-    r->hdr.type = HEAP_STRING;
-    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
-    r->len = result_len;
-    uint32_t out = 0;
-    for (uint32_t i = 0; i < s->len;) {
-        if (o->len <= s->len - i) {
-            uint32_t j;
-            for (j = 0; j < o->len; j++) if (s->data[i + j] != o->data[j]) break;
-            if (j == o->len) {
-                if (nlen > 0) { __builtin_memcpy(r->data + out, n->data, nlen); out += nlen; }
-                i += o->len;
-                continue;
-            }
-        }
-        r->data[out++] = s->data[i++];
-    }
-    r->data[result_len] = '\0';
-    return ENCODE_PTR(r);
-}
-
-RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
-{
-    return rt_string_replace_all(str, old_val, new_val);
-}
 
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
@@ -910,7 +833,7 @@ RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int32_t i = (int32_t)idx;
+    int32_t i = DECODE_INT(idx);
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     return a->items[i];
 }
@@ -920,7 +843,7 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    int32_t i = (int32_t)idx;
+    int32_t i = DECODE_INT(idx);
     if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
     a->items[i] = val;
     return val;
@@ -932,23 +855,6 @@ RuntimeValue rt_array_len(RuntimeValue arr)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return 0;
     return (RuntimeValue)a->len;
-}
-
-RuntimeValue rt_string_chars(RuntimeValue str)
-{
-    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
-    RuntimeValue arr = rt_array_new(ENCODE_INT(s && s->hdr.type == HEAP_STRING ? s->len : 0));
-    if (!s || s->hdr.type != HEAP_STRING) return arr;
-    for (uint32_t i = 0; i < s->len;) {
-        uint8_t lead = (uint8_t)s->data[i];
-        uint32_t width = 1;
-        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
-        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
-        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
-        arr = rt_array_push(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width));
-        i += width;
-    }
-    return arr;
 }
 
 S3(rt_array_slice) S2(rt_array_contains) S2(rt_array_index_of)
@@ -1225,16 +1131,10 @@ RuntimeValue rt_memory_barrier(void)
 
 static void arm32_clean_dcache_range(uint32_t addr, uint32_t size)
 {
-    if (size == 0U) return;
-    /* A DMA ownership range may not wrap the ARM32 physical address space.
-     * Fail-stop instead of silently maintaining an unrelated low range and
-     * then allowing device submission to continue. */
-    if ((size - 1U) > (UINT32_MAX - addr)) __builtin_trap();
     uint32_t line = addr & ~31U;
-    uint32_t last = (addr + size - 1U) & ~31U;
-    for (;;) {
+    uint32_t end = (addr + size + 31U) & ~31U;
+    while (line < end) {
         __asm__ volatile("mcr p15, 0, %0, c7, c10, 1" :: "r"(line) : "memory");
-        if (line == last) break;
         line += 32U;
     }
     __asm__ volatile("dsb sy" ::: "memory");
@@ -1242,13 +1142,10 @@ static void arm32_clean_dcache_range(uint32_t addr, uint32_t size)
 
 static void arm32_invalidate_dcache_range(uint32_t addr, uint32_t size)
 {
-    if (size == 0U) return;
-    if ((size - 1U) > (UINT32_MAX - addr)) __builtin_trap();
     uint32_t line = addr & ~31U;
-    uint32_t last = (addr + size - 1U) & ~31U;
-    for (;;) {
+    uint32_t end = (addr + size + 31U) & ~31U;
+    while (line < end) {
         __asm__ volatile("mcr p15, 0, %0, c7, c6, 1" :: "r"(line) : "memory");
-        if (line == last) break;
         line += 32U;
     }
     __asm__ volatile("dsb sy" ::: "memory");
@@ -1271,21 +1168,6 @@ static void write_le32_volatile(volatile uint8_t *p, uint32_t v)
 static uint32_t arm32_scalar_arg(RuntimeValue v)
 {
     return IS_INT(v) ? (uint32_t)DECODE_INT(v) : (uint32_t)v;
-}
-
-/* Shared Pure-Simple DMA cache-maintenance boundary.  Keep the CP15
- * implementation in this architecture owner; drivers pass only a bounded
- * address range and never duplicate cache-line assumptions. */
-RuntimeValue rt_arm32_dcache_clean_range(RuntimeValue addr, RuntimeValue size)
-{
-    arm32_clean_dcache_range(arm32_scalar_arg(addr), arm32_scalar_arg(size));
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_arm32_dcache_invalidate_range(RuntimeValue addr, RuntimeValue size)
-{
-    arm32_invalidate_dcache_range(arm32_scalar_arg(addr), arm32_scalar_arg(size));
-    return NIL_VALUE;
 }
 
 RuntimeValue rt_virtq_desc_write(RuntimeValue base, RuntimeValue index, RuntimeValue addr_lo,
@@ -1910,30 +1792,10 @@ RuntimeValue rt_text_to_upper_ascii(RuntimeValue value) { return value; }
 
 RuntimeValue rt_char_from_code(RuntimeValue code)
 {
-    int32_t c = (int32_t)code;
-    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF))
-        return rt_string_from_cstr("");
-    char buf[5] = { 0, 0, 0, 0, 0 };
-    RuntimeValue len = 1;
-    if (c < 0x80) {
-        buf[0] = (char)c;
-    } else if (c < 0x800) {
-        len = 2;
-        buf[0] = (char)(0xC0 | (c >> 6));
-        buf[1] = (char)(0x80 | (c & 0x3F));
-    } else if (c < 0x10000) {
-        len = 3;
-        buf[0] = (char)(0xE0 | (c >> 12));
-        buf[1] = (char)(0x80 | ((c >> 6) & 0x3F));
-        buf[2] = (char)(0x80 | (c & 0x3F));
-    } else {
-        len = 4;
-        buf[0] = (char)(0xF0 | (c >> 18));
-        buf[1] = (char)(0x80 | ((c >> 12) & 0x3F));
-        buf[2] = (char)(0x80 | ((c >> 6) & 0x3F));
-        buf[3] = (char)(0x80 | (c & 0x3F));
-    }
-    return rt_string_new((RuntimeValue)(uintptr_t)buf, len);
+    int32_t c = arm32_raw_or_encoded_int(code);
+    if (c < 0 || c > 127) c = '?';
+    char buf[2] = { (char)c, '\0' };
+    return rt_string_from_cstr(buf);
 }
 
 RuntimeValue char_from_code(RuntimeValue code) { return rt_char_from_code(code); }
@@ -2318,6 +2180,61 @@ static uint32_t arm32_fat32_find_sys_apps_file(const Arm32Fat32Probe *fat, const
     uint32_t apps = arm32_fat32_find_entry(fat, sys, "APPS       ", 1, 0);
     if (apps < 2U) return 0;
     return arm32_fat32_find_entry(fat, apps, name11, 0, size_out);
+}
+
+static void arm32_fat32_serial_name83(const uint8_t *entry)
+{
+    uint32_t base_end = 8U;
+    uint32_t ext_end = 11U;
+    while (base_end > 0U && entry[base_end - 1U] == ' ') base_end--;
+    while (ext_end > 8U && entry[ext_end - 1U] == ' ') ext_end--;
+    for (uint32_t i = 0; i < base_end; ++i) serial_putchar((char)entry[i]);
+    if (ext_end > 8U) {
+        serial_putchar('.');
+        for (uint32_t i = 8U; i < ext_end; ++i) serial_putchar((char)entry[i]);
+    }
+}
+
+RuntimeValue rt_arm32_fs_ls_sys_apps(void)
+{
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) return 0;
+    uint32_t sys = arm32_fat32_find_entry(
+        &fat, fat.root_cluster, "SYS        ", 1, 0);
+    if (sys < 2U) return 0;
+    uint32_t apps = arm32_fat32_find_entry(&fat, sys, "APPS       ", 1, 0);
+    if (apps < 2U) return 0;
+
+    serial_puts("FS_LS_BEGIN path=/SYS/APPS\n");
+    uint32_t cluster = apps;
+    uint32_t entries = 0;
+    uint32_t cluster_budget = 128U;
+    while (cluster >= 2U && cluster < 0x0ffffff8U) {
+        if (cluster_budget == 0U) return 0;
+        cluster_budget--;
+        uint32_t first = arm32_fat32_cluster_sector(&fat, cluster);
+        for (uint32_t sec = 0; sec < fat.spc; ++sec) {
+            if (!arm32_fat32_read_sector(first + sec)) return 0;
+            const uint8_t *data = arm32_fat32_sector_data();
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const uint8_t *e = data + off;
+                if (e[0] == 0x00U) goto listing_complete;
+                if (e[0] == 0xe5U || e[11] == 0x0fU ||
+                    (e[11] & 0x08U) != 0U || e[0] == '.') continue;
+                serial_puts("FS_LS_ENTRY name=");
+                arm32_fat32_serial_name83(e);
+                serial_putchar('\r');
+                serial_putchar('\n');
+                entries++;
+                if (entries >= 256U) goto listing_complete;
+            }
+        }
+        cluster = arm32_fat32_next_cluster(&fat, cluster);
+    }
+listing_complete:
+    if (entries == 0U) return 0;
+    serial_puts("FS_LS_END status=pass\n");
+    return 1;
 }
 
 static int arm32_fat32_sector_contains(const char *needle)
@@ -3201,13 +3118,3 @@ int __modsi3(int a, int b)
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
-
-/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
- * multi-byte literal (hosted interns by data ptr for perf). The freestanding
- * kernel has no intern table, so forward to rt_string_new — functionally
- * identical (a fresh heap string per call). Matches the riscv32 stub. */
-RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
-RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
-{
-    return rt_string_new(data, len_val);
-}

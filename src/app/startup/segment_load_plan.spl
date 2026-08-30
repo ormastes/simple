@@ -17,7 +17,10 @@
 # rows fail CLOSED: the table is marked invalid with an explicit error and
 # every plan built from it is empty with a reason.
 
-use app.startup.load_policy_wiring.StartupLoadDecision
+use app.startup.load_policy_wiring.{
+    StartupLoadDecision,
+    StartupLoadPolicyResultV1
+}
 
 pub struct StartupSegmentRow:
     kind: text
@@ -37,6 +40,13 @@ pub struct SegmentPlanRow:
 pub struct SegmentLoadPlan:
     rows: [SegmentPlanRow]
     planned: bool
+    reason: text
+
+pub struct StartupSegmentLoadResultV1:
+    applicable: bool
+    ok: bool
+    load_policy: StartupLoadPolicyResultV1
+    plan: SegmentLoadPlan
     reason: text
 
 # Plan-action vocabulary accessors (kept as fns so consumers never depend
@@ -148,6 +158,49 @@ pub fn parse_segment_table(content: text) -> StartupSegmentTable:
 fn _empty_plan(reason: text) -> SegmentLoadPlan:
     val none: [SegmentPlanRow] = []
     SegmentLoadPlan(rows: none, planned: false, reason: reason)
+
+# Production integration envelope. Missing metadata or a missing segment table
+# is an explicit no-action result, not an invitation to guess segment ranges.
+# Invalid available metadata/tables fail closed with ok=false.
+pub fn startup_segment_load_result_v1(
+    load_policy: StartupLoadPolicyResultV1,
+    segment_table_available: bool,
+    segment_table_source: text
+) -> StartupSegmentLoadResultV1:
+    if not load_policy.applicable:
+        return StartupSegmentLoadResultV1(
+            applicable: false,
+            ok: load_policy.ok,
+            load_policy: load_policy,
+            plan: _empty_plan(load_policy.reason),
+            reason: load_policy.reason
+        )
+    if not load_policy.ok:
+        return StartupSegmentLoadResultV1(
+            applicable: true,
+            ok: false,
+            load_policy: load_policy,
+            plan: _empty_plan(load_policy.reason),
+            reason: load_policy.reason
+        )
+    if not segment_table_available:
+        val reason = "segment_table_unavailable"
+        return StartupSegmentLoadResultV1(
+            applicable: false,
+            ok: true,
+            load_policy: load_policy,
+            plan: _empty_plan(reason),
+            reason: reason
+        )
+    val table = parse_segment_table(segment_table_source)
+    val plan = segment_load_plan(load_policy.decision, table)
+    StartupSegmentLoadResultV1(
+        applicable: true,
+        ok: plan.planned,
+        load_policy: load_policy,
+        plan: plan,
+        reason: plan.reason
+    )
 
 # Map a decision's preload_mode plus one segment row onto a plan action.
 # map_read_only: only read-only file-backed segments (rx, r) are eligible;

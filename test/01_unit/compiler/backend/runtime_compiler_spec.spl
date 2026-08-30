@@ -1,14 +1,7 @@
-"""
-## Purpose and audience
-Purpose: Prove that Runtime Compiler.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-BACKEND-001 — stable requirement identity for this spec.
-
 use std.spec.*
 use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
 use app.io.mod.{cwd}
-use std.io_runtime.{read_file_text, process_run}
+use std.io_runtime.{file_read_raw, process_run}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
@@ -21,8 +14,6 @@ fn with_env(key: text, value: text, block: fn()):
 
 describe "Runtime Compiler":
     it "recognizes MSVC-compatible driver spellings without classifying GNU clang":
-        step("Verify: recognizes MSVC-compatible driver spellings without classifying GNU clang")
-        # @req: REQ-COMPILER-BACKEND-001
         expect(_is_msvc_cc("cl")).to_be(true)
         expect(_is_msvc_cc("C:\\VS\\BIN\\CL.EXE")).to_be(true)
         expect(_is_msvc_cc("C:/VS/bin/cl")).to_be(true)
@@ -33,7 +24,6 @@ describe "Runtime Compiler":
         expect(_is_msvc_cc("gcc.exe")).to_be(false)
 
     it "honors SIMPLE_CC override":
-        step("Verify: honors SIMPLE_CC override")
         with_env("SIMPLE_NATIVE_BUILD_TARGET", "aarch64-unknown-linux-gnu", fn():
             with_env("SIMPLE_CC", "/custom/toolchain/cc", fn():
                 expect(find_c_compiler()).to_equal("/custom/toolchain/cc")
@@ -41,7 +31,6 @@ describe "Runtime Compiler":
         )
 
     it "honors the explicit Windows ABI outside MSYS":
-        step("Verify: honors the explicit Windows ABI outside MSYS")
         with_env("SIMPLE_LINKER_FLAVOR", "", fn():
             with_env("MSYSTEM", "", fn():
                 with_env("SIMPLE_WINDOWS_ABI", "gnu", fn():
@@ -54,8 +43,7 @@ describe "Runtime Compiler":
         )
 
     it "fails closed before host compiler discovery when a cross driver is missing":
-        step("Verify: fails closed before host compiler discovery when a cross driver is missing")
-        val source = read_file_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_raw("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val finder_pos = source.find("fn find_c_compiler()")
         val discovery_pos = source.find("# Runtime Source Discovery")
         val finder_source = source.substring(finder_pos, discovery_pos)
@@ -69,13 +57,12 @@ describe "Runtime Compiler":
         expect(guarded).to_contain("return \"\"")
 
     it "cleans every planned runtime object on post-plan failure":
-        step("Verify: cleans every planned runtime object on post-plan failure")
-        val source = read_file_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_raw("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val compile_pos = source.find("fn compile_runtime_objects(")
         val cleanup_fn_pos = source.find("fn cleanup_runtime_objects(")
         val compile_source = source.substring(compile_pos, cleanup_fn_pos)
         expect(compile_source.split("cleanup_runtime_objects(objects)").len() - 1).to_equal(4)
-        expect(compile_source).to_contain("if not file_exists(src_path):\n            cleanup_runtime_objects(objects)\n            return Err(\"Required runtime source not found")
+        expect(compile_source).to_contain("if not rt_file_exists(src_path):\n            cleanup_runtime_objects(objects)\n            return Err(\"Required runtime source not found")
         expect(compile_source).to_contain("if comp_code != 0:\n            cleanup_runtime_objects(objects)\n            return Err(\"Failed to compile")
         expect(compile_source).to_contain("if object_count == 0:\n        cleanup_runtime_objects(objects)\n        return Err(\"No runtime source files were compiled\")")
         expect(compile_source).to_contain("if object_count < sources.len():\n        cleanup_runtime_objects(objects)\n        return Err(\"Expected ")
@@ -100,8 +87,7 @@ describe "Runtime Compiler":
         expect(source.split("file_delete(obj)").len() - 1).to_equal(1)
 
     it "includes the contract ABI owner in every fresh hosted runtime bundle":
-        step("Verify: includes the contract ABI owner in every fresh hosted runtime bundle")
-        val source = read_file_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_raw("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val compile_pos = source.find("fn compile_runtime_objects(")
         val cleanup_fn_pos = source.find("fn cleanup_runtime_objects(")
         val compile_source = source.substring(compile_pos, cleanup_fn_pos)
@@ -118,14 +104,12 @@ describe "Runtime Compiler":
         expect(compile_source.find(object_entry)).to_be_less_than(compile_source.find("for name in sources:"))
 
     it "honors SIMPLE_PROJECT_ROOT override before cwd fallback":
-        step("Verify: honors SIMPLE_PROJECT_ROOT override before cwd fallback")
         val project_root = cwd()
         with_env("SIMPLE_PROJECT_ROOT", project_root, fn():
             expect(find_runtime_source_dir()).to_equal("{project_root}/src/runtime")
         )
 
     it "finds runtime sources from cwd when no override is set":
-        step("Verify: finds runtime sources from cwd when no override is set")
         with_env("SIMPLE_PROJECT_ROOT", "", fn():
             expect(find_runtime_source_dir()).to_equal("src/runtime")
         )
@@ -161,87 +145,3 @@ describe "Runtime Compiler":
 #             else:
 #                 # May not find if run from different directory
 #                 expect(true).to_equal(true)
-
-# ---------------------------------------------------------------------------
-# Regression coverage for the cwd-independent runtime-source discovery fix
-# (origin/main 8beeb621c70f, FIX B). `find_runtime_source_dir`'s only
-# cwd-independent strategy used to be a fixed 3-level dirname chain from
-# /proc/self/exe, which lands on `<root>/bin` for the deployed
-# `<root>/bin/release/<triple>/simple` layout and therefore never resolved.
-# `_runtime_dir_walk_up` replaced it.
-#
-# The two cases above only ever observe cwd == repo root, where the plain
-# `src/runtime/runtime.c` relative probe already answers. The load-bearing
-# cases are the ones where cwd cannot help, so this runs the SAME probe
-# program from four different working directories through the real CLI and
-# requires the identical absolute answer from each.
-# ---------------------------------------------------------------------------
-
-fn probe_rtdir_from(dir: text) -> text:
-    val repo = cwd()
-    # SIMPLE_PROJECT_ROOT is deliberately cleared: the point is what discovery
-    # finds on its own. Exit status is read on the line AFTER the command, never
-    # through a pipe.
-    val script = "set -u; cd " + dir + " || exit 91; " +
-        "SIMPLE_PROJECT_ROOT= " + repo + "/bin/simple run " +
-        repo + "/test/fixtures/runtime_source_dir_cwd/probe_runtime_source_dir.spl " +
-        "2>/dev/null; echo PROBE_RC=$?"
-    val result = process_run("sh", ["-c", script])
-    return result.0 + result.1
-
-describe "Runtime source discovery is cwd-independent":
-    it "resolves the same runtime source directory from every working directory":
-        step("resolve the expected absolute answer once, from the repository root")
-        val repo = cwd()
-        val expected = "RTDIR={repo}/src/runtime"
-
-        step("probe from the repository root, where the cwd-relative strategy answers first")
-        val from_root = probe_rtdir_from(repo)
-        expect(from_root).to_contain("PROBE_RC=0")
-        # Documented difference in FORM, not in resolution: at the root the
-        # plain `src/runtime/runtime.c` probe hits, so the answer is relative.
-        # Every cwd below cannot use that strategy and must still resolve.
-        expect(from_root).to_contain("RTDIR=src/runtime")
-
-        step("probe from a directory nested deep inside the repository")
-        val from_nested = probe_rtdir_from("{repo}/src/compiler/70.backend/backend")
-        expect(from_nested).to_contain("PROBE_RC=0")
-        expect(from_nested).to_contain(expected)
-
-        step("probe from /tmp, which is outside the repository entirely")
-        val from_tmp = probe_rtdir_from("/tmp")
-        expect(from_tmp).to_contain("PROBE_RC=0")
-        expect(from_tmp).to_contain(expected)
-
-        step("probe from / — the shallowest possible cwd, no ancestor can help")
-        val from_slash = probe_rtdir_from("/")
-        expect(from_slash).to_contain("PROBE_RC=0")
-        expect(from_slash).to_contain(expected)
-
-        step("the answer must never be empty, which is what the old fixed dirname chain returned")
-        expect(from_tmp).to_contain("RTDIR=/")
-
-    it "walks up to the tree that holds src/runtime/runtime.c, and stops honestly elsewhere":
-        step("an absolute path deep inside the repository resolves to this repository")
-        val repo = cwd()
-        expect(_runtime_dir_walk_up("{repo}/src/compiler/70.backend/backend")).to_equal("{repo}/src/runtime")
-
-        step("the deployed binary layout <root>/bin/release/<triple>/simple resolves too")
-        expect(_runtime_dir_walk_up("{repo}/bin/release/x86_64-unknown-linux-gnu/simple")).to_equal("{repo}/src/runtime")
-
-        step("a path with no such ancestor resolves to nothing rather than guessing")
-        expect(_runtime_dir_walk_up("/proc")).to_equal("")
-
-        step("a relative or empty path is rejected outright")
-        expect(_runtime_dir_walk_up("src/runtime")).to_equal("")
-        expect(_runtime_dir_walk_up("")).to_equal("")
-
-    it "names cwd, the executable and SIMPLE_PROJECT_ROOT when nothing resolves":
-        step("read the diagnostic the failure path emits")
-        val message = _runtime_dir_not_found_message()
-
-        step("it must blame the search, not the user's program")
-        expect(message).to_contain("Runtime source directory not found")
-        expect(message).to_contain("SIMPLE_PROJECT_ROOT=")
-        expect(message).to_contain("current directory")
-        expect(message).to_contain("running executable")

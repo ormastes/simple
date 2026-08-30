@@ -1,6 +1,29 @@
 # Coverage Specification
 
-> Tests covering Coverage System Integration.
+> 1. calculator add function
+
+<!-- sdn-diagram:id=coverage_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=coverage_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+coverage_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=coverage_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,20 @@
 
 #### tracks function coverage
 
-- tracks function coverage
+1. calculator add function
+2. calculator add function
+3. calculator add function
+4. calculator mark function touched
+5. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("tracks function coverage")
 val calculator = function_coverage()
 
 calculator.add_function("add", "math", "public")
@@ -54,18 +79,19 @@ expect(stats.coverage_percentage).to lt(67.0)
 
 #### tracks multiple touches of same function
 
-- tracks multiple touches of same function
+1. calculator add function
+2. calculator mark function touched
+3. calculator mark function touched
+4. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("tracks multiple touches of same function")
 val calculator = function_coverage()
 
 calculator.add_function("add", "math", "public")
@@ -83,18 +109,19 @@ expect(touched[0].touched_by.len()).to eq(3)
 
 #### filters by public visibility
 
-- filters by public visibility
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
+4. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("filters by public visibility")
 val calculator = function_coverage()
 
 calculator.add_function("public_fn", "mod", "public")
@@ -114,18 +141,18 @@ expect(stats.touched_count).to eq(1)
 
 #### can include private functions
 
-- can include private functions
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can include private functions")
 val calculator = function_coverage().include_private()
 
 calculator.add_function("public_fn", "mod", "public")
@@ -146,18 +173,20 @@ expect(stats.touched_count).to eq(1)
 
 #### tracks method coverage
 
-- tracks method coverage
+1. calculator add method
+2. calculator add method
+3. calculator add method
+4. calculator mark method touched
+5. calculator mark method touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("tracks method coverage")
 val calculator = method_coverage()
 
 calculator.add_method("add", "Calculator", "math", "public")
@@ -177,18 +206,18 @@ expect(stats.touched_count).to eq(2)
 
 #### distinguishes methods with same name in different structs
 
-- distinguishes methods with same name in different structs
+1. calculator add method
+2. calculator add method
+3. calculator mark method touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("distinguishes methods with same name in different structs")
 val calculator = method_coverage()
 
 calculator.add_method("new", "Calculator", "math", "public")
@@ -208,18 +237,20 @@ expect(stats.untouched_count).to eq(1)
 
 #### tracks line coverage
 
-- tracks line coverage
+1. calculator add line
+2. calculator add line
+3. calculator add line
+4. calculator mark line touched
+5. calculator mark line touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("tracks line coverage")
 val calculator = line_coverage()
 
 calculator.add_line("file.spl", 10)
@@ -241,18 +272,13 @@ expect(stats.touched_count).to eq(2)
 
 #### calculates coverage percentage correctly
 
-- calculates coverage percentage correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("calculates coverage percentage correctly")
 val stats = CoverageStats.new(10, 7)
 
 expect(stats.total_count).to eq(10)
@@ -265,18 +291,13 @@ expect(stats.coverage_percentage).to eq(70.0)
 
 #### handles 100% coverage
 
-- handles 100% coverage
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles 100% coverage")
 val stats = CoverageStats.new(5, 5)
 
 expect(stats.is_complete()).to be_true()
@@ -287,18 +308,13 @@ expect(stats.coverage_percentage).to eq(100.0)
 
 #### handles 0% coverage
 
-- handles 0% coverage
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles 0% coverage")
 val stats = CoverageStats.new(5, 0)
 
 expect(stats.is_complete()).to be_false()
@@ -309,18 +325,13 @@ expect(stats.coverage_percentage).to eq(0.0)
 
 #### handles empty target list
 
-- handles empty target list
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles empty target list")
 val stats = CoverageStats.new(0, 0)
 
 expect(stats.coverage_percentage).to eq(100.0)
@@ -331,18 +342,13 @@ expect(stats.is_complete()).to be_true()
 
 #### checks threshold acceptance
 
-- checks threshold acceptance
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("checks threshold acceptance")
 val stats = CoverageStats.new(10, 8)
 
 expect(stats.is_acceptable(80.0)).to be_true()
@@ -353,18 +359,13 @@ expect(stats.is_acceptable(85.0)).to be_false()
 
 #### generates summary string
 
-- generates summary string
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates summary string")
 val stats = CoverageStats.new(10, 7)
 
 val summary = stats.summary()
@@ -378,18 +379,20 @@ expect(summary).to include_string("70.00%")
 
 #### calculates module-specific coverage
 
-- calculates module-specific coverage
+1. calculator add function
+2. calculator add function
+3. calculator add function
+4. calculator mark function touched
+5. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("calculates module-specific coverage")
 val calculator = function_coverage()
 
 calculator.add_function("add", "math", "public")
@@ -412,18 +415,18 @@ expect(parser_stats.touched_count).to eq(0)
 
 #### lists all modules
 
-- lists all modules
+1. calculator add function
+2. calculator add function
+3. calculator add function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("lists all modules")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "mod1", "public")
@@ -440,18 +443,18 @@ expect(modules.contains("mod2")).to be_true()
 
 #### gets entries by module
 
-- gets entries by module
+1. calculator add function
+2. calculator add function
+3. calculator add function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets entries by module")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "mod1", "public")
@@ -471,18 +474,19 @@ expect(mod2_entries.len()).to eq(1)
 
 #### gets untouched targets
 
-- gets untouched targets
+1. calculator add function
+2. calculator add function
+3. calculator add function
+4. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets untouched targets")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "mod", "public")
@@ -499,18 +503,18 @@ expect(untouched.len()).to eq(2)
 
 #### gets touched targets
 
-- gets touched targets
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("gets touched targets")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "mod", "public")
@@ -529,18 +533,21 @@ expect(touched[0].touched).to be_true()
 
 #### generates coverage summary
 
-- generates coverage summary
+1. calculator add function
+2. calculator add function
+3. calculator add function
+4. calculator mark function touched
+5. calculator mark function touched
+6. reporter print report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates coverage summary")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "mod", "public")
@@ -561,18 +568,13 @@ reporter.print_report(calculator)
 
 #### can disable colors
 
-- can disable colors
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can disable colors")
 val reporter = TerminalReporter.new().without_colors()
 expect(reporter.show_colors).to be_false()
 ```
@@ -581,18 +583,18 @@ expect(reporter.show_colors).to be_false()
 
 #### can show/hide sections
 
-- can show/hide sections
+1.  without untouched
+2.  with touched
+3.  without per module
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can show/hide sections")
 val reporter = TerminalReporter.new()
     .without_untouched()
     .with_touched()
@@ -607,18 +609,13 @@ expect(reporter.show_per_module).to be_false()
 
 #### can set threshold
 
-- can set threshold
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can set threshold")
 val reporter = TerminalReporter.new().with_threshold(90.0)
 expect(reporter.threshold).to eq(90.0)
 ```
@@ -629,18 +626,19 @@ expect(reporter.threshold).to eq(90.0)
 
 #### generates compact summary
 
-- generates compact summary
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
+4. reporter print report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates compact summary")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "mod", "public")
@@ -660,18 +658,18 @@ reporter.print_report(calculator)
 
 #### generates HTML report
 
-- generates HTML report
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates HTML report")
 val calculator = function_coverage()
 
 calculator.add_function("add", "math", "public")
@@ -692,18 +690,13 @@ expect(html).to include_string("math")
 
 #### can set custom title
 
-- can set custom title
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can set custom title")
 val reporter = HtmlReporter.new().with_title("My Coverage Report")
 expect(reporter.title).to eq("My Coverage Report")
 ```
@@ -712,18 +705,13 @@ expect(reporter.title).to eq("My Coverage Report")
 
 #### can include source
 
-- can include source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can include source")
 val reporter = HtmlReporter.new().with_source()
 expect(reporter.include_source).to be_true()
 ```
@@ -734,18 +722,18 @@ expect(reporter.include_source).to be_true()
 
 #### generates JSON coverage report
 
-- generates JSON coverage report
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates JSON coverage report")
 val calculator = function_coverage()
 
 calculator.add_function("add", "math", "public")
@@ -766,18 +754,16 @@ expect(json_str).to include_string("50")  # 50% coverage
 
 #### can pretty-print JSON
 
-- can pretty-print JSON
+1. calculator add function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can pretty-print JSON")
 val calculator = function_coverage()
 calculator.add_function("f1", "mod", "public")
 
@@ -791,18 +777,13 @@ expect(json_str).to include_string("\n")  # Newlines indicate pretty print
 
 #### can exclude targets
 
-- can exclude targets
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can exclude targets")
 val reporter = JsonCoverageReporter.new().without_targets()
 expect(reporter.include_targets).to be_false()
 ```
@@ -811,18 +792,13 @@ expect(reporter.include_targets).to be_false()
 
 #### can include touched_by info
 
-- can include touched_by info
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("can include touched_by info")
 val reporter = JsonCoverageReporter.new().with_touched_by()
 expect(reporter.include_touched_by).to be_true()
 ```
@@ -833,18 +809,18 @@ expect(reporter.include_touched_by).to be_true()
 
 #### generates Codecov-compatible JSON
 
-- generates Codecov-compatible JSON
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates Codecov-compatible JSON")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "module1", "public")
@@ -865,18 +841,18 @@ expect(json_str).to include_string("files")
 
 #### generates Coveralls-compatible JSON
 
-- generates Coveralls-compatible JSON
+1. calculator add function
+2. calculator add function
+3. calculator mark function touched
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("generates Coveralls-compatible JSON")
 val calculator = function_coverage()
 
 calculator.add_function("f1", "module1", "public")
@@ -897,18 +873,23 @@ expect(json_str).to include_string("source_files")
 
 #### tracks coverage from test execution
 
-- tracks coverage from test execution
+1. calculator add function
+2. calculator add function
+3. calculator add function
+4. calculator add function
+5. calculator mark function touched
+6. calculator mark function touched
+7. calculator mark function touched
+8. terminal print report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("tracks coverage from test execution")
 # Simulate a test suite
 val calculator = function_coverage()
 
@@ -954,12 +935,12 @@ expect(json).to include_string("\"coverage_percentage\":75")
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/spec/coverage_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Coverage System Integration.
+Tests covering:
 - Coverage System Integration
 
 ## Scenario Summary
@@ -974,69 +955,3 @@ Tests covering Coverage System Integration.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1f57bbda60e1c9c450a5ac5f59dd1f855caa77ab2fa3988122ba889429d3a22f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1f57bbda60e1c9c450a5ac5f59dd1f855caa77ab2fa3988122ba889429d3a22f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1f57bbda60e1c9c450a5ac5f59dd1f855caa77ab2fa3988122ba889429d3a22f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/02_integration/spec/coverage_spec.spl
-mirror: doc/06_spec/02_integration/spec/coverage_spec.md (current)
-findings: 11 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/spec/coverage_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/spec/coverage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/spec/coverage_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks function coverage' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/spec/coverage_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks multiple touches of same function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/spec/coverage_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'filters by public visibility' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/spec/coverage_spec.spl:73:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can include private functions' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/spec/coverage_spec.spl:290:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can disable colors' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/spec/coverage_spec.spl:296:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can show/hide sections' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/spec/coverage_spec.spl:308:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can set threshold' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/spec/coverage_spec.spl:349:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can set custom title' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/spec/coverage_spec.spl:355:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can include source' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

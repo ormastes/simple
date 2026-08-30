@@ -63,6 +63,53 @@
 #endif
 #endif
 
+/* OS CSPRNG bytes encoded as lowercase hexadecimal.  This is the native
+ * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. */
+const char* rt_random_hex(int64_t len) {
+    static const char hex[] = "0123456789abcdef";
+    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return NULL;
+    size_t byte_len = (size_t)len;
+    unsigned char* random_bytes = NULL;
+    if (byte_len > 0) {
+        random_bytes = (unsigned char*)malloc(byte_len);
+        if (!random_bytes) return NULL;
+#if defined(_WIN32)
+        typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+        if (byte_len > 0xffffffffu) { free(random_bytes); return NULL; }
+        HMODULE library = LoadLibraryA("bcrypt.dll");
+        if (!library) { free(random_bytes); return NULL; }
+        BCryptGenRandomFn fill = (BCryptGenRandomFn)GetProcAddress(library, "BCryptGenRandom");
+        long status = fill ? fill(NULL, random_bytes, (unsigned long)byte_len, 0x00000002) : -1;
+        FreeLibrary(library);
+        if (status != 0) { free(random_bytes); return NULL; }
+#else
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) { free(random_bytes); return NULL; }
+        size_t offset = 0;
+        while (offset < byte_len) {
+            ssize_t count = read(fd, random_bytes + offset, byte_len - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                close(fd);
+                free(random_bytes);
+                return NULL;
+            }
+            offset += (size_t)count;
+        }
+        close(fd);
+#endif
+    }
+    char* encoded = (char*)malloc(byte_len * 2 + 1);
+    if (!encoded) { free(random_bytes); return NULL; }
+    for (size_t i = 0; i < byte_len; i++) {
+        encoded[i * 2] = hex[random_bytes[i] >> 4];
+        encoded[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
+    }
+    encoded[byte_len * 2] = '\0';
+    free(random_bytes);
+    return encoded;
+}
+
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
 bool rt_dir_create_cpath(const char* path, bool recursive) {
@@ -114,6 +161,7 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #define RT_VALUE_SPECIAL_NIL 0x0ULL
 #define RT_VALUE_SPECIAL_TRUE 0x1ULL
 #define RT_VALUE_SPECIAL_FALSE 0x2ULL
+#define RT_VALUE_SPECIAL_ERROR 0x3ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
 #define RT_VALUE_HEAP_CLOSURE 0x03U
@@ -3760,6 +3808,12 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
     return -1;
 }
 
+/* Self-hosted Simple declares index_of as a raw i64 result.  Its historical
+ * fallback spelling differed from the canonical C worker only by name. */
+int64_t rt_string_index_of(int64_t value, int64_t needle) {
+    return rt_string_find(value, needle);
+}
+
 int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
@@ -3876,6 +3930,33 @@ int64_t rt_string_to_lower(int64_t value) {
 
 int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
+}
+
+/* Canonical RuntimeValue ASCII helpers used by std.sffi.system.  The Rust
+ * hosted runtime exposed these names while core-C only exposed the older
+ * rt_string_to_{lower,upper} spelling, leaving native tool closures with NULL
+ * GOT slots.  Keep both spellings on the same implementation. */
+int64_t rt_text_to_lower_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+int64_t rt_text_to_upper_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+int64_t rt_text_is_ascii(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_text_is_ascii(promoted);
+        }
+        return 0;
+    }
+    for (uint64_t i = 0; i < s->len; i++) {
+        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    }
+    return 1;
 }
 
 int64_t rt_string_to_float(int64_t value) {
@@ -4864,6 +4945,23 @@ int64_t rt_sort(int64_t receiver) {
     return receiver;
 }
 
+bool rt_array_sort(int64_t receiver) {
+    (void)rt_sort(receiver);
+    return true;
+}
+
+int64_t rt_array_max(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    int64_t result = rt_array_get(arr, 0);
+    int64_t count = rt_array_len(arr);
+    for (int64_t index = 1; index < count; index++) {
+        int64_t candidate = rt_array_get(arr, index);
+        if (rt_sort_cmp(result, candidate) < 0) result = candidate;
+    }
+    return result;
+}
+
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
  * A negative n yields an empty result, matching the saturating eval_arg_usize. */
 int64_t rt_take(int64_t receiver, int64_t n) {
@@ -5554,6 +5652,11 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
     return found;
 }
 
+/* runtime_memory.c is the canonical allocator/pointer ABI member whenever it
+ * is part of the composition.  Keep this ownership flag separate from
+ * SIMPLE_CORE_C_STANDALONE: a native-all link needs the hosted providers below
+ * even though it still compiles runtime_memory.c beside runtime_native.c. */
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
@@ -5585,7 +5688,7 @@ void* rt_alloc(int64_t size) {
 }
 
 void* rt_struct_alloc(int64_t size) {
-    if (size < 0) return NULL;
+    if (size <= 0) return NULL;
     void* ptr = rt_alloc(size);
     if (ptr && !rt_struct_alloc_register(ptr, (size_t)size)) {
         rt_free(ptr);
@@ -5596,6 +5699,7 @@ void* rt_struct_alloc(int64_t size) {
 
 int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width) {
     if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
+    if ((((uint64_t)receiver) & RT_VALUE_TAG_MASK) > 1) return 0;
     uintptr_t ptr = (uintptr_t)(((uint64_t)receiver) & ~RT_VALUE_TAG_MASK);
     if (ptr == 0) return 0;
 
@@ -5705,6 +5809,7 @@ void* copy_mem(void* dst, const void* src, int64_t n) {
 void* rt_memset(void* dst, int8_t val, int64_t n) {
     return memset(dst, (int)val, (size_t)n);
 }
+#endif
 
 int64_t rt_memcmp(const void* a, const void* b, int64_t n) {
     return (int64_t)memcmp(a, b, (size_t)n);
@@ -5774,6 +5879,40 @@ void rt_memory_barrier(void) {
 
 double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
+}
+
+/* Fault limits are process policy for the pure-Simple runner and its child
+ * compiler/test processes. Keep this provider independent from the legacy
+ * Rust CLI CGU (which also owns seed-delegating rt_cli_run_tests). The names
+ * are the canonical variables consumed by compiler initialization. */
+static void rt_fault_set_env_i64(const char* name, int64_t value) {
+    char text[32];
+    snprintf(text, sizeof(text), "%lld", (long long)value);
+#if defined(_WIN32)
+    _putenv_s(name, text);
+#else
+    setenv(name, text, 1);
+#endif
+}
+
+void rt_fault_set_stack_overflow_detection(uint8_t enabled) {
+#if defined(_WIN32)
+    _putenv_s("SIMPLE_STACK_OVERFLOW_DETECTION", enabled ? "1" : "0");
+#else
+    setenv("SIMPLE_STACK_OVERFLOW_DETECTION", enabled ? "1" : "0", 1);
+#endif
+}
+
+void rt_fault_set_max_recursion_depth(int64_t depth) {
+    rt_fault_set_env_i64("SIMPLE_MAX_RECURSION_DEPTH", depth);
+}
+
+void rt_fault_set_timeout(int64_t secs) {
+    rt_fault_set_env_i64("SIMPLE_TIMEOUT_SECONDS", secs);
+}
+
+void rt_fault_set_execution_limit(int64_t limit) {
+    rt_fault_set_env_i64("SIMPLE_EXECUTION_LIMIT", limit);
 }
 
 /* ================================================================
@@ -6732,6 +6871,23 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
         ((int64_t*)array->data)[array->len++] = val;
     }
     return 1;
+}
+
+/* Canonical half-open integer range `[start, end)`, matching the RuntimeValue
+ * array contract used by MIR range lowering. */
+int64_t rt_range(int64_t start, int64_t end) {
+    if (end <= start) return (int64_t)(uintptr_t)rt_array_new(0);
+    uint64_t len = (uint64_t)end - (uint64_t)start;
+    if (len > (uint64_t)INT64_MAX) return rt_core_nil();
+    SplArray* result = rt_array_new((int64_t)len);
+    if (!result) return rt_core_nil();
+    for (int64_t value = start; value < end; value++) {
+        if (!rt_array_push(result, rt_value_int(value))) {
+            rt_array_free(result);
+            return rt_core_nil();
+        }
+    }
+    return (int64_t)(uintptr_t)result;
 }
 
 /* Receiver-dispatched push parity with the hosted RuntimeValue provider.
@@ -8543,6 +8699,77 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
+/* Canonical descriptor provider for std.nogc_sync_mut.io.FileHandle. Mode
+ * encoding matches runtime/src/value/sffi/file_io/io_file.rs exactly:
+ * 0 read, 1 write/create/truncate, 2 read/write/create, 3 append/create. */
+int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode) {
+    char path[RT_TEXT_PATH_MAX];
+    int flags;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+    switch (mode) {
+        case 0: flags = O_RDONLY; break;
+        case 1: flags = O_WRONLY | O_CREAT | O_TRUNC; break;
+        case 2: flags = O_RDWR | O_CREAT; break;
+        case 3: flags = O_WRONLY | O_CREAT | O_APPEND; break;
+        default: return -1;
+    }
+#if defined(_WIN32)
+    flags |= _O_BINARY;
+    return (int64_t)_open(path, flags, _S_IREAD | _S_IWRITE);
+#else
+    return (int64_t)open(path, flags, 0666);
+#endif
+}
+
+/* Canonical FileHandle close ABI. The descriptor originates from
+ * rt_io_file_open above; invalid descriptors fail closed. */
+bool rt_io_file_close(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    return _close((int)fd) == 0;
+#else
+    return close((int)fd) == 0;
+#endif
+}
+
+/* Read from the descriptor's current position through EOF into the canonical
+ * packed-byte array representation used by `[u8]`. The descriptor remains
+ * open and retains its advanced position. */
+int64_t rt_io_file_read_all(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    size_t len = 0;
+    size_t cap = 4096;
+    uint8_t* bytes = (uint8_t*)malloc(cap);
+    if (!bytes) return rt_core_nil();
+    for (;;) {
+        if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(bytes); return rt_core_nil(); }
+            size_t next_cap = cap * 2;
+            uint8_t* grown = (uint8_t*)realloc(bytes, next_cap);
+            if (!grown) { free(bytes); return rt_core_nil(); }
+            bytes = grown;
+            cap = next_cap;
+        }
+#if defined(_WIN32)
+        int count = _read((int)fd, bytes + len,
+            (unsigned int)((cap - len) > UINT_MAX ? UINT_MAX : (cap - len)));
+#else
+        ssize_t count = read((int)fd, bytes + len, cap - len);
+#endif
+        if (count > 0) { len += (size_t)count; continue; }
+        if (count == 0) break;
+        if (errno == EINTR) continue;
+        free(bytes);
+        return rt_core_nil();
+    }
+    SplArray* result = rt_byte_array_new_len((uint64_t)len);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) { free(bytes); return rt_core_nil(); }
+    if (len != 0) memcpy(array->data, bytes, len);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
@@ -8562,6 +8789,43 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
     free(content);
     return result;
+}
+
+/* Memory-map a file and copy its bytes into the canonical runtime string.
+ * The mapping is released before return; rt_string_new owns its copy. */
+int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
+#if defined(_WIN32)
+    int fd = _open(path, _O_RDONLY | _O_BINARY);
+    if (fd < 0) return rt_core_nil();
+    struct _stat64 st;
+    if (_fstat64(fd, &st) != 0 || st.st_size <= 0) { _close(fd); return rt_core_nil(); }
+    intptr_t os_handle = _get_osfhandle(fd);
+    if (os_handle == -1) { _close(fd); return rt_core_nil(); }
+    HANDLE mapping = CreateFileMappingA((HANDLE)os_handle, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mapping) { _close(fd); return rt_core_nil(); }
+    const uint8_t* data = (const uint8_t*)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!data) { CloseHandle(mapping); _close(fd); return rt_core_nil(); }
+    int64_t result = rt_string_new(data, (uint64_t)st.st_size);
+    UnmapViewOfFile(data);
+    CloseHandle(mapping);
+    _close(fd);
+    return result;
+#else
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return rt_core_nil();
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return rt_core_nil(); }
+    if ((uint64_t)st.st_size > (uint64_t)SIZE_MAX) { close(fd); return rt_core_nil(); }
+    size_t len = (size_t)st.st_size;
+    const uint8_t* data = (const uint8_t*)mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) { close(fd); return rt_core_nil(); }
+    int64_t result = rt_string_new(data, (uint64_t)len);
+    munmap((void*)data, len);
+    close(fd);
+    return result;
+#endif
 }
 
 int64_t rt_file_read_regular_no_follow_bounded(
@@ -8900,6 +9164,29 @@ int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     if (slash < 0) return rt_string_new((const uint8_t*)".", 1);
     if (slash == 0) return rt_string_new(path_ptr, 1);
     return rt_string_new(path_ptr, (uint64_t)slash);
+}
+
+/* Canonical dirname ABI used by the pure-Simple module resolver. Unlike the
+ * older path_parent helper, a separator-free relative path has an empty
+ * parent, matching Path::parent in the bootstrap runtime. */
+int64_t rt_path_dirname(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len == 0) return rt_string_new(NULL, 0);
+    uint64_t end = path_len;
+    while (end > 1 && (path_ptr[end - 1] == '/' || path_ptr[end - 1] == '\\')) {
+        end--;
+    }
+    if (end == 1 && (path_ptr[0] == '/' || path_ptr[0] == '\\')) {
+        return rt_string_new(NULL, 0);
+    }
+    uint64_t slash = end;
+    while (slash > 0) {
+        slash--;
+        if (path_ptr[slash] == '/' || path_ptr[slash] == '\\') {
+            if (slash == 0) return rt_string_new(path_ptr, 1);
+            return rt_string_new(path_ptr, slash);
+        }
+    }
+    return rt_string_new(NULL, 0);
 }
 
 int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
@@ -11072,6 +11359,7 @@ double rt_pow(double a, double b) { return pow(a, b); }
  * Pointer Read/Write Operations (for relocation patching, FFI interop)
  * ================================================================ */
 
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;
@@ -11117,6 +11405,7 @@ int64_t rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, in
     memcpy((char*)(uintptr_t)addr + offset, src, (size_t)len);
     return len;
 }
+#endif
 
 /* Call a raw code address as a zero-argument int64_t function. */
 int64_t rt_call_ptr_0(int64_t addr) {
@@ -12651,12 +12940,86 @@ SPL_RT_TRAP1(rt_wait)
 /* Dynamic dispatch: the emitter passes no vtable identity the C runtime can
  * resolve, so any answer would be a wrong method address. */
 SPL_RT_TRAP2(rt_vtable_lookup)
-/* io_print.rs:437 takes (value, fmt_ptr, fmt_len) -- the format spec is a raw
- * pointer the C runtime cannot validate; naming the trap beats a wrong string. */
+/* Format a tagged RuntimeValue using the canonical core-C representation.
+ * `fmt` is the compiler-emitted byte span ABI, copied into a bounded local
+ * buffer before parsing.  The value itself is never treated as a generic
+ * pointer: strings and boxed floats go through registry-gated core helpers. */
 int64_t rt_value_format_string(int64_t v, const uint8_t* fmt, uint64_t fmt_len) {
-    (void)v; (void)fmt; (void)fmt_len;
-    rt_trap_unimplemented("rt_value_format_string");
-    return 0;
+    char spec[65];
+    uint64_t n = 0;
+    if (fmt != NULL) {
+        n = fmt_len < sizeof(spec) - 1 ? fmt_len : sizeof(spec) - 1;
+        if (n > 0) memcpy(spec, fmt, (size_t)n);
+    }
+    spec[n] = '\0';
+
+    char type = n > 0 ? spec[n - 1] : '\0';
+    int precision = -1;
+    int width = 0;
+    int zero_pad = n > 0 && spec[0] == '0';
+    for (uint64_t i = 0; i < n; i++) {
+        if (spec[i] == '.') {
+            precision = 0;
+            for (uint64_t j = i + 1; j < n && spec[j] >= '0' && spec[j] <= '9'; j++) {
+                int digit = spec[j] - '0';
+                precision = precision > (64 - digit) / 10 ? 64 : precision * 10 + digit;
+            }
+            break;
+        }
+        if (spec[i] >= '0' && spec[i] <= '9') {
+            int digit = spec[i] - '0';
+            width = width > (256 - digit) / 10 ? 256 : width * 10 + digit;
+        }
+    }
+
+    if (type == '\0' || type == 's') {
+        if (rt_core_is_special(v)) {
+            switch (rt_core_special_payload(v)) {
+                case RT_VALUE_SPECIAL_NIL: return rt_string_new((const uint8_t*)"nil", 3);
+                case RT_VALUE_SPECIAL_ERROR: return rt_string_new((const uint8_t*)"error", 5);
+                default: break;
+            }
+        }
+        return rt_to_string(v);
+    }
+
+    char out[512];
+    int len = -1;
+    if (rt_core_is_int(v)) {
+        long long value = (long long)rt_core_as_int(v);
+        switch (type) {
+            case 'd': break;
+            case 'x': len = snprintf(out, sizeof(out), zero_pad ? "%0*llx" : "%*llx", width, (unsigned long long)value); break;
+            case 'X': len = snprintf(out, sizeof(out), zero_pad ? "%0*llX" : "%*llX", width, (unsigned long long)value); break;
+            case 'o': len = snprintf(out, sizeof(out), zero_pad ? "%0*llo" : "%*llo", width, (unsigned long long)value); break;
+            default: break;
+        }
+        if (type == 'd')
+            len = snprintf(out, sizeof(out), zero_pad ? "%0*lld" : "%*lld", width, value);
+        if (type == 'b') {
+            uint64_t bits = (uint64_t)value;
+            char digits[65];
+            int used = 0;
+            do { digits[used++] = (char)('0' + (bits & 1)); bits >>= 1; } while (bits && used < 64);
+            int pad_count = width > used ? width - used : 0;
+            len = 0;
+            while (pad_count-- > 0 && len < (int)sizeof(out) - 1) out[len++] = zero_pad ? '0' : ' ';
+            while (used > 0 && len < (int)sizeof(out) - 1) out[len++] = digits[--used];
+            out[len] = '\0';
+        }
+    } else if (rt_core_is_float(v) && (type == 'f' || type == 'F' || type == 'e' || type == 'E' || type == '%')) {
+        double value = rt_core_as_float(v);
+        if (type == '%') value *= 100.0;
+        int p = precision >= 0 ? precision : 6;
+        if (type == 'e' || type == 'E')
+            len = snprintf(out, sizeof(out), type == 'E' ? "%.*E" : "%.*e", p, value);
+        else
+            len = snprintf(out, sizeof(out), "%.*f", p, value);
+        if (type == '%' && len >= 0 && len < (int)sizeof(out) - 1) out[len++] = '%';
+    }
+    if (len < 0) return rt_to_string(v);
+    if (len >= (int)sizeof(out)) len = (int)sizeof(out) - 1;
+    return rt_string_new((const uint8_t*)out, (uint64_t)len);
 }
 SPL_RT_TRAP2(rt_fstring_format)
 /* interpreter_bridge.rs:112 -- requires a hosted interpreter. */

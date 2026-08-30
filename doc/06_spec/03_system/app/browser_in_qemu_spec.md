@@ -2,6 +2,31 @@
 
 > This system spec locks the SimpleOS browser guest contract before the parallel GUI/web framework work fills in more runtime plumbing. It verifies the deterministic BrowserSession fixture in pure code and, when QEMU is available, boots the browser kernel far enough to observe the live transport probe, deterministic request pump, session result, and framebuffer paint marker.
 
+<!-- sdn-diagram:id=browser_in_qemu_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=browser_in_qemu_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+browser_in_qemu_spec -> std
+browser_in_qemu_spec -> os
+browser_in_qemu_spec -> test
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=browser_in_qemu_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -20,7 +45,7 @@ This system spec locks the SimpleOS browser guest contract before the parallel G
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser_in_qemu_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -43,24 +68,13 @@ gate and skip only the live guest capture.
 
 #### builds gui_entry_browser.spl into a baremetal kernel
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- builds gui_entry_browser.spl into a baremetal kernel
-   - Expected: ok is true
-   - Expected: file_exists(target.output) is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds gui_entry_browser.spl into a baremetal kernel")
 val target = _browser_target()
 val ok = build_os(target)
 expect(ok).to_equal(true)
@@ -71,26 +85,32 @@ expect(file_exists(target.output)).to_equal(true)
 
 #### locks the deterministic guest HTTP fixture contract for the future BrowserSession bridge
 
-- locks the deterministic guest HTTP fixture contract for the future BrowserSession bridge
+1. url: browser guest live probe url
    - Expected: live_probe.status equals `0`
    - Expected: live_probe.error equals `{browser_guest_live_transport_error()}: {browser_guest_live_probe_url()}`
+
+2. url: browser guest boot url
    - Expected: boot_doc.status equals `200`
+
+3. url: browser guest final url
    - Expected: final_doc.status equals `200`
+
+4. url: browser guest style url
    - Expected: style_doc.status equals `200`
    - Expected: style_doc.error equals ``
+
+5. url: browser guest script url
    - Expected: script_doc.status equals `200`
    - Expected: script_doc.error equals ``
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 66 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("locks the deterministic guest HTTP fixture contract for the future BrowserSession bridge")
 val live_probe = resolve_browser_guest_request(BrowserRequest.create(
     id: "probe-1",
     kind: "document",
@@ -166,28 +186,44 @@ expect(script_doc.body).to_contain("document.cookie = 'script=guest; Path=/'")
 
 #### boots guest, pumps deterministic BrowserSession resources, and matches session baseline _(slow)_
 
-- boots guest, pumps deterministic BrowserSession resources, and matches session baseline
-   - Expected: file_exists(target.output) is true
-   - Expected: target_available is false
+1. dir create all
+
+2. Ok
+
+3. 30000)) to equal
+
+4. print read serial log
+
+5. stop guest
    - Expected: saw_painted is true
+
+6. stop guest
    - Expected: serial_output contains `[BE] Probing live browser transport...`
+
+7. "[BE] Live transport unavailable: {browser guest live transport error
+
+8. "[BE] Live transport unexpectedly resolved status=0 url={browser guest live probe url
    - Expected: saw_live_unavailable or saw_live_unexpected is true
    - Expected: serial_output contains `[BE] Applying deterministic request 1...`
    - Expected: serial_output contains `[BE] Applying deterministic request 2...`
+
+9. "[BE] Session settled url={browser guest final url
    - Expected: saw_session_settled or saw_session_failed is true
    - Expected: serial_output contains `[BE] Building shared browser page...`
+
+10. "[BE] Frame painted: HTML -> DOM -> layout -> paint -> scene -> software rasterizer -> framebuffer")) to equal
+
+11. Err
    - Expected: spawned is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("boots guest, pumps deterministic BrowserSession resources, and matches session baseline")
 val target = _browser_target()
 expect(file_exists(target.output)).to_equal(true)
 
@@ -262,19 +298,17 @@ expect(spawned).to_equal(true)
 
 #### has a baseline directory for browser_in_qemu captures
 
-- has a baseline directory for browser_in_qemu captures
+1. dir create all
    - Expected: file_exists(baseline_dir) is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has a baseline directory for browser_in_qemu captures")
 val baseline_dir = "test/baselines/browser_in_qemu"
 dir_create_all(baseline_dir)
 expect(file_exists(baseline_dir)).to_equal(true)
@@ -294,54 +328,3 @@ expect(file_exists(baseline_dir)).to_equal(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `59f1e8a3baf1cef49d9e825282403bc83fd7709dcdda79269174d2ed5aff6793`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `59f1e8a3baf1cef49d9e825282403bc83fd7709dcdda79269174d2ed5aff6793`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `59f1e8a3baf1cef49d9e825282403bc83fd7709dcdda79269174d2ed5aff6793`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/app/browser_in_qemu_spec.spl
-mirror: doc/06_spec/03_system/app/browser_in_qemu_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/browser_in_qemu_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/browser_in_qemu_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/browser_in_qemu_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/browser_in_qemu_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds gui_entry_browser.spl into a baremetal kernel' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/browser_in_qemu_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'locks the deterministic guest HTTP fixture contract for the future BrowserSession bridge' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/browser_in_qemu_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'boots guest, pumps deterministic BrowserSession resources, and matches session baseline' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

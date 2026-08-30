@@ -1,6 +1,29 @@
-# Mcp Lsp Rename Specification
+# mcp_lsp_rename_spec
 
-> Tests covering rename tool edge cases, rename keyword collision, rename identifier validation, rename command construction, rename tool multi-file scenarios, rename naming conventions, rename destructive operation safety.
+> Tests rename symbol edge cases: same-name, keyword collision, multi-file, identifier validation, and command construction variants.
+
+<!-- sdn-diagram:id=mcp_lsp_rename_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mcp_lsp_rename_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mcp_lsp_rename_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mcp_lsp_rename_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,36 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Mcp Lsp Rename Specification
+# mcp_lsp_rename_spec
+
+Tests rename symbol edge cases: same-name, keyword collision, multi-file, identifier validation, and command construction variants.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #MCP-LSP-002 |
+| Category | Tooling |
+| Difficulty | 3/5 |
+| Status | Implemented |
+| Source | `test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests rename symbol edge cases: same-name, keyword collision, multi-file,
+identifier validation, and command construction variants.
+
+## Key Concepts
+
+| Concept          | Description                                        |
+|------------------|----------------------------------------------------|
+| Rename           | Replaces symbol name across all references          |
+| Keyword check    | New name must not collide with language keywords     |
+| Identifier rules | Must start with letter or underscore, no spaces      |
+| Destructive      | Rename modifies source files                         |
+| Dry-run          | Preview mode that shows changes without applying     |
 
 ## Scenarios
 
@@ -17,23 +69,13 @@
 
 #### detects same-name rename as no-op
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- detects same-name rename as no-op
-   - Expected: is_noop is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects same-name rename as no-op")
 val old_name = "query_main"
 val new_name = "query_main"
 val is_noop = old_name == new_name
@@ -44,19 +86,13 @@ expect(is_noop).to_equal(true)
 
 #### detects different names as non-noop
 
-- detects different names as non-noop
-   - Expected: is_noop is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects different names as non-noop")
 val old_name = "query_main"
 val new_name = "process_query"
 val is_noop = old_name == new_name
@@ -67,19 +103,13 @@ expect(is_noop).to_equal(false)
 
 #### case-different name is not a no-op
 
-- case-different name is not a no-op
-   - Expected: is_noop is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("case-different name is not a no-op")
 val old_name = "queryMain"
 val new_name = "querymain"
 val is_noop = old_name == new_name
@@ -92,19 +122,13 @@ expect(is_noop).to_equal(false)
 
 #### detects fn keyword collision
 
-- detects fn keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects fn keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "fn"
 val is_keyword = keywords.contains(new_name)
@@ -115,19 +139,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects class keyword collision
 
-- detects class keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects class keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "class"
 val is_keyword = keywords.contains(new_name)
@@ -138,19 +156,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects val keyword collision
 
-- detects val keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects val keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "val"
 val is_keyword = keywords.contains(new_name)
@@ -161,19 +173,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects var keyword collision
 
-- detects var keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects var keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "var"
 val is_keyword = keywords.contains(new_name)
@@ -184,19 +190,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects self keyword collision
 
-- detects self keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects self keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "self"
 val is_keyword = keywords.contains(new_name)
@@ -207,19 +207,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects nil keyword collision
 
-- detects nil keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects nil keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "nil"
 val is_keyword = keywords.contains(new_name)
@@ -230,19 +224,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects true keyword collision
 
-- detects true keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects true keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "true"
 val is_keyword = keywords.contains(new_name)
@@ -253,19 +241,13 @@ expect(is_keyword).to_equal(true)
 
 #### detects match keyword collision
 
-- detects match keyword collision
-   - Expected: is_keyword is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects match keyword collision")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "match"
 val is_keyword = keywords.contains(new_name)
@@ -276,19 +258,13 @@ expect(is_keyword).to_equal(true)
 
 #### allows valid identifier as new_name
 
-- allows valid identifier as new_name
-   - Expected: is_keyword is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows valid identifier as new_name")
 val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "for", "while", "match", "return", "import", "use", "trait", "impl", "static", "me", "self", "nil", "true", "false"]
 val new_name = "better_name"
 val is_keyword = keywords.contains(new_name)
@@ -299,19 +275,13 @@ expect(is_keyword).to_equal(false)
 
 #### allows snake_case identifier
 
-- allows snake_case identifier
-   - Expected: is_keyword is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows snake_case identifier")
 val keywords = ["fn", "class", "struct", "enum", "val", "var"]
 val new_name = "parse_expression"
 val is_keyword = keywords.contains(new_name)
@@ -322,19 +292,13 @@ expect(is_keyword).to_equal(false)
 
 #### allows PascalCase identifier
 
-- allows PascalCase identifier
-   - Expected: is_keyword is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows PascalCase identifier")
 val keywords = ["fn", "class", "struct", "enum", "val", "var"]
 val new_name = "TokenParser"
 val is_keyword = keywords.contains(new_name)
@@ -347,40 +311,28 @@ expect(is_keyword).to_equal(false)
 
 #### validates new_name is not empty
 
-- validates new_name is not empty
-   - Expected: new_name equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates new_name is not empty")
 val new_name = ""
-expect(new_name).to_equal("")
+expect(new_name == "").to_equal(true)
 ```
 
 </details>
 
 #### validates new_name has no spaces
 
-- validates new_name has no spaces
-   - Expected: has_space is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates new_name has no spaces")
 val new_name = "has space"
 val has_space = new_name.contains(" ")
 expect(has_space).to_equal(true)
@@ -390,18 +342,13 @@ expect(has_space).to_equal(true)
 
 #### validates new_name starts with letter or underscore
 
-- validates new_name starts with letter or underscore
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates new_name starts with letter or underscore")
 val valid_starts = ["a", "z", "A", "Z", "_"]
 val name = "_private"
 val first = name.substring(0, 1)
@@ -412,20 +359,13 @@ expect(valid_starts).to_contain(first)
 
 #### validates uppercase start is valid
 
-- validates uppercase start is valid
-   - Expected: is_upper is true
-   - Expected: is_upper_end is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates uppercase start is valid")
 val name = "ClassName"
 val first = name.substring(0, 1)
 val is_upper = first >= "A"
@@ -438,19 +378,13 @@ expect(is_upper_end).to_equal(true)
 
 #### validates lowercase start is valid
 
-- validates lowercase start is valid
-   - Expected: is_lower is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates lowercase start is valid")
 val valid_starts = ["a", "z", "A", "Z", "_"]
 val name = "method_name"
 val first = name.substring(0, 1)
@@ -463,19 +397,13 @@ expect(is_lower).to_equal(true)
 
 #### detects name starting with digit as invalid
 
-- detects name starting with digit as invalid
-   - Expected: starts_with_digit is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects name starting with digit as invalid")
 val name = "3invalid"
 val first = name.substring(0, 1)
 val is_digit = first >= "0"
@@ -488,19 +416,13 @@ expect(starts_with_digit).to_equal(true)
 
 #### detects name with special characters
 
-- detects name with special characters
-   - Expected: has_hyphen is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects name with special characters")
 val name = "invalid-name"
 val has_hyphen = name.contains("-")
 expect(has_hyphen).to_equal(true)
@@ -510,19 +432,13 @@ expect(has_hyphen).to_equal(true)
 
 #### detects name with dots
 
-- detects name with dots
-   - Expected: has_dot is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects name with dots")
 val name = "module.name"
 val has_dot = name.contains(".")
 expect(has_dot).to_equal(true)
@@ -532,21 +448,13 @@ expect(has_dot).to_equal(true)
 
 #### allows name with underscores
 
-- allows name with underscores
-   - Expected: has_space is false
-   - Expected: has_hyphen is false
-   - Expected: has_dot is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows name with underscores")
 val name = "my_var_name"
 val has_space = name.contains(" ")
 val has_hyphen = name.contains("-")
@@ -560,19 +468,13 @@ expect(has_dot).to_equal(false)
 
 #### allows single character name
 
-- allows single character name
-   - Expected: is_valid_length is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows single character name")
 val name = "x"
 val is_valid_length = name.len() > 0
 expect(is_valid_length).to_equal(true)
@@ -582,20 +484,13 @@ expect(is_valid_length).to_equal(true)
 
 #### allows single underscore name
 
-- allows single underscore name
-   - Expected: is_valid_length is true
-   - Expected: starts_ok is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows single underscore name")
 val name = "_"
 val is_valid_length = name.len() > 0
 val starts_ok = name.substring(0, 1) == "_"
@@ -609,18 +504,13 @@ expect(starts_ok).to_equal(true)
 
 #### builds dry-run rename command
 
-- builds dry-run rename command
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds dry-run rename command")
 val file = "src/test.spl"
 val line = "10"
 val new_name = "renamed"
@@ -633,18 +523,13 @@ expect(cmd).to_contain("--new-name renamed")
 
 #### builds command with column
 
-- builds command with column
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds command with column")
 val file = "src/test.spl"
 val line = "10"
 val column = "5"
@@ -658,18 +543,13 @@ expect(cmd).to_contain("10 5 --new-name renamed")
 
 #### preserves long file paths
 
-- preserves long file paths
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("preserves long file paths")
 val file = "src/compiler/10.frontend/core/parser.spl"
 val line = "250"
 val new_name = "parse_expr"
@@ -681,18 +561,13 @@ expect(cmd).to_contain("src/compiler/10.frontend/core/parser.spl")
 
 #### handles underscore-prefixed new name
 
-- handles underscore-prefixed new name
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles underscore-prefixed new name")
 val file = "test.spl"
 val line = "1"
 val new_name = "_internal"
@@ -704,18 +579,13 @@ expect(cmd).to_contain("--new-name _internal")
 
 #### handles long snake_case name
 
-- handles long snake_case name
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles long snake_case name")
 val file = "test.spl"
 val line = "1"
 val new_name = "parse_expression_from_token_stream"
@@ -727,18 +597,13 @@ expect(cmd).to_contain("--new-name parse_expression_from_token_stream")
 
 #### uses 30 second timeout
 
-- uses 30 second timeout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("uses 30 second timeout")
 val cmd = "timeout 30 bin/simple query rename test.spl 1 --new-name x"
 expect(cmd).to_start_with("timeout 30")
 ```
@@ -747,18 +612,13 @@ expect(cmd).to_start_with("timeout 30")
 
 #### redirects stderr to stdout
 
-- redirects stderr to stdout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("redirects stderr to stdout")
 val file = "test.spl"
 val line = "1"
 val new_name = "x"
@@ -773,18 +633,13 @@ expect(cmd).to_end_with("2>&1")
 
 #### builds command targeting project-wide search
 
-- builds command targeting project-wide search
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds command targeting project-wide search")
 val file = "src/lib/common/text/mod.spl"
 val line = "15"
 val new_name = "format_text"
@@ -797,18 +652,13 @@ expect(cmd).to_contain("--new-name format_text")
 
 #### includes src directory in search scope
 
-- includes src directory in search scope
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes src directory in search scope")
 val search_dir = "src/"
 val scope = "src/ --include='*.spl'"
 expect(scope).to_contain(search_dir)
@@ -818,18 +668,13 @@ expect(scope).to_contain(search_dir)
 
 #### respects word boundaries in search
 
-- respects word boundaries in search
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("respects word boundaries in search")
 val symbol = "parse"
 val pattern = "\\b" + symbol + "\\b"
 expect(pattern).to_contain("\\b")
@@ -839,18 +684,13 @@ expect(pattern).to_contain("\\b")
 
 #### distinguishes similar symbol names
 
-- distinguishes similar symbol names
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("distinguishes similar symbol names")
 val symbols = ["parse", "parser", "parse_expr", "parse_stmt"]
 val target = "parse"
 expect(symbols).to_contain(target)
@@ -862,19 +702,13 @@ expect(count).to_be_greater_than(1)
 
 #### handles symbols in different directories
 
-- handles symbols in different directories
-   - Expected: files.len() equals `3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles symbols in different directories")
 val files = ["src/app/cli/main.spl", "src/lib/common/text/mod.spl", "src/compiler/10.frontend/core/parser.spl"]
 expect(files.len()).to_equal(3)
 ```
@@ -883,19 +717,13 @@ expect(files.len()).to_equal(3)
 
 #### rename in lib affects importers
 
-- rename in lib affects importers
-   - Expected: is_lib is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rename in lib affects importers")
 val lib_file = "src/lib/common/text/mod.spl"
 val is_lib = lib_file.contains("src/lib/")
 expect(is_lib).to_equal(true)
@@ -905,19 +733,13 @@ expect(is_lib).to_equal(true)
 
 #### rename in compiler affects internal refs only
 
-- rename in compiler affects internal refs only
-   - Expected: is_compiler is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rename in compiler affects internal refs only")
 val compiler_file = "src/compiler/10.frontend/core/parser.spl"
 val is_compiler = compiler_file.contains("src/compiler/")
 expect(is_compiler).to_equal(true)
@@ -929,20 +751,13 @@ expect(is_compiler).to_equal(true)
 
 #### preserves snake_case convention
 
-- preserves snake_case convention
-   - Expected: has_underscore is true
-   - Expected: has_uppercase is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("preserves snake_case convention")
 val new_name = "process_input"
 val has_underscore = new_name.contains("_")
 val has_uppercase = new_name.contains("P")
@@ -954,19 +769,13 @@ expect(has_uppercase).to_equal(false)
 
 #### preserves PascalCase convention for types
 
-- preserves PascalCase convention for types
-   - Expected: first equals `T`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("preserves PascalCase convention for types")
 val new_name = "TokenParser"
 val first = new_name.substring(0, 1)
 expect(first).to_equal("T")
@@ -976,19 +785,13 @@ expect(first).to_equal("T")
 
 #### allows SCREAMING_SNAKE_CASE for constants
 
-- allows SCREAMING_SNAKE_CASE for constants
-   - Expected: has_underscore is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows SCREAMING_SNAKE_CASE for constants")
 val new_name = "MAX_BUFFER_SIZE"
 val has_underscore = new_name.contains("_")
 expect(has_underscore).to_equal(true)
@@ -998,19 +801,13 @@ expect(has_underscore).to_equal(true)
 
 #### detects mixed convention
 
-- detects mixed convention
-   - Expected: is_lower_start is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects mixed convention")
 val new_name = "camelCase"
 val first = new_name.substring(0, 1)
 val is_lower_start = first >= "a"
@@ -1021,19 +818,13 @@ expect(is_lower_start).to_equal(true)
 
 #### handles single-letter names
 
-- handles single-letter names
-   - Expected: names.len() equals `6`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles single-letter names")
 val names = ["x", "y", "z", "i", "n", "k"]
 expect(names.len()).to_equal(6)
 expect(names).to_contain("x")
@@ -1043,19 +834,13 @@ expect(names).to_contain("x")
 
 #### handles numeric suffix names
 
-- handles numeric suffix names
-   - Expected: is_valid is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles numeric suffix names")
 val new_name = "result2"
 val is_valid = new_name.len() > 0
 expect(is_valid).to_equal(true)
@@ -1067,18 +852,13 @@ expect(is_valid).to_equal(true)
 
 #### rename is a destructive operation
 
-- rename is a destructive operation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rename is a destructive operation")
 val destructive = ["simple_rename", "simple_document_formatting"]
 expect(destructive).to_contain("simple_rename")
 ```
@@ -1087,19 +867,13 @@ expect(destructive).to_contain("simple_rename")
 
 #### non-destructive tools do not include rename
 
-- non-destructive tools do not include rename
-   - Expected: has_rename is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("non-destructive tools do not include rename")
 val safe_tools = ["simple_signature_help", "simple_code_actions", "simple_workspace_symbols", "simple_call_hierarchy", "simple_type_hierarchy", "simple_semantic_tokens", "simple_inlay_hints", "simple_selection_range"]
 val has_rename = safe_tools.contains("simple_rename")
 expect(has_rename).to_equal(false)
@@ -1109,19 +883,13 @@ expect(has_rename).to_equal(false)
 
 #### destructive tools list is exhaustive
 
-- destructive tools list is exhaustive
-   - Expected: destructive.len() equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("destructive tools list is exhaustive")
 val destructive = ["simple_rename", "simple_document_formatting"]
 expect(destructive.len()).to_equal(2)
 ```
@@ -1130,45 +898,19 @@ expect(destructive.len()).to_equal(2)
 
 #### read-only tools outnumber destructive tools
 
-- read-only tools outnumber destructive tools
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("read-only tools outnumber destructive tools")
 val read_only_count = 8
 val destructive_count = 2
 expect(read_only_count).to_be_greater_than(destructive_count)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering rename tool edge cases, rename keyword collision, rename identifier validation, rename command construction, rename tool multi-file scenarios, rename naming conventions, rename destructive operation safety.
-- rename tool edge cases
-- rename keyword collision
-- rename identifier validation
-- rename command construction
-- rename tool multi-file scenarios
-- rename naming conventions
-- rename destructive operation safety
 
 ## Scenario Summary
 
@@ -1182,54 +924,3 @@ Tests covering rename tool edge cases, rename keyword collision, rename identifi
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a5af417df51684ac374035539b4512d000d69138d10b684d86bb5a249b7c18e1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a5af417df51684ac374035539b4512d000d69138d10b684d86bb5a249b7c18e1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a5af417df51684ac374035539b4512d000d69138d10b684d86bb5a249b7c18e1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl
-mirror: doc/06_spec/01_unit/app/mcp_unit/mcp_lsp_rename_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/mcp_unit/mcp_lsp_rename_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/mcp_unit/mcp_lsp_rename_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects same-name rename as no-op' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects different names as non-noop' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp_unit/mcp_lsp_rename_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'case-different name is not a no-op' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -243,10 +243,13 @@ pub(super) fn eval_control_expr(
                     // walks the overlay), so each statement after a match
                     // expression cost O(module globals). See bug
                     // seed_match_expression_return_arm_statement_cost_cliff_2026-08-22.
-                    arm_env.clear_dirty();
                     for (name, value) in arm_bindings {
                         arm_env.insert(name, value);
                     }
+                    // Pattern bindings are arm-local setup, not writes by the
+                    // arm body. Clear them after insertion so dirty-only
+                    // write-back cannot overwrite a same-named outer value.
+                    arm_env.clear_dirty();
                     let mut result = Value::Nil;
                     let stmt_count = arm.body.statements.len();
                     for (idx, stmt) in arm.body.statements.iter().enumerate() {

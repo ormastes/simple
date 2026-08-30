@@ -22,12 +22,12 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw environment lookup; empty text is the unset or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
-@unsafe(reason: "raw process capture; nonzero code reports command or provider failure", capabilities: [ffi])
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw canonical-path lookup; empty text is the unresolved or provider-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
 @unsafe(reason: "raw directory listing; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_dir_list(path: text) -> [text]
+@unsafe(reason: "raw recursive directory walk; empty data conflates empty, inaccessible, and provider failure", capabilities: [ffi])
+extern fn rt_dir_walk(path: text) -> [text]
 
 # Directories to skip during source collection
 val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
@@ -489,6 +489,18 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
         i = i + 1
     path_text != ""
 
+fn _driver_line_end(content: text, start: i64) -> i64:
+    """Return the exclusive end of one source line without splitting the file.
+
+    Entry-closure discovery retains the canonical source text for later parse
+    phases. `content.split("\n")` therefore created a second, source-sized
+    array plus one text object per line at the peak of closure discovery. This
+    bounded cursor keeps only the current line live."""
+    var end = start
+    while end < content.len() and content.char_code_at(end) != 10:
+        end = end + 1
+    end
+
 fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # Whole-content early-out, mirroring the `mod `/`export ` gate in
     # _driver_entry_sibling_paths below: a file with no use/import keyword at all
@@ -497,7 +509,12 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
         return []
     var result: [text] = []
     var in_doc = false
-    for raw_line in content.split("\n"):
+    var line_start: i64 = 0
+    while line_start < content.len():
+        val line_end = _driver_line_end(content, line_start)
+        val raw_line = content[line_start:line_end]
+        # Advance before every fast-path continue.
+        line_start = line_end + 1
         # PERF (2026-08-21): fast reject before any comment/docstring work.
         # This body runs over every line of every file in the entry closure and
         # measured 46.7 ms per call -- 56.5 s of a 91 s `[build] source_closure`
@@ -668,7 +685,11 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
         return []
     var result: [text] = []
     var in_doc = false
-    for raw_line in content.split("\n"):
+    var line_start: i64 = 0
+    while line_start < content.len():
+        val line_end = _driver_line_end(content, line_start)
+        val raw_line = content[line_start:line_end]
+        line_start = line_end + 1
         var scan_line = raw_line
         if not in_doc:
             val comment_at = _driver_text_index_of(scan_line, "#")
@@ -1237,23 +1258,18 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     else:
         if _driver_source_trace_enabled():
             print "[collect_sources] dir {p}"
-        # Use find for directory roots. The generated bootstrap compiler corrupts
-        # some static arrays used by the old recursive walker.
-        val cmd = "find {p} -type f -name '*.spl' 2>/dev/null"
-        var stdout = ""
-        var code: i64 = -1
+        # Walk through the runtime filesystem owner. Avoid a child shell plus a
+        # complete captured manifest string and second split-line allocation.
+        var discovered: [text] = []
         unsafe(capabilities: [ffi]):
-            val capture = rt_process_run("sh", ["-c", cmd])
-            stdout = capture.0
-            code = capture.2
+            discovered = rt_dir_walk(p) ?? []
         if _driver_source_trace_enabled():
-            print "[collect_sources] find_code {code} stdout_len {stdout.len()}"
-        if code != 0 or stdout == "":
-            return result
-        val lines = stdout.split("\n")
-        for line in lines:
-            val path = line.trim()
+            print "[collect_sources] walk_count {discovered.len()}"
+        for discovered_path in discovered:
+            val path = discovered_path.trim()
             if path == "":
+                continue
+            if not path.ends_with(".spl"):
                 continue
             if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
                 continue

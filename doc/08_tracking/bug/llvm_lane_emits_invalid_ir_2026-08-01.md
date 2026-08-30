@@ -1,7 +1,6 @@
 # Pure-Simple LLVM lane emits invalid IR for every program
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** defect 2 FIXED with compiled-native proof on 2026-08-03;
   defects 3 and 4 remain open
 - **Owner:** Codex `/root/symbolid_zero_spec/simpleos_unoq_stage3`
 - **Claim scope:** stop retaining the target composite, reconstruct a fresh

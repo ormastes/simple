@@ -13,31 +13,39 @@
 ## Run:
 ##   bin/simple test test/integration/os/port/native_convergence_spec.spl
 
-use std.spec.step
-
 use std.spec
-use os.port.bootstrap_native_verify.{verify_native_convergence}
-use std.fs.{write_text}
 
-extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
-fn simpleos_runtime() -> text:
-    """Return the SIMPLEOS_RUNTIME env var, or empty string if unset."""
-    val sr = rt_env_get("SIMPLEOS_RUNTIME")
-    if sr == nil:
-        ""
-    else:
-        sr
+fn mismatch_offset(result: NativeByteComparison) -> i64:
+    match result:
+        NativeByteComparison.Mismatch(offset): offset
+        NativeByteComparison.Equal: -1
+        NativeByteComparison.Error(_): -2
+
+fn verifier_fixture(first: [u8], second: [u8]) -> Result<(), text>:
+    val tmpdir = shell("mktemp -d").stdout.trim()
+    if tmpdir == "":
+        return Err("mktemp failed")
+    val stage2 = "{tmpdir}/stage2.elf"
+    val stage3 = "{tmpdir}/stage3.elf"
+    if not rt_file_write_bytes(stage2, first):
+        val _ = shell("rm -rf '{tmpdir}'")
+        return Err("stage2 fixture write failed")
+    if not rt_file_write_bytes(stage3, second):
+        val _ = shell("rm -rf '{tmpdir}'")
+        return Err("stage3 fixture write failed")
+    val result = verify_native_convergence(stage2, stage3)
+    val _ = shell("rm -rf '{tmpdir}'")
+    result
 
 describe "IF-09 native-convergence contract":
-    # @manual scenario evidence
     """
     Documents `verify_native_convergence(stage2, stage3) -> Result<(), text>`
     exported by `src/os/port/bootstrap_native_verify.spl`.
 
-    Wave-3 byte-equality. Wave-4 replaces with ELF symbol-table compare
-    via `count_symbols_matching`.
-    """
+    it "reports a byte-zero mismatch without confusing it with equality":
+        expect(mismatch_offset(compare_native_bytes([0x7fu8, 1u8], [0x00u8, 1u8]))).to_equal(0)
 
     it "identical stage2 and stage3 blobs converge":
         # @req REQ-SSPEC-INTEGRATION
@@ -56,10 +64,9 @@ describe "IF-09 native-convergence contract":
         # @req REQ-SSPEC-INTEGRATION
         step("same-path arguments converge without reading the filesystem")
         """
-        IF-09 short-circuit: identical path arguments must return Ok(())
-        before any filesystem access, so unreadable paths still converge
-        when they are literally the same file. Byte-divergence Err paths
-        need in-guest fs.read_bytes and stay with wave-4 QEMU coverage.
+        IF-09 reject path: differing bytes must produce Err with a
+        non-empty diagnostic. Wave-4 asserts the diagnostic names the
+        first diverging symbol.
         """
         val sr = simpleos_runtime()
         if sr == "":

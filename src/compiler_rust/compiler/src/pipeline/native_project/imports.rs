@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_prefix_from_path};
 use super::{safe_canonicalize, source_root_for_file};
 
@@ -294,29 +296,46 @@ pub(crate) fn build_import_map(
     // operations whose tagged ABI differs from raw machine integers.
     let mut fn_return_types: HashMap<String, simple_parser::Type> = HashMap::new();
 
+    // Parse each physical module once, in parallel. Both collection passes
+    // below walk `parsed` in `file_sources` order, so every first-wins /
+    // push-order merge rule is exactly what the per-pass serial parse gave.
+    let target_arch = super::effective_target().arch;
     let mut seen_canonical = HashSet::new();
-    for (path, source) in file_sources {
-        let canonical_path = safe_canonicalize(path);
-        if !seen_canonical.insert(canonical_path.clone()) {
-            continue;
-        }
+    let unique_files: Vec<(&PathBuf, &String, PathBuf)> = file_sources
+        .iter()
+        .filter_map(|(path, source)| {
+            let canonical_path = safe_canonicalize(path);
+            seen_canonical
+                .insert(canonical_path.clone())
+                .then_some((path, source, canonical_path))
+        })
+        .collect();
+    let parsed: Vec<Option<simple_parser::ast::Module>> = unique_files
+        .par_iter()
+        .map(|(_, source, _)| {
+            let filtered_source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, target_arch);
+            let mut parser = simple_parser::Parser::new(&filtered_source);
+            parser.parse().ok().map(|mut ast| {
+                // Keep the arity/return-type map consistent with the codegen unit:
+                // drop wrong-arch `@cfg` function variants so a non-target variant
+                // does not seed these maps (bug
+                // x64_freestanding_cfg_multivariant_misdispatch).
+                super::discovery::strip_inactive_cfg_arch_fns(&mut ast, target_arch);
+                ast
+            })
+        })
+        .collect();
+
+    for ((path, _, canonical_path), ast) in unique_files.iter().zip(&parsed) {
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
         // `path` is the exact declaration identity used by the resolver in
         // normal builds; retain its canonical spelling too for callers that
         // canonicalize before handing it to the HIR lowerer.
-        struct_module_owners.insert(path.clone(), prefix.clone());
+        struct_module_owners.insert((*path).clone(), prefix.clone());
         struct_module_owners.insert(canonical_path.clone(), prefix.clone());
         let runtime_module_name = enum_runtime_module_name_from_path(path, fallback_root);
-        let filtered_source =
-            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
-        let mut parser = simple_parser::Parser::new(&filtered_source);
-        if let Ok(mut ast) = parser.parse() {
-            // Keep the arity/return-type map consistent with the codegen unit:
-            // drop wrong-arch `@cfg` function variants so a non-target variant
-            // does not seed these maps (bug
-            // x64_freestanding_cfg_multivariant_misdispatch).
-            super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
+        if let Some(ast) = ast {
             for item in &ast.items {
                 match item {
                     simple_parser::ast::Node::Function(f) => {
@@ -638,21 +657,12 @@ pub(crate) fn build_import_map(
     }
 
     let mut metadata = Vec::new();
-    let mut seen_canonical_reexport = std::collections::HashSet::new();
-    for (path, source) in file_sources {
-        let canonical_path = safe_canonicalize(path);
-        if !seen_canonical_reexport.insert(canonical_path.clone()) {
-            continue;
-        }
+    for ((path, _, canonical_path), ast) in unique_files.iter().zip(&parsed) {
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
-        let filtered_source =
-            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
-        let mut parser = simple_parser::Parser::new(&filtered_source);
-        if let Ok(mut ast) = parser.parse() {
-            super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
+        if let Some(ast) = ast {
             let mut item_metadata = ExportMetadata {
-                path: canonical_path,
+                path: canonical_path.clone(),
                 root: per_file_root,
                 prefix,
                 ..Default::default()
@@ -701,48 +711,108 @@ pub(crate) fn build_import_map(
     }
     metadata.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let mut owner_sets = std::collections::BTreeMap::new();
+    // Owner resolution has two parts: a forwarded lookup through `owner_sets`
+    // (which grows across fixed-point iterations) and a match against
+    // `raw_to_mangled` (constant for the whole build). A single glob
+    // `export use x.*` expands to every symbol name in the closure, so the
+    // constant part -- ~99.9% of the ~5M bindings the fixed point visits on
+    // the bootstrap closure -- is computed exactly once per binding, in
+    // parallel, and only the forwarded lookups repeat below. Collecting an
+    // indexed `par_iter` preserves order, so the fixed point visits imports
+    // and bindings in the same sequence as the serial loop it replaces.
+    struct PreparedImport<'a> {
+        item: &'a ExportMetadata,
+        expected_prefix: String,
+        stripped_prefix: Option<String>,
+        bindings: Vec<(String, String, std::collections::BTreeSet<String>)>,
+    }
+    let import_refs: Vec<(&ExportMetadata, &(Vec<String>, simple_parser::ast::ImportTarget, bool))> = metadata
+        .iter()
+        .flat_map(|item| item.public_imports.iter().map(move |import| (item, import)))
+        .collect();
+    let prepared_imports: Vec<PreparedImport<'_>> = import_refs
+        .par_iter()
+        .map(|(item, (segments, target, bare_only))| {
+            let norm_segments: Vec<&str> = segments
+                .iter()
+                .map(|s| if s == "std" { "lib" } else { s.as_str() })
+                .collect();
+            let mut bindings = Vec::new();
+            collect_target_bindings(target, &mut bindings);
+            if matches!(target, simple_parser::ast::ImportTarget::Glob) {
+                let names: Vec<String> = if *bare_only {
+                    item.bare_exports.clone()
+                } else {
+                    raw_to_mangled
+                        .keys()
+                        .filter(|name| !name.starts_with('_'))
+                        .cloned()
+                        .collect()
+                };
+                bindings.extend(names.into_iter().map(|name| (name.clone(), name)));
+            }
+            let bindings = bindings
+                .into_iter()
+                .filter(|(public_name, _)| !*bare_only || item.bare_exports.contains(public_name))
+                .map(|(public_name, source_name)| {
+                    let owners = mangled_import_owner_candidates(&source_name, &norm_segments, &raw_to_mangled);
+                    (public_name, source_name, owners)
+                })
+                .collect();
+            PreparedImport {
+                item,
+                expected_prefix: norm_segments.join("__"),
+                stripped_prefix: (norm_segments.len() > 1).then(|| norm_segments[1..].join("__")),
+                bindings,
+            }
+        })
+        .collect();
+
+    // Keyed prefix -> public name -> owners (the same `(prefix, name)` order as
+    // one flat map) so the per-binding lookups borrow `&str` keys instead of
+    // allocating a `(String, String)` tuple for each of them.
+    type OwnerSets = std::collections::BTreeMap<String, std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>;
+    fn forwarded_owners(owner_sets: &OwnerSets, prefix: &str, name: &str) -> Vec<String> {
+        owner_sets
+            .get(prefix)
+            .and_then(|names| names.get(name))
+            .map(|owners| owners.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+    let mut owner_sets = OwnerSets::new();
     for _ in 0..=metadata.len() {
         let mut changed = false;
-        for item in &metadata {
-            for (segments, target, bare_only) in &item.public_imports {
-                let norm_segments: Vec<&str> = segments
-                    .iter()
-                    .map(|s| if s == "std" { "lib" } else { s.as_str() })
-                    .collect();
-                let mut bindings = Vec::new();
-                collect_target_bindings(target, &mut bindings);
-                if matches!(target, simple_parser::ast::ImportTarget::Glob) {
-                    let names: Vec<String> = if *bare_only {
-                        item.bare_exports.clone()
-                    } else {
-                        raw_to_mangled
-                            .keys()
-                            .filter(|name| !name.starts_with('_'))
-                            .cloned()
-                            .collect()
-                    };
-                    bindings.extend(names.into_iter().map(|name| (name.clone(), name)));
+        for prepared in &prepared_imports {
+            for (public_name, source_name, static_owners) in &prepared.bindings {
+                let mut forwarded = forwarded_owners(&owner_sets, &prepared.expected_prefix, source_name);
+                if let Some(stripped_prefix) = &prepared.stripped_prefix {
+                    forwarded.extend(forwarded_owners(&owner_sets, stripped_prefix, source_name));
                 }
-                for (public_name, source_name) in bindings {
-                    if *bare_only && !item.bare_exports.contains(&public_name) {
-                        continue;
-                    }
-                    let owners =
-                        resolve_import_owner_candidates(&source_name, &norm_segments, &raw_to_mangled, &owner_sets);
-                    let entry = owner_sets
-                        .entry((item.prefix.clone(), public_name))
-                        .or_insert_with(std::collections::BTreeSet::new);
-                    let before = entry.len();
-                    entry.extend(owners);
-                    changed |= entry.len() != before;
+                // An empty owner set never changes the fixed point and every
+                // consumer below drops it (`owners.len() == 1`), so it is not
+                // materialized as an entry.
+                if static_owners.is_empty() && forwarded.is_empty() {
+                    continue;
                 }
+                let entry = owner_sets
+                    .entry(prepared.item.prefix.clone())
+                    .or_default()
+                    .entry(public_name.clone())
+                    .or_default();
+                let before = entry.len();
+                entry.extend(static_owners.iter().cloned());
+                entry.extend(forwarded);
+                changed |= entry.len() != before;
             }
         }
         if !changed {
             break;
         }
     }
+    let owner_sets: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<String>> = owner_sets
+        .into_iter()
+        .flat_map(|(prefix, names)| names.into_iter().map(move |(name, owners)| ((prefix.clone(), name), owners)))
+        .collect();
 
     let mut package_owner_sets = std::collections::BTreeMap::new();
     for item in metadata
@@ -1185,32 +1255,22 @@ fn import_target_exports_name(target: &simple_parser::ast::ImportTarget, wanted:
     }
 }
 
-fn resolve_import_owner_candidates(
+/// Owner candidates for `func_name` imported via `use_segments`, taken from the
+/// build-wide `all_mangled` table only. This half of owner resolution does not
+/// depend on the re-export fixed point, so `build_import_map` computes it once
+/// per binding and repeats only the `owner_sets` forwarding lookups.
+fn mangled_import_owner_candidates(
     func_name: &str,
     use_segments: &[&str],
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
-    owner_sets: &std::collections::BTreeMap<(String, String), std::collections::BTreeSet<String>>,
 ) -> std::collections::BTreeSet<String> {
-    let mut owners = std::collections::BTreeSet::new();
-    let expected_prefix = use_segments.join("__");
-    if let Some(forwarded) = owner_sets.get(&(expected_prefix, func_name.to_string())) {
-        owners.extend(forwarded.iter().cloned());
-    }
-    if use_segments.len() > 1 {
-        let stripped_prefix = use_segments[1..].join("__");
-        if let Some(forwarded) = owner_sets.get(&(stripped_prefix, func_name.to_string())) {
-            owners.extend(forwarded.iter().cloned());
-        }
-    }
-    if let Some(candidates) = all_mangled.get(func_name) {
-        owners.extend(
-            candidates
-                .iter()
-                .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
-                .cloned(),
-        );
-    }
-    owners
+    all_mangled
+        .get(func_name)
+        .into_iter()
+        .flatten()
+        .filter(|candidate| mangled_matches_use_path(candidate, use_segments))
+        .cloned()
+        .collect()
 }
 
 fn mangled_matches_use_path(mangled: &str, use_segments: &[&str]) -> bool {

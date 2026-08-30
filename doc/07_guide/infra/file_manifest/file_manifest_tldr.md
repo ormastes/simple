@@ -1,6 +1,6 @@
 # FILE.md Manifest — TLDR
 
-Declare allowed files per directory. Enforced by explicit audit, commit, and SPipe verify.
+Declare allowed files per directory. Enforced at lint, commit, and SPipe verify.
 
 ```
   FILE.md (root)                     ← WRG001/WRG002
@@ -18,7 +18,7 @@ Declare allowed files per directory. Enforced by explicit audit, commit, and SPi
 
 | Where | Command | Scope |
 |-------|---------|-------|
-| Manual | `sh scripts/check-workspace-root-guard.shs audit` | explicit |
+| Lint | `bin/simple build lint` | auto |
 | Commit | `.git/hooks/pre-commit` | `--staged` |
 | SPipe | verify phase step 7 | `--strict` |
 

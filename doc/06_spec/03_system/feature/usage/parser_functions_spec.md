@@ -1,6 +1,29 @@
 # Parser Function Definition Specification
 
-> use std.spec.step
+> fn name(params) -> ReturnType:
+
+<!-- sdn-diagram:id=parser_functions_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=parser_functions_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+parser_functions_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=parser_functions_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,10 +32,12 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # Parser Function Definition Specification
 
-use std.spec.step
+fn name(params) -> ReturnType:
 
+```
 ## At a Glance
 
 | Field | Value |
@@ -21,14 +46,12 @@ use std.spec.step
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/parser_functions_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
 
 ```simple
-use std.spec.step
-
 fn name(params) -> ReturnType:
 body
 
@@ -49,18 +72,17 @@ body
 
 #### parses function without params
 
-- parses function without params
+1. fn get value
+2. expect get value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses function without params")
 fn get_value() -> i64:
     42
 expect get_value() == 42
@@ -70,18 +92,17 @@ expect get_value() == 42
 
 #### parses function with single param
 
-- parses function with single param
+1. fn double
+2. expect double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses function with single param")
 fn double(x: i64) -> i64:
     x * 2
 expect double(21) == 42
@@ -91,18 +112,17 @@ expect double(21) == 42
 
 #### parses function with multiple params
 
-- parses function with multiple params
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses function with multiple params")
 fn add(a: i64, b: i64) -> i64:
     a + b
 expect add(20, 22) == 42
@@ -114,18 +134,17 @@ expect add(20, 22) == 42
 
 #### parses explicit return type
 
-- parses explicit return type
+1. fn typed
+2. expect typed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses explicit return type")
 fn typed() -> i64:
     42
 expect typed() == 42
@@ -135,18 +154,17 @@ expect typed() == 42
 
 #### parses inferred return
 
-- parses inferred return
+1. fn inferred
+2. expect inferred
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses inferred return")
 fn inferred():
     42
 expect inferred() == 42
@@ -156,18 +174,17 @@ expect inferred() == 42
 
 #### parses unit return
 
-- parses unit return
+1. fn unit fn
+2. unit fn
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses unit return")
 fn unit_fn():
     val x = 1
 unit_fn()
@@ -180,18 +197,17 @@ expect true
 
 #### parses multi-statement body
 
-- parses multi-statement body
+1. fn complex
+2. expect complex
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multi-statement body")
 fn complex(x: i64) -> i64:
     val doubled = x * 2
     val incremented = doubled + 1
@@ -203,18 +219,18 @@ expect complex(20) == 41
 
 #### parses recursive function
 
-- parses recursive function
+1. fn fib
+2. fib
+3. expect fib
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses recursive function")
 fn fib(n: i64) -> i64:
     if n <= 1:
         n
@@ -229,18 +245,17 @@ expect fib(10) == 55
 
 #### parses single type parameter
 
-- parses single type parameter
+1. fn identity<T>
+2. expect identity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses single type parameter")
 fn identity<T>(x: T) -> T:
     x
 expect identity(42) == 42
@@ -250,18 +265,17 @@ expect identity(42) == 42
 
 #### parses multiple type parameters
 
-- parses multiple type parameters
+1. fn pair<T, U>
+2.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple type parameters")
 fn pair<T, U>(a: T, b: U) -> (T, U):
     (a, b)
 val p = pair(1, "hello")
@@ -272,18 +286,18 @@ expect p.0 == 1
 
 #### parses nested generic types
 
-- parses nested generic types
+1. fn wrap<T>
+2. Some
+3. expect wrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses nested generic types")
 fn wrap<T>(x: T) -> Option<T>:
     Some(x)
 expect wrap(42).unwrap() == 42
@@ -295,18 +309,20 @@ expect wrap(42).unwrap() == 42
 
 #### parses single where clause
 
-- parses single where clause
+1. fn show
+2. fn display<T>
+3. x show
+4. fn show
+5. expect display
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses single where clause")
 trait Show:
     fn show() -> text
 fn display<T>(x: T) -> text where T: Show:
@@ -323,18 +339,18 @@ expect display(Number { value: 42 }) == "42"
 
 #### parses multiple bounds
 
-- parses multiple bounds
+1. fn clone
+2. fn debug
+3. fn process<T>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple bounds")
 trait Clone:
     fn clone() -> Self
 trait Debug:
@@ -348,18 +364,17 @@ expect true  # Compiles successfully
 
 #### parses multiple where clauses
 
-- parses multiple where clauses
+1. fn clone
+2. fn combine<T, U>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple where clauses")
 trait Cloneable:
     fn clone() -> Self
 fn combine<T, U>(a: T, b: U) where T: Cloneable, U: Cloneable:
@@ -373,18 +388,18 @@ expect true  # Compiles successfully
 
 #### parses default parameter
 
-- parses default parameter
+1. fn greet
+2. expect greet
+3. expect greet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses default parameter")
 fn greet(name: text = "World") -> text:
     "Hello, {name}!"
 expect greet() == "Hello, World!"
@@ -395,18 +410,17 @@ expect greet("Alice") == "Hello, Alice!"
 
 #### parses multiple defaults
 
-- parses multiple defaults
+1. fn create point
+2.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple defaults")
 fn create_point(x: i64 = 0, y: i64 = 0) -> (i64, i64):
     (x, y)
 val p1 = create_point()
@@ -421,18 +435,18 @@ expect p3.1 == 10
 
 #### parses mixed required and default
 
-- parses mixed required and default
+1. fn format
+2. expect format
+3. expect format
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses mixed required and default")
 fn format(value: i64, prefix: text = "", suffix: text = "") -> text:
     "{prefix}{value}{suffix}"
 expect format(42) == "42"
@@ -445,18 +459,17 @@ expect format(42, "<<") == "<<42"
 
 #### parses named arguments
 
-- parses named arguments
+1. fn point
+2.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses named arguments")
 fn point(x: i64, y: i64) -> (i64, i64):
     (x, y)
 val p = point(x = 10, y = 20)
@@ -467,18 +480,16 @@ expect p.0 == 10
 
 #### parses mixed positional and named
 
-- parses mixed positional and named
+1. fn format person
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses mixed positional and named")
 fn format_person(name: text, age: i64, city: text) -> text:
     "{name}, {age}, from {city}"
 val result = format_person("Alice", age = 30, city = "NYC")
@@ -489,18 +500,17 @@ expect result == "Alice, 30, from NYC"
 
 #### parses named arguments in any order
 
-- parses named arguments in any order
+1. fn subtract
+2. expect subtract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses named arguments in any order")
 fn subtract(a: i64, b: i64) -> i64:
     a - b
 expect subtract(b = 10, a = 52) == 42
@@ -512,18 +522,16 @@ expect subtract(b = 10, a = 52) == 42
 
 #### parses extern function
 
-- parses extern function
+1. extern fn strlen
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses extern function")
 extern fn strlen(s: text) -> i64
 
 # Extern functions may not be callable without FFI setup
@@ -535,18 +543,16 @@ expect true
 
 #### parses extern with multiple params
 
-- parses extern with multiple params
+1. extern fn add external
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses extern with multiple params")
 extern fn add_external(a: i64, b: i64) -> i64
 expect true
 ```
@@ -557,18 +563,16 @@ expect true
 
 #### parses macro definition
 
-- parses macro definition
+1. macro double emit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses macro definition")
 macro double_emit(x: i64) -> (returns result: i64):
     emit result:
         x + x
@@ -582,18 +586,17 @@ expect value == 42
 
 #### parses actor definition
 
-- parses actor definition
+1. fn increment
+2. fn get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses actor definition")
 actor Counter:
     count: i64 = 0
 
@@ -614,18 +617,17 @@ expect true  # Compiles successfully
 
 #### parses method with self
 
-- parses method with self
+1. fn sum
+2. expect p sum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses method with self")
 class Point:
     x: i64
     y: i64
@@ -641,18 +643,18 @@ expect p.sum() == 42
 
 #### parses mutable method
 
-- parses mutable method
+1. me increment
+2. var c = Counter
+3. c increment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses mutable method")
 class Counter:
     value: i64
 
@@ -670,18 +672,17 @@ expect c.value == 1
 
 #### parses static method
 
-- parses static method
+1. static fn origin
+2. Point
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses static method")
 class Point:
     x: i64
     y: i64
@@ -699,18 +700,16 @@ expect p.x == 0
 
 #### parses simple lambda
 
-- parses simple lambda
+1. expect f
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses simple lambda")
 val f = \x: x * 2
 expect f(21) == 42
 ```
@@ -719,18 +718,16 @@ expect f(21) == 42
 
 #### parses multi-param lambda
 
-- parses multi-param lambda
+1. expect f
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multi-param lambda")
 val f = \a, b, c: a + b + c
 expect f(10, 20, 12) == 42
 ```
@@ -739,18 +736,16 @@ expect f(10, 20, 12) == 42
 
 #### parses typed lambda
 
-- parses typed lambda
+1. expect f
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses typed lambda")
 # Typed lambda syntax not yet supported
 val f = \x: x * 2
 expect f(21) == 42
@@ -760,18 +755,18 @@ expect f(21) == 42
 
 #### parses lambda in higher-order context
 
-- parses lambda in higher-order context
+1. fn apply
+2. f
+3. expect apply
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses lambda in higher-order context")
 fn apply(f, x: i64) -> i64:
     f(x)
 expect apply(\x: x + 1, 41) == 42
@@ -783,18 +778,16 @@ expect apply(\x: x + 1, 41) == 42
 
 #### parses async function
 
-- parses async function
+1. async fn fetch value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses async function")
 async fn fetch_value() -> i64:
     42
 expect true  # Compiles successfully
@@ -804,18 +797,17 @@ expect true  # Compiles successfully
 
 #### parses await expression
 
-- parses await expression
+1. async fn get data
+2. async fn use data
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses await expression")
 async fn get_data() -> i64:
     42
 async fn use_data() -> i64:
@@ -838,51 +830,3 @@ expect true  # Compiles successfully
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d36490950c61c4a4e0c40b022a5df5f4393136ad8a834dca8b672621e1e7fd06`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d36490950c61c4a4e0c40b022a5df5f4393136ad8a834dca8b672621e1e7fd06`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d36490950c61c4a4e0c40b022a5df5f4393136ad8a834dca8b672621e1e7fd06`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/parser_functions_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/parser_functions_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/parser_functions_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/parser_functions_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/parser_functions_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses function without params' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_functions_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses function with single param' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_functions_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses function with multiple params' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

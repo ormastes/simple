@@ -276,17 +276,23 @@ Check whether an attempt is ready for real training/use:
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-ready <attempt_id>
 ```
 
+`fine-tune-ready` is release-blocking: when an attempt records a safe
+repo-local checker, readiness includes `data_check_gate_ready` and fails until
+that checker reports PASS. It also prints the checker status and stable gate
+fields so a WARN cache, training, or acceptance gate cannot be bypassed by
+registry rows alone.
+
 Print the next phase required before real training/use:
 
 ```sh
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-next <attempt_id>
 ```
 
-`fine-tune-next` exits nonzero unless the attempt is ready. It prints
-`STATUS: WARN llm-finetune-next` for non-ready next actions and
-`STATUS: PASS llm-finetune-next` only when the next action is `ready`. In shell
-automation, capture its output explicitly instead of chaining it as a green
-check for retry states.
+`fine-tune-next` exits nonzero unless the attempt is ready. In shell automation,
+capture its output explicitly instead of chaining it as a green check for retry
+states. If the attempt has a safe checker, `fine-tune-next` also prints the
+checker status and stable gate fields, so the route and concrete blocker remain
+visible in one command.
 
 An attempt is expected to fail `fine-tune-ready` until it has an accepted
 decision backed by target-reaching eval evidence. When the best available model
@@ -299,6 +305,13 @@ Generate a consolidated handoff report:
 ```sh
 node examples/05_stdlib/spipe/cli/spipe.js fine-tune-report <attempt_id>
 ```
+
+When the attempt records a safe repo-local checker, the report includes a
+`Data Check Execution` section after the registry blocks. That section runs the
+checker and prints `data_check_execution`, `data_check_status`, and stable gate
+fields such as `result`, `target_accuracy`, `required_accuracy`,
+`target_eval_reached`, and `acceptance_allowed`, matching the status/doctor
+surfaces used for normal review.
 
 Record LLM-backed app/server handoff and retune routing:
 

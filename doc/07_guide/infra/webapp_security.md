@@ -144,12 +144,8 @@ must fail closed before it mints tokens or upgrades WebSockets:
 - `SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1` is only for explicit non-TLS local
   development fallback.
 - TLS serving must never use the insecure dev secret fallback.
-- `/ui/login` requires an allowed `Origin` plus the exact per-process bootstrap
-  grant published as lowercase hex in the same-origin root document. Missing or
-  mismatched grants return `403` without a token; valid redemptions remain
-  bounded by body-size and fixed-window burst gates.
-- Tokens contain a distinct server-owned random grant claim, never the login
-  proof; replaying the serialized token claim at `/ui/login` is forbidden.
+- `/ui/login` requires an allowed `Origin` and is bounded by body-size and
+  fixed-window burst gates.
 - `/ui/ws`, `/ui/resume`, and sensitive `/api/*` routes require an
   origin-bound bearer token; legacy `/ws` is hidden with `404`.
 - Browser clients should carry bearer tokens in `Sec-WebSocket-Protocol`;
@@ -289,7 +285,7 @@ The `SEC-CMP001` lint rule warns when `==` is used on variables named `password`
 
 ## Compiler Security Lint Rules
 
-Run `bin/simple lint <files>` to check for security issues:
+Run `bin/simple build lint` to check for security issues:
 
 | Code | Level | What It Catches |
 |------|-------|-----------------|

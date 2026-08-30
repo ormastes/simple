@@ -103,12 +103,38 @@ impl<M: Module> CodegenBackend<M> {
         Ok(())
     }
 
+    /// Declare and define one `F$boxed` thunk per NAMED function that some
+    /// body in `mir` loads as a first-class value (`val g = add_one`,
+    /// `Port(tokenize_fn: my_tok)`). A named fn has no ctx slot, so the thunk
+    /// drops the closure handle and forwards only the user arguments; the
+    /// `GlobalLoad` site then wraps `F$boxed` in a zero-capture
+    /// `rt_closure_new` object, giving a bare function reference the SAME
+    /// representation as a lambda value. Must run AFTER `declare_functions`.
+    pub fn emit_boxed_fn_value_entries(
+        &mut self,
+        mir: &crate::mir::MirModule,
+        functions: &[MirFunction],
+    ) -> BackendResult<()> {
+        let trace = std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").ok().as_deref() == Some("1");
+        for name in named_fn_value_targets(mir) {
+            if trace {
+                eprintln!("[rust-jit] fn-value boxed entry for {name}");
+            }
+            let Some(func) = functions.iter().find(|f| f.name == name) else {
+                continue;
+            };
+            self.emit_boxed_entry_for(func, false)?;
+        }
+        Ok(())
+    }
+
     fn emit_one_boxed_entry(&mut self, lambda: &MirFunction) -> BackendResult<()> {
         self.emit_boxed_entry_for(lambda, true)
     }
 
-    /// A named function has no closure-context parameter; its boxed thunk
-    /// drops the closure handle and forwards every declared parameter.
+    /// `has_ctx`: the target's slot 0 is the closure ctx pointer (outlined
+    /// lambda) and receives the handle; otherwise (named fn) the handle is
+    /// dropped and every target param is a user param.
     fn emit_boxed_entry_for(&mut self, lambda: &MirFunction, has_ctx: bool) -> BackendResult<()> {
         let raw_name = boxed_entry_name(&lambda.name);
         if self.func_ids.contains_key(&raw_name) {
@@ -170,7 +196,7 @@ impl<M: Module> CodegenBackend<M> {
             for (i, ty) in user_params.iter().enumerate() {
                 let tagged = params[i + 1];
                 // Cranelift type the target actually declares for this slot
-                // (index i + 1 — slot 0 is the ctx pointer).
+                // (offset by one when slot 0 is the ctx pointer).
                 let want = target_sig.params[i + skip].value_type;
                 call_args.push(unbox_arg(&mut b, &helpers, tagged, *ty, want));
             }
@@ -191,22 +217,6 @@ impl<M: Module> CodegenBackend<M> {
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| BackendError::ModuleError(format!("define {symbol}: {e}")))?;
         self.module.clear_context(&mut self.ctx);
-        Ok(())
-    }
-
-    /// Emit one boxed closure entry for every defined function that is loaded
-    /// as a first-class value in this module.
-    pub fn emit_boxed_fn_value_entries(
-        &mut self,
-        mir: &crate::mir::MirModule,
-        functions: &[MirFunction],
-    ) -> BackendResult<()> {
-        for name in named_fn_value_targets(mir) {
-            let Some(func) = functions.iter().find(|f| f.name == name) else {
-                continue;
-            };
-            self.emit_boxed_entry_for(func, false)?;
-        }
         Ok(())
     }
 }
@@ -230,7 +240,11 @@ struct BoxHelperRefs {
 }
 
 impl BoxHelperIds {
-    fn resolve<M: Module>(backend: &CodegenBackend<M>, params: &[TypeId], ret: TypeId) -> BackendResult<Self> {
+    fn resolve<M: Module>(
+        backend: &CodegenBackend<M>,
+        params: &[TypeId],
+        ret: TypeId,
+    ) -> BackendResult<Self> {
         let need = |pred: &dyn Fn(TypeId) -> bool| params.iter().copied().any(pred) || pred(ret);
         let get = |name: &'static str| backend.runtime_funcs.get(name).copied();
         let _ = need;
@@ -253,7 +267,11 @@ impl BoxHelperIds {
         Ok(ids)
     }
 
-    fn in_func<M: Module>(&self, module: &mut M, func: &mut cranelift_codegen::ir::Function) -> BoxHelperRefs {
+    fn in_func<M: Module>(
+        &self,
+        module: &mut M,
+        func: &mut cranelift_codegen::ir::Function,
+    ) -> BoxHelperRefs {
         BoxHelperRefs {
             unbox_int: self.unbox_int.map(|id| module.declare_func_in_func(id, func)),
             as_float: self.as_float.map(|id| module.declare_func_in_func(id, func)),
@@ -378,7 +396,12 @@ fn coerce(
     }
 }
 
-fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
+/// Names of DEFINED (non-extern, with a body) functions that some function in
+/// `mir` loads as a first-class value through `GlobalLoad`. Mirrors the
+/// resolution in `cranelift_emitter::emit_global_load`: a name that is not a
+/// declared global variable but is a function. Extern fn names are excluded
+/// on both sides (they carry no body to wrap and remain guarded in jit.rs).
+pub fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
     let global_names: std::collections::HashSet<&str> = mir
         .globals
         .iter()
@@ -405,4 +428,86 @@ fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
         }
     }
     out
+}
+
+/// Name of the vtable-slot thunk for a method whose MIR function takes no
+/// `self` parameter (the body never references `self`, so HIR dropped it).
+pub fn vtable_selfless_entry_name(fn_name: &str) -> String {
+    format!("{fn_name}$vt")
+}
+
+impl<M: Module> CodegenBackend<M> {
+    /// Emit `name$vt(self, p1..pn)` -> `name(p1..pn)` for every function in
+    /// `functions` named by a vtable slot whose MIR params do not start with
+    /// `self`. A virtual call (`compile_method_call_virtual`) always passes the
+    /// receiver first; a slot pointing straight at a selfless body would read
+    /// the receiver as its first user argument (measured: a fieldless
+    /// `FileReader.lookup(name)` saw the object as `name`, `name.len()` == -1).
+    /// Returns the set of thunk-backed names so the vtable writer can pick
+    /// the thunk. Must run AFTER `declare_functions`.
+    pub fn emit_vtable_selfless_entries(
+        &mut self,
+        functions: &[MirFunction],
+        slot_fn_names: &std::collections::HashSet<String>,
+    ) -> BackendResult<std::collections::HashSet<String>> {
+        let mut thunked = std::collections::HashSet::new();
+        for func in functions {
+            if !slot_fn_names.contains(&func.name) {
+                continue;
+            }
+            if func.params.first().is_some_and(|p| p.name == "self") {
+                continue;
+            }
+            let raw_name = vtable_selfless_entry_name(&func.name);
+            if self.func_ids.contains_key(&raw_name) {
+                thunked.insert(func.name.clone());
+                continue;
+            }
+            let Some(&target_id) = self.func_ids.get(&func.name) else {
+                continue;
+            };
+            let target_sig = build_mir_signature(func);
+            let mut sig = Signature::new(platform_call_conv());
+            sig.params.push(AbiParam::new(types::I64)); // receiver, dropped
+            for p in &target_sig.params {
+                sig.params.push(AbiParam::new(p.value_type));
+            }
+            for r in &target_sig.returns {
+                sig.returns.push(AbiParam::new(r.value_type));
+            }
+            let symbol = match &self.module_prefix {
+                Some(prefix) => format!("{prefix}__{raw_name}"),
+                None => raw_name.clone(),
+            };
+            let func_id = self
+                .module
+                .declare_function(&symbol, Linkage::Local, &sig)
+                .map_err(|e| BackendError::ModuleError(format!("declare {symbol}: {e}")))?;
+            self.func_ids.insert(raw_name.clone(), func_id);
+
+            self.module.clear_context(&mut self.ctx);
+            self.ctx.func.signature = sig;
+            self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
+            {
+                let target_ref = self.module.declare_func_in_func(target_id, &mut self.ctx.func);
+                let mut fb_ctx = FunctionBuilderContext::new();
+                let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut fb_ctx);
+                let entry = b.create_block();
+                b.append_block_params_for_function_params(entry);
+                b.switch_to_block(entry);
+                b.seal_block(entry);
+                let params: Vec<_> = b.block_params(entry).to_vec();
+                let call = b.ins().call(target_ref, &params[1..]);
+                let results = b.inst_results(call).to_vec();
+                b.ins().return_(&results);
+                b.finalize();
+            }
+            self.module
+                .define_function(func_id, &mut self.ctx)
+                .map_err(|e| BackendError::ModuleError(format!("define {symbol}: {e}")))?;
+            self.module.clear_context(&mut self.ctx);
+            thunked.insert(func.name.clone());
+        }
+        Ok(thunked)
+    }
 }

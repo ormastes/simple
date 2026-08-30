@@ -2,9 +2,7 @@
 
 > Tests covering CUDA ProcessingIR backend operator flow.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+## Windows DirectX row
 
 <details>
 <summary>Full Scenario Manual</summary>

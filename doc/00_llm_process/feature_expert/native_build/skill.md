@@ -119,110 +119,20 @@ failure; do not call it deployed pure-Simple without provenance, essential-smoke
 and deploy receipts. Open bug:
 `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
-## Phase snapshots for side-lane native builds (2026-08-17)
+### Worker runtime selection recovery (2026-08-16)
 
-Never build or test against `bin/simple` or an in-place stage output while a
-bootstrap is running — both get replaced under you. Pin to an immutable
-lineage-named snapshot under `build/phase_snapshots/`
-(`phase1_<t1>_phase2_<t2>/simple`; see its README). New fix landed = new
-generation; in-flight tasks finish on their pinned lineage. The bootstrap
-build owns CPU/memory: run native-build side lanes `nice`d with <=2 concurrent
-test processes — earlyoom kills `simple` first (a 3.1 GB worker died at 9.97%
-free), so an OOM kill can masquerade as a codegen crash. For sweep-style
-find-and-fix, go per-directory under `timeout` and drop to per-file on crash;
-fixes landed in the source tree get compiled into later stages for free.
-Runtime parity note: `rt_file_atomic_write` now exists in the Rust staticlib
-(`src/compiler_rust/native_all/src/lib.rs:1155`).
+The lightweight owner `src/app/cli/native_build_main.spl` must never revive an
+implicit Rust-seed or unchecked `bin/simple` worker fallback. Runtime candidates
+come only from existing `SIMPLE_BINARY`, `SIMPLE_BIN`, and the invoking
+executable, in that priority order. Canonical paths under
+`src/compiler_rust/target/` are rejected. An empty selection returns nonzero
+before environment export or process spawn.
 
-Standing test rule (2026-08-17): every native-build bug fix ships a spec
-reproducing the exact defect plus a generalization spec probing similar
-problems nearby, both cited in the bug doc. A fix without its reproducing
-spec is not done.
-
-Family-owned pure-Simple consumers must import their `std.<family>.*` facade,
-not the interpreter-compatibility `src.std.*` shim. Native-project deliberately
-refuses to choose a bare function when duplicate family providers exist. For
-aliased imports, regress both the production facade chain and an adjacent
-same-named decoy; see
-`native_project_src_std_platform_alias_owner_loss_2026_08_03.md`.
-## Per-phase run-to-end loop and evidence bar (2026-08-17)
-
-A phase build runs to completion and yields a full error census; the landed
-binary is snapshotted immutably with lineage naming before any verification
-claim references it; verification runs in a parallel niced lane attempting all
-tool builds (even when some fail) plus the test suites with that snapshot; the
-next phase starts on the newest available binary, waiting when a rebuild is in
-flight. The build owns CPU/memory — test lanes drop to 1 concurrent process
-when free RAM is low (2026-08-17: earlyoom killed `jobs=8` stage workers under
-~14 test lanes, forcing `jobs=2`; session-measured, unfiled).
-
-Evidence bar addition: exit 0 from `bin/simple test <spec>` is not a pass —
-~1897 warning lines with no result line and exit 0 is a measured shape
-(`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`).
-Require a results/count line, else INCONCLUSIVE plus a `bin/simple run` repro.
-This is the same failure family as the exit-0 native build with no fresh
-artifact above.
-
-## Per-lane private build caches (2026-08-17)
-
-Concurrent bootstrap lanes (phase-1 seed, phase-2 stage, phase-3 self-host,
-phase-4 full CLI, census, tool builds) may run DIFFERENT compiler binaries over
-the SAME source tree. Both engines' native-build cache scope keys now carry a
-**lane** axis on top of the compiler identity they already had:
-`SIMPLE_CACHE_SCOPE=<name>`, or `--cache-scope <name>` on the Rust
-native-build / native-all CLIs. Unset ⇒ `default` (previous behaviour).
-
-Entries are partitioned by a scope-derived DIRECTORY, so a cross-scope lookup
-cannot name an out-of-scope entry — the miss is structural, not a hash compare.
-Each cache dir records its owner in a `.cache_scope` marker; check ownership
-without running a compiler via `scripts/check/check-cache-scope-ownership.shs
-<cache-dir> <lane>` (PASS/FAIL/ERROR, `--selftest`). `bootstrap-from-scratch.sh`
-gives each stage `build/bootstrap/native_cache/<lane>/` and refuses fail-closed
-to build against another lane's cache; `resume-stage3-from-admitted.sh` fences
-its stage2/stage3 dirs the same way.
-
-- Design: `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`
-- Rust: `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`
-  (`cache_lane`, `cache_scope_segment`, `cache_dir`, `object_cache_key`)
-- Pure Simple: `src/compiler/80.driver/driver_build/incremental.spl`
-  (`native_build_cache_lane`, `native_build_cache_scope_key`)
-- Specs: `test/01_unit/compiler/cache/per_lane_cache_scope{,_prevention}_spec.spl`
-- NOT changed: dependency-aware partial rebuild (`interface_digest_of`,
-  `simple.sdn` traversal, `SmfManifest` load-verification remain uncalled).
-
-## HIR cache and HIR shard workers (2026-08-22)
-
-HIR lowering (142 s/module interpreted on the bootstrap closure) now crosses a
-process boundary. Three pieces, three commits:
-
-- **Codec** — `src/compiler/20.hir/generated/hir_codec.spl` is GENERATED by
-  `bin/simple run src/app/compiler_schema/main.spl codec`
-  (`src/app/compiler_schema/codec_gen.spl`) over every declaration reachable
-  from `HirModule` (95 decls incl. `SymbolTable`; ids are module-local, so no
-  remapping). Unclassifiable field type = generation failure, never a skipped
-  field. Hand-written half: `src/compiler/20.hir/hir_codec_support.spl`
-  (writer, nil-preserving scalars, fail-closed `BlockValue`/parser `Expr`),
-  API in `src/compiler/20.hir/hir_codec.spl`. Gates:
-  `scripts/check/check-hir-codec-complete.shs` (generatable + fresh) and
-  `scripts/check/check-hir-codec-roundtrip.shs` (every module re-encodes
-  byte-identically under `SIMPLE_HIR_CODEC_ROUNDTRIP=1`, and the build
-  continued from DECODED modules yields the same binary).
-- **Cache** — `src/compiler/80.driver/driver_hir_cache.spl`, entries under
-  `build/bootstrap/native_cache/<lane>/hir/` (`SIMPLE_HIR_CACHE_DIR`,
-  `SIMPLE_HIR_CACHE=0` off). Key = source sha256 + digest of ALL frozen
-  surfaces (lowering indexes the whole closure, see the file header) + entry
-  flag + lowering env switches + codec header; compiler identity in the entry
-  header via the front-end cache scope. Driver loop
-  (`driver_hir_pipeline_lowering.spl`, non-streaming path) loads on hit, skips
-  lowering, replays the bootstrap flat HIR rows, stores on miss; prints
-  `[hir-cache] hits= misses= stores=`.
-- **Shards** — `native_build_main.spl` `run_hir_shards` (after the parse
-  shards, `--threads N`): N `--hir-shard=i/N` children lower claimed modules
-  (flock'd queue under the HIR cache dir, claim order = topological import
-  levels) into the cache and exit before typecheck; receipt
-  `[hir-shard] done shard=i/N lowered= claimed= levels=`. Only the
-  non-streaming driver path is wired (`SIMPLE_STAGE3_STREAMING_SURFACES=1`
-  still lowers in process).
-- Specs: `test/01_unit/compiler/hir/hir_codec_roundtrip_spec.spl`,
-  `test/02_integration/compiler/driver/native_build_hir_sharding_spec.spl`.
-- Record: `doc/08_tracking/bug/native_build_phases_after_parse_single_threaded_2026-08-22.md`.
+Pure policy lives with staged compiler identity in
+`src/app/cli/bootstrap_identity.spl`. Behavioral coverage is
+`test/03_system/check/cached_render_entry_closure_runtime_selection_spec.spl`;
+its manually synchronized mirror is under `doc/06_spec/03_system/check/` until
+an admitted full CLI can run test/maintenance/docgen. Do not use the known-bad
+`release/` artifact or any Rust seed to turn `TEST_BLOCKED` into PASS. This
+criterion does not authenticate arbitrarily renamed binaries and does not
+admit Stage 4, build the render carrier, or prove 8K execution.

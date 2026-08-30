@@ -1,0 +1,150 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# guide: doc/07_guide/tooling/ponytail.md ; audit: mcp_audit_REPORT Q2 (ponytail parity)
+
+use std.spec.step
+
+use std.io_runtime.{dir_create_all, file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.common.ponytail.ladder.{ponytail_ladder_report_source, ponytail_ladder_report_diff, ponytail_level_threshold}
+use app.mcp.main_dispatch.{dispatch_tool_content}
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+fn expect_absence_marker_hidden(value: text):
+    expect(value.split(absence_marker()).len()).to_equal(1)
+
+fn smelly_source() -> text:
+    var s = "trait Renderer:\n    fn render(self) -> text\n\n"
+    s = s + "class WidgetFactory:\n    fn make(self) -> i64:\n        1\n\n"
+    s = s + "struct ScanConfig:\n    depth: i64 = 4\n    verbose: bool = false\n\n"
+    s = s + "fn _dead_helper(x: i64) -> i64:\n    x + 1\n\n"
+    s = s + "fn my_line_count(s: text) -> i64:\n    s.split(\"\\n\").len()\n\n"
+    s = s + "fn is_ok(x: i64) -> bool:\n    if x > 0:\n        return true\n    else:\n        return false\n\n"
+    s = s + "fn pairs(xs: [i64]) -> i64:\n    var n = 0\n    for a in xs:\n        for b in xs:\n            n = n + 1\n    n\n\n"
+    s = s + "fn raw() -> i64:\n    rt_string_len(\"x\")\n\n"
+    s = s + "fn later():\n    pass_todo\n"
+    s
+
+fn clean_source() -> text:
+    "fn hello() -> text:\n    \"ok\"\n\nfn main():\n    hello()\n"
+
+describe "ponytail ladder scanner":
+    it "reports nothing on a clean file":
+        # @req REQ-SSPEC-UNIT
+        step("reports nothing on a clean file")
+        val out = ponytail_ladder_report_source("clean.spl", clean_source(), "full")
+        expect(out).to_contain("Ponytail Ladder")
+        expect(out).to_contain("status: ok")
+        expect(out).to_contain("findings: 0")
+        expect_absence_marker_hidden(out)
+
+    it "tags each smell with its ladder rung":
+        # @req REQ-SSPEC-UNIT
+        step("tags each smell with its ladder rung")
+        val out = ponytail_ladder_report_source("smelly.spl", smelly_source(), "full")
+        expect(out).to_contain("status: review")
+        expect(out).to_contain("rung6 single-impl: `Renderer`")
+        expect(out).to_contain("rung6 factory-for-one: `WidgetFactory`")
+        expect(out).to_contain("rung6 config-for-constant: `ScanConfig.depth`")
+        expect(out).to_contain("rung1 unused: `_dead_helper`")
+        expect(out).to_contain("rung2 stdlib: `my_line_count`")
+        expect(out).to_contain("rung5 one-line")
+        expect(out).to_contain("rung6 missing-ceiling: nested loop")
+        expect(out).to_contain("rung4 direct-rt")
+        expect(out).to_contain("rung1 placeholder")
+        expect(out).to_contain("pattern: [code] -> skipped: [X], add when [Y]")
+        expect_absence_marker_hidden(out)
+
+    it "honours a ponytail ceiling comment":
+        # @req REQ-SSPEC-UNIT
+        step("honours a ponytail ceiling comment")
+        val src = "fn pairs(xs: [i64]) -> i64:\n    var n = 0\n    for a in xs:\n        # ponytail: O(n^2), index when n grows\n        for b in xs:\n            n = n + 1\n    n\n"
+        val out = ponytail_ladder_report_source("ceiling.spl", src, "full")
+        expect(out.contains("missing-ceiling")).to_equal(false)
+
+    it "filters by intensity level":
+        # @req REQ-SSPEC-UNIT
+        step("filters by intensity level")
+        expect(ponytail_level_threshold("lite")).to_equal(3)
+        expect(ponytail_level_threshold("full")).to_equal(2)
+        expect(ponytail_level_threshold("ultra")).to_equal(1)
+        val lite = ponytail_ladder_report_source("smelly.spl", smelly_source(), "lite")
+        expect(lite).to_contain("rung1 unused: `_dead_helper`")
+        expect(lite).to_contain("rung1 placeholder")
+        expect(lite.contains("factory-for-one")).to_equal(false)
+        expect(lite).to_contain("hidden at level lite")
+        val ultra = ponytail_ladder_report_source("smelly.spl", smelly_source(), "ultra")
+        expect(ultra).to_contain("factory-for-one")
+        expect(ultra.contains("hidden at level")).to_equal(false)
+
+    it "scopes a unified diff to added lines with new-file numbers":
+        # @req REQ-SSPEC-UNIT
+        step("scopes a unified diff to added lines with new-file numbers")
+        var d = "diff --git a/src/x.spl b/src/x.spl\n--- a/src/x.spl\n+++ b/src/x.spl\n@@ -1,3 +10,5 @@\n fn keep():\n     1\n+class ThingFactory:\n+    fn make(self) -> i64:\n+        2\n-fn removed_factory(): 0\n"
+        val out = ponytail_ladder_report_diff(d, "full")
+        expect(out).to_contain("source: src/x.spl")
+        expect(out).to_contain("scope: diff")
+        expect(out).to_contain("lines: 3")
+        expect(out).to_contain("L12 rung6 factory-for-one: `ThingFactory`")
+        expect(out.contains("removed_factory")).to_equal(false)
+
+describe "simple_ponytail MCP tool":
+    it "returns ladder findings for a file with the typed schema fields":
+        # @req REQ-SSPEC-UNIT
+        step("returns ladder findings for a file with the typed schema fields")
+        dir_create_all("build/test/ponytail_mcp")
+        val path = "build/test/ponytail_mcp/smelly.spl"
+        file_write(path, smelly_source())
+        val ladder = dispatch_tool_content("simple_ponytail", "{\"file\":\"" + path + "\",\"mode\":\"ladder\",\"level\":\"full\"}")
+        expect(ladder).to_contain("Ponytail Ladder")
+        expect(ladder).to_contain("rung6 factory-for-one")
+        expect_absence_marker_hidden(ladder)
+        val audit = dispatch_tool_content("simple_ponytail", "{\"file\":\"" + path + "\"}")
+        expect(audit).to_contain("Ponytail Audit")
+        expect(audit).to_contain("ladder findings:")
+        expect(audit).to_contain("rung1 unused")
+        val bad_level = dispatch_tool_content("simple_ponytail", "{\"file\":\"" + path + "\",\"level\":\"max\"}")
+        expect(bad_level).to_contain("Invalid level")
+
+    it "accepts a diff without a file":
+        # @req REQ-SSPEC-UNIT
+        step("accepts a diff without a file")
+        val args = "{\"diff\":\"+++ b/y.spl\\n@@ -0,0 +1,2 @@\\n+class YFactory:\\n+    pass_todo\\n\",\"level\":\"ultra\",\"format\":\"json\"}"
+        val out = dispatch_tool_content("simple_ponytail", args)
+        expect(out).to_contain("\"command\":\"ponytail\"")
+        expect(out).to_contain("source: y.spl")
+        expect(out).to_contain("factory-for-one")
+        expect(out).to_contain("placeholder")
+        val none = dispatch_tool_content("simple_ponytail", "{\"level\":\"full\"}")
+        expect(none).to_contain("Missing required parameter")
+
+describe "ponytail session hooks":
+    it "session-start hook self-test passes over level-file variants":
+        # @req REQ-SSPEC-UNIT
+        step("session-start hook self-test passes over level-file variants")
+        val (out, err, code) = process_run_timeout("sh", [".claude/hooks/ponytail-session-start.shs", "--selftest"], 20000)
+        expect(out).to_contain("Results: 7 passed, 0 failed")
+        expect(code).to_equal(0)
+
+    it "prompt hook self-test tracks toggles":
+        # @req REQ-SSPEC-UNIT
+        step("prompt hook self-test tracks toggles")
+        val (out, err, code) = process_run_timeout("sh", [".claude/hooks/ponytail-prompt.shs", "--selftest"], 20000)
+        expect(out).to_contain("Results: 9 passed, 0 failed")
+        expect(code).to_equal(0)
+
+    it "session-start banner names the level from the level file":
+        # @req REQ-SSPEC-UNIT
+        step("session-start banner names the level from the level file")
+        dir_create_all("build/test/ponytail_mcp")
+        file_write("build/test/ponytail_mcp/level", "ultra\n")
+        val (out, err, code) = process_run_timeout("env", ["PONYTAIL_LEVEL_FILE=build/test/ponytail_mcp/level", "sh", ".claude/hooks/ponytail-session-start.shs"], 20000)
+        expect(out).to_contain("PONYTAIL MODE ACTIVE — level: ultra")
+        expect(out).to_contain("## The ladder")
+        # Prompt-side budget: the banner is injected on every startup/resume/
+        # clear/compact. The original plugin injects 4,039 B; the old hook
+        # cat-ed the whole skill file (6,133 B). Long prose lives in the skill.
+        expect(out.len() <= 4039).to_equal(true)
+        expect(out).to_contain(".claude/skills/ponytail.md")

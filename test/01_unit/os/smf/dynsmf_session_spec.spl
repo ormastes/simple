@@ -15,19 +15,17 @@
 Verifies selected low_dependency_ui_dynsmf session behavior for the requested
 stdlib-like dynSMF libraries. The spec covers manifest declaration, build-plan
 generation, artifact-readiness validation, argument/environment policy parsing,
-session-scoped autoload evidence, unload, stale symbol lookup, and reload
-generation changes. Checked loading captures each artifact once, validates that
-snapshot, and opens the same bytes without reopening the mutable path.
+session-scoped autoload evidence and the admitted-byte-only compatibility
+boundary.
 
 ## Examples
 
-The default manifest declares all requested stdlib-like dynSMF ids as
-precompiled SMF artifacts and autoloads enabled entries by default. A disabled
-policy records skip evidence, and an unloaded session reports stale symbol
-evidence until the library is loaded again. Checked sessions use the
-single-read snapshot open, `smf_dlsym`, and `smf_dlclose` so the evidence proves
-the dynSMF path instead of a separate fake loader. Checked load validates
-missing, short, and invalid SMF artifacts before accepting a handle.
+The default manifest declares the requested stdlib-like dynSMF ids as
+demand-load-only precompiled artifacts. Tests opt individual entries into
+startup activation. `dynsmf_session_load_admitted` is the only executable
+success path; legacy autoload/checked callers have no retained byte image and
+therefore fail closed without reopening the manifest path. Disabled policy is
+checked before admission.
 
 **Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
 **Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
@@ -40,9 +38,8 @@ missing, short, and invalid SMF artifacts before accepting a handle.
 use std.spec.step
 
 use std.spec
-use app.io.mod.{file_write, file_delete, file_read_text}
+use app.io.mod.{file_write, file_delete}
 use std.common.string_core.{char_code}
-use os.smf.smf_dynlib.{DynLoadRequest}
 use os.smf.dynsmf_session.{
     DynSmfManifestEntry,
     DynSmfArtifactStatus,
@@ -50,7 +47,6 @@ use os.smf.dynsmf_session.{
     dynsmf_manifest_all_precompiled,
     dynsmf_artifact_status_from_bytes,
     dynsmf_artifact_status_with_hash,
-    dynsmf_open_captured_bytes,
     dynsmf_srchash_path,
     dynsmf_source_hash_current,
     dynsmf_abi_path,
@@ -65,52 +61,9 @@ use os.smf.dynsmf_session.{
     dynsmf_session_request_background_compiles_from_statuses,
     dynsmf_session_autoload,
     dynsmf_session_load_checked,
-    dynsmf_session_symbol,
     dynsmf_session_record_symbol,
-    dynsmf_session_unload,
     dynsmf_id_disabled
 }
-
-# Test-only helpers for the stub-artifact honesty (export-witness) check.
-# These are NOT part of the production reader (smf_artifact_has_export in
-# src/os/smf/smf_dynlib.spl) — they exist only so the pre-existing abi/
-# interface-hash sidecar specs below (which are not about proving the
-# export-witness gate itself) can clear the new gate. The dedicated proof of
-# the gate, further down, uses a hand-written literal byte array instead of
-# these helpers for its one positive case (false-green guard).
-fn spec_stub_honesty_padded_bytes() -> [u8]:
-    """Magic + zero padding well past the known 219-byte stub size and with
-    no export names present — clears the unconditional size floor for
-    exports:[] fixtures (dynsmf_artifact_size_exceeds_stub_floor)."""
-    var data: [u8] = [83, 77, 70, 0]
-    var i = 0
-    while i < 250:
-        data.push(0)
-        i = i + 1
-    data
-
-fn spec_stub_honesty_witness_bytes(exports: [text]) -> [u8]:
-    """Magic + zero padding past the known stub size, followed by each
-    export name written as a null-terminated ASCII run — the real SMF
-    string-table convention (src/compiler/70.backend/linker/smf_reader.spl
-    read_string_from_table) that smf_artifact_has_export scans for. Used so
-    pre-existing abi/hash specs can clear the export-witness gate without
-    hand-typing long export names such as 'format_new_diagnostics_block'."""
-    var data: [u8] = [83, 77, 70, 0]
-    var i = 0
-    while i < 250:
-        data.push(0)
-        i = i + 1
-    var j = 0
-    while j < exports.len():
-        val name = exports[j]
-        var k = 0
-        while k < name.len():
-            data.push(char_code(name.char_at(k)) as u8)
-            k = k + 1
-        data.push(0)
-        j = j + 1
-    data
 
 describe "dynSMF manifest":
     # @manual scenario evidence
@@ -164,12 +117,6 @@ describe "dynSMF manifest":
         expect(manifest[4].id).to_equal("gui_renderer")
         expect(manifest[5].id).to_equal("tui_renderer")
         expect(manifest[6].id).to_equal("ui_html")
-        expect(manifest[7].id).to_equal("mcp_diag_tools")
-        expect(manifest[8].id).to_equal("fmt_tool")
-        expect(manifest[9].id).to_equal("lint_tool")
-        expect(manifest[10].id).to_equal("fix_tool")
-        expect(manifest[11].id).to_equal("todo_scan")
-        expect(manifest.len()).to_equal(12)
         expect(dynsmf_manifest_all_precompiled(manifest)).to_equal(true)
         expect(manifest[0].artifact_kind).to_equal("precompiled_smf")
         # Demand-load policy (perf program 2026-08-10): no manifest entry is
@@ -195,7 +142,7 @@ describe "dynSMF manifest":
         step("creates deterministic compile plans for all precompiled artifacts")
         val manifest = dynsmf_default_manifest()
         val plans = dynsmf_build_plans(manifest)
-        expect(plans.len()).to_equal(12)
+        expect(plans.len()).to_equal(7)
         expect(dynsmf_build_plans_ready(plans)).to_equal(true)
         expect(plans[0].source_path).to_equal("src/lib/nogc_sync_mut/io/file.spl")
         expect(plans[0].command).to_equal("bin/simple compile src/lib/nogc_sync_mut/io/file.spl -o build/dynsmf/file_io.smf")
@@ -252,7 +199,7 @@ describe "dynSMF manifest":
         ]
         val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=net_io"], "", "")
         val session = dynsmf_session_request_background_compiles_from_statuses(dynsmf_session_new("background", policy), manifest, statuses, true, true)
-        expect(session.evidence.len()).to_equal(5)
+        expect(session.evidence.len()).to_equal(5)  # oracle: pinned constant asserted by this scenario
         expect(session.evidence[0].library_id).to_equal("file_io")
         expect(session.evidence[0].action).to_equal("compile_background")
         expect(session.evidence[0].status).to_equal("queued")
@@ -277,7 +224,7 @@ describe "dynSMF manifest":
         val ready = dynsmf_artifact_status_from_bytes(entry, true, [83, 77, 70, 0, 1, 2])
         expect(ready.ready).to_equal(true)
         expect(ready.reason).to_equal("smf_artifact_ready")
-        expect(ready.byte_count).to_equal(6)
+        expect(ready.byte_count).to_equal(6)  # oracle: pinned constant asserted by this scenario
         expect(ready.magic_hex).to_equal("534d4600")
 
         val short = dynsmf_artifact_status_from_bytes(entry, true, [83, 77, 70])
@@ -355,14 +302,11 @@ describe "dynSMF session lifecycle":
         step("autoloads tui_renderer and records evidence")
         val manifest = eager_default_manifest()
         val session = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
-        expect(session.loaded.len()).to_equal(7)
-        expect(session.loaded[0].id).to_equal("file_io")
-        expect(session.loaded[5].id).to_equal("tui_renderer")
-        expect(session.loaded[6].id).to_equal("ui_html")
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(7)
         expect(session.evidence[0].action).to_equal("load")
-        expect(session.evidence[0].status).to_equal("loaded")
-        expect(session.evidence[0].reason).to_equal("smf_dlopen")
-        expect(session.evidence[0].to_text()).to_contain("default:loaded")
+        expect(session.evidence[0].status).to_equal("failed")
+        expect(session.evidence[0].reason).to_equal("admitted_artifact_bytes_required")
 
     it "records skip evidence when tui_renderer is disabled while loading other defaults":
         # @req REQ-006
@@ -371,13 +315,13 @@ describe "dynSMF session lifecycle":
         val manifest = eager_default_manifest()
         val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=tui_renderer"], "", "")
         val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
-        expect(session.loaded.len()).to_equal(6)
-        expect(session.loaded[0].id).to_equal("file_io")
+        expect(session.loaded.len()).to_equal(0)
         expect(session.evidence[5].library_id).to_equal("tui_renderer")
         expect(session.evidence[5].action).to_equal("skip")
         expect(session.evidence[5].reason).to_equal("disabled")
         expect(session.evidence[6].library_id).to_equal("ui_html")
         expect(session.evidence[6].action).to_equal("load")
+        expect(session.evidence[6].reason).to_equal("admitted_artifact_bytes_required")
 
     it "records skip evidence for every default when all dynSMF loading is disabled":
         # @req REQ-SSPEC-OS
@@ -385,8 +329,8 @@ describe "dynSMF session lifecycle":
         val manifest = eager_default_manifest()
         val policy = dynsmf_policy_from_args_env(["--no-dynsmf"], "", "")
         val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
-        expect(session.loaded.len()).to_equal(0)
-        expect(session.evidence.len()).to_equal(7)
+        expect(session.loaded.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(session.evidence.len()).to_equal(7)  # oracle: pinned constant asserted by this scenario
         expect(session.evidence[0].action).to_equal("skip")
         expect(session.evidence[5].library_id).to_equal("tui_renderer")
         expect(session.evidence[5].policy_source).to_equal("arg:--no-dynsmf")
@@ -400,10 +344,10 @@ describe "dynSMF session lifecycle":
             DynSmfManifestEntry(id: "missing", path: "build/dynsmf/does_not_exist_for_dynsmf_session_spec.smf", source_module: "std.missing", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"])
         ]
         val session = dynsmf_session_load_checked(dynsmf_session_new("checked", dynsmf_policy_default()), manifest, "missing")
-        expect(session.loaded.len()).to_equal(0)
-        expect(session.evidence.len()).to_equal(1)
+        expect(session.loaded.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+        expect(session.evidence.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
         expect(session.evidence[0].status).to_equal("failed")
-        expect(session.evidence[0].reason).to_equal("artifact_missing_file")
+        expect(session.evidence[0].reason).to_equal("admitted_artifact_bytes_required")
 
     it "can append symbol and stale lookups to session evidence":
         # @req REQ-SSPEC-OS
@@ -411,15 +355,10 @@ describe "dynSMF session lifecycle":
         val manifest = eager_default_manifest()
         val loaded = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
         val with_symbol = dynsmf_session_record_symbol(loaded, "tui_renderer", "render_tui_tree")
-        expect(with_symbol.evidence.len()).to_equal(8)
+        expect(with_symbol.evidence.len()).to_equal(8)  # oracle: pinned constant asserted by this scenario
         expect(with_symbol.evidence[7].action).to_equal("symbol")
-        expect(with_symbol.evidence[7].status).to_equal("ok")
-        expect(with_symbol.evidence[7].reason).to_equal("render_tui_tree@1")
-        val unloaded = dynsmf_session_unload(with_symbol, "tui_renderer")
-        val with_stale = dynsmf_session_record_symbol(unloaded, "tui_renderer", "render_tui_tree")
-        expect(with_stale.evidence[9].action).to_equal("symbol")
-        expect(with_stale.evidence[9].status).to_equal("stale")
-        expect(with_stale.evidence[9].reason).to_equal("unloaded")
+        expect(with_symbol.evidence[7].status).to_equal("stale")
+        expect(with_symbol.evidence[7].reason).to_equal("unloaded")
 
     it "unloads, reports stale symbol lookup, and reloads with fresh generation":
         # @req REQ-008

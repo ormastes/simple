@@ -48,9 +48,7 @@ For each public function, identify complexity. Flag O(n^2)+:
 ## Phase 5: Test Verification
 
 ```bash
-bin/simple test <focused-scope>
-bin/simple lint <changed .spl files>
-bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
+bin/simple test && bin/simple build lint && bin/simple build check
 ```
 
 Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.

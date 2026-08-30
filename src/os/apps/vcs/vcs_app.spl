@@ -28,11 +28,9 @@
 # FFI — works in interpreter (hosted) mode
 # ============================================================================
 
-use std.io_runtime.{ file_exists }
-
-extern fn rt_file_write_text(path: text, content: text)
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{ file_exists, process_run }
+use std.nogc_sync_mut.env.variables.{env_get}
+use std.nogc_sync_mut.file_system.file_ops.{file_write_text}
 
 # ============================================================================
 # Helpers
@@ -40,14 +38,14 @@ extern fn rt_env_get(key: text) -> text
 
 fn file_read(path: text) -> text:
     """Read file via cat (works in interpreter — rt_file_read_text returns Option)."""
-    val (out, _, code) = rt_process_run("cat", [path])
+    val (out, _, code) = process_run("cat", [path])
     if code == 0:
         return out
     ""
 
 fn file_list(dir: text) -> [text]:
     """List files in directory."""
-    val (out, _, code) = rt_process_run("ls", ["-1", dir])
+    val (out, _, code) = process_run("ls", ["-1", dir])
     if code != 0:
         return []
     val trimmed = out.trim()
@@ -56,18 +54,18 @@ fn file_list(dir: text) -> [text]:
     trimmed.split("\n")
 
 fn file_copy(src: text, dst: text) -> bool:
-    val (_, _, code) = rt_process_run("cp", [src, dst])
+    val (_, _, code) = process_run("cp", [src, dst])
     code == 0
 
 fn dir_create(path: text):
-    rt_process_run("mkdir", ["-p", [path]])
+    process_run("mkdir", ["-p", [path]])
 
 fn dir_remove(path: text):
-    rt_process_run("rm", ["-rf", [path]])
+    process_run("rm", ["-rf", [path]])
 
 fn timestamp_now() -> text:
     """Get current timestamp via date."""
-    val (out, _, code) = rt_process_run("date", ["+%Y-%m-%dT%H:%M:%S"])
+    val (out, _, code) = process_run("date", ["+%Y-%m-%dT%H:%M:%S"])
     if code == 0:
         return out.trim()
     "unknown"
@@ -176,9 +174,9 @@ fn vcs_init(e: VcsEngine) -> bool:
     dir_create(e.vcs_dir + "/commits")
     dir_create(e.vcs_dir + "/staging")
     dir_create(e.vcs_dir + "/objects")
-    rt_file_write_text(e.vcs_dir + "/HEAD", "")
-    rt_file_write_text(e.vcs_dir + "/staging.manifest", "")
-    rt_file_write_text(e.vcs_dir + "/config", "author: user\n")
+    file_write_text(e.vcs_dir + "/HEAD", "")
+    file_write_text(e.vcs_dir + "/staging.manifest", "")
+    file_write_text(e.vcs_dir + "/config", "author: user\n")
     true
 
 # --- add ---
@@ -208,7 +206,7 @@ fn vcs_add(e: VcsEngine, files: [text]) -> i64:
                 manifest = manifest + "\n"
             manifest = manifest + f + "\n"
         count = count + 1
-    rt_file_write_text(e.vcs_dir + "/staging.manifest", manifest)
+    file_write_text(e.vcs_dir + "/staging.manifest", manifest)
     count
 
 # --- commit ---
@@ -243,15 +241,15 @@ fn vcs_commit(e: VcsEngine, message: text) -> text:
 
     # Write commit metadata
     val commit = VcsCommit(hash: hash, parent: head, message: message, timestamp: ts, files: files)
-    rt_file_write_text(e.vcs_dir + "/commits/" + hash + ".txt", serialize_commit(commit))
+    file_write_text(e.vcs_dir + "/commits/" + hash + ".txt", serialize_commit(commit))
 
     # Update HEAD
-    rt_file_write_text(e.vcs_dir + "/HEAD", hash)
+    file_write_text(e.vcs_dir + "/HEAD", hash)
 
     # Clear staging
     dir_remove(e.vcs_dir + "/staging")
     dir_create(e.vcs_dir + "/staging")
-    rt_file_write_text(e.vcs_dir + "/staging.manifest", "")
+    file_write_text(e.vcs_dir + "/staging.manifest", "")
 
     hash
 
@@ -383,7 +381,7 @@ fn vcs_checkout(e: VcsEngine, hash: text) -> bool:
                 dir_create(parent_path)
                 pi = pi + 1
         file_copy(src, dst)
-    rt_file_write_text(e.vcs_dir + "/HEAD", hash)
+    file_write_text(e.vcs_dir + "/HEAD", hash)
     true
 
 # ============================================================================
@@ -512,9 +510,9 @@ fn vcs_help_text() -> text:
 # ============================================================================
 
 fn main() -> i64:
-    val cwd = rt_env_get("PWD")
+    val cwd = env_get("PWD")
     # Skip first arg if it's "vcs"
-    val args = rt_env_get("VCS_ARGS")
+    val args = env_get("VCS_ARGS")
     if args != "":
         val parts = args.split(" ")
         return vcs_run(cwd, parts)

@@ -1,0 +1,252 @@
+# SPipe MCP Parser API
+
+`std.nogc_sync_mut.spipe.tree_context` is the common language-neutral parser
+surface for SPipe MCP, context-mode style storage, and CLI-tool output parsing.
+
+## API
+
+- `spipe_source_blob(id, kind, command, raw_text)` creates raw context.
+- `spipe_match_parser(kind, command, raw_text)` returns the best parser name.
+- `spipe_parse_source(source)` and `spipe_parse_text(kind, command, raw_text)`
+  build a `TreeDoc`.
+- `spipe_render_tree(doc)` renders compact `@ctx`, `@parent`, `@node`, and
+  `raw:<source>#Lx-Ly` pointers.
+- `spipe_context_store_new`, `spipe_context_put`, `spipe_context_get`,
+  `spipe_context_search`, and `spipe_context_raw` provide the minimal store and
+  exact raw-line retrieval API.
+
+Log levels are grouped only when explicit levels are detected. Plain output
+renders in tree/path order with `level_detected=false`.
+
+## CLI
+
+```bash
+bin/spipe_mcp_server
+bin/spipe_mcp_server serve
+bin/spipe_mcp_server parsers
+bin/release/simple run src/app/spipe_mcp/main.spl
+bin/release/simple run src/app/spipe_mcp/main.spl serve
+bin/release/simple run src/app/spipe_mcp/main.spl parsers
+bin/release/simple run src/app/spipe_mcp/main.spl tree-parser-list
+bin/release/simple run src/app/spipe_mcp/main.spl match --command='git diff' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl tree-match-parser --command='git diff' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl tree-match-parser --source-kind=repomix --command='repomix' -f output.md
+bin/release/simple run src/app/spipe_mcp/main.spl parse --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl render --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl tree-render --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl raw -f output.txt --start=10 --end=12 --before=2 --after=2
+bin/release/simple run src/app/spipe_mcp/main.spl context-get-raw -f output.txt --start=10 --end=12 --before=2 --after=2
+bin/release/simple run src/app/spipe_mcp/main.spl sql-put --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl sql-get --db=build/spipe.db --source-id=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl sql-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-put --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-put-raw --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-get --db=build/spipe.db --source-id=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-get-tree --db=build/spipe.db --source-id=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl context-sql-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl exec-capture --db=build/spipe.db --source-id=exec:1 --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl exec-parse --command='simple build' -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl exec-search --db=build/spipe.db --query=ERROR --source-filter=exec:1
+bin/release/simple run src/app/spipe_mcp/main.spl minimality-check --task='add date picker'
+bin/release/simple run src/app/spipe_mcp/main.spl minimality-review -f diff.txt
+bin/release/simple run src/app/spipe_mcp/main.spl minimality-debt -f source.txt
+bin/release/simple run src/app/spipe_mcp/main.spl hook-rules --provider=codex
+bin/release/simple run src/app/spipe_mcp/main.spl hook-render --provider=codex --event=tool_start -f output.txt
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-profile
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
+bin/release/simple run src/app/spipe_mcp/main.spl getCodebase --path=. --include=src/app/spipe_mcp/main.spl --exclude='.git/**,build/**'
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-local --root=. --include=src/app/spipe_mcp/main.spl --ignore='.git/**,build/**'
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-pack-remote --repository=https://github.com/example/repo
+bin/release/simple run src/app/spipe_mcp/main.spl getRemoteCodebase --root=https://github.com/example/repo
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-ingest --source-id=codebase:1 -f repomix.txt
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-search --query=main.spl --source-id=codebase:1 -f repomix.txt
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-get --source-id=codebase:1 -f repomix.txt
+bin/release/simple run src/app/spipe_mcp/main.spl codebase-save --source-id=codebase:1 -f repomix.txt
+bin/release/simple run src/app/spipe_mcp/main.spl saveCodebase --source-id=codebase:1 -f repomix.txt
+bin/release/simple run scripts/smoke/spipe_mcp_protocol_smoke.spl
+bin/release/simple run src/app/cli/main.spl spipe-mcp parsers
+```
+
+No args and `serve` run the MCP stdio server. Logs must stay off stdout.
+For MCP client registration, prefer `bin/spipe_mcp_server`; `serve` uses the
+proven Simple source entrypoint by default for both stdio and CLI subcommands,
+so source changes are visible even when an older native `spipe_mcp` artifact is
+present. Set `SIMPLE_SPIPE_MCP_BINARY=/path/to/spipe_mcp` for an explicit native
+deployment, or `SIMPLE_SPIPE_MCP_PREFER_NATIVE=1` only after the native parser
+and stdio protocol probes pass.
+`simple spipe-mcp ...` is the canonical shortcut; the top-level wrapper hands it
+to `bin/spipe_mcp_server` and keeps every other `simple` command on the stable
+release runtime.
+Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
+`--kind=K`; the default is `command_output`. MCP calls may use `source_kind` or
+`sourceKind`, and raw text may be supplied as `text`, `raw_text`, or `rawText`.
+
+## MCP Tools
+
+- `spipe_tree_parser_list`
+- `spipe_tree_match_parser`
+- `spipe_tree_parse`
+- `spipe_tree_render`
+- `spipe_context_put`
+- `spipe_context_put_raw`
+- `spipe_context_get`
+- `spipe_context_get_tree`
+- `spipe_context_search`
+- `spipe_context_raw`
+- `spipe_context_get_raw`
+- `spipe_context_sql_put`
+- `spipe_context_sql_put_raw`
+- `spipe_context_sql_get`
+- `spipe_context_sql_get_tree`
+- `spipe_context_sql_search`
+- `spipe_exec_capture`
+- `spipe_exec_parse`
+- `spipe_exec_search`
+- `spipe_minimality_check`
+- `spipe_minimality_review`
+- `spipe_minimality_debt`
+- `spipe_hook_event`
+- `spipe_hook_rules`
+- `spipe_hook_render`
+- `spipe_codebase_profile`
+- `spipe_codebase_pack`
+- `spipe_codebase_pack_local`
+- `spipe_codebase_pack_remote`
+- `getCodebase`
+- `getRemoteCodebase`
+- `spipe_codebase_ingest`
+- `spipe_codebase_search`
+- `spipe_codebase_get`
+- `spipe_codebase_save`
+- `saveCodebase`
+
+The minimality tools are deterministic Ponytail gates. They flag obvious
+`delete`, `yagni`, `native`, `stdlib`, `dependency`, and `shrink` cases and list
+`ponytail:` debt markers. They do not replace normal LLM review.
+
+The execution tools are context aliases for already-captured output:
+`spipe_exec_capture` stores supplied command text, `spipe_exec_parse` renders a
+tree for supplied command text, and `spipe_exec_search` searches captured
+execution text. They do not spawn shell commands.
+
+The hook tools normalize Claude, Codex, Gemini, Cursor, and generic provider event
+names into SPipe phases such as `pre_tool`, `post_tool`, `pre_prompt`,
+`post_turn`, `pre_edit`, `post_edit`, and `pre_commit`.
+MCP hook calls accept snake_case or camelCase names for hook payload fields,
+including `raw_payload`/`rawPayload`, `tool_name`/`toolName`, and
+`prompt_excerpt`/`promptExcerpt`. CLI hook calls mirror common spellings such as
+`--tool`, `--toolName`, `--tool-name`, `--prompt`, `--promptExcerpt`, and
+`--prompt-excerpt`.
+
+The codebase tools run RepoMix with a fixed argv vector. Local packs use
+`npx -y repomix <root> --stdout --style markdown --include <patterns> --ignore
+<patterns>`; remote packs use `npx -y repomix --remote <root> --stdout --style
+markdown --include <patterns> --ignore <patterns>`. They ingest existing
+RepoMix/codebase-mcp output, index it in the session-local tree store, and
+expose the focused Simple MCP include/ignore profile. Pack tools return status
+and byte count only; use
+`spipe_codebase_search` or `spipe_codebase_get` to inspect the stored tree.
+The CLI mirrors ingest/search/get over a supplied packed-output file because
+standalone CLI invocations do not share MCP session memory.
+For codebase-mcp compatibility, `getCodebase`, `getRemoteCodebase`, and
+`saveCodebase` are aliases for the local pack, remote pack, and metadata-only
+save tools. MCP calls may use either SPipe snake_case arguments
+(`source_id`, `include_patterns`, `ignore_patterns`, `timeout_ms`) or
+codebase-mcp-style camelCase arguments (`sourceId`, `includePatterns`,
+`ignorePatterns`, `excludePatterns`, `timeoutMs`), with `cwd`, `repo`, `path`,
+or `repository` accepted as aliases for `root`.
+Existing packed output may be supplied as `text`, `packed_text`, or `packedText`.
+The CLI accepts the same compatibility spellings as flags, for example
+`--cwd`, `--repo`, `--path`, `--repository`, `--sourceId`,
+`--includePatterns`, `--ignorePatterns`, `--excludePatterns`, and
+`--timeoutMs`.
+Existing XML RepoMix input with `<file path=...>` is matched as
+`repomix_xml`; markdown-style packs use `repomix_markdown`.
+RepoMix file markers render as file nodes, so codebase packs can be searched
+and retrieved by actual source path.
+Plain markdown sources or heading-shaped text use `markdown_headings`.
+`tree` command output keeps a small path stack so nested entries render parent
+directories such as `src/app` instead of isolated leaf names; rows with deeper
+children are classified as directories even when `tree` omits trailing slashes.
+`find` and plain file-tree output classify a path as a directory when later
+rows have that path as their parent prefix.
+`ls -l` output extracts ordinary entry names from permission rows and marks
+rows starting with `d` as directories.
+`git status` output extracts standard status paths including modified, new,
+deleted, renamed, and both-modified rows.
+`git diff` output extracts the destination path from `diff --git a/... b/...`
+headers.
+`git log --name-only` style output extracts standalone path rows.
+Python tracebacks extract `File "path", line N` frames and group final
+`Error`/`Exception` rows as parser-confirmed errors.
+`pytest` output extracts paths from `FAILED path::test` and `ERROR path::test`
+summary rows.
+`cargo` output extracts Rust diagnostic locations from `--> path:line:col`.
+`npm` output extracts simple Node stack rows such as `at path:line:col`.
+`apt`/`dpkg` output extracts local package-manager paths and treats `E:`,
+`W:`, and `Err:` prefixes as parser-confirmed levels.
+`tar`/`zip`/`unzip`/`rsync` output extracts archive and copy paths from common
+list, add, inflate, extract, and transfer rows.
+`journalctl`/`systemctl` output extracts systemd unit names and unit file paths.
+`cmake` output extracts file paths from `CMake Error/Warning at path:line`.
+`ninja` output extracts the first quoted path from `ninja: error:` rows.
+`make` output extracts paths from GNU Make bracketed error rows such as
+`[path:line: target]`.
+`shell` output extracts script paths from `path: line N:` and
+`bash: path: line N:` style diagnostics.
+`ctest` output extracts whitespace-delimited `path:line` tokens from failure
+rows.
+`ld` output skips the linker executable prefix and extracts the referenced
+path-like field from colon-delimited diagnostics.
+Path leaves render as `kind=file`; non-path output remains `kind=line` and can
+still be grouped by explicit log level.
+
+The SQL context tools persist the rendered parent-chain tree into the existing
+Simple context SQLite table. Use `spipe_context_sql_put` with `db_path` to save
+parsed output, `spipe_context_sql_get` to retrieve one source, and
+`spipe_context_sql_search` to search stored parsed context by query and optional
+source filter. MCP callers may use `db` or `dbPath` as aliases for `db_path`,
+and `sourceFilter`, `source_id`, or `sourceId` as aliases for
+`source_filter` on SQL search.
+Search tools accept `query`, `q`, or `searchText`; the CLI mirrors those as
+`--query`, `--q`, or `--searchText`. The CLI accepts the same aliases as
+`--dbPath`, `--sourceFilter`, and `--sourceId`.
+
+The explicit MCP names `spipe_context_put_raw`, `spipe_context_get_tree`,
+`spipe_context_get_raw`, `spipe_context_sql_put_raw`, and
+`spipe_context_sql_get_tree` are aliases for `spipe_context_put`,
+`spipe_context_get`, `spipe_context_raw`, `spipe_context_sql_put`, and
+`spipe_context_sql_get`, matching context-mode naming while keeping the original
+compact names stable.
+
+`spipe_context_raw` and `spipe_context_get_raw` prepend the matching `@parent`
+chain before exact raw lines, so a middle slice still carries command and
+file/dir context. If callers pass raw text directly, SPipe parses that text first
+and renders the same parent context.
+Context tools accept `source_id` or `sourceId`; CLI raw-context calls mirror
+that as `--source-id` or `--sourceId`.
+Raw-context calls accept either `start_line`/`end_line`/`before`/`after` or
+`startLine`/`endLine`/`contextBefore`/`contextAfter`; the CLI mirrors those
+camelCase aliases as flags. If no range is provided, raw context defaults to
+line 1.
+
+`scripts/smoke/spipe_mcp_protocol_smoke.spl` is the focused live protocol
+oracle. It sends JSONL `initialize`, `tools/list`, `spipe_context_put`,
+`spipe_context_search`, `spipe_context_get_raw`, `spipe_codebase_ingest`,
+`spipe_codebase_search`, `spipe_codebase_get`, `spipe_minimality_check`, and
+`spipe_hook_event` requests plus SQL context and codebase alias calls through
+the stdio server. It checks the rendered level group, parent chain, raw pointer,
+exact raw lines, codebase file nodes, Ponytail native-date guidance, normalized
+hook fields, SQL put/get/search, codebase alias rejection/save behavior, and
+absence of non-MCP stdout banners. It also checks a no-level parser call and an
+unknown-method JSON-RPC error path while compiler/runtime diagnostics stay on
+stderr.
+
+## Current Boundary
+
+This patch adds the common parser/store API, executable wrapper, minimal MCP
+stdio server, deterministic Ponytail minimality tools, and hook normalization.
+It also ingests existing RepoMix/codebase-mcp output and can persist parsed
+context through the existing SQLite context database. RepoMix execution stays
+behind the app-owned process facade and uses argv-safe arguments instead of a
+shell command string.

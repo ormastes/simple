@@ -1,8 +1,8 @@
 use super::{aot_compiles, aot_compiles_module, aot_object};
 use crate::hir::{BinOp, TypeId};
 use crate::mir::{
-    BindingStep, BlockId, LocalKind, MirFunction, MirInst, MirLiteral, MirLocal, MirModule, MirPattern, PatternBinding,
-    Terminator, UnitOverflowBehavior,
+    BindingStep, BlockId, LambdaParamBinding, LocalKind, MirFunction, MirInst, MirLiteral, MirLocal, MirModule,
+    MirPattern, PatternBinding, Terminator, UnitOverflowBehavior,
 };
 
 // =============================================================================
@@ -61,6 +61,127 @@ fn codegen_closure_create_and_indirect_call() {
     module.functions.push(func);
     module.functions.push(main);
 
+    assert!(aot_compiles_module(module));
+}
+
+#[test]
+fn codegen_indirect_call_boxes_concrete_float_with_any_param_type() {
+    let mut func = MirFunction::new(
+        "float_identity".to_string(),
+        TypeId::F64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let param_vreg = func.new_vreg();
+    func.params.push(MirLocal {
+        name: "x".to_string(),
+        ty: TypeId::F64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
+    func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(param_vreg));
+
+    let mut main = MirFunction::new(
+        "float_any_indirect".to_string(),
+        TypeId::F64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let closure = main.new_vreg();
+    let arg = main.new_vreg();
+    let dest = main.new_vreg();
+    let block = main.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ClosureCreate {
+        dest: closure,
+        func_name: "float_identity".to_string(),
+        closure_size: 8,
+        capture_offsets: vec![],
+        capture_types: vec![],
+        captures: vec![],
+        lambda_params: vec![LambdaParamBinding {
+            local_index: 0,
+            name: "x".to_string(),
+            ty: TypeId::F64,
+        }],
+        body_block: None,
+        return_type: TypeId::F64,
+    });
+    block.instructions.push(MirInst::ConstFloat { dest: arg, value: 1.5 });
+    block.instructions.push(MirInst::IndirectCall {
+        dest: Some(dest),
+        callee: closure,
+        param_types: vec![TypeId::ANY],
+        return_type: TypeId::F64,
+        args: vec![arg],
+        effect: crate::mir::Effect::Compute,
+    });
+    block.terminator = Terminator::Return(Some(dest));
+
+    let mut module = MirModule::new();
+    module.functions.push(func);
+    module.functions.push(main);
+    assert!(aot_compiles_module(module));
+}
+
+#[test]
+fn codegen_indirect_call_boxes_f32_with_any_param_type() {
+    let mut main = MirFunction::new(
+        "f32_any_indirect".to_string(),
+        TypeId::F64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let closure = main.new_vreg();
+    let wide_arg = main.new_vreg();
+    let arg = main.new_vreg();
+    let dest = main.new_vreg();
+    let block = main.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ConstFloat {
+        dest: wide_arg,
+        value: -0.0,
+    });
+    block.instructions.push(MirInst::Cast {
+        dest: arg,
+        source: wide_arg,
+        from_ty: TypeId::F64,
+        to_ty: TypeId::F32,
+    });
+    block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
+    block.instructions.push(MirInst::IndirectCall {
+        dest: Some(dest),
+        callee: closure,
+        param_types: vec![TypeId::ANY],
+        return_type: TypeId::F64,
+        args: vec![arg],
+        effect: crate::mir::Effect::Compute,
+    });
+    block.terminator = Terminator::Return(Some(dest));
+    let mut module = MirModule::new();
+    module.functions.push(main);
+    assert!(aot_compiles_module(module));
+}
+
+#[test]
+fn codegen_indirect_call_keeps_word_shaped_any_argument() {
+    let mut main = MirFunction::new(
+        "word_any_indirect".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let closure = main.new_vreg();
+    let arg = main.new_vreg();
+    let dest = main.new_vreg();
+    let block = main.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
+    block.instructions.push(MirInst::ConstInt { dest: arg, value: 3 });
+    block.instructions.push(MirInst::IndirectCall {
+        dest: Some(dest),
+        callee: closure,
+        param_types: vec![TypeId::ANY],
+        return_type: TypeId::I64,
+        args: vec![arg],
+        effect: crate::mir::Effect::Compute,
+    });
+    block.terminator = Terminator::Return(Some(dest));
+    let mut module = MirModule::new();
+    module.functions.push(main);
     assert!(aot_compiles_module(module));
 }
 

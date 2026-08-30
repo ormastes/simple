@@ -1,0 +1,113 @@
+# Scheduler-owned bounded x86_32 privilege-token registry.
+#
+# The registry owns mutable lifecycle identity. It does not expose token memory
+# to the child; assembly receives a kernel pointer only after preparation.
+
+use os.kernel.arch.x86_32.privilege_abi.{X86_32_TOKEN_REGISTRY_SLOTS, X86_32PrivilegeTokenV1}
+use os.kernel.arch.common.packed_auth_storage.{PACKED_AUTH_X86_TOKEN, packed_auth_claim, packed_auth_write_bytes, packed_auth_address, packed_auth_release}
+
+struct X86_32TokenLease:
+    slot: u32
+    generation: u32
+    task_id: u64
+    packed_lease: u64
+
+struct X86_32TokenRegistrySlot:
+    occupied: bool
+    generation: u32
+    task_id: u64
+    packed_lease: u64
+
+var g_x86_32_token_registry: [X86_32TokenRegistrySlot; 16] = [
+    X86_32TokenRegistrySlot(occupied: false, generation: 0, task_id: 0, packed_lease: 0); 16
+]
+
+fn x86_32_token_registry_claim(task_id: u64) -> X86_32TokenLease?:
+    if task_id == 0:
+        return nil
+    var i: u32 = 0
+    while i < X86_32_TOKEN_REGISTRY_SLOTS:
+        val current = g_x86_32_token_registry[i]
+        if not current.occupied:
+            val packed_lease = packed_auth_claim(PACKED_AUTH_X86_TOKEN)
+            if packed_lease == 0:
+                return nil
+            var next_generation = current.generation + 1
+            if next_generation == 0:
+                next_generation = 1
+            g_x86_32_token_registry[i] = X86_32TokenRegistrySlot(
+                occupied: true, generation: next_generation, task_id: task_id,
+                packed_lease: packed_lease
+            )
+            return X86_32TokenLease(
+                slot: i, generation: next_generation, task_id: task_id,
+                packed_lease: packed_lease
+            )
+        i = i + 1
+    nil
+
+fn x86_32_token_registry_matches(lease: X86_32TokenLease) -> bool:
+    if lease.slot >= X86_32_TOKEN_REGISTRY_SLOTS or lease.generation == 0 or lease.task_id == 0:
+        return false
+    val current = g_x86_32_token_registry[lease.slot]
+    current.occupied and current.generation == lease.generation and current.task_id == lease.task_id and
+        current.packed_lease == lease.packed_lease and lease.packed_lease != 0
+
+fn _x86_token_append_le32(out: [u8], value: u32):
+    var shift: u32 = 0
+    while shift < 32:
+        out.push(((value >> shift) & 0xffu32).to_u8())
+        shift = shift + 8
+
+fn _x86_token_append_le64(out: [u8], value: u64):
+    var shift: u64 = 0
+    while shift < 64:
+        out.push(((value >> shift) & 0xffu64).to_u8())
+        shift = shift + 8
+
+fn _x86_32_token_bytes(token: X86_32PrivilegeTokenV1) -> [u8]:
+    var out: [u8] = []
+    _x86_token_append_le32(out, token.magic)
+    _x86_token_append_le32(out, token.version)
+    _x86_token_append_le32(out, token.state)
+    _x86_token_append_le32(out, token.reserved0)
+    _x86_token_append_le64(out, token.task_id)
+    _x86_token_append_le64(out, token.task_generation)
+    _x86_token_append_le64(out, token.address_space_id)
+    _x86_token_append_le32(out, token.expected_cr3)
+    _x86_token_append_le32(out, token.kernel_cr3)
+    _x86_token_append_le32(out, token.kernel_esp)
+    _x86_token_append_le32(out, token.kernel_resume_eip)
+    _x86_token_append_le32(out, token.expected_nonce_user_va)
+    _x86_token_append_le32(out, token.nonce_length)
+    var i: u32 = 0
+    while i < 32:
+        out.push(token.nonce_digest[i])
+        i = i + 1
+    out
+
+fn x86_32_token_registry_publish(
+    lease: X86_32TokenLease, token: X86_32PrivilegeTokenV1
+) -> u64:
+    if not x86_32_token_registry_matches(lease) or token.task_id != lease.task_id or
+            token.task_generation == 0 or token.address_space_id == 0:
+        return 0
+    val bytes = _x86_32_token_bytes(token)
+    if not packed_auth_write_bytes(lease.packed_lease, bytes, 96):
+        return 0
+    packed_auth_address(lease.packed_lease)
+
+fn x86_32_token_registry_revoke(lease: X86_32TokenLease) -> bool:
+    if not x86_32_token_registry_matches(lease):
+        return false
+    val current = g_x86_32_token_registry[lease.slot]
+    if not packed_auth_release(current.packed_lease):
+        return false
+    g_x86_32_token_registry[lease.slot] = X86_32TokenRegistrySlot(
+        occupied: false, generation: current.generation, task_id: 0, packed_lease: 0
+    )
+    true
+
+export X86_32TokenLease
+export x86_32_token_registry_claim, x86_32_token_registry_matches
+export x86_32_token_registry_publish, x86_32_token_registry_revoke

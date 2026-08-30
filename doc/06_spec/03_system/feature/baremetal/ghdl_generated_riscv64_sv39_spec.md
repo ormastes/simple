@@ -1,6 +1,29 @@
 # Ghdl Generated Riscv64 Sv39 Specification
 
-> Tests covering Generated RV64 GHDL Sv39 translated address path.
+> <details>
+
+<!-- sdn-diagram:id=ghdl_generated_riscv64_sv39_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ghdl_generated_riscv64_sv39_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ghdl_generated_riscv64_sv39_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ghdl_generated_riscv64_sv39_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,24 +40,13 @@
 
 #### sv39 runner exists and sv39 smoke source is present
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- sv39 runner exists and sv39 smoke source is present
-   - Expected: rt_file_exists(GENERATED_RUNNER) is true
-   - Expected: rt_file_exists(GENERATED_SV39) is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("sv39 runner exists and sv39 smoke source is present")
 expect(rt_file_exists(GENERATED_RUNNER)).to_equal(true)
 expect(rt_file_exists(GENERATED_SV39)).to_equal(true)
 ```
@@ -46,21 +58,13 @@ expect(rt_file_exists(GENERATED_SV39)).to_equal(true)
 
 #### runs a generated RV64 supervisor-mode Sv39 translated read-address smoke program _(slow)_
 
-- runs a generated RV64 supervisor-mode Sv39 translated read-address smoke program
-   - Expected: 1 equals `1`
-   - Expected: 1 equals `1`
-   - Expected: result[2] equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("runs a generated RV64 supervisor-mode Sv39 translated read-address smoke program")
 if not runner_tools_available():
     expect(1).to_equal(1)
 else:
@@ -86,12 +90,12 @@ else:
 | Category | Baremetal |
 | Status | Active |
 | Source | `test/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Generated RV64 GHDL Sv39 translated address path.
+Tests covering:
 - Generated RV64 GHDL Sv39 translated address path
 
 ## Scenario Summary
@@ -106,51 +110,3 @@ Tests covering Generated RV64 GHDL Sv39 translated address path.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `eca523729ee2d03064565dcde9a4436df431227281b6949e362e62c75ff6b083`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `eca523729ee2d03064565dcde9a4436df431227281b6949e362e62c75ff6b083`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `eca523729ee2d03064565dcde9a4436df431227281b6949e362e62c75ff6b083`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.spl
-mirror: doc/06_spec/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sv39 runner exists and sv39 smoke source is present' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/baremetal/ghdl_generated_riscv64_sv39_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs a generated RV64 supervisor-mode Sv39 translated read-address smoke program' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

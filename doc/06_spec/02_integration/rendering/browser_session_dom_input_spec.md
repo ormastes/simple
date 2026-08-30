@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,6 +20,8 @@
 - should parse mixed-case document tags through layout Draw IR and pixels
    - HTML capture: after_step
 - Open a document with uppercase structural and visible tags
+   - HTML capture: after_step
+- var session = BrowserSession new
    - HTML capture: after_step
    - Evidence: HTML text verified by 4 expected checks
    - Expected: session.current_title equals `Case İ`
@@ -38,6 +40,8 @@
    - Expected: box_found is true
    - Expected: text_found is true
    - Expected: tag equals `p`
+- "{opened}|{session current title}|{paragraphs len
+   - HTML capture: after_step
 
 
 <details>
@@ -153,9 +157,7 @@ expect(opened.is_ok()).to_equal(true)
 val before = session.render_to_pixels(64, 48)
 expect(_count_dom_input_color(before.pixel_data, 0xFFEF4444u32)).to_be_greater_than(0)
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "accept"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event("accept", "click", true, true)
 expect(dispatch.default_action).to_equal("input-checkbox-toggle")
 expect(dispatch.default_action_allowed).to_equal(true)
 expect(session.current_title).to_contain("checked=\"checked\"")
@@ -192,9 +194,7 @@ session.open_html(
     "<html><body><a id='blocked' href='/next' onclick='prevent-default'>Next</a></body></html>"
 )
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "blocked"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event("blocked", "click", true, true)
 
 expect(dispatch.event.default_prevented).to_equal(true)
 expect(dispatch.default_action_allowed).to_equal(false)
@@ -227,9 +227,9 @@ session.open_html(
     "<html><head><title>Initial</title></head><body><input id='accept' type='checkbox' onclick='prevent-default' oninput=\"document.title='input'\" onchange=\"document.title='change'\"></body></html>"
 )
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "accept"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event(
+    "accept", "click", true, true
+)
 
 expect(dispatch.event.default_prevented).to_equal(true)
 expect(session.current_body_html.contains("checked=")).to_equal(false)
@@ -242,8 +242,10 @@ expect(session.current_title).to_equal("Initial")
 
 - routes an uncanceled link default through session navigation
    - Expected: dispatch.default_action_allowed is true
+- Some
    - Expected: request.kind equals `document`
    - Expected: request.url equals `https://example.test/next`
+- fail
 
 
 <details>
@@ -261,9 +263,7 @@ session.open_html(
     "<html><body><a id='next' href='/next'>Next</a></body></html>"
 )
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "next"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event("next", "click", true, true)
 
 expect(dispatch.default_action_allowed).to_equal(true)
 match session.take_pending_request():
@@ -300,10 +300,9 @@ session.open_html(
 val buttons = be_dom_find_by_tag(session.dom_root(), "button")
 expect(buttons.len()).to_equal(1)
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_node_route(session, buttons[0].node_id),
-    "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event(
+    be_dom_event_identity(buttons[0]), "click", true, true
+)
 
 expect(dispatch.default_action).to_equal("button-activate")
 expect(session.current_body_html).to_contain("data-activated=\"true\"")
@@ -333,9 +332,7 @@ session.open_html(
     "<html><body><form id='profile' onsubmit='prevent-default'><button id='save'>Save</button></form></body></html>"
 )
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "save"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event("save", "click", true, true)
 
 expect(dispatch.default_action_allowed).to_equal(true)
 expect(session.current_body_html).to_contain("data-activated=\"true\"")
@@ -387,9 +384,9 @@ match session.take_pending_request():
     nil:
         fail("Expected sandbox form document request")
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "save"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event(
+    "save", "click", true, true
+)
 expect(dispatch.default_action).to_equal("button-activate")
 expect(session.has_pending_requests()).to_be(false)
 expect(session.warnings.join("|")).to_contain(
@@ -566,9 +563,11 @@ expect(request.body).to_equal("name=Ada")
 
 - submits a button with an invalid type as the default submitter
    - Expected: dispatch.default_action equals `button-activate`
+- Some
    - Expected: request.method equals `POST`
    - Expected: request.url equals `https://example.test/save`
    - Expected: request.body equals `name=Ada`
+- fail
 
 
 <details>
@@ -586,16 +585,12 @@ session.open_html(
     "<html><body><form id='profile' action='/save' method='post'><input name='name' value='Ada'><button id='save' type='wat'>Save</button></form></body></html>"
 )
 
-val submit_index = _dom_input_index(session)
-expect(be_dom_implicit_submit_route_result(
-    session.dom_root(), submit_index,
-    _dom_input_route(session, "profile")
-).default_submitter_route).to_equal(
-    Some(_dom_input_route(session, "save"))
+expect(be_dom_default_submitter_id(
+    session.dom_root(), "profile"
+)).to_equal("save")
+val dispatch = session.dispatch_dom_event(
+    "save", "click", true, true
 )
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "save"), "click", true, true
-).unwrap()
 
 expect(dispatch.default_action).to_equal("button-activate")
 match session.take_pending_request():
@@ -631,9 +626,9 @@ session.open_html(
     "<html><body><form action='/save' method='post'><button id='save' type='wat' onclick='prevent-default'>Save</button></form></body></html>"
 )
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "save"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event(
+    "save", "click", true, true
+)
 
 expect(dispatch.default_action_allowed).to_equal(false)
 expect(session.has_pending_requests()).to_equal(false)
@@ -663,9 +658,9 @@ session.open_html(
     "<html><body><form action='/save' method='post'><button id='save' type='button'>Save</button></form></body></html>"
 )
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "save"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event(
+    "save", "click", true, true
+)
 
 expect(dispatch.default_action).to_equal("button-activate")
 expect(session.has_pending_requests()).to_equal(false)
@@ -677,14 +672,20 @@ expect(session.has_pending_requests()).to_equal(false)
 
 - resets nested controls to parsed defaults unless reset is canceled
    - Expected: reset.default_action equals `form-reset`
-   - Expected: be_dom_get_attr(name, "value") equals `seed`
-   - Expected: be_dom_get_text_content(notes) equals `memo`
-   - Expected: be_dom_has_attr(flag, "checked") is true
-   - Expected: be_dom_has_attr(one, "selected") is true
-   - Expected: be_dom_has_attr(two, "selected") is false
-   - Expected: be_dom_get_attr(profile, "data-reset") equals `yes`
+   - Expected: be_dom_get_attr(name[name.len() - 1], "value") equals `seed`
+   - Expected: be_dom_get_text_content(notes[notes.len() - 1]) equals `memo`
+   - Expected: be_dom_has_attr(flag[flag.len() - 1], "checked") is true
+   - Expected: be_dom_has_attr(one[one.len() - 1], "selected") is true
+   - Expected: be_dom_has_attr(two[two.len() - 1], "selected") is false
+- profile[profile len
+- session clear dom focus
+- initial, session render to pixels
+   - Expected: session.set_dom_text_input("kept", "changed").is_ok() is true
+- session clear dom focus
    - Expected: prevented.default_action equals `form-reset`
-   - Expected: be_dom_get_attr(kept, "value") equals `changed`
+- kept[kept len
+- session clear dom focus
+- session render to pixels
 
 
 <details>
@@ -699,64 +700,57 @@ step("resets nested controls to parsed defaults unless reset is canceled")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.test/reset",
-    "<html><head><style>input,textarea,select,button{display:block;width:96px;height:22px}input[checked]{{background-color:#2563eb}}</style></head><body><form id='profile' onreset='set-attr:data-reset=yes'><div><input id='name' value='seed'><textarea id='notes'>memo</textarea><input id='flag' type='checkbox' checked><select id='choice'><option id='one' value='one' selected>One</option><option id='two' value='two'>Two</option></select><button id='restore' type='reset'>Reset</button></div></form><form id='blocked' onreset='prevent-default'><input id='kept' value='safe'><input id='blocked-reset' type='reset' value='Reset'></form></body></html>"
+    "<html><head><style>input,textarea,select,button{display:block;width:96px;height:22px}input[checked]{background-color:#2563eb}</style></head><body><form id='profile' onreset='set-attr:data-reset=yes'><div><input id='name' value='seed'><textarea id='notes'>memo</textarea><input id='flag' type='checkbox' checked><select id='choice'><option id='one' value='one' selected>One</option><option id='two' value='two'>Two</option></select><button id='restore' type='reset'>Reset</button></div></form><form id='blocked' onreset='prevent-default'><input id='kept' value='safe'><input id='blocked-reset' type='reset' value='Reset'></form></body></html>"
 )
 val initial = session.render_to_pixels(128, 180).pixel_data
 
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "name"), "changed"
-).unwrap()
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "notes"), "changed"
-).unwrap()
-val _ = session.dispatch_dom_event_route(
-    _dom_input_route(session, "flag"), "click", true, true
-).unwrap()
-expect(session.set_dom_select_value_route(
-    _dom_input_route(session, "choice"), "two"
-)).to_equal(Ok(true))
+expect(session.set_dom_text_input("name", "changed").is_ok()).to_equal(true)
+expect(session.set_dom_text_input("notes", "changed").is_ok()).to_equal(true)
+val _ = session.dispatch_dom_event("flag", "click", true, true)
+expect(session.set_dom_select_value("choice", "two").is_ok()).to_equal(true)
 val callbacks_before_reset = session.dom_callback_count
-val reset = session.dispatch_dom_event_route(
-    _dom_input_route(session, "restore"), "click", true, true
-).unwrap()
+val reset = session.dispatch_dom_event(
+    "restore", "click", true, true
+)
 
 expect(reset.default_action).to_equal("form-reset")
 expect(session.dom_callback_count).to_equal(
     callbacks_before_reset + 1
 )
-val name = _dom_input_node(session, "name")
-val notes = _dom_input_node(session, "notes")
-val flag = _dom_input_node(session, "flag")
-val one = _dom_input_node(session, "one")
-val two = _dom_input_node(session, "two")
-val profile = _dom_input_node(session, "profile")
-expect(be_dom_get_attr(name, "value")).to_equal("seed")
-expect(be_dom_get_text_content(notes)).to_equal("memo")
-expect(be_dom_has_attr(flag, "checked")).to_equal(true)
-expect(be_dom_has_attr(one, "selected")).to_equal(true)
-expect(be_dom_has_attr(two, "selected")).to_equal(false)
-expect(be_dom_get_attr(profile, "data-reset")).to_equal("yes")
+val name = be_dom_find_path_to_id(session.dom_root(), "name")
+val notes = be_dom_find_path_to_id(session.dom_root(), "notes")
+val flag = be_dom_find_path_to_id(session.dom_root(), "flag")
+val one = be_dom_find_path_to_id(session.dom_root(), "one")
+val two = be_dom_find_path_to_id(session.dom_root(), "two")
+val profile = be_dom_find_path_to_id(session.dom_root(), "profile")
+expect(be_dom_get_attr(name[name.len() - 1], "value")).to_equal("seed")
+expect(be_dom_get_text_content(notes[notes.len() - 1])).to_equal("memo")
+expect(be_dom_has_attr(flag[flag.len() - 1], "checked")).to_equal(true)
+expect(be_dom_has_attr(one[one.len() - 1], "selected")).to_equal(true)
+expect(be_dom_has_attr(two[two.len() - 1], "selected")).to_equal(false)
+expect(be_dom_get_attr(
+    profile[profile.len() - 1], "data-reset"
+)).to_equal("yes")
 session.clear_dom_focus()
 expect(_dom_input_pixels_equal(
     initial, session.render_to_pixels(128, 180).pixel_data
 )).to_equal(true)
 
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "kept"), "changed"
-).unwrap()
+expect(session.set_dom_text_input("kept", "changed").is_ok()).to_equal(true)
 session.clear_dom_focus()
 val prevented_before = session.render_to_pixels(128, 180).pixel_data
 val callbacks_before_prevented = session.dom_callback_count
-val prevented = session.dispatch_dom_event_route(
-    _dom_input_route(session, "blocked-reset"),
-    "click", true, true
-).unwrap()
+val prevented = session.dispatch_dom_event(
+    "blocked-reset", "click", true, true
+)
 expect(prevented.default_action).to_equal("form-reset")
 expect(session.dom_callback_count).to_equal(
     callbacks_before_prevented + 1
 )
-val kept = _dom_input_node(session, "kept")
-expect(be_dom_get_attr(kept, "value")).to_equal("changed")
+val kept = be_dom_find_path_to_id(session.dom_root(), "kept")
+expect(be_dom_get_attr(
+    kept[kept.len() - 1], "value"
+)).to_equal("changed")
 session.clear_dom_focus()
 expect(_dom_input_pixels_equal(
     prevented_before,
@@ -770,10 +764,12 @@ expect(_dom_input_pixels_equal(
 
 - queues an uncanceled POST form with live DOM values
    - Expected: dispatch.default_action_allowed is true
+- Some
    - Expected: request.kind equals `document`
    - Expected: request.method equals `POST`
    - Expected: request.url equals `https://example.test/save`
    - Expected: request.body equals `name=Ada+%26+Bob&commit=yes`
+- fail
 
 
 <details>
@@ -790,13 +786,9 @@ session.open_html(
     "https://example.test/form",
     "<html><body><form id='profile' action='/save' method='post'><input id='name' name='name' value='old'><button id='save' name='commit' value='yes'>Save</button></form></body></html>"
 )
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "name"), "Ada & Bob"
-).unwrap()
+expect(session.set_dom_text_input("name", "Ada & Bob").is_ok()).to_equal(true)
 
-val dispatch = session.dispatch_dom_event_route(
-    _dom_input_route(session, "save"), "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event("save", "click", true, true)
 
 expect(dispatch.default_action_allowed).to_equal(true)
 match session.take_pending_request():
@@ -1202,9 +1194,9 @@ session.open_html(
     "<html><body><input id='name' oninput=\"document.title='Typing'\"></body></html>"
 )
 
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "name"), "Ada & Bob"
-).unwrap()
+val updated = session.set_dom_text_input("name", "Ada & Bob")
+
+expect(updated.is_ok()).to_equal(true)
 expect(session.current_title).to_equal("Typing")
 expect(session.current_body_html).to_contain("value=\"Ada &amp; Bob\"")
 ```
@@ -1215,7 +1207,9 @@ expect(session.current_body_html).to_contain("value=\"Ada &amp; Bob\"")
 
 - dispatches focus before text input and keeps one focused control
    - Expected: session.current_title equals `Focused`
+   - Expected: session.set_dom_text_input("first", "Ada Lovelace").is_ok() is true
    - Expected: session.dom_callback_count equals `callbacks_after_focus`
+   - Expected: session.set_dom_text_input("second", "Bob").is_ok() is true
    - Expected: be_dom_get_attr(inputs[0], "data-focused") equals ``
    - Expected: be_dom_get_attr(inputs[1], "data-focused") equals `true`
 
@@ -1235,18 +1229,12 @@ session.open_html(
     "<html><body><input id='first' onfocus=\"document.title='Focused'\"><input id='second'></body></html>"
 )
 
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "first"), "Ada"
-).unwrap()
+expect(session.set_dom_text_input("first", "Ada").is_ok()).to_equal(true)
 expect(session.current_title).to_equal("Focused")
 val callbacks_after_focus = session.dom_callback_count
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "first"), "Ada Lovelace"
-).unwrap()
+expect(session.set_dom_text_input("first", "Ada Lovelace").is_ok()).to_equal(true)
 expect(session.dom_callback_count).to_equal(callbacks_after_focus)
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "second"), "Bob"
-).unwrap()
+expect(session.set_dom_text_input("second", "Bob").is_ok()).to_equal(true)
 val inputs = be_dom_find_by_tag(session.dom_root(), "input")
 expect(be_dom_get_attr(inputs[0], "data-focused")).to_equal("")
 expect(be_dom_get_attr(inputs[1], "data-focused")).to_equal("true")
@@ -1258,8 +1246,12 @@ expect(be_dom_get_attr(inputs[1], "data-focused")).to_equal("true")
 
 - blurs the old control before focus mutates and paints the new state
 - Open two controls whose focus transition mutates rendered CSS
+- var session = BrowserSession new
+- "<html><head><style>#stage{width:32px;height:24px;background-color:#ef4444} blurred{background-color:#f59e0b} focused{background-color:#2563eb}</style></head><body><div id='stage'></div><input id='first' onblur=\"document title=document title+'blur>';document getElementById
 - Focus the first control, then move focus to the second
+   - Expected: session.set_dom_text_input("first", "Ada").is_ok() is true
    - Expected: session.eval_script("document.title=''").is_ok() is true
+   - Expected: session.set_dom_text_input("second", "Bob").is_ok() is true
 - Require blur-before-focus state through DOM, Draw IR, and pixels
    - Expected: session.current_title equals `blur>focus>`
    - Expected: be_dom_get_attr(inputs[0], "data-focused") equals ``
@@ -1280,17 +1272,13 @@ step("Open two controls whose focus transition mutates rendered CSS")
 var session = BrowserSession.new()
 expect(session.open_html(
     "https://example.test/focus-order",
-    "<html><head><style>#stage{width:32px;height:24px;background-color:#ef4444}.blurred{{background-color:#f59e0b}}.focused{{background-color:#2563eb}}</style></head><body><div id='stage'></div><input id='first' onblur=\"document.title=document.title+'blur>';document.getElementById('stage').className='blurred'\"><input id='second' onfocus=\"document.title=document.title+'focus>';document.getElementById('stage').className='focused'\"></body></html>"
+    "<html><head><style>#stage{width:32px;height:24px;background-color:#ef4444}.blurred{background-color:#f59e0b}.focused{background-color:#2563eb}</style></head><body><div id='stage'></div><input id='first' onblur=\"document.title=document.title+'blur>';document.getElementById('stage').className='blurred'\"><input id='second' onfocus=\"document.title=document.title+'focus>';document.getElementById('stage').className='focused'\"></body></html>"
 ).is_ok()).to_equal(true)
 
 step("Focus the first control, then move focus to the second")
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "first"), "Ada"
-).unwrap()
+expect(session.set_dom_text_input("first", "Ada").is_ok()).to_equal(true)
 expect(session.eval_script("document.title=''").is_ok()).to_equal(true)
-val _ = session.set_dom_text_input_route(
-    _dom_input_route(session, "second"), "Bob"
-).unwrap()
+expect(session.set_dom_text_input("second", "Bob").is_ok()).to_equal(true)
 
 step("Require blur-before-focus state through DOM, Draw IR, and pixels")
 expect(session.current_title).to_equal("blur>focus>")
@@ -1338,8 +1326,8 @@ Tests covering BrowserSession live DOM input.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

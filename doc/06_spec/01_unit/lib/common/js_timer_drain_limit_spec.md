@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,66 +17,8 @@
 
 #### mutates the active timer queues without replacement arrays
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- mutates the active timer queues without replacement arrays
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 34 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("mutates the active timer queues without replacement arrays")
-val interpreter_source = rt_file_read_text(
-    "src/lib/nogc_sync_mut/js/engine/interpreter.spl"
-) ?? ""
-val async_source = rt_file_read_text(
-    "src/lib/nogc_sync_mut/js/engine/interpreter_async.spl"
-) ?? ""
-val native_source = rt_file_read_text(
-    "src/lib/nogc_sync_mut/js/engine/interpreter_native.spl"
-) ?? ""
-expect(async_source.contains(
-    "var rest: [PendingTimerTask]"
-)).to_be(false)
-expect(native_source.contains(
-    "var rest: [PendingTimerTask]"
-)).to_be(false)
-expect(async_source).to_contain(
-    "val task = self.pending_timer_tasks[0]"
-)
-expect(interpreter_source).to_contain(
-    "me _timer_heap_remove_at(index: i64)"
-)
-expect(interpreter_source).to_contain(
-    "val _ = self.pending_timer_tasks.pop()"
-)
-expect(async_source).to_contain(
-    "self._timer_heap_remove_at(0)"
-)
-expect(async_source.contains(
-    "while i < self.pending_timer_tasks.len()"
-)).to_be(false)
-expect(async_source.contains("better_due_task")).to_be(false)
-expect(native_source.contains("better_due_task")).to_be(false)
-```
-
-</details>
-
-#### does not allocate Node timer handles in browser mode
-
-- does not allocate Node timer handles in browser mode
-   - Expected: runtime.eval("function noop() {}").is_ok() is true
-   - Expected: runtime.drain_due_timers(now) equals `1`
-   - Expected: runtime.interpreter.object_store.next_id equals `baseline`
-   - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
-   - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
+- "self pending timer tasks pop
+- "self pending timer tasks pop
 
 
 <details>
@@ -86,8 +28,47 @@ Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("does not allocate Node timer handles in browser mode")
+val async_source = rt_file_read_text(
+    "src/lib/nogc_sync_mut/js/engine/interpreter_async.spl"
+) ?? ""
+val native_source = rt_file_read_text(
+    "src/lib/nogc_sync_mut/js/engine/interpreter_native.spl"
+) ?? ""
+expect(async_source).to_contain(
+    "self.pending_timer_tasks.pop()"
+)
+expect(native_source).to_contain(
+    "self.pending_timer_tasks.pop()"
+)
+expect(async_source.contains(
+    "var rest: [PendingTimerTask]"
+)).to_be(false)
+expect(native_source.contains(
+    "var rest: [PendingTimerTask]"
+)).to_be(false)
+```
+
+</details>
+
+#### does not allocate Node timer handles in browser mode
+
+- Logger new
+   - Expected: runtime.eval("function noop() {}").is_ok() is true
+- Ok
+- fail
+   - Expected: runtime.drain_due_timers(now) equals `1`
+   - Expected: runtime.interpreter.object_store.next_id equals `baseline`
+   - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
+   - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 var runtime = JsRuntime.new_browser(
     Logger.new("browser-timer-heap", LogLevel.Error)
 )
@@ -110,7 +91,8 @@ expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
 
 #### coalesces an overdue interval to one callback per clock advance
 
-- coalesces an overdue interval to one callback per clock advance
+- var runtime = JsRuntime new
+- "var ticks = 0; setInterval
    - Expected: scheduled.is_ok() is true
    - Expected: runtime.drain_due_timers(1000000000) equals `1`
 
@@ -118,12 +100,10 @@ expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("coalesces an overdue interval to one callback per clock advance")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 val scheduled = runtime.eval(
     "var ticks = 0; setInterval(function() { ticks = ticks + 1; }, 1);"
@@ -137,7 +117,8 @@ expect(runtime.drain_due_timers(1000000000)).to_equal(1)
 
 #### yields after one thousand nested zero-delay callbacks
 
-- yields after one thousand nested zero-delay callbacks
+- var runtime = JsRuntime new
+- "var ticks = 0; function again
    - Expected: scheduled.is_ok() is true
    - Expected: runtime.drain_due_timers(0) equals `1000`
 
@@ -145,12 +126,10 @@ expect(runtime.drain_due_timers(1000000000)).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("yields after one thousand nested zero-delay callbacks")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 val scheduled = runtime.eval(
     "var ticks = 0; function again() { ticks = ticks + 1; setTimeout(again, 0); } setTimeout(again, 0);"
@@ -162,18 +141,21 @@ expect(runtime.drain_due_timers(0)).to_equal(1000)
 
 </details>
 
-#### drains a full due queue in deadline and creation order
+#### lets an interval cancel its queued continuation
 
-- drains a full due queue in deadline and creation order
+- var runtime = JsRuntime new
+- "var ticks = 0; var timer = setInterval
    - Expected: scheduled.is_ok() is true
-   - Expected: runtime.interpreter.pending_timer_tasks.len() equals `4096`
-   - Expected: runtime.drain_due_timers(4095) equals `1000`
-   - Expected: runtime.drain_due_timers(4095) equals `1000`
-   - Expected: runtime.drain_due_timers(4095) equals `1000`
-   - Expected: runtime.drain_due_timers(4095) equals `1000`
-   - Expected: runtime.drain_due_timers(4095) equals `96`
-   - Expected: runtime.interpreter.pending_timer_tasks.len() equals `0`
-   - Expected: result equals `4096:0`
+   - Expected: runtime.drain_due_timers(100) equals `1`
+   - Expected: runtime.drain_due_timers(200) equals `0`
+- Ok
+   - Expected: ticks equals `1.0`
+- fail
+- Ok
+   - Expected: metadata equals `1:true:false`
+- fail
+   - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
+   - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
 
 
 <details>
@@ -183,53 +165,6 @@ Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("drains a full due queue in deadline and creation order")
-var runtime = JsRuntime.new_browser(
-    Logger.new("timer-bulk-order", LogLevel.Error)
-)
-val scheduled = runtime.eval(
-    "var fired = 0; var mismatches = 0; function record(expected) { if (expected !== 4095 - fired) { mismatches = mismatches + 1; } fired = fired + 1; } for (var i = 0; i < 4096; i = i + 1) { setTimeout(record, 4095 - i, i); }"
-)
-expect(scheduled.is_ok()).to_equal(true)
-expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(4096)
-
-expect(runtime.drain_due_timers(4095)).to_equal(1000)
-expect(runtime.drain_due_timers(4095)).to_equal(1000)
-expect(runtime.drain_due_timers(4095)).to_equal(1000)
-expect(runtime.drain_due_timers(4095)).to_equal(1000)
-expect(runtime.drain_due_timers(4095)).to_equal(96)
-expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
-match runtime.eval("fired + ':' + mismatches"):
-    Ok(JsValue.String(result)):
-        expect(result).to_equal("4096:0")
-    _:
-        fail("Expected full ordered timer drain result")
-```
-
-</details>
-
-#### lets an interval cancel its queued continuation
-
-- lets an interval cancel its queued continuation
-   - Expected: scheduled.is_ok() is true
-   - Expected: runtime.drain_due_timers(100) equals `1`
-   - Expected: runtime.drain_due_timers(200) equals `0`
-   - Expected: ticks equals `1.0`
-   - Expected: metadata equals `1:true:false`
-   - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
-   - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 24 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("lets an interval cancel its queued continuation")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 val scheduled = runtime.eval(
     "var ticks = 0; var timer = setInterval(function() { ticks = ticks + 1; clearInterval(timer); }, 1);"
@@ -258,21 +193,22 @@ expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
 
 #### keeps an interval in its original same-deadline queue slot
 
-- keeps an interval in its original same-deadline queue slot
+- var runtime = JsRuntime new
+- "var order = ''; var interval = setInterval
    - Expected: runtime.drain_due_timers(10) equals `1`
    - Expected: runtime.drain_due_timers(20) equals `2`
+- Ok
    - Expected: order equals `AAB`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps an interval in its original same-deadline queue slot")
 var runtime = JsRuntime.new(Logger.new("timer-order", LogLevel.Error))
 expect(runtime.eval(
     "var order = ''; var interval = setInterval(function() { order = order + 'A'; if (order === 'AA') { clearInterval(interval); } }, 10); setTimeout(function() { order = order + 'B'; }, 20);"
@@ -290,20 +226,21 @@ match runtime.eval("order"):
 
 #### runs due timers by deadline instead of insertion order
 
-- runs due timers by deadline instead of insertion order
+- Logger new
+- "var order = ''; setTimeout
    - Expected: runtime.drain_due_timers(20) equals `2`
+- Ok
    - Expected: order equals `EL`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("runs due timers by deadline instead of insertion order")
 var runtime = JsRuntime.new_browser(
     Logger.new("timer-deadline-order", LogLevel.Error)
 )
@@ -323,20 +260,21 @@ match runtime.eval("order"):
 
 #### runs a Promise microtask checkpoint between timer callbacks
 
-- runs a Promise microtask checkpoint between timer callbacks
+- Logger new
+- "var order = ''; setTimeout
    - Expected: runtime.drain_due_timers(0) equals `2`
+- Ok
    - Expected: order equals `AMB`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("runs a Promise microtask checkpoint between timer callbacks")
 var runtime = JsRuntime.new_browser(
     Logger.new("timer-microtask-order", LogLevel.Error)
 )
@@ -356,20 +294,21 @@ match runtime.eval("order"):
 
 #### runs Node nextTick FIFO before Promise microtasks and the next timer
 
-- runs Node nextTick FIFO before Promise microtasks and the next timer
+- Logger new
+- "var order = ''; setTimeout
    - Expected: runtime.drain_due_timers(0) equals `3`
+- Ok
    - Expected: order equals `ANMB`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("runs Node nextTick FIFO before Promise microtasks and the next timer")
 var runtime = JsRuntime.new(
     Logger.new("timer-next-tick-order", LogLevel.Error)
 )
@@ -389,22 +328,25 @@ match runtime.eval("order"):
 
 #### yields before the next timer when a microtask checkpoint hits its cap
 
-- yields before the next timer when a microtask checkpoint hits its cap
+- Logger new
+- "var hits = 0; var second = false; setTimeout
    - Expected: runtime.drain_due_timers(0) equals `1`
+- Ok
    - Expected: state equals `1000:false`
+- fail
    - Expected: runtime.drain_due_timers(0) equals `1`
+- Ok
    - Expected: state equals `1001:true`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("yields before the next timer when a microtask checkpoint hits its cap")
 var runtime = JsRuntime.new_browser(
     Logger.new("timer-microtask-cap", LogLevel.Error)
 )
@@ -431,19 +373,20 @@ match runtime.eval("hits + ':' + second"):
 
 #### bounds pending timer tasks per document
 
-- bounds pending timer tasks per document
+- var runtime = JsRuntime new
+- "var denied = 0; for
+- Ok
    - Expected: denied equals `4.0`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds pending timer tasks per document")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 val result = runtime.eval(
     "var denied = 0; for (var i = 0; i < 4100; i = i + 1) { if (setTimeout(function() {}, 1000) === undefined) { denied = denied + 1; } } denied"
@@ -459,20 +402,21 @@ match result:
 
 #### keeps a single requestAnimationFrame chain alive past handle history
 
-- keeps a single requestAnimationFrame chain alive past handle history
+- var runtime = JsRuntime new
+- "var frames = 0; function frame
    - Expected: scheduled.is_ok() is true
+- Ok
    - Expected: frames equals `4097.0`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps a single requestAnimationFrame chain alive past handle history")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 val scheduled = runtime.eval(
     "var frames = 0; function frame() { frames = frames + 1; requestAnimationFrame(frame); } requestAnimationFrame(frame);"
@@ -494,7 +438,8 @@ match runtime.eval("frames"):
 
 #### fires chained animation frames once and retires completed lookups
 
-- fires chained animation frames once and retires completed lookups
+- var runtime = JsRuntime new
+- "var frames = 0; function frame
    - Expected: scheduled.is_ok() is true
    - Expected: runtime.drain_due_timers(16) equals `1`
    - Expected: runtime.drain_due_timers(32) equals `1`
@@ -502,21 +447,22 @@ match runtime.eval("frames"):
    - Expected: runtime.interpreter.pending_timer_tasks.len() equals `0`
    - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
    - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
+- "var canceled = setTimeout
    - Expected: runtime.interpreter.pending_timer_tasks.len() equals `0`
    - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
    - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
+- Ok
    - Expected: frames equals `3.0`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("fires chained animation frames once and retires completed lookups")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 val scheduled = runtime.eval(
     "var frames = 0; function frame() { frames = frames + 1; if (frames < 3) { requestAnimationFrame(frame); } } requestAnimationFrame(frame);"
@@ -546,22 +492,23 @@ match runtime.eval("frames"):
 
 #### preserves actual frame time when animation handles are refreshed
 
-- preserves actual frame time when animation handles are refreshed
+- var runtime = JsRuntime new
+- "var frameTimes = ''; var refreshedFrame = requestAnimationFrame
    - Expected: runtime.drain_due_timers(33) equals `1`
    - Expected: runtime.eval("refreshedFrame.refresh() === refreshedFrame").is_ok() is true
    - Expected: runtime.drain_due_timers(66) equals `1`
+- Ok
    - Expected: metadata equals `33:66:66`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("preserves actual frame time when animation handles are refreshed")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 expect(runtime.eval(
     "var frameTimes = ''; var refreshedFrame = requestAnimationFrame(function(frameTime) { frameTimes = frameTimes + frameTime + ':'; }); refreshedFrame.refresh();"
@@ -581,32 +528,42 @@ match runtime.eval("frameTimes + refreshedFrame.lastFiredAt"):
 
 #### refreshes a completed timeout from the current clock
 
-- refreshes a completed timeout from the current clock
+- var runtime = JsRuntime new
+- "var refreshTicks = 0; var refreshed = setTimeout
+- Ok
    - Expected: usable is true
+- fail
    - Expected: runtime.drain_due_timers(10) equals `1`
    - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
+- "refreshed unref
+- Ok
    - Expected: usable is true
+- fail
+- Ok
    - Expected: same_handle is true
+- fail
    - Expected: runtime.interpreter.timer_handle_ids.len() equals `1`
    - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `1`
+- Ok
    - Expected: metadata equals `10:10:20:true:false`
+- fail
    - Expected: runtime.drain_due_timers(19) equals `0`
    - Expected: runtime.drain_due_timers(20) equals `1`
    - Expected: runtime.drain_due_timers(21) equals `0`
    - Expected: runtime.interpreter.timer_handle_ids.len() equals `0`
    - Expected: runtime.interpreter.timer_handle_object_ids.len() equals `0`
+- Ok
    - Expected: metadata equals `2:2:false:true`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("refreshes a completed timeout from the current clock")
 var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
 expect(runtime.eval(
     "var refreshTicks = 0; var refreshed = setTimeout(function() { refreshTicks = refreshTicks + 1; }, 10); var numericId = refreshed.valueOf(); var refBefore = refreshed.hasRef(); refreshed.unref(); var unrefed = refreshed.hasRef(); refreshed.ref(); var rerefed = refreshed.hasRef();"
@@ -666,7 +623,7 @@ match runtime.eval(
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/js_timer_drain_limit_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -678,62 +635,11 @@ Tests covering JavaScript timer drain limit.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `27d3c456255a56c0ad5f373862bcf907ab471fd475008e4d40171487b06d6fe1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `27d3c456255a56c0ad5f373862bcf907ab471fd475008e4d40171487b06d6fe1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `27d3c456255a56c0ad5f373862bcf907ab471fd475008e4d40171487b06d6fe1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/common/js_timer_drain_limit_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/js_timer_drain_limit_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/js_timer_drain_limit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/js_timer_drain_limit_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/js_timer_drain_limit_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 47 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/common/js_timer_drain_limit_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mutates the active timer queues without replacement arrays' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/js_timer_drain_limit_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not allocate Node timer handles in browser mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/js_timer_drain_limit_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'coalesces an overdue interval to one callback per clock advance' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

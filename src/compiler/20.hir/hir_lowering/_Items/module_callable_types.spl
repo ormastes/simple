@@ -9,6 +9,7 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -72,7 +73,7 @@ impl HirLowering:
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
-            if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            if self.ambient_bootstrap_enabled():
                 # The bootstrap route has no whole-program inference pass.
                 # Preserve the value dynamically; Unit would discard it.
                 return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
@@ -278,6 +279,25 @@ impl HirLowering:
                     imported_module_name),
                 []),
             span: callable.span)
+
+    me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
+        if shape != "named" and shape != "named_array":
+            return nil
+        val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
+            imported_module_name, type_name)
+        var element: HirType = HirType(kind: HirTypeKind.Error, span: span)
+        if raw_symbol_id >= 0:
+            element = HirType(
+                kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []),
+                span: span)
+        else:
+            element = HirType(
+                kind: self.lower_named_kind(type_name, [], span), span: span)
+        var projected: HirType = element
+        if shape == "named_array":
+            projected = HirType(
+                kind: HirTypeKind.Array(element, nil), span: span)
+        Some(projected)
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:

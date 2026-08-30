@@ -148,12 +148,9 @@ guide finalization.
   and SimpleOS/QEMU WM (`src/os/desktop/shell.spl` + `engine2d_baremetal_core.spl`) both use the
   same `Engine2D` core and shared `common.ui.window_scene*` chrome/scene code; only the pixel-sink
   backend adapters differ (hosted SDL2/Cocoa/Win32 vs baremetal framebuffer/VirtIO-GPU), as designed.
-- QEMU capture historical note: the legacy `wm_entry.spl` gate and its
-  `build/os/wm_x86_64_*` receipts are retired. The compatibility command now
-  delegates to canonical `check-simpleos-wm-fullscreen-evidence.shs`, whose
-  evidence is `build/simpleos_wm_fullscreen_evidence/evidence.env` plus
-  baseline/fullscreen/restored QMP `pmemsave` captures and press/release input
-  receipts. Do not consume the removed 7/7 `wm-event` counter contract.
+- QEMU capture: `check-simpleos-x86-64-wm-render-event-evidence.shs` render gate PASS today —
+  real QMP screendump `build/os/wm_x86_64_screendump.ppm` (1024x768, wallpaper color verified at
+  7 anchors). Event gate FAIL: garbage 64-bit `count=` serial markers (serialization bug).
 - Host regressions RESOLVED (Wave-2, 2026-07-11): the "segfault" premise was stale —
   `check-shared-wm-renderer-unification-evidence.shs` failed on a stale grep source-contract
   (F7) after the motion-background commits added `t_micros` to the render funnel; pattern fixed
@@ -247,8 +244,7 @@ Implementation result (2026-07-11, committed 9feb36cb72a2):
 - clang-from-FS ring-3 gate: `sh scripts/os/ssh_clang_hello_ring3.shs`.
 - WM parity: `sh scripts/check/check-shared-wm-renderer-unification-evidence.shs`,
   `check-hosted-wm-capture-evidence.shs` (warm run), and QEMU
-  `check-simpleos-wm-fullscreen-evidence.shs` (or its compatibility entry;
-  inspect canonical `evidence.env` and retained captures, not legacy events).
+  `check-simpleos-x86-64-wm-render-event-evidence.shs` (render + 7/7 events).
 - 2D/web pixel parity: `check-cpu-simd-engine2d-evidence.shs`,
   `check-simple-web-engine2d-js-bitmap-evidence.shs`.
 - UI CLI access: `bin/simple run scripts/check/check-ui-cli-access.spl --scenario <name>`.
@@ -259,10 +255,3 @@ Implementation result (2026-07-11, committed 9feb36cb72a2):
   `doc/08_tracking/bug/self_hosted_simpleos_target_native_build_crash_2026-07-11.md` —
   cranelift output must be proven non-stub-collapsed; the seed external-llc path is the
   memory-documented real route (llc blockers #131/#133 apply to full-app scope).
-# Frozen QEMU source admission — 2026-07-26
-
-Before accepting an x86_64 WM render/event or ARM64 QMP input capture, require
-the producer-side `qemu-frozen-source-admission-v1` sidecar. It is published
-only by a linked, clean worktree and binds revision, scoped-source fingerprint,
-entry, compiler, exact build command, and output digest. This is an admission
-precondition; retain all existing x86/ARM SIMD, render, and input capture rows.

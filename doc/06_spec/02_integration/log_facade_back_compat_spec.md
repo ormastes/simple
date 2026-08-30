@@ -2,6 +2,29 @@
 
 > log-lib-drivers Phase 4 spec — back-compat for existing log call sites.
 
+<!-- sdn-diagram:id=log_facade_back_compat_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=log_facade_back_compat_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+log_facade_back_compat_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=log_facade_back_compat_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -28,8 +51,11 @@ log-lib-drivers Phase 4 spec — back-compat for existing log call sites.
 Covers AC-4 (back-compat: existing `log.info(...)` / `log.warn(...)`
 call sites must keep working).
 
-Status: RED PHASE. Phase 5 has not rerouted `nogc_sync_mut/log.spl`
-through the new facade yet.
+Status: Implemented. `std.log` owns registration, filtering, and dispatch;
+`nogc_sync_mut/log.spl` uses a one-way compatibility adapter into that owner.
+Legacy thresholds retain OFF=0..TRACE=6, VERBOSE=7, and ALL=10 while ring
+records use canonical TRACE=0..FATAL=5 levels. Exact arbitrary string-scope
+overrides remain isolated in the legacy adapter before canonical dispatch.
 
 Phase 3 contract (locked, §F):
   - `use std.log.{error, warn, info, debug, fatal}` resolves; signatures
@@ -38,9 +64,8 @@ Phase 3 contract (locked, §F):
     `log_dispatch_text(canonical_level, subsys_from_scope(scope), bytes)`.
   - `subsys_from_scope("pkg")` -> SUBSYS_PKG, "cli" -> SUBSYS_CLI,
     "test" -> SUBSYS_TEST. Unknown scope -> SUBSYS_USER_BASE.
-  - The duplicate `src/lib/nogc_sync_mut/src/log.spl` keeps working
-    (marked DEPRECATED — Phase 6 deletes; this spec must NOT block on
-    that decision).
+  - The obsolete duplicate owner is gone. `std.log` does not import the
+    compatibility module, so dispatch remains one-way and cycle-free.
 
 ## Scenarios
 
@@ -48,23 +73,23 @@ Phase 3 contract (locked, §F):
 
 #### AC-4: `use std.log.{error, warn, info, debug}` resolves
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- AC-4: `use std.log.{error, warn, info, debug}` resolves
+1. log set level
+2. ring backend clear
+3. info
+4. warn
+5. debug
+6. error
    - Expected: ring_backend_count(sink) equals `4`
+7. log remove backend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("AC-4: `use std.log.{error, warn, info, debug}` resolves")
 # Compile-time check: if these names don't resolve, the file
 # doesn't compile — which is the failure signal in red phase.
 log_set_level(LOG_TRACE)
@@ -83,18 +108,22 @@ log_remove_backend(id)
 
 #### AC-4: log.info(scope, msg) emits without crashing
 
-- AC-4: log.info(scope, msg) emits without crashing
+1. log set level
+2. ring backend clear
+3. info
+4. warn
+5. debug
+6. error
+7. log remove backend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("AC-4: log.info(scope, msg) emits without crashing")
 log_set_level(LOG_TRACE)
 val sink = ring_backend_new(64)
 val id = log_register_backend(sink.ops)
@@ -113,21 +142,13 @@ log_remove_backend(id)
 
 #### AC-4: subsys_from_scope routes legacy scopes to canonical IDs
 
-- AC-4: subsys_from_scope routes legacy scopes to canonical IDs
-   - Expected: subsys_from_scope("pkg") equals `SUBSYS_PKG`
-   - Expected: subsys_from_scope("cli") equals `SUBSYS_CLI`
-   - Expected: subsys_from_scope("test") equals `SUBSYS_TEST`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("AC-4: subsys_from_scope routes legacy scopes to canonical IDs")
 expect(subsys_from_scope("pkg")).to_equal(SUBSYS_PKG)
 expect(subsys_from_scope("cli")).to_equal(SUBSYS_CLI)
 expect(subsys_from_scope("test")).to_equal(SUBSYS_TEST)
@@ -137,19 +158,13 @@ expect(subsys_from_scope("test")).to_equal(SUBSYS_TEST)
 
 #### AC-4: unknown scope falls through to SUBSYS_USER_BASE
 
-- AC-4: unknown scope falls through to SUBSYS_USER_BASE
-   - Expected: subsys_from_scope("not-a-known-scope") equals `SUBSYS_USER_BASE`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("AC-4: unknown scope falls through to SUBSYS_USER_BASE")
 expect(subsys_from_scope("not-a-known-scope")).to_equal(SUBSYS_USER_BASE)
 ```
 
@@ -159,20 +174,21 @@ expect(subsys_from_scope("not-a-known-scope")).to_equal(SUBSYS_USER_BASE)
 
 #### AC-4: legacy info('pkg', ...) lands as SUBSYS_PKG record
 
-- AC-4: legacy info('pkg', ...) lands as SUBSYS_PKG record
+1. log set level
+2. ring backend clear
+3. info
    - Expected: ring_backend_count(sink) equals `1`
    - Expected: ring_backend_subsys_at(sink, 0) equals `SUBSYS_PKG`
+4. log remove backend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("AC-4: legacy info('pkg', ...) lands as SUBSYS_PKG record")
 log_set_level(LOG_TRACE)
 val sink = ring_backend_new(64)
 val id = log_register_backend(sink.ops)
@@ -187,19 +203,20 @@ log_remove_backend(id)
 
 #### AC-4: legacy warn('cli', ...) lands as SUBSYS_CLI record
 
-- AC-4: legacy warn('cli', ...) lands as SUBSYS_CLI record
+1. log set level
+2. ring backend clear
+3. warn
    - Expected: ring_backend_subsys_at(sink, 0) equals `SUBSYS_CLI`
+4. log remove backend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("AC-4: legacy warn('cli', ...) lands as SUBSYS_CLI record")
 log_set_level(LOG_TRACE)
 val sink = ring_backend_new(64)
 val id = log_register_backend(sink.ops)
@@ -223,54 +240,3 @@ log_remove_backend(id)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e493f78c85b771fc493cf0be52df029bc0a19b0feda5d6f7cbccce266fc85b0d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e493f78c85b771fc493cf0be52df029bc0a19b0feda5d6f7cbccce266fc85b0d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e493f78c85b771fc493cf0be52df029bc0a19b0feda5d6f7cbccce266fc85b0d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/02_integration/log_facade_back_compat_spec.spl
-mirror: doc/06_spec/02_integration/log_facade_back_compat_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/log_facade_back_compat_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/log_facade_back_compat_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/log_facade_back_compat_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/log_facade_back_compat_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-4: `use std.log.{error, warn, info, debug}` resolves' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/log_facade_back_compat_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-4: log.info(scope, msg) emits without crashing' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/log_facade_back_compat_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-4: subsys_from_scope routes legacy scopes to canonical IDs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

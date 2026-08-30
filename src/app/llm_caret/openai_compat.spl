@@ -21,10 +21,13 @@ fn _Q() -> text:
     "\""
 
 fn _escape_json(s: text) -> text:
+    # Iterate characters, never `while i < s.len()` with `s[i]`: `.len()`
+    # counts BYTES while `[]` counts CHARACTERS, so the indexed form ran off
+    # the end of any non-ASCII string and trapped -- which made it impossible
+    # to send a prompt containing non-ASCII text at all. See
+    # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
     var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
+    for ch in s.chars():
         if ch == "\\":
             result = result + "\\\\"
         elif ch == "\"":
@@ -37,7 +40,6 @@ fn _escape_json(s: text) -> text:
             result = result + "\\t"
         else:
             result = result + ch
-        i = i + 1
     result
 
 fn _extract_json_string(json: text, key: text) -> text:
@@ -52,17 +54,25 @@ fn _extract_json_string(json: text, key: text) -> text:
     val trimmed = after.trim()
     if trimmed.starts_with(quote):
         val rest = trimmed.substring(1)
-        var end = 0
+        # Accumulate characters instead of remembering an index: `.len()` and
+        # `.substring()` count BYTES while `[]` counts CHARACTERS, so the old
+        # index-and-slice form both ran off the end and sliced at the wrong
+        # offset once the value held any non-ASCII text -- a provider error
+        # message in Chinese was enough to kill the process. See
+        # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
+        var acc = ""
         var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
+        for ch in rest.chars():
             if escaped:
+                acc = acc + ch
                 escaped = false
             elif ch == "\\":
+                acc = acc + ch
                 escaped = true
             elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
+                return acc
+            else:
+                acc = acc + ch
     ""
 
 fn _extract_json_value(json: text, key: text) -> text:
@@ -74,13 +84,13 @@ fn _extract_json_value(json: text, key: text) -> text:
     val start = idx + slen
     val after = json.substring(start)
     val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
+    # Same byte/char hazard as _extract_json_string above.
+    var acc = ""
+    for ch in trimmed.chars():
         if ch == "," or ch == _RB() or ch == "]":
             break
-        end = end + 1
-    trimmed.substring(0, end).trim()
+        acc = acc + ch
+    acc.trim()
 
 fn _extract_json_int(json: text, key: text) -> i64:
     val raw = _extract_json_value(json, key)
@@ -140,7 +150,24 @@ fn compat_endpoint_url(base_url: text) -> text:
     var base = base_url
     while base.len() > 0 and base.ends_with("/"):
         base = base.substring(0, base.len() - 1)
+    # A base URL that already names its API version (OpenAI "/v1", Zhipu GLM
+    # "/api/paas/v4") must not have a second "/v1" appended -- that is what
+    # made Moonshot answer url.not_found.
+    if _ends_with_version(base):
+        return base + "/chat/completions"
     base + "/v1/chat/completions"
+
+fn _ends_with_version(base: text) -> bool:
+    val idx = base.last_index_of("/v")
+    if idx < 0:
+        return false
+    val tail = base.substring(idx + 2)
+    if tail.len() == 0:
+        return false
+    for ch in tail.chars():
+        if ch < "0" or ch > "9":
+            return false
+    true
 
 fn build_compat_request(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatRequest:
     CompatRequest(

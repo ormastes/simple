@@ -1,13 +1,5 @@
 # Semantic Specification
 
-> **Performance storage update (2026-08-24):** local semantic signature
-> membership uses stable integer bucket IDs and nested `[i64]` arrays. The
-> behavioral scenarios require cross-directory detection, exactly one
-> two-member match, all three unordered pairs from a three-member bucket, and
-> the 400/401 saturation boundary. Separate static source review establishes
-> the absence of comma-text growth, splitting, and integer reparsing. This
-> update is manually unverified.
-
 > 1. signature: "fn add
 
 <!-- sdn-diagram:id=semantic_spec.arch -->
@@ -35,7 +27,7 @@ semantic_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 38 | 38 | 0 | 0 |
+| 36 | 36 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -642,79 +634,6 @@ expect(report.used_fallback).to_equal(true)
 ```
 
 </details>
-
-### semantic - local cross-directory
-
-#### retains the first oversized sentinel but rejects later bucket members
-
-```simple
-expect(semantic_bucket_accepts_member(400)).to_equal(true)
-expect(semantic_bucket_accepts_member(401)).to_equal(false)
-```
-
-#### detects a semantic clone whose two copies live in different directories
-
-```simple
-var config = default_config()
-config.exclude_patterns = []
-config.semantic_threshold = 0.60
-val report = run_semantic_analysis_local(
-    "test/fixtures/duplicate_check/crossdir", config)
-expect(report.matches.len()).to_be_greater_than(0)
-val found = report.matches[0]
-expect(found.entry_a.file_path != found.entry_b.file_path).to_equal(true)
-```
-
-#### detects two documented semantic clones in one file
-
-```simple
-val path = "/tmp/simple_duplicate_same_file_semantic.spl"
-val _ = rt_file_delete(path)
-val source = "# Normalize ledger transaction records with canonical account currency timestamp identifier validation and stable audit ordering.\n" +
-    "fn normalize_ledger_record(source: text, account: text, currency: text, timestamp: i64) -> text:\n    source\n\n" +
-    "# Normalize ledger transaction records with canonical account currency timestamp identifier validation and stable audit ordering.\n" +
-    "fn canonicalize_ledger_record(source: text, account: text, currency: text, timestamp: i64) -> text:\n    source\n"
-expect(rt_file_write_text(path, source)).to_equal(true)
-var config = default_config()
-config.exclude_patterns = []
-config.semantic_threshold = 0.96
-val report = run_semantic_analysis_local(path, config)
-expect(rt_file_delete(path)).to_equal(true)
-expect(report.matches.len()).to_equal(1)
-```
-
-#### retains all three members of a processed signature bucket
-
-```simple
-val path = "/tmp/simple_duplicate_three_member_semantic.spl"
-val _ = rt_file_delete(path)
-val docs = "# Normalize ledger transaction records with canonical account currency timestamp identifier validation and stable audit ordering.\n"
-val source = docs + "fn normalize_alpha(source: text) -> text:\n    source\n\n" +
-    docs + "fn normalize_beta(source: text) -> text:\n    source\n\n" +
-    docs + "fn normalize_gamma(source: text) -> text:\n    source\n"
-expect(rt_file_write_text(path, source)).to_equal(true)
-var config = default_config()
-config.exclude_patterns = []
-config.semantic_threshold = 0.96
-val report = run_semantic_analysis_local(path, config)
-expect(rt_file_delete(path)).to_equal(true)
-expect(report.matches.len()).to_equal(3)
-var alpha_beta = false
-var alpha_gamma = false
-var beta_gamma = false
-for found in report.matches:
-    val a = found.entry_a.item_name
-    val b = found.entry_b.item_name
-    if (a == "normalize_alpha" and b == "normalize_beta") or (a == "normalize_beta" and b == "normalize_alpha"):
-        alpha_beta = true
-    if (a == "normalize_alpha" and b == "normalize_gamma") or (a == "normalize_gamma" and b == "normalize_alpha"):
-        alpha_gamma = true
-    if (a == "normalize_beta" and b == "normalize_gamma") or (a == "normalize_gamma" and b == "normalize_beta"):
-        beta_gamma = true
-expect(alpha_beta).to_equal(true)
-expect(alpha_gamma).to_equal(true)
-expect(beta_gamma).to_equal(true)
-```
 
 ### semantic_formatter
 

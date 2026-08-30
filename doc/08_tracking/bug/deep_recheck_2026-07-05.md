@@ -1,8 +1,5 @@
 # Deep-Recheck Bug Inventory — 2026-07-05
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 Source: 9-subsystem deep-recheck workflow (sonnet audit + opus adversarial verify).
 `real=` is the opus verifier's verdict. All are **current-source** bugs unless marked
 `already-fixed-stale-binary`. **Verification caveat:** confirming a pure-Simple source
@@ -14,97 +11,10 @@ Priority key: **P0** = short + pinned + high-confidence (do now); **P1** = diffi
 high-impact (opus); **P2** = wide/risky (fix+verify after wall); **DOC** = feature/long/dead-code (plan).
 
 ## Interpreter (flat-AST, `bin/simple run` path) — `src/compiler/10.frontend/core/interpreter/`
-- **P0** [~~real~~ **REFUTED, then FIXED** — see note + 2026-08-01 measurement] Result/Option payload read wrong field index: `unwrap()`/`match Ok(v)` return `__tag` (idx 0) not `__payload` (idx 1) → `Ok(42).unwrap()`=5. ~~`eval_methods.spl:112`~~ (construct site `eval_access.spl:482-504` uses `[__tag,__payload]`). ~~Silent-wrong-value.~~ **The silent-wrong-value never happened in the live lane.** Measured behaviour is now recorded below.
+- **P0** [real] Result/Option payload read wrong field index: `unwrap()`/`match Ok(v)` return `__tag` (idx 0) not `__payload` (idx 1) → `Ok(42).unwrap()`=5. `eval_methods.spl:112` (construct site `eval_access.spl:482-504` uses `[__tag,__payload]`). Silent-wrong-value.
 - **P1** [real] f64 silently → 0.0 when a nested call's return flows into a **typed** fast-local slot (typed param / array-literal elem). `eval_calls.spl:280` + `resolve.spl:105-133` + `env.spl:212-232` (pooled-frame LOAD_FAST). Wide, unpinned.
-- **P1** [real] Trait **default** method calling `self.other_method()` → **SIGSEGV**. ~~`eval_methods.spl`~~ → live dispatch is `_EvalOps/call_method_eval.spl` (`eval_method_call` / `eval_method_with_args`). Wide, unpinned; the SIGSEGV was observed by *running*, so the symptom stands — only the file pointer was to the dead duplicate.
-- **DOC** [~~real~~ **PARTLY NOW-WRONG**] `Array.map`/`reduce` unimplemented (UFCS fails); `print(array)` shows raw pointer. ~~`eval_methods.spl:230`~~. Feature. Re-derived 2026-08-01 against the live `eval_array_method` (`_EvalOps/call_method_eval.spl:788-925`): `map`, `filter`, `flat_map`/`flatmap`, `any`, `all`, `enumerate` **are** implemented; `reduce` is **not** (falls through to `eval_set_error("no method 'reduce' on array")`). So half this item is stale. **2026-08-01: `reduce` implemented** (`reduce`/`fold`, `(initial, fn(acc, item))`, same closure convention as the neighbouring `map`/`filter`/`flat_map` arms; misuse is a loud `eval_set_error`, not a silent identity return). Caveat recorded honestly: it is **not** behaviourally verified in the pure-Simple lane — a closure cannot be driven through `core_interpret_expr` at all; the pre-existing `map` arm aborts there identically with `array index out of bounds: index is 0 but length is 0`, so the **harness**, not the arm, is the blocker. `reduce` is verified by structural parity with `map` only. `print(array)` raw-pointer half is untouched.
-
-> **Dead-code audit 2026-08-01.** Every `eval_methods.spl` citation in the
-> Interpreter section above pointed at a file that was a **duplicate shadowed
-> by package-local `_EvalOps` copies**, deleted in `f97dfbbb8ee`. Re-derived
-> against the live `eval_method_call` (`_EvalOps/call_method_eval.spl:567-654`):
-> it contains **no Option/Result built-in method block whatsoever** — no
-> `unwrap`, `unwrap_or`, `is_some`, `is_none`, `unwrap_err`, `is_ok`, `is_err`
-> arm exists anywhere in `src/compiler/10.frontend/core/interpreter/`. The
-> `val_struct_get_field_idx(receiver, 1)` code the P0 quoted lived **only** in
-> the deleted file. Therefore the P0 as written ("`Ok(42).unwrap()` = 5,
-> silent-wrong-value") cannot be the live pure-Simple behaviour: the live path
-> falls through `func_table_lookup("Result::Ok__unwrap")` and the callable-field
-> fallback to `eval_set_error("no method 'unwrap' on struct")` — a **loud
-> error, not a silent wrong value**. Marked NOW-WRONG rather than deleted:
-> whether the deleted block ever executed is UNKNOWN, because the sabotage
-> proof covered `eval_text_method` (call site inside `_EvalOps`) and never
-> measured how `eval.spl:301` resolved `eval_method_call`. **What would settle
-> the historical question:** nothing — only one definition survives.
-> **What replaces this P0:** a new, differently-shaped defect —
-> *Option/Result built-in methods are entirely absent from the pure-Simple
-> interpreter*. See
-> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
-
-> **P0 settled by measurement, then fixed — 2026-08-01 (second pass).**
-> The replacement defect was confirmed by *running* the pure-Simple
-> interpreter, then implemented. Method: `core_interpret_expr(source)` driven
-> from a scratchpad driver with the Rust seed
-> (`src/compiler_rust/target/bootstrap/simple`, 154 MB canonical build) as
-> **HOST ONLY**, compiling **working-copy** interpreter source. Every number
-> below is produced by the **pure-Simple interpreter under test**, not by the
-> seed's own evaluator. The probe carried a deliberately-failing SENTINEL row
-> (`.definitely_not_a_method()`) that stayed red throughout, so it is
-> falsifiable.
->
-> **What the behaviour ACTUALLY was** (answering the P0 directly): not `5`,
-> and not any wrong value — *every* Option/Result method raised
-> `no method '<name>' on struct`. The P0's silent-wrong-value mechanism is
-> **refuted for the live lane**; it could only ever have described the deleted
-> file.
->
-> | expression | before | after |
-> |---|---|---|
-> | `"1234".parse_int().unwrap()` | ERROR `no method 'unwrap' on struct` | `1234` |
-> | `"1234".parse_int().is_some()` | ERROR | `true` |
-> | `"abc".parse_int().is_none()` | ERROR | `true` |
-> | `"abc".parse_int().unwrap_or(7)` | ERROR | `7` |
-> | `"abc".parse_int().unwrap()` | ERROR `no method 'unwrap' on struct` | **ERROR `called unwrap on None`** |
-> | `nil.unwrap_or(7)` | ERROR `no method 'unwrap_or' on nil` | `7` |
-> | `nil.unwrap()` | ERROR `no method 'unwrap' on nil` | **ERROR `called unwrap on None`** |
->
-> The loud failure on the last two rows is the point: before the fix the live
-> path errored loudly **by accident** (no arm matched, indistinguishable from a
-> typo — the SENTINEL produced a byte-identical diagnostic). It is now
-> deliberate, with a diagnostic that names the actual fault.
->
-> **ENCODING (this is the trap that made the original P0 plausible).** There is
-> **no `VAL_ENUM`** in this interpreter — kinds stop at `VAL_THUNK`. An
-> Option/Result is either **BOXED** (a `VAL_STRUCT` with `__tag` text at field
-> 0 and payload at field 1) or **FLAT** (the raw payload word itself, with
-> `nil` meaning `None`; see `match_enum_variant_pattern`, `eval.spl:912-921`).
-> Crucially the struct **NAME is not a usable discriminator**: the two
-> producers disagree. `eval_enum_variant_call` names it `"Option::Some"` /
-> `"Result::Ok"` (`Type::Variant`), while `eval_text_method`'s `parse_int` arm
-> names it plain `"Option"`. Measured: `"1234".parse_int()` =>
-> `struct name='Option' __tag='Some'`. Only `__tag` is reliable, which is what
-> `val_is_boxed_enum` (`eval.spl:857-864`) keys on. The fix discriminates on
-> `__tag` and handles both encodings.
->
-> Also measured: bare `Some(42)` / `Ok(42)` are **not constructible** through
-> `core_interpret_expr` (`undefined function: Some`) — the bare-identifier call
-> path has no Option/Result special case, so only `Enum.Variant(..)` with a
-> registered enum table reaches `eval_enum_variant_call`. Unrelated to this
-> fix; noted so the next lane does not mistake it for one.
->
-> **Fix:** `is_option_result_method` / `option_result_tag` /
-> `option_result_payload` / `eval_option_result_method` in
-> `_EvalOps/call_method_eval.spl`, gated **before** the per-kind dispatch
-> (a flat `Some(text)` would otherwise be swallowed by `eval_text_method`), and
-> skipped for a non-enum `VAL_STRUCT` so a user-defined `Type__unwrap` still
-> wins. Exported from `interpreter/__init__.spl` — that file uses **explicit
-> export lists**, so a new helper is invisible to importers until listed.
-> Regression pin: `test/01_unit/compiler/interpreter/option_result_method_dispatch_spec.spl`
-> (7 examples), proven falsifiable by sabotage: replacing the
-> `eval_set_error("called unwrap on None")` branch with a silent
-> `return val_make_nil()` turns the "FAILS LOUDLY" example red **and** flips
-> `"abc".parse_int().unwrap()` from the diagnostic to a silent `kind=nil`.
-> Restored, 7/7 green.
+- **P1** [real] Trait **default** method calling `self.other_method()` → **SIGSEGV**. `eval_methods.spl` trait default dispatch. Wide, unpinned.
+- **DOC** [real] `Array.map`/`reduce` unimplemented (UFCS fails); `print(array)` shows raw pointer. `eval_methods.spl:230`. Feature.
 - (stale-binary) `?` non-propagation — already fixed at source (b7fe9071/da6c4d0d), stale in deployed binary.
 
 ## Type system — `src/compiler/30.types` + `35.semantics` + driver
@@ -161,17 +71,3 @@ high-impact (opus); **P2** = wide/risky (fix+verify after wall); **DOC** = featu
 2. **Now (P1, opus):** type-checker-is-a-noop + generic trait-bound.
 3. **After wall (P1/P2 batch):** interpreter f64/SIGSEGV, AOP compiled-path (4), lint/fmt non-functional, regalloc multi-arch, HIR diagnostics/generic-args, loader relocation/facade.
 4. **DOC/features:** Array.map/reduce, DictComprehension lowering, GPU HIR, dead-code removals.
-
-## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
-
-Umbrella doc, re-checked at HEAD 2026-08-17. Of 31 `**P**`-tagged items: 1
-REFUTED-then-FIXED (the P0 Result/Option payload index, now `[__tag,__payload]`
-at `src/compiler/10.frontend/core/interpreter/eval_access.spl:482-504`), 1 marked
-"PARTLY NOW-WRONG", 5 still `real=?` (never verified), 1 `real=False`, and the
-remaining ~23 carry no fix annotation. The Type system, HIR, backends/regalloc,
-AOP, loader, tooling and test-runner sections carry no fixed markers at all.
-
-This doc is not actionable as a single P2 row and should not be closed as one:
-it is an inventory whose items belong in separate records. Recommend splitting
-the 5 `real=?` items into individually reproducible records and retiring the
-umbrella. NOT FIXED by this lane.

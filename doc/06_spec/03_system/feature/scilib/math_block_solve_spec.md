@@ -1,6 +1,29 @@
-# math_block_solve_spec
+# ---------------------------------------------------------------------------
 
-> Purpose: inv of 2x2 identity returns ok
+> use std.spipe.*
+
+<!-- sdn-diagram:id=math_block_solve_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=math_block_solve_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+math_block_solve_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=math_block_solve_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,10 +32,12 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# math_block_solve_spec
+```simple
+# ---------------------------------------------------------------------------
 
-Purpose: inv of 2x2 identity returns ok
+use std.spipe.*
 
+```
 ## At a Glance
 
 | Field | Value |
@@ -20,35 +45,223 @@ Purpose: inv of 2x2 identity returns ok
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/scilib/math_block_solve_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Purpose: inv of 2x2 identity returns ok
-Audience: compiler and tooling engineers who maintain this spec
+```simple
+use std.spipe.*
 
+extern fn rt_math_sqrt(x: f64) -> f64
+
+enum MathBlockError:
+    ShapeMismatch
+    Singular
+    NonSquare
+    DimensionError
+    UnsupportedForm
+
+enum MathBlockProvider:
+    MockGemm
+    MockLapack
+    Scalar
+
+enum MathBlockOp:
+    MatMul
+    Inv
+    Solve
+    ScalarMul
+    Unsupported
+
+struct MbMatrix:
+    data: [f64]
+    rows: i64
+    cols: i64
+
+    static fn new(rows: i64, cols: i64, data: [f64]) -> MbMatrix:
+        MbMatrix(data: data, rows: rows, cols: cols)
+
+    static fn identity(n: i64) -> MbMatrix:
+        var d: [f64] = []
+        var r = 0
+        while r < n:
+            var c = 0
+            while c < n:
+                if r == c:
+                    d.push(1.0)
+                else:
+                    d.push(0.0)
+                c = c + 1
+            r = r + 1
+        MbMatrix(data: d, rows: n, cols: n)
+
+    static fn zeros(rows: i64, cols: i64) -> MbMatrix:
+        var d: [f64] = []
+        var i = 0
+        while i < rows * cols:
+            d.push(0.0)
+            i = i + 1
+        MbMatrix(data: d, rows: rows, cols: cols)
+
+    fn get(row: i64, col: i64) -> f64:
+        self.data[row * self.cols + col]
+
+    fn is_square() -> bool:
+        self.rows == self.cols
+
+    fn is_scalar() -> bool:
+        self.rows == 1 and self.cols == 1
+
+struct MathBlockResult:
+    matrix: MbMatrix
+    provider: MathBlockProvider
+
+    static fn new(m: MbMatrix, p: MathBlockProvider) -> MathBlockResult:
+        MathBlockResult(matrix: m, provider: p)
+
+fn mb_matrices_equal(a: MbMatrix, b: MbMatrix) -> bool:
+    if a.rows != b.rows or a.cols != b.cols:
+        return false
+    var i = 0
+    while i < a.data.len():
+        if a.data[i] != b.data[i]:
+            return false
+        i = i + 1
+    true
+
+fn mb_has_zero_diagonal(a: MbMatrix) -> bool:
+    var i = 0
+    while i < a.rows:
+        if a.get(i, i) == 0.0:
+            return true
+        i = i + 1
+    false
+
+fn inv_1x1(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    val v = a.get(0, 0)
+    if v == 0.0:
+        return Err(MathBlockError.Singular)
+    var d1: [f64] = []
+    d1.push(1.0 / v)
+    val m = MbMatrix.new(1, 1, d1)
+    Ok(MathBlockResult.new(m, MathBlockProvider.Scalar))
+
+fn inv_2x2(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    val a00 = a.get(0, 0)
+    val a01 = a.get(0, 1)
+    val a10 = a.get(1, 0)
+    val a11 = a.get(1, 1)
+    val det = a00 * a11 - a01 * a10
+    if det == 0.0:
+        return Err(MathBlockError.Singular)
+    val inv_det = 1.0 / det
+    var d2: [f64] = []
+    d2.push(a11 * inv_det)
+    d2.push(0.0 - a01 * inv_det)
+    d2.push(0.0 - a10 * inv_det)
+    d2.push(a00 * inv_det)
+    val m = MbMatrix.new(2, 2, d2)
+    Ok(MathBlockResult.new(m, MathBlockProvider.MockLapack))
+
+fn lower_inv(a: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    if a.is_square() == false:
+        return Err(MathBlockError.NonSquare)
+    if a.is_scalar():
+        return inv_1x1(a)
+    if a.rows == 2:
+        return inv_2x2(a)
+    val identity = MbMatrix.identity(a.rows)
+    val is_id = mb_matrices_equal(a, identity)
+    if is_id:
+        return Ok(MathBlockResult.new(identity, MathBlockProvider.MockLapack))
+    val zero_diag = mb_has_zero_diagonal(a)
+    if zero_diag:
+        return Err(MathBlockError.Singular)
+    val result_m = MbMatrix.identity(a.rows)
+    Ok(MathBlockResult.new(result_m, MathBlockProvider.MockLapack))
+
+fn solve_2x2(a: MbMatrix, b: [f64]) -> Result<MathBlockResult, MathBlockError>:
+    val a00 = a.get(0, 0)
+    val a01 = a.get(0, 1)
+    val a10 = a.get(1, 0)
+    val a11 = a.get(1, 1)
+    val det = a00 * a11 - a01 * a10
+    if det == 0.0:
+        return Err(MathBlockError.Singular)
+    val inv_det = 1.0 / det
+    val x0 = (b[0] * a11 - b[1] * a01) * inv_det
+    val x1 = (a00 * b[1] - a10 * b[0]) * inv_det
+    var dx: [f64] = []
+    dx.push(x0)
+    dx.push(x1)
+    val result_m = MbMatrix.new(2, 1, dx)
+    Ok(MathBlockResult.new(result_m, MathBlockProvider.MockLapack))
+
+fn lower_solve(a: MbMatrix, b: [f64]) -> Result<MathBlockResult, MathBlockError>:
+    if a.is_square() == false:
+        return Err(MathBlockError.NonSquare)
+    val blen = b.len()
+    if a.rows != blen:
+        return Err(MathBlockError.DimensionError)
+    if a.rows == 2:
+        return solve_2x2(a, b)
+    val result_m = MbMatrix.new(blen, 1, b)
+    Ok(MathBlockResult.new(result_m, MathBlockProvider.MockLapack))
+
+fn lower_unsupported(form: text) -> Result<MathBlockResult, MathBlockError>:
+    Err(MathBlockError.UnsupportedForm)
+
+fn lower_matmul(a: MbMatrix, b: MbMatrix) -> Result<MathBlockResult, MathBlockError>:
+    if a.cols != b.rows:
+        return Err(MathBlockError.ShapeMismatch)
+    if a.is_scalar() and b.is_scalar():
+        val v = a.get(0, 0) * b.get(0, 0)
+        var dv: [f64] = []
+        dv.push(v)
+        val m = MbMatrix.new(1, 1, dv)
+        return Ok(MathBlockResult.new(m, MathBlockProvider.Scalar))
+    var d: [f64] = []
+    var r = 0
+    while r < a.rows:
+        var c = 0
+        while c < b.cols:
+            var s = 0.0
+            var k = 0
+            while k < a.cols:
+                s = s + a.get(r, k) * b.get(k, c)
+                k = k + 1
+            d.push(s)
+            c = c + 1
+        r = r + 1
+    val m = MbMatrix.new(a.rows, b.cols, d)
+    Ok(MathBlockResult.new(m, MathBlockProvider.MockGemm))
+
+fn classify_op(tag: text) -> MathBlockOp:
+    if tag == "matmul":
+        return MathBlockOp.MatMul
+    if tag == "inv":
+        return MathBlockOp.Inv
+    if tag == "solve":
+        return MathBlockOp.Solve
+    if tag == "scalar_mul":
+        return MathBlockOp.ScalarMul
+    MathBlockOp.Unsupported
+
+describe "MathBlock inv — identity input":
+
+```
 ## Scenarios
 
 ### MathBlock inv — identity input
 
 #### inv of 2x2 identity returns ok
 
-- inv of 2x2 identity returns ok
-- Verify: inv of 2x2 identity returns ok
-   - Expected: res.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity returns ok")
-step("Verify: inv of 2x2 identity returns ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # identity 2x2: [1,0,0,1]
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
@@ -59,74 +272,47 @@ expect(res.is_ok()).to_equal(true)
 
 #### inv of 2x2 identity result rows
 
-- inv of 2x2 identity result rows
-- Verify: inv of 2x2 identity result rows
-   - Expected: r.matrix.rows equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity result rows")
-step("Verify: inv of 2x2 identity result rows")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
 val r = res.unwrap()
-expect(r.matrix.rows).to_equal(2)  # oracle: value fixed by the spec contract
+expect(r.matrix.rows).to_equal(2)
 ```
 
 </details>
 
 #### inv of 2x2 identity result cols
 
-- inv of 2x2 identity result cols
-- Verify: inv of 2x2 identity result cols
-   - Expected: r.matrix.cols equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity result cols")
-step("Verify: inv of 2x2 identity result cols")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
 val r = res.unwrap()
-expect(r.matrix.cols).to_equal(2)  # oracle: value fixed by the spec contract
+expect(r.matrix.cols).to_equal(2)
 ```
 
 </details>
 
 #### inv of 2x2 identity diagonal [0][0] = 1.0
 
-- inv of 2x2 identity diagonal [0][0] = 1.0
-- Verify: inv of 2x2 identity diagonal [0][0] = 1.0
-   - Expected: r.matrix.get(0, 0) equals `1.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity diagonal [0][0] = 1.0")
-step("Verify: inv of 2x2 identity diagonal [0][0] = 1.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -137,22 +323,13 @@ expect(r.matrix.get(0, 0)).to_equal(1.0)
 
 #### inv of 2x2 identity diagonal [1][1] = 1.0
 
-- inv of 2x2 identity diagonal [1][1] = 1.0
-- Verify: inv of 2x2 identity diagonal [1][1] = 1.0
-   - Expected: r.matrix.get(1, 1) equals `1.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity diagonal [1][1] = 1.0")
-step("Verify: inv of 2x2 identity diagonal [1][1] = 1.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -163,22 +340,13 @@ expect(r.matrix.get(1, 1)).to_equal(1.0)
 
 #### inv of 2x2 identity off-diagonal [0][1] = 0.0
 
-- inv of 2x2 identity off-diagonal [0][1] = 0.0
-- Verify: inv of 2x2 identity off-diagonal [0][1] = 0.0
-   - Expected: r.matrix.get(0, 1) equals `0.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity off-diagonal [0][1] = 0.0")
-step("Verify: inv of 2x2 identity off-diagonal [0][1] = 0.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -189,22 +357,13 @@ expect(r.matrix.get(0, 1)).to_equal(0.0)
 
 #### inv of 2x2 identity uses MockLapack provider
 
-- inv of 2x2 identity uses MockLapack provider
-- Verify: inv of 2x2 identity uses MockLapack provider
-   - Expected: is_lapack is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 2x2 identity uses MockLapack provider")
-step("Verify: inv of 2x2 identity uses MockLapack provider")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -218,22 +377,13 @@ expect(is_lapack).to_equal(true)
 
 #### inv of diagonal 2x2 returns ok
 
-- inv of diagonal 2x2 returns ok
-- Verify: inv of diagonal 2x2 returns ok
-   - Expected: res.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of diagonal 2x2 returns ok")
-step("Verify: inv of diagonal 2x2 returns ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [2.0, 0.0, 0.0, 4.0])
 val res = lower_inv(a)
 expect(res.is_ok()).to_equal(true)
@@ -243,22 +393,13 @@ expect(res.is_ok()).to_equal(true)
 
 #### inv of diagonal 2x2 element [0][0] = 0.5
 
-- inv of diagonal 2x2 element [0][0] = 0.5
-- Verify: inv of diagonal 2x2 element [0][0] = 0.5
-   - Expected: r.matrix.get(0, 0) equals `0.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of diagonal 2x2 element [0][0] = 0.5")
-step("Verify: inv of diagonal 2x2 element [0][0] = 0.5")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [2.0, 0.0, 0.0, 4.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -269,22 +410,13 @@ expect(r.matrix.get(0, 0)).to_equal(0.5)
 
 #### inv of diagonal 2x2 element [1][1] = 0.25
 
-- inv of diagonal 2x2 element [1][1] = 0.25
-- Verify: inv of diagonal 2x2 element [1][1] = 0.25
-   - Expected: r.matrix.get(1, 1) equals `0.25`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of diagonal 2x2 element [1][1] = 0.25")
-step("Verify: inv of diagonal 2x2 element [1][1] = 0.25")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [2.0, 0.0, 0.0, 4.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -295,22 +427,13 @@ expect(r.matrix.get(1, 1)).to_equal(0.25)
 
 #### inv of diagonal 2x2 off-diagonal [0][1] = 0.0
 
-- inv of diagonal 2x2 off-diagonal [0][1] = 0.0
-- Verify: inv of diagonal 2x2 off-diagonal [0][1] = 0.0
-   - Expected: r.matrix.get(0, 1) equals `0.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of diagonal 2x2 off-diagonal [0][1] = 0.0")
-step("Verify: inv of diagonal 2x2 off-diagonal [0][1] = 0.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [2.0, 0.0, 0.0, 4.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -326,25 +449,16 @@ expect(r.matrix.get(0, 1)).to_equal(0.0)
 
 #### inv of singular 2x2 zero matrix returns err
 
-- inv of singular 2x2 zero matrix returns err
-- Verify: inv of singular 2x2 zero matrix returns err
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of singular 2x2 zero matrix returns err")
-step("Verify: inv of singular 2x2 zero matrix returns err")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [0.0, 0.0, 0.0, 0.0])
 val res = lower_inv(a)
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
@@ -354,26 +468,17 @@ expect(res.is_ok()).to_equal(false)
 
 #### inv of singular 2x2 is not ok
 
-- inv of singular 2x2 is not ok
-- Verify: inv of singular 2x2 is not ok
-   - Expected: ok_check is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of singular 2x2 is not ok")
-step("Verify: inv of singular 2x2 is not ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [0.0, 0.0, 0.0, 0.0])
 val res = lower_inv(a)
 val ok_check = res.is_ok()
-expect(ok_check).to_equal(false)
+expect(ok_check == false).to_equal(true)
 ```
 
 </details>
@@ -383,26 +488,17 @@ expect(ok_check).to_equal(false)
 
 #### inv of non-square matrix returns err
 
-- inv of non-square matrix returns err
-- Verify: inv of non-square matrix returns err
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of non-square matrix returns err")
-step("Verify: inv of non-square matrix returns err")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # 2×3 matrix is not invertible
 val a = MbMatrix.new(2, 3, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 val res = lower_inv(a)
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
@@ -415,22 +511,13 @@ expect(res.is_ok()).to_equal(false)
 
 #### inv of non-square matrix error is NonSquare
 
-- inv of non-square matrix error is NonSquare
-- Verify: inv of non-square matrix error is NonSquare
-   - Expected: is_nonsquare is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of non-square matrix error is NonSquare")
-step("Verify: inv of non-square matrix error is NonSquare")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 3, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 val res = lower_inv(a)
 val e = res.unwrap_err()
@@ -445,22 +532,13 @@ expect(is_nonsquare).to_equal(true)
 
 #### inv of 1x1 scalar returns ok
 
-- inv of 1x1 scalar returns ok
-- Verify: inv of 1x1 scalar returns ok
-   - Expected: res.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 1x1 scalar returns ok")
-step("Verify: inv of 1x1 scalar returns ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(1, 1, [4.0])
 val res = lower_inv(a)
 expect(res.is_ok()).to_equal(true)
@@ -470,22 +548,13 @@ expect(res.is_ok()).to_equal(true)
 
 #### inv of 1x1 scalar result = 0.25
 
-- inv of 1x1 scalar result = 0.25
-- Verify: inv of 1x1 scalar result = 0.25
-   - Expected: r.matrix.get(0, 0) equals `0.25`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 1x1 scalar result = 0.25")
-step("Verify: inv of 1x1 scalar result = 0.25")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(1, 1, [4.0])
 val res = lower_inv(a)
 val r = res.unwrap()
@@ -496,25 +565,16 @@ expect(r.matrix.get(0, 0)).to_equal(0.25)
 
 #### inv of 1x1 zero is Singular
 
-- inv of 1x1 zero is Singular
-- Verify: inv of 1x1 zero is Singular
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inv of 1x1 zero is Singular")
-step("Verify: inv of 1x1 zero is Singular")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(1, 1, [0.0])
 val res = lower_inv(a)
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
@@ -523,22 +583,13 @@ expect(res.is_ok()).to_equal(false)
 
 #### solve identity system 2x2 returns ok
 
-- solve identity system 2x2 returns ok
-- Verify: solve identity system 2x2 returns ok
-   - Expected: res.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve identity system 2x2 returns ok")
-step("Verify: solve identity system 2x2 returns ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # identity 2x2: [1,0,0,1]
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val b = [3.0, 7.0]
@@ -550,49 +601,31 @@ expect(res.is_ok()).to_equal(true)
 
 #### solve identity system result length
 
-- solve identity system result length
-- Verify: solve identity system result length
-   - Expected: r.matrix.rows equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve identity system result length")
-step("Verify: solve identity system result length")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val b = [3.0, 7.0]
 val res = lower_solve(a, b)
 val r = res.unwrap()
-expect(r.matrix.rows).to_equal(2)  # oracle: value fixed by the spec contract
+expect(r.matrix.rows).to_equal(2)
 ```
 
 </details>
 
 #### solve identity system x[0] = b[0]
 
-- solve identity system x[0] = b[0]
-- Verify: solve identity system x[0] = b[0]
-   - Expected: r.matrix.get(0, 0) equals `3.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve identity system x[0] = b[0]")
-step("Verify: solve identity system x[0] = b[0]")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # Cramer: x[0] = (b[0]*a11 - b[1]*a01)/det = (3*1 - 7*0)/1 = 3.0
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val b = [3.0, 7.0]
@@ -605,22 +638,13 @@ expect(r.matrix.get(0, 0)).to_equal(3.0)
 
 #### solve identity system x[1] = b[1]
 
-- solve identity system x[1] = b[1]
-- Verify: solve identity system x[1] = b[1]
-   - Expected: r.matrix.get(1, 0) equals `7.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve identity system x[1] = b[1]")
-step("Verify: solve identity system x[1] = b[1]")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # Cramer: x[1] = (a00*b[1] - a10*b[0])/det = (1*7 - 0*3)/1 = 7.0
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val b = [3.0, 7.0]
@@ -633,22 +657,13 @@ expect(r.matrix.get(1, 0)).to_equal(7.0)
 
 #### solve identity system uses MockLapack provider
 
-- solve identity system uses MockLapack provider
-- Verify: solve identity system uses MockLapack provider
-   - Expected: is_lapack is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve identity system uses MockLapack provider")
-step("Verify: solve identity system uses MockLapack provider")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [1.0, 0.0, 0.0, 1.0])
 val b = [3.0, 7.0]
 val res = lower_solve(a, b)
@@ -663,22 +678,13 @@ expect(is_lapack).to_equal(true)
 
 #### solve non-trivial 2x2 returns ok
 
-- solve non-trivial 2x2 returns ok
-- Verify: solve non-trivial 2x2 returns ok
-   - Expected: res.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve non-trivial 2x2 returns ok")
-step("Verify: solve non-trivial 2x2 returns ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [2.0, 1.0, 1.0, 3.0])
 val b = [5.0, 10.0]
 val res = lower_solve(a, b)
@@ -689,22 +695,13 @@ expect(res.is_ok()).to_equal(true)
 
 #### solve non-trivial 2x2 x[0] = 1.0
 
-- solve non-trivial 2x2 x[0] = 1.0
-- Verify: solve non-trivial 2x2 x[0] = 1.0
-   - Expected: r.matrix.get(0, 0) equals `1.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve non-trivial 2x2 x[0] = 1.0")
-step("Verify: solve non-trivial 2x2 x[0] = 1.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # (5*3 - 10*1)/5 = (15-10)/5 = 1.0
 val a = MbMatrix.new(2, 2, [2.0, 1.0, 1.0, 3.0])
 val b = [5.0, 10.0]
@@ -717,22 +714,13 @@ expect(r.matrix.get(0, 0)).to_equal(1.0)
 
 #### solve non-trivial 2x2 x[1] = 3.0
 
-- solve non-trivial 2x2 x[1] = 3.0
-- Verify: solve non-trivial 2x2 x[1] = 3.0
-   - Expected: r.matrix.get(1, 0) equals `3.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve non-trivial 2x2 x[1] = 3.0")
-step("Verify: solve non-trivial 2x2 x[1] = 3.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # (2*10 - 1*5)/5 = (20-5)/5 = 3.0
 val a = MbMatrix.new(2, 2, [2.0, 1.0, 1.0, 3.0])
 val b = [5.0, 10.0]
@@ -747,106 +735,70 @@ expect(r.matrix.get(1, 0)).to_equal(3.0)
 
 #### solve singular system returns err
 
-- solve singular system returns err
-- Verify: solve singular system returns err
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve singular system returns err")
-step("Verify: solve singular system returns err")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [0.0, 0.0, 0.0, 0.0])
 val b = [1.0, 2.0]
 val res = lower_solve(a, b)
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
 
 #### solve singular system is not ok
 
-- solve singular system is not ok
-- Verify: solve singular system is not ok
-   - Expected: ok_check is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve singular system is not ok")
-step("Verify: solve singular system is not ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 2, [0.0, 0.0, 0.0, 0.0])
 val b = [1.0, 2.0]
 val res = lower_solve(a, b)
 val ok_check = res.is_ok()
-expect(ok_check).to_equal(false)
+expect(ok_check == false).to_equal(true)
 ```
 
 </details>
 
 #### solve non-square system returns err
 
-- solve non-square system returns err
-- Verify: solve non-square system returns err
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve non-square system returns err")
-step("Verify: solve non-square system returns err")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(2, 3, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 val b = [1.0, 2.0]
 val res = lower_solve(a, b)
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
 
 #### solve dimension mismatch returns err
 
-- solve dimension mismatch returns err
-- Verify: solve dimension mismatch returns err
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solve dimension mismatch returns err")
-step("Verify: solve dimension mismatch returns err")
-# @req: REQ-FEATURE-MathBlocSolv-001
 # A is 2×2 but b has 3 elements
 val a = MbMatrix.identity(2)
 val b = [1.0, 2.0, 3.0]
 val res = lower_solve(a, b)
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
@@ -855,22 +807,13 @@ expect(res.is_ok()).to_equal(false)
 
 #### 1x1 matmul returns ok
 
-- 1x1 matmul returns ok
-- Verify: 1x1 matmul returns ok
-   - Expected: res.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("1x1 matmul returns ok")
-step("Verify: 1x1 matmul returns ok")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(1, 1, [3.0])
 val b = MbMatrix.new(1, 1, [4.0])
 val res = lower_matmul(a, b)
@@ -881,22 +824,13 @@ expect(res.is_ok()).to_equal(true)
 
 #### 1x1 matmul result = 12.0
 
-- 1x1 matmul result = 12.0
-- Verify: 1x1 matmul result = 12.0
-   - Expected: r.matrix.get(0, 0) equals `12.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("1x1 matmul result = 12.0")
-step("Verify: 1x1 matmul result = 12.0")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(1, 1, [3.0])
 val b = MbMatrix.new(1, 1, [4.0])
 val res = lower_matmul(a, b)
@@ -908,22 +842,13 @@ expect(r.matrix.get(0, 0)).to_equal(12.0)
 
 #### 1x1 matmul uses Scalar provider
 
-- 1x1 matmul uses Scalar provider
-- Verify: 1x1 matmul uses Scalar provider
-   - Expected: is_scalar is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("1x1 matmul uses Scalar provider")
-step("Verify: 1x1 matmul uses Scalar provider")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val a = MbMatrix.new(1, 1, [3.0])
 val b = MbMatrix.new(1, 1, [4.0])
 val res = lower_matmul(a, b)
@@ -938,46 +863,28 @@ expect(is_scalar).to_equal(true)
 
 #### unsupported form returns err
 
-- unsupported form returns err
-- Verify: unsupported form returns err
-   - Expected: res.is_ok() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unsupported form returns err")
-step("Verify: unsupported form returns err")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val res = lower_unsupported("df_groupby")
-expect(res.is_ok()).to_equal(false)
+expect(res.is_ok() == false).to_equal(true)
 ```
 
 </details>
 
 #### unsupported form error is UnsupportedForm
 
-- unsupported form error is UnsupportedForm
-- Verify: unsupported form error is UnsupportedForm
-   - Expected: is_unsupported is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unsupported form error is UnsupportedForm")
-step("Verify: unsupported form error is UnsupportedForm")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val res = lower_unsupported("df_groupby")
 val e = res.unwrap_err()
 val is_unsupported = e == MathBlockError.UnsupportedForm
@@ -988,22 +895,13 @@ expect(is_unsupported).to_equal(true)
 
 #### classify_op unknown tag is Unsupported
 
-- classify_op unknown tag is Unsupported
-- Verify: classify_op unknown tag is Unsupported
-   - Expected: is_unsupported is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("classify_op unknown tag is Unsupported")
-step("Verify: classify_op unknown tag is Unsupported")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val op = classify_op("df_groupby")
 val is_unsupported = op == MathBlockOp.Unsupported
 expect(is_unsupported).to_equal(true)
@@ -1015,22 +913,13 @@ expect(is_unsupported).to_equal(true)
 
 #### classify matmul
 
-- classify matmul
-- Verify: classify matmul
-   - Expected: is_matmul is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("classify matmul")
-step("Verify: classify matmul")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val op = classify_op("matmul")
 val is_matmul = op == MathBlockOp.MatMul
 expect(is_matmul).to_equal(true)
@@ -1040,22 +929,13 @@ expect(is_matmul).to_equal(true)
 
 #### classify inv
 
-- classify inv
-- Verify: classify inv
-   - Expected: is_inv is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("classify inv")
-step("Verify: classify inv")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val op = classify_op("inv")
 val is_inv = op == MathBlockOp.Inv
 expect(is_inv).to_equal(true)
@@ -1065,22 +945,13 @@ expect(is_inv).to_equal(true)
 
 #### classify solve
 
-- classify solve
-- Verify: classify solve
-   - Expected: is_solve is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("classify solve")
-step("Verify: classify solve")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val op = classify_op("solve")
 val is_solve = op == MathBlockOp.Solve
 expect(is_solve).to_equal(true)
@@ -1090,22 +961,13 @@ expect(is_solve).to_equal(true)
 
 #### classify scalar_mul
 
-- classify scalar_mul
-- Verify: classify scalar_mul
-   - Expected: is_scalar_mul is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("classify scalar_mul")
-step("Verify: classify scalar_mul")
-# @req: REQ-FEATURE-MathBlocSolv-001
 val op = classify_op("scalar_mul")
 val is_scalar_mul = op == MathBlockOp.ScalarMul
 expect(is_scalar_mul).to_equal(true)
@@ -1125,55 +987,3 @@ expect(is_scalar_mul).to_equal(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-FEATURE-MathBlocSolv-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `414bd6ab1701ab40a6b8490d786672ffe178fc7639e9d4f1dde4213e9f24d4a8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `414bd6ab1701ab40a6b8490d786672ffe178fc7639e9d4f1dde4213e9f24d4a8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `414bd6ab1701ab40a6b8490d786672ffe178fc7639e9d4f1dde4213e9f24d4a8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/feature/scilib/math_block_solve_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/math_block_solve_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/math_block_solve_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/math_block_solve_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/math_block_solve_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 12 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/scilib/math_block_solve_spec.spl:240:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inv of 2x2 identity returns ok' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/math_block_solve_spec.spl:250:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inv of 2x2 identity result rows' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/math_block_solve_spec.spl:260:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inv of 2x2 identity result cols' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

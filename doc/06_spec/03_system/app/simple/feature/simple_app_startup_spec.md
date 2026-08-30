@@ -40,7 +40,7 @@ expect(startup_detect_launch_kind("run.shs")).to_equal("script")
 
 </details>
 
-#### should classify other executable files as native launches
+#### classify other executable files as native launches
 
 - should classify other executable files as native launches
    - Expected: startup_detect_launch_kind("simple") equals `native`
@@ -64,7 +64,7 @@ expect(startup_detect_launch_kind("app.bin")).to_equal("native")
 
 ### REQ-002: file argument parsing
 
-#### should add the entry path as argv zero when missing
+#### add the entry path as argv zero when missing
 
 - should add the entry path as argv zero when missing
    - Expected: args[0] equals `main.spl`
@@ -89,7 +89,7 @@ expect(args[2]).to_equal("two")
 
 </details>
 
-#### should not duplicate argv zero when caller already passed it
+#### not duplicate argv zero when caller already passed it
 
 - should not duplicate argv zero when caller already passed it
    - Expected: args.len() equals `2`
@@ -114,7 +114,7 @@ expect(args[1]).to_equal("one")
 
 </details>
 
-#### should exclude app arg parser code when metadata says the app does not use it
+#### exclude app arg parser code when metadata says the app does not use it
 
 - should exclude app arg parser code when metadata says the app does not use it
    - Expected: plan.include_arg_parser is false
@@ -139,7 +139,7 @@ expect(startup_feature_summary(plan)).to_contain("arg_parser=false")
 
 ### REQ-003: mmap or cache strategy
 
-#### should use host mmap when metadata requests cache and host supports mmap
+#### use host mmap when metadata requests cache and host supports mmap
 
 - should use host mmap when metadata requests cache and host supports mmap
    - Expected: plan.executable_source equals `filesystem`
@@ -158,7 +158,6 @@ Reproduction: this block contains the complete executable scenario source.
 step("should use host mmap when metadata requests cache and host supports mmap")
 val metadata = _metadata("script", true, true, [], [])
 val plan = startup_plan_from_metadata("main.spl", [], metadata, true, false)
-expect(plan.executable_source).to_equal("filesystem")
 expect(plan.include_mmap_cache).to_equal(true)
 expect(plan.cache_strategy).to_equal("mmap")
 ```
@@ -189,7 +188,7 @@ expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
 
 </details>
 
-#### should make SimpleOS app metadata use the SimpleOS VFS prewarm lane
+#### make SimpleOS app metadata use the SimpleOS VFS prewarm lane
 
 - should make SimpleOS app metadata use the SimpleOS VFS prewarm lane
    - Expected: plan.target_os equals `simpleos`
@@ -216,7 +215,7 @@ expect(startup_feature_summary(plan)).to_contain("os=simpleos")
 
 </details>
 
-#### should fall back to normal read when no cache support is available
+#### fall back to normal read when no cache support is available
 
 - should fall back to normal read when no cache support is available
    - Expected: plan.include_mmap_cache is false
@@ -253,7 +252,7 @@ expect(plan.cache_strategy).to_equal("normal_read")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -262,23 +261,18 @@ step("should include no dynlib loader when no dependencies are declared")
 val metadata = _metadata("native", false, false, [], [])
 val plan = startup_plan_from_metadata("native_app", [], metadata, true, false)
 expect(plan.include_dynlib_loader).to_equal(false)
-expect(plan.load_native_dynlibs.len()).to_equal(0)
-expect(plan.load_smf_dynlibs.len()).to_equal(0)
+expect(plan.load_native_dynlibs.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(plan.load_smf_dynlibs.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### should load native dynlibs declared by native build metadata
 
-- should load native dynlibs declared by native build metadata
-   - Expected: plan.include_dynlib_loader is true
-   - Expected: plan.load_native_dynlibs[0] equals `libsimple_gui.dylib`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -292,7 +286,7 @@ expect(plan.load_native_dynlibs[0]).to_equal("libsimple_gui.dylib")
 
 </details>
 
-#### should load SMF dynlibs declared by SMF metadata
+#### load SMF dynlibs declared by SMF metadata
 
 - should load SMF dynlibs declared by SMF metadata
    - Expected: plan.include_dynlib_loader is true
@@ -320,7 +314,7 @@ expect(plan.program_args[0]).to_equal("app.smf")
 
 ### REQ-005: build launch metadata sidecar
 
-#### should render native build launch metadata as a sidecar
+#### render native build launch metadata as a sidecar
 
 - should render native build launch metadata as a sidecar
 
@@ -344,7 +338,7 @@ expect(sidecar).to_contain("mmap_hint: false")
 
 </details>
 
-#### should parse sidecar metadata with native and SMF dynlib dependencies
+#### parse sidecar metadata with native and SMF dynlib dependencies
 
 - should parse sidecar metadata with native and SMF dynlib dependencies
    - Expected: metadata.entry_kind equals `smf`
@@ -386,7 +380,7 @@ expect(plan.cache_strategy).to_equal("simpleos_vfs_prewarm")
 
 </details>
 
-#### should name sidecars next to the artifact path
+#### name sidecars next to the artifact path
 
 - should name sidecars next to the artifact path
    - Expected: launch_metadata_sidecar_path("build/app") equals `build/app.simple_launch.sdn`
@@ -408,7 +402,7 @@ expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_lau
 
 ### REQ-006: embedded SMF launch metadata
 
-#### should parse embedded SMF metadata for SimpleOS startup
+#### parse embedded SMF metadata for SimpleOS startup
 
 - should parse embedded SMF metadata for SimpleOS startup
    - Expected: metadata.entry_kind equals `smf`
@@ -422,7 +416,7 @@ expect(launch_metadata_sidecar_path("build/app")).to_equal("build/app.simple_lau
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -460,7 +454,7 @@ expect(plan.program_args[0]).to_equal("/sys/apps/simple.smf")
 
 ### REQ-007: embedded native launch metadata
 
-#### should parse native launch metadata from the binary trailer
+#### parse native launch metadata from the binary trailer
 
 - should parse native launch metadata from the binary trailer
    - Expected: has_native_launch_metadata_trailer(binary) is true

@@ -1,6 +1,29 @@
 # Builder Specification
 
-> Tests covering Container builders, Leaf widget builders, Composite widget builders, Tree builders, Widget modifiers.
+> <details>
+
+<!-- sdn-diagram:id=builder_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=builder_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+builder_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=builder_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,13 @@
 
 #### creates panel with vbox layout
 
-- creates panel with vbox layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates panel with vbox layout")
 val c1 = WidgetNode.new("col_child1", "text")
 val c2 = WidgetNode.new("col_child2", "text")
 val col = column("col1", [c1, c2])
@@ -42,18 +60,16 @@ expect col.layout to_equal "vbox"
 
 #### has correct child count
 
-- has correct child count
+1. expect col child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has correct child count")
 val c1 = WidgetNode.new("col2_a", "text")
 val c2 = WidgetNode.new("col2_b", "text")
 val col = column("col2", [c1, c2])
@@ -64,18 +80,16 @@ expect col.child_count() to_equal 2
 
 #### creates empty column with no children
 
-- creates empty column with no children
+1. expect col child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates empty column with no children")
 val col = column("col_empty", [])
 expect col.kind to_equal "panel"
 expect col.child_count() to_equal 0
@@ -87,18 +101,13 @@ expect col.child_count() to_equal 0
 
 #### creates panel with hbox layout
 
-- creates panel with hbox layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates panel with hbox layout")
 val c1 = WidgetNode.new("row_child1", "text")
 val r = row("row1", [c1])
 expect r.kind to_equal "panel"
@@ -109,18 +118,16 @@ expect r.layout to_equal "hbox"
 
 #### has correct child count
 
-- has correct child count
+1. expect r child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has correct child count")
 val c1 = WidgetNode.new("row2_a", "text")
 val c2 = WidgetNode.new("row2_b", "text")
 val c3 = WidgetNode.new("row2_c", "text")
@@ -134,18 +141,13 @@ expect r.child_count() to_equal 3
 
 #### creates panel with grid layout
 
-- creates panel with grid layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates panel with grid layout")
 val c1 = WidgetNode.new("grid_child1", "text")
 val g = builder.grid("grid1", [c1])
 expect g.kind to_equal "panel"
@@ -156,18 +158,16 @@ expect g.layout to_equal "grid"
 
 #### has correct child count
 
-- has correct child count
+1. expect g child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has correct child count")
 val c1 = WidgetNode.new("grid2_a", "text")
 val c2 = WidgetNode.new("grid2_b", "text")
 val g = builder.grid("grid2", [c1, c2])
@@ -180,18 +180,16 @@ expect g.child_count() to_equal 2
 
 #### creates panel with title prop
 
-- creates panel with title prop
+1. expect p get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates panel with title prop")
 val child = WidgetNode.new("pan_child", "text")
 val p = panel("pan1", "My Panel", [child])
 expect p.kind to_equal "panel"
@@ -202,7 +200,22 @@ expect p.get_prop("title") to_equal "My Panel"
 
 #### uses vbox layout
 
-- uses vbox layout
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val p = panel("pan2", "Title", [])
+expect p.layout to_equal "vbox"
+```
+
+</details>
+
+#### has children
+
+1. expect p child count
 
 
 <details>
@@ -212,28 +225,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses vbox layout")
-val p = panel("pan2", "Title", [])
-expect p.layout to_equal "vbox"
-```
-
-</details>
-
-#### has children
-
-- has children
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("has children")
 val c1 = WidgetNode.new("pan3_a", "text")
 val c2 = WidgetNode.new("pan3_b", "button")
 val p = panel("pan3", "Container", [c1, c2])
@@ -248,18 +239,16 @@ expect p.child_count() to_equal 2
 
 #### creates text with content prop
 
-- creates text with content prop
+1. expect tw get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates text with content prop")
 val tw = text_widget("tw1", "Hello World")
 expect tw.kind to_equal "text"
 expect tw.get_prop("content") to_equal "Hello World"
@@ -269,18 +258,16 @@ expect tw.get_prop("content") to_equal "Hello World"
 
 #### handles empty content
 
-- handles empty content
+1. expect tw get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles empty content")
 val tw = text_widget("tw2", "")
 expect tw.get_prop("content") to_equal ""
 ```
@@ -291,18 +278,16 @@ expect tw.get_prop("content") to_equal ""
 
 #### creates text with label prop
 
-- creates text with label prop
+1. expect lbl get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates text with label prop")
 val lbl = label("lbl1", "Username:")
 expect lbl.kind to_equal "text"
 expect lbl.get_prop("label") to_equal "Username:"
@@ -314,18 +299,16 @@ expect lbl.get_prop("label") to_equal "Username:"
 
 #### creates input with placeholder prop
 
-- creates input with placeholder prop
+1. expect inp get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates input with placeholder prop")
 val inp = text_input("inp1", "Enter text...")
 expect inp.kind to_equal "input"
 expect inp.get_prop("placeholder") to_equal "Enter text..."
@@ -337,18 +320,17 @@ expect inp.get_prop("placeholder") to_equal "Enter text..."
 
 #### creates button with label and action props
 
-- creates button with label and action props
+1. expect btn get prop
+2. expect btn get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates button with label and action props")
 val btn = button("btn1", "Click Me", "submit")
 expect btn.kind to_equal "button"
 expect btn.get_prop("label") to_equal "Click Me"
@@ -361,18 +343,17 @@ expect btn.get_prop("action") to_equal "submit"
 
 #### creates checked checkbox
 
-- creates checked checkbox
+1. expect cb get prop
+2. expect cb get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates checked checkbox")
 val cb = checkbox("cb1", "Accept Terms", true)
 expect cb.kind to_equal "checkbox"
 expect cb.get_prop("label") to_equal "Accept Terms"
@@ -383,18 +364,16 @@ expect cb.get_prop("checked") to_equal "true"
 
 #### creates unchecked checkbox
 
-- creates unchecked checkbox
+1. expect cb get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates unchecked checkbox")
 val cb = checkbox("cb2", "Subscribe", false)
 expect cb.get_prop("checked") to_equal "false"
 ```
@@ -405,18 +384,17 @@ expect cb.get_prop("checked") to_equal "false"
 
 #### creates textfield with value and placeholder
 
-- creates textfield with value and placeholder
+1. expect tf get prop
+2. expect tf get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates textfield with value and placeholder")
 val tf = text_field("tf1", "initial", "Type here")
 expect tf.kind to_equal "textfield"
 expect tf.get_prop("value") to_equal "initial"
@@ -429,18 +407,17 @@ expect tf.get_prop("placeholder") to_equal "Type here"
 
 #### creates image with src and alt
 
-- creates image with src and alt
+1. expect img get prop
+2. expect img get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates image with src and alt")
 val img = image("img1", "https://example.com/pic.png", "A photo")
 expect img.kind to_equal "image"
 expect img.get_prop("src") to_equal "https://example.com/pic.png"
@@ -453,18 +430,13 @@ expect img.get_prop("alt") to_equal "A photo"
 
 #### creates divider widget
 
-- creates divider widget
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates divider widget")
 val div = divider("div1")
 expect div.kind to_equal "divider"
 ```
@@ -475,18 +447,16 @@ expect div.kind to_equal "divider"
 
 #### creates progress bar with value
 
-- creates progress bar with value
+1. expect pb get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates progress bar with value")
 val pb = progress("pb1", 75)
 expect pb.kind to_equal "progress"
 expect pb.get_prop("value") to_equal "75"
@@ -496,18 +466,16 @@ expect pb.get_prop("value") to_equal "75"
 
 #### creates progress bar with zero
 
-- creates progress bar with zero
+1. expect pb get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates progress bar with zero")
 val pb = progress("pb2", 0)
 expect pb.get_prop("value") to_equal "0"
 ```
@@ -520,18 +488,16 @@ expect pb.get_prop("value") to_equal "0"
 
 #### creates dropdown with option children
 
-- creates dropdown with option children
+1. expect dd child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates dropdown with option children")
 val dd = dropdown("dd1", ["Apple", "Banana"])
 expect dd.kind to_equal "dropdown"
 expect dd.child_count() to_equal 2
@@ -541,18 +507,16 @@ expect dd.child_count() to_equal 2
 
 #### option children have label props
 
-- option children have label props
+1. expect first get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("option children have label props")
 val dd = dropdown("dd2", ["Red", "Green", "Blue"])
 val first = dd.child_at(0)
 expect first != nil to_equal true
@@ -563,18 +527,16 @@ expect first.get_prop("label") to_equal "Red"
 
 #### creates empty dropdown with no items
 
-- creates empty dropdown with no items
+1. expect dd child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates empty dropdown with no items")
 val dd = dropdown("dd3", [])
 expect dd.child_count() to_equal 0
 ```
@@ -585,18 +547,16 @@ expect dd.child_count() to_equal 0
 
 #### creates menubar with text children
 
-- creates menubar with text children
+1. expect mb child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates menubar with text children")
 val mb = menubar("mb1", ["File", "Edit"])
 expect mb.kind to_equal "menubar"
 expect mb.child_count() to_equal 2
@@ -606,18 +566,16 @@ expect mb.child_count() to_equal 2
 
 #### menu children have label props
 
-- menu children have label props
+1. expect first get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("menu children have label props")
 val mb = menubar("mb2", ["View", "Help"])
 val first = mb.child_at(0)
 expect first != nil to_equal true
@@ -630,18 +588,17 @@ expect first.get_prop("label") to_equal "View"
 
 #### creates statusbar with left and right props
 
-- creates statusbar with left and right props
+1. expect sb get prop
+2. expect sb get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates statusbar with left and right props")
 val sb = statusbar("sb1", "Ready", "Ln 42")
 expect sb.kind to_equal "statusbar"
 expect sb.get_prop("left") to_equal "Ready"
@@ -654,18 +611,16 @@ expect sb.get_prop("right") to_equal "Ln 42"
 
 #### creates tabs with labeled children
 
-- creates tabs with labeled children
+1. expect tb child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates tabs with labeled children")
 val tb = tabs("tb1", ["Tab1", "Tab2"])
 expect tb.kind to_equal "tabs"
 expect tb.child_count() to_equal 2
@@ -675,18 +630,16 @@ expect tb.child_count() to_equal 2
 
 #### tab children have label props
 
-- tab children have label props
+1. expect second get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tab children have label props")
 val tb = tabs("tb2", ["Home", "Settings", "About"])
 val second = tb.child_at(1)
 expect second != nil to_equal true
@@ -699,18 +652,16 @@ expect second.get_prop("label") to_equal "Settings"
 
 #### creates list with item children
 
-- creates list with item children
+1. expect lw child count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates list with item children")
 val lw = list_widget("lw1", ["Alpha", "Beta", "Gamma"])
 expect lw.kind to_equal "list"
 expect lw.child_count() to_equal 3
@@ -720,18 +671,16 @@ expect lw.child_count() to_equal 3
 
 #### item children have label props
 
-- item children have label props
+1. expect first get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("item children have label props")
 val lw = list_widget("lw2", ["First", "Second"])
 val first = lw.child_at(0)
 expect first != nil to_equal true
@@ -744,18 +693,16 @@ expect first.get_prop("label") to_equal "First"
 
 #### creates dialog with title prop
 
-- creates dialog with title prop
+1. expect dlg get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates dialog with title prop")
 val dlg = dialog("dlg1", "Confirm", [])
 expect dlg.kind to_equal "dialog"
 expect dlg.get_prop("title") to_equal "Confirm"
@@ -765,18 +712,13 @@ expect dlg.get_prop("title") to_equal "Confirm"
 
 #### dialog has vbox layout
 
-- dialog has vbox layout
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("dialog has vbox layout")
 val dlg = dialog("dlg2", "Alert", [])
 expect dlg.layout to_equal "vbox"
 ```
@@ -787,18 +729,17 @@ expect dlg.layout to_equal "vbox"
 
 #### creates tooltip with content and target
 
-- creates tooltip with content and target
+1. expect tt get prop
+2. expect tt get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates tooltip with content and target")
 val tt = tooltip("tt1", "Help text", "btn_target")
 expect tt.kind to_equal "tooltip"
 expect tt.get_prop("content") to_equal "Help text"
@@ -813,18 +754,13 @@ expect tt.get_prop("target") to_equal "btn_target"
 
 #### wraps root in UITree
 
-- wraps root in UITree
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("wraps root in UITree")
 val root = WidgetNode.new("bt_root", "panel")
 val tree = build_tree(root)
 expect tree.root.id to_equal "bt_root"
@@ -834,18 +770,13 @@ expect tree.root.id to_equal "bt_root"
 
 #### uses default title
 
-- uses default title
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses default title")
 val root = WidgetNode.new("bt_root2", "panel")
 val tree = build_tree(root)
 expect tree.title to_equal "Simple UI"
@@ -855,18 +786,13 @@ expect tree.title to_equal "Simple UI"
 
 #### uses default theme
 
-- uses default theme
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses default theme")
 val root = WidgetNode.new("bt_root3", "panel")
 val tree = build_tree(root)
 expect tree.theme to_equal "dark"
@@ -878,18 +804,13 @@ expect tree.theme to_equal "dark"
 
 #### sets custom title
 
-- sets custom title
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets custom title")
 val root = WidgetNode.new("btt_root1", "panel")
 val tree = build_tree_with_title(root, "My App", "dark")
 expect tree.title to_equal "My App"
@@ -899,18 +820,13 @@ expect tree.title to_equal "My App"
 
 #### sets custom theme
 
-- sets custom theme
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets custom theme")
 val root = WidgetNode.new("btt_root2", "panel")
 val tree = build_tree_with_title(root, "App", "light")
 expect tree.theme to_equal "light"
@@ -920,18 +836,13 @@ expect tree.theme to_equal "light"
 
 #### preserves root node
 
-- preserves root node
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("preserves root node")
 val root = WidgetNode.new("btt_root3", "panel")
 val tree = build_tree_with_title(root, "Title", "monokai")
 expect tree.root.id to_equal "btt_root3"
@@ -945,18 +856,18 @@ expect tree.root.id to_equal "btt_root3"
 
 #### sets flex property
 
-- sets flex property
+1. var node = WidgetNode new
+2. node = with flex
+3. expect node get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets flex property")
 var node = WidgetNode.new("flex1", "panel")
 node = with_flex(node, 2)
 expect node.get_prop("flex") to_equal "2"
@@ -968,18 +879,18 @@ expect node.get_prop("flex") to_equal "2"
 
 #### sets width property
 
-- sets width property
+1. var node = WidgetNode new
+2. node = with width
+3. expect node get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets width property")
 var node = WidgetNode.new("width1", "panel")
 node = with_width(node, 100)
 expect node.get_prop("width") to_equal "100"
@@ -991,18 +902,18 @@ expect node.get_prop("width") to_equal "100"
 
 #### sets height property
 
-- sets height property
+1. var node = WidgetNode new
+2. node = with height
+3. expect node get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets height property")
 var node = WidgetNode.new("height1", "panel")
 node = with_height(node, 50)
 expect node.get_prop("height") to_equal "50"
@@ -1014,18 +925,22 @@ expect node.get_prop("height") to_equal "50"
 
 #### applies multiple modifiers
 
-- applies multiple modifiers
+1. var node = WidgetNode new
+2. node = with flex
+3. node = with width
+4. node = with height
+5. expect node get prop
+6. expect node get prop
+7. expect node get prop
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("applies multiple modifiers")
 var node = WidgetNode.new("chain1", "panel")
 node = with_flex(node, 1)
 node = with_width(node, 200)
@@ -1044,12 +959,12 @@ expect node.get_prop("height") to_equal "80"
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/builder_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Container builders, Leaf widget builders, Composite widget builders, Tree builders, Widget modifiers.
+Tests covering:
 - Container builders
 - Leaf widget builders
 - Composite widget builders
@@ -1068,51 +983,3 @@ Tests covering Container builders, Leaf widget builders, Composite widget builde
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `84b2317ad6f2f882d08944a37472436ebc4915811dd8e3e5ae914d0c8bb8e0e6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `84b2317ad6f2f882d08944a37472436ebc4915811dd8e3e5ae914d0c8bb8e0e6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `84b2317ad6f2f882d08944a37472436ebc4915811dd8e3e5ae914d0c8bb8e0e6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/builder_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/builder_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/builder_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/builder_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/builder_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates panel with vbox layout' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/builder_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has correct child count' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/builder_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates empty column with no children' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

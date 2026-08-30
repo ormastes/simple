@@ -1,0 +1,108 @@
+#!/bin/sh
+# Parent-side Stage 3 result classification must not trust a contained worker
+# crash's shell-zero controller result.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+failed=0
+checked=0
+
+check() {
+  checked=$((checked + 1))
+  if ! "$@"; then
+    failed=$((failed + 1))
+    echo "FAIL: $*" >&2
+  fi
+}
+
+# Exercise the production functions without executing the admission-heavy
+# wrapper body.
+sed -n \
+  '/^bootstrap_stage3_resume_effective_status()/,/^}/p;
+   /^bootstrap_stage3_resume_write_status_receipt()/,/^}/p' \
+  "$resume" >"$tmp/functions.sh"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$tmp/functions.sh"
+
+candidate="$tmp/simple"
+log="$tmp/stage3.log"
+transcript="$tmp/stage3.transcript"
+receipt="$tmp/status.env"
+printf '#!/bin/sh\nexit 0\n' >"$candidate"
+chmod +x "$candidate"
+printf 'command transcript fixture\n' >"$transcript"
+printf '%s\n' \
+  'timeout: the monitored command dumped core' \
+  'error: native-build worker exited with code 4294967295.' \
+  '  interpreter: admitted/simple (exit code 4294967295)' >"$log"
+
+effective=0
+bootstrap_stage3_resume_effective_status 0 "$log" "$candidate" || effective=$?
+check test "$effective" -eq 1
+check test "$bootstrap_stage3_resume_worker_status" = 4294967295
+check test "$bootstrap_stage3_resume_diagnostic_class" = worker-core-dump
+check test "$bootstrap_stage3_resume_signal_identity" = core-dump-signal-unspecified
+bootstrap_stage3_resume_write_status_receipt "$receipt" "$log" \
+  "$transcript" 0 "$effective" "$bootstrap_stage3_resume_worker_status" \
+  coordinator direct "$bootstrap_stage3_resume_diagnostic_class" \
+  "$bootstrap_stage3_resume_signal_identity"
+check grep -Fxq 'status=fail' "$receipt"
+check grep -Fxq 'shell_exit_status=0' "$receipt"
+check grep -Fxq 'effective_exit_status=1' "$receipt"
+check grep -Fxq 'worker_exit_status=4294967295' "$receipt"
+check grep -Fxq 'requested_route=coordinator' "$receipt"
+check grep -Fxq 'fallback_route=direct' "$receipt"
+check grep -Fxq 'diagnostic_class=worker-core-dump' "$receipt"
+check grep -Fxq 'signal_identity=core-dump-signal-unspecified' "$receipt"
+
+# A real shell failure keeps its exact portable exit status. A clean result
+# requires a fresh regular executable candidate.
+printf 'ordinary failure\n' >"$log"
+effective=0
+bootstrap_stage3_resume_effective_status 139 "$log" "$candidate" || effective=$?
+check test "$effective" -eq 139
+check test "$bootstrap_stage3_resume_diagnostic_class" = shell-signal-exit
+check test "$bootstrap_stage3_resume_signal_identity" = signal-number-11
+printf 'build succeeded\n' >"$log"
+effective=0
+bootstrap_stage3_resume_effective_status 0 "$log" "$candidate" || effective=$?
+check test "$effective" -eq 0
+rm -f "$candidate"
+effective=0
+bootstrap_stage3_resume_effective_status 0 "$log" "$candidate" || effective=$?
+check test "$effective" -eq 1
+
+# The route choice is diagnostic-only input evidence, but is included in both
+# the args hash and the real transcribed environment. Multi-worker recovery
+# records its coordinator request and explicit direct fallback; one worker
+# records the direct route with no fallback.
+check grep -Fq 'stage3_requested_route=direct' "$resume"
+check grep -Fq 'stage3_fallback_route=none' "$resume"
+check grep -Fq 'stage3_requested_route=coordinator' "$resume"
+check grep -Fq 'stage3_fallback_route=direct' "$resume"
+check test "$(grep -c 'SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=' "$resume")" -eq 2
+check test "$(grep -c 'SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=' "$resume")" -eq 2
+
+# Production ordering: status is classified and atomically published before
+# the failure branch; sanity/provenance creation remains below that branch.
+classify_line=$(grep -n '^bootstrap_stage3_resume_effective_status "$status"' "$resume" | cut -d: -f1)
+receipt_line=$(grep -n '^if ! bootstrap_stage3_resume_write_status_receipt ' "$resume" | cut -d: -f1)
+failure_line=$(grep -n '^if \[ "$effective_status" -ne 0 \]; then' "$resume" | cut -d: -f1)
+sanity_line=$(grep -n '^bootstrap_stage_sanity ' "$resume" | cut -d: -f1)
+manifest_line=$(grep -n '^bootstrap_stage3_write_manifest$' "$resume" | cut -d: -f1)
+check test "$classify_line" -lt "$receipt_line"
+check test "$receipt_line" -lt "$failure_line"
+check test "$failure_line" -lt "$sanity_line"
+check test "$failure_line" -lt "$manifest_line"
+
+if [ "$failed" -ne 0 ]; then
+  echo "FAIL — $checked Stage 3 resume exit contract(s), $failed failed"
+  exit 1
+fi
+echo "PASS — $checked Stage 3 resume exit contract(s) checked"

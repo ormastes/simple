@@ -4,15 +4,15 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1
+- **Total Features:** 6
+- **Complete Documentation:** 6 (100%)
 - **Stubs Remaining:** 0
 - **Total Lines:** 11
 - **Warnings:** 6
 
 ---
 
-## Syntax / Math DSL (1 features)
+## Other (6 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|

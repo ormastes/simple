@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13,7 +13,7 @@
 
 ## Scenarios
 
-### REQ-RLD-001..007
+### REQ-RLD-001..006
 
 #### keeps dual-arch QEMU virt profiles public and deterministic
 
@@ -106,8 +106,8 @@ Tests covering REQ-RLD-001..007.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

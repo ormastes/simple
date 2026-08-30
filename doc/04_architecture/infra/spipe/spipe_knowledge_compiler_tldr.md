@@ -51,10 +51,8 @@ runtime adapters.
   fail closed.
 - Target membership is anchored by a sealed, content-addressed inventory root.
   Resolver order proves workspace/worktree + snapshot + canonical target before
-  receipt verification; an alias yields only a candidate and must itself pass
-  target proof. Workspace aggregates carry the complete canonical
-  `contributingProjectRoots` list in both seal layers, and worktree binding is
-  transitive through the verified manifest tuple.
+  receipt verification; workspace aggregates are explicit null-project manifests
+  and worktree binding is transitive through the verified manifest tuple.
 - The seal is two-level and non-cyclic: `TargetInventoryManifestV1` binds a
   base snapshot UID, then `AuthorityManifestV1` binds that base UID plus the
   inventory root. The sealed alias index is resolved through SnapshotAuthority,

@@ -1,0 +1,61 @@
+#!/bin/sh
+# Canonical nonzero MC/DC gate for the production RV32 SMP wait policy.
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+SIMPLE_BIN="${RV32_HAL_SIMPLE_BIN:-bin/release/simple}"
+CLANG_BIN="${RV32_HAL_CLANG_BIN:-clang-20}"
+LLVM_COV_BIN="${RV32_HAL_LLVM_COV_BIN:-llvm-cov-20}"
+LLVM_PROFDATA_BIN="${RV32_HAL_LLVM_PROFDATA_BIN:-llvm-profdata-20}"
+ARTIFACT_DIR="build/test-artifacts/rv32-hal-coverage"
+INPUT="$ARTIFACT_DIR/rv32_smp_policy_mcdc_input.spl"
+INSTRUMENTED="$ARTIFACT_DIR/rv32_smp_policy_mcdc_instrumented.spl"
+REPORT="$ARTIFACT_DIR/rv32_smp_policy_mcdc_report.txt"
+C_SOURCE="test/fixtures/os/kernel/arch/riscv32/rv32_smp_wait_ref.c"
+C_BINARY="$ARTIFACT_DIR/rv32_smp_wait_ref"
+C_PROFILE_RAW="$ARTIFACT_DIR/rv32_smp_wait_ref.profraw"
+C_PROFILE_DATA="$ARTIFACT_DIR/rv32_smp_wait_ref.profdata"
+
+mkdir -p "$ARTIFACT_DIR"
+
+command -v "$CLANG_BIN" >/dev/null
+command -v "$LLVM_COV_BIN" >/dev/null
+command -v "$LLVM_PROFDATA_BIN" >/dev/null
+rm -f "$C_PROFILE_RAW" "$C_PROFILE_DATA"
+"$CLANG_BIN" -O0 -fprofile-instr-generate -fcoverage-mapping -fcoverage-mcdc \
+  "$C_SOURCE" -o "$C_BINARY"
+C_CASES="$(LLVM_PROFILE_FILE="$C_PROFILE_RAW" "$C_BINARY")"
+"$LLVM_PROFDATA_BIN" merge -sparse "$C_PROFILE_RAW" -o "$C_PROFILE_DATA"
+C_COVERAGE="$("$LLVM_COV_BIN" report --show-branch-summary --show-mcdc-summary \
+  "$C_BINARY" -instr-profile="$C_PROFILE_DATA" "$C_SOURCE" | tail -n 1 | tr -s ' ')"
+
+test "$C_CASES" = 'cases=1,0,0'
+echo "$C_COVERAGE" | grep -Fq \
+  '4 0 100.00% 2 0 100.00% 12 0 100.00% 4 0 100.00% 2 0 100.00%'
+echo "C_ORACLE $C_CASES"
+echo "C_COVERAGE $C_COVERAGE"
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "RV32_HAL_MCDC_FAILED missing Simple runtime: $SIMPLE_BIN" >&2
+  exit 127
+fi
+
+PREDICATE='online_harts < expected_harts and spins < spin_limit'
+grep -Fq "    if $PREDICATE:" src/os/kernel/arch/riscv32/smp_policy.spl
+grep -Fq 'use os.kernel.arch.riscv32.smp_policy.{hal_rv32_smp_should_wait}' src/os/kernel/arch/riscv32/smp_provider.spl
+grep -Fq '    while hal_rv32_smp_should_wait(online_harts, spins, expected_harts, spin_limit):' src/os/kernel/arch/riscv32/smp_provider.spl
+awk 'FNR == 1 && NR != 1 { print "" } { print }' \
+  src/os/kernel/arch/riscv32/smp_policy.spl \
+  test/fixtures/os/kernel/arch/riscv32/rv32_smp_policy_mcdc_driver.spl \
+  >"$INPUT"
+
+env -u SIMPLE_RUNTIME_FAMILY "$SIMPLE_BIN" \
+  scripts/check/cert/mcdc_instrument.spl ignored "$INPUT" >"$INSTRUMENTED"
+env -u SIMPLE_RUNTIME_FAMILY SIMPLE_LIB=src "$SIMPLE_BIN" "$INSTRUMENTED" \
+  >"$REPORT"
+
+grep -Fq 'MC/DC: 100% (2/2), evaluations=3' "$REPORT"
+grep -Fq 'Uncovered: (none)' "$REPORT"
+cat "$REPORT"
+echo "STATUS: PASS rv32-hal-mcdc c_branches=4/4 c_conditions=2/2 simple_decisions=1/1 simple_conditions=2/2"

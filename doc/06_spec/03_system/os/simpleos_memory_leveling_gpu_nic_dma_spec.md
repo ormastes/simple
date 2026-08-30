@@ -1,6 +1,30 @@
 # Simpleos Memory Leveling Gpu Nic Dma Specification
 
-> Tests covering SimpleOS GPU NIC DMA memory leveling.
+> <details>
+
+<!-- sdn-diagram:id=simpleos_memory_leveling_gpu_nic_dma_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_memory_leveling_gpu_nic_dma_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_memory_leveling_gpu_nic_dma_spec -> std
+simpleos_memory_leveling_gpu_nic_dma_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_memory_leveling_gpu_nic_dma_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,13 +41,10 @@
 
 #### REQ-001 REQ-002 keeps language and kernel configurations separate
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- REQ-001 REQ-002 keeps language and kernel configurations separate
 - Create an independently owned language placement configuration
+- var placement = simple memory placement config from intent
 - Create an independently owned SimpleOS capacity configuration
+- var os config = simpleos memory leveling config default
 - Verify neither configuration mutation changes the other owner
    - Expected: placement.preferred_tier.name equals `cpu_cold`
    - Expected: placement.movable is false
@@ -34,12 +55,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-001 REQ-002 keeps language and kernel configurations separate")
 step("Create an independently owned language placement configuration")
 val intent = simple_memory_iso_cpu_cold()
 var placement = simple_memory_placement_config_from_intent(intent)
@@ -60,7 +79,6 @@ expect(os_config.swap_enabled).to_equal(true)
 
 #### REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order
 
-- REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order
 - Allocate a tracked cold CPU buffer with stable identity
    - Expected: allocation.ok is true
 - Reject ownership transfer before a device mapping exists
@@ -83,12 +101,10 @@ expect(os_config.swap_enabled).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order")
 step("Allocate a tracked cold CPU buffer with stable identity")
 val intent = simple_memory_iso_cpu_cold()
 val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
@@ -118,8 +134,9 @@ expect(manager.unmap_device(allocation.allocation_id, 91).state).to_equal("cpu_o
 
 #### REQ-008 REQ-014 bounds pressure and reports incremental counters
 
-- REQ-008 REQ-014 bounds pressure and reports incremental counters
 - Configure a pressure batch larger than the hard safety bound
+- var config = simpleos memory leveling config default
+- manager request
 - Apply critical pressure without scanning every allocation
    - Expected: report.inspected equals `64`
    - Expected: report.selected equals `64`
@@ -132,12 +149,10 @@ expect(manager.unmap_device(allocation.allocation_id, 91).state).to_equal("cpu_o
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-008 REQ-014 bounds pressure and reports incremental counters")
 step("Configure a pressure batch larger than the hard safety bound")
 var config = simpleos_memory_leveling_config_default()
 config.pressure_batch_limit = 1000
@@ -164,8 +179,8 @@ expect(stats.candidate_count).to_equal(70)
 
 #### REQ-007 preserves CPU and device reservations
 
-- REQ-007 preserves CPU and device reservations
 - Configure CPU GPU NIC and DMA reservations over shared capacity
+- var config = simpleos memory leveling config default
 - Reject CPU allocation that would consume protected device capacity
    - Expected: manager.request(simple_memory_placement_config_from_intent(cpu), memory_leveling_policy_from_intent(cpu), 71, 1, 1).reason equals `reservation-protected`
    - Expected: manager.request(simple_memory_placement_config_from_intent(cpu), memory_leveling_policy_from_intent(cpu), 70, 1, 1).ok is true
@@ -177,19 +192,15 @@ expect(stats.candidate_count).to_equal(70)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-007 preserves CPU and device reservations")
 step("Configure CPU GPU NIC and DMA reservations over shared capacity")
 var config = simpleos_memory_leveling_config_default()
 config.physical_capacity_bytes = 100
 config.cpu_capacity_bytes = 100
 config.cpu_reserved_bytes = 20
-config.cpu_low_watermark_bytes = 25
-config.cpu_high_watermark_bytes = 50
 config.gpu_capacity_bytes = 50
 config.gpu_reserved_bytes = 10
 config.nic_reserved_bytes = 10
@@ -211,7 +222,6 @@ expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), m
 
 #### REQ-009 preserves bytes across committed swap transitions
 
-- REQ-009 preserves bytes across committed swap transitions
 - Prepare a cold allocation for swap
    - Expected: manager.prepare_swap(allocation.allocation_id, 31).state equals `migrating`
 - Write deterministic bytes before committing the swapped state
@@ -227,12 +237,10 @@ expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), m
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-009 preserves bytes across committed swap transitions")
 step("Prepare a cold allocation for swap")
 val intent = simple_memory_iso_cpu_cold()
 val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
@@ -258,8 +266,10 @@ expect(store.release(written.slot_id, allocation.allocation_id).ok).to_equal(tru
 
 #### REQ-011 validates scatter DMA metadata and synchronization
 
-- REQ-011 validates scatter DMA metadata and synchronization
 - Create a DMA descriptor with two explicit physical segments
+- owner: DmaOwner
+- dma segment
+- dma segment
    - Expected: mapping.segment_count() equals `2`
 - Transfer ownership in order and reject unmap while device-owned
    - Expected: dma_mapping_unmap(device).is_err() is true
@@ -269,12 +279,10 @@ expect(store.release(written.slot_id, allocation.allocation_id).ok).to_equal(tru
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-011 validates scatter DMA metadata and synchronization")
 step("Create a DMA descriptor with two explicit physical segments")
 val buffer = SharedDmaBuffer(
     cpu_virt_addr: 0x1000,
@@ -304,8 +312,8 @@ expect(dma_mapping_unmap(returned).is_ok()).to_equal(true)
 
 #### REQ-012 protects GPU queues and NIC buffers through completion
 
-- REQ-012 protects GPU queues and NIC buffers through completion
 - Register a permanently pinned GPU command queue
+- var config = simpleos memory leveling config default
    - Expected: manager.register_gpu_queue(501, 12, 4096, 0x12000).ok is true
 - Submit and complete GPU work while release remains protected
    - Expected: manager.device_submit(501, 12).state equals `device_owned`
@@ -326,17 +334,14 @@ expect(dma_mapping_unmap(returned).is_ok()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-012 protects GPU queues and NIC buffers through completion")
 step("Register a permanently pinned GPU command queue")
 var config = simpleos_memory_leveling_config_default()
 config.gpu_capacity_bytes = 65536
 config.nic_capacity_bytes = 65536
-config.nic_reserved_bytes = 0
 val manager = memory_leveling_manager_new(config)
 expect(manager.register_gpu_queue(501, 12, 4096, 0x12000).ok).to_equal(true)
 
@@ -361,7 +366,6 @@ expect(memory_leveling_device_migration_unavailable(502).reason).to_equal("migra
 
 #### REQ-013 REQ-015 reports QEMU support without hardware overclaim
 
-- REQ-013 REQ-015 reports QEMU support without hardware overclaim
 - Inspect the QEMU virtio capability report
    - Expected: capabilities.virtio_gpu_backing is true
    - Expected: capabilities.virtio_nic_buffers is true
@@ -377,12 +381,10 @@ expect(memory_leveling_device_migration_unavailable(502).reason).to_equal("migra
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("REQ-013 REQ-015 reports QEMU support without hardware overclaim")
 step("Inspect the QEMU virtio capability report")
 val capabilities = memory_leveling_qemu_capabilities()
 expect(capabilities.virtio_gpu_backing).to_equal(true)
@@ -406,12 +408,12 @@ expect(capabilities.iommu_isolation).to_equal(false)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-10 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering SimpleOS GPU NIC DMA memory leveling.
+Tests covering:
 - SimpleOS GPU NIC DMA memory leveling
 
 ## Scenario Summary
@@ -426,59 +428,3 @@ Tests covering SimpleOS GPU NIC DMA memory leveling.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-002`
-- `REQ-005`
-- `REQ-006`
-- `REQ-014`
-- `REQ-015`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `98ff2046848fa810e7beff27b2bf56cea08eab3fd9fac5c563760f3aca44ba75`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `98ff2046848fa810e7beff27b2bf56cea08eab3fd9fac5c563760f3aca44ba75`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `98ff2046848fa810e7beff27b2bf56cea08eab3fd9fac5c563760f3aca44ba75`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl
-mirror: doc/06_spec/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-001 REQ-002 keeps language and kernel configurations separate' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/simpleos_memory_leveling_gpu_nic_dma_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REQ-008 REQ-014 bounds pressure and reports incremental counters' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

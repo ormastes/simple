@@ -20,7 +20,7 @@
 #   ["MAC0", protected, external_aad, payload]
 #
 # Public API:
-#   cose_sign1_create(payload, alg, key)       -> Result<[u8], CoseError>
+#   cose_sign1_create(payload, alg, key)       -> [u8]
 #   cose_sign1_verify(cose_bytes, alg, key)    -> CoseVerifyResult
 #   cose_mac0_create(payload, key)             -> [u8]
 #   cose_mac0_verify(cose_bytes, key)          -> CoseVerifyResult
@@ -610,38 +610,33 @@ fn _cose_build_mac_structure(protected_bstr: [i64], payload: [u8]) -> [u8]:
 # Internal: sign dispatch
 # ============================================================================
 
-fn _cose_sign(alg_id: i64, key: [u8], to_be_signed: [u8]) -> Result<[u8], CoseError>:
-    """Dispatch signing by algorithm id with typed provider failure."""
+fn _cose_sign(alg_id: i64, key: [u8], to_be_signed: [u8]) -> [u8]:
+    """Dispatch signing by algorithm id. Returns raw signature bytes."""
     if alg_id == cose_alg_eddsa():
         # Ed25519: key is 32-byte seed
         val kp = ed25519_keypair_from_seed(key)
         val seed = kp.0
         val pub_key = kp.1
-        Ok(ed25519_sign(seed, pub_key, to_be_signed))
+        ed25519_sign(seed, pub_key, to_be_signed)
     else:
         if alg_id == cose_alg_es256():
             # ECDSA P-256: key is PKCS#8 DER
-            match ecdsa_p256_sign_fixed(key, to_be_signed):
-                case Ok(signature): Ok(signature)
-                case Err(error): Err(CoseError.InvalidEncoding("ECDSA P-256 signing failed: {error}"))
+            ecdsa_p256_sign_fixed(key, to_be_signed)
         else:
-            Err(CoseError.AlgorithmRejected("algorithm is not valid for COSE_Sign1"))
+            # HS256 — not used for Sign1 (it's MAC); return empty to signal error
+            []
 
-fn _cose_verify_sig(
-    alg_id: i64, key: [u8], to_be_signed: [u8], signature: [u8]
-) -> Result<bool, CoseError>:
+fn _cose_verify_sig(alg_id: i64, key: [u8], to_be_signed: [u8], signature: [u8]) -> bool:
     """Dispatch signature verification by algorithm id."""
     if alg_id == cose_alg_eddsa():
         # Ed25519: key is 32-byte compressed public key
-        Ok(ed25519_verify(key, to_be_signed, signature))
+        ed25519_verify(key, to_be_signed, signature)
     else:
         if alg_id == cose_alg_es256():
             # ECDSA P-256: key is SPKI DER
-            match ecdsa_p256_verify_fixed(key, to_be_signed, signature):
-                case Ok(valid): Ok(valid)
-                case Err(error): Err(CoseError.InvalidEncoding("ECDSA P-256 verification failed: {error}"))
+            ecdsa_p256_verify_fixed(key, to_be_signed, signature)
         else:
-            Err(CoseError.AlgorithmRejected("algorithm is not valid for COSE_Sign1"))
+            false
 
 # ============================================================================
 # Internal: encode COSE_Sign1 / COSE_Mac0 CBOR structures
@@ -788,18 +783,21 @@ fn _cose_parse_alg_from_protected(prot_bytes: [i64]) -> i64:
 # Public API: COSE_Sign1
 # ============================================================================
 
-fn cose_sign1_create(payload: [u8], alg_id: i64, key: [u8]) -> Result<[u8], CoseError>:
+fn cose_sign1_create(payload: [u8], alg_id: i64, key: [u8]) -> [u8]:
     """Create a COSE_Sign1 message.
 
     payload:  arbitrary bytes to protect
     alg_id:   cose_alg_eddsa() or cose_alg_es256()
     key:      Ed25519 seed (32 bytes) or ECDSA P-256 PKCS#8 DER
 
-    Returns CBOR-encoded COSE_Sign1 bytes (tag 18), or a typed error."""
+    Returns CBOR-encoded COSE_Sign1 bytes (tag 18).
+    Returns empty [u8] on sign failure."""
     val protected_bstr = _cose_make_protected(alg_id)
     val to_be_signed = _cose_build_sig_structure(protected_bstr, payload)
-    val signature = _cose_sign(alg_id, key, to_be_signed)?
-    Ok(_cose_encode_sign1(protected_bstr, payload, signature))
+    val signature = _cose_sign(alg_id, key, to_be_signed)
+    if signature.len() == 0:
+        return []
+    _cose_encode_sign1(protected_bstr, payload, signature)
 
 fn cose_sign1_verify(cose_bytes: [u8], alg_id: i64, key: [u8]) -> CoseVerifyResult:
     """Verify a COSE_Sign1 message.
@@ -838,10 +836,8 @@ fn cose_sign1_verify(cose_bytes: [u8], alg_id: i64, key: [u8]) -> CoseVerifyResu
         return CoseVerifyResult.Err(CoseError.AlgorithmRejected("alg mismatch in protected headers"))
 
     val to_be_signed = _cose_build_sig_structure(prot_bstr, _i64_to_u8(payload_bytes))
-    val signature_valid = match _cose_verify_sig(alg_id, key, to_be_signed, _i64_to_u8(sig_bytes)):
-        case Ok(valid): valid
-        case Err(error): return CoseVerifyResult.Err(error)
-    if not signature_valid:
+    val valid = _cose_verify_sig(alg_id, key, to_be_signed, _i64_to_u8(sig_bytes))
+    if not valid:
         return CoseVerifyResult.Err(CoseError.SignatureMismatch)
 
     CoseVerifyResult.Ok(_i64_to_u8(payload_bytes))

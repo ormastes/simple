@@ -2,6 +2,29 @@
 
 > Tests Windows-specific platform features using a local harness that preserves test intent without depending on Windows-only modules. Verifies path handling, executable extensions, and MSVC/MinGW toolchain detection.
 
+<!-- sdn-diagram:id=windows_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=windows_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+windows_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=windows_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 24 | 24 | 0 | 0 |
@@ -20,7 +43,7 @@ Tests Windows-specific platform features using a local harness that preserves te
 | Category | Platform |
 | Status | In Progress |
 | Source | `test/03_system/feature/platform/windows_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -35,22 +58,16 @@ executable extensions, and MSVC/MinGW toolchain detection.
 
 #### converts forward slashes to backslashes
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- converts forward slashes to backslashes
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts forward slashes to backslashes")
 check(normalize_windows_path("C:/Users/foo") == "C:\\Users\\foo")
 ```
 
@@ -58,18 +75,16 @@ check(normalize_windows_path("C:/Users/foo") == "C:\\Users\\foo")
 
 #### handles drive letters correctly
 
-- handles drive letters correctly
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles drive letters correctly")
 check(normalize_windows_path("D:/data/bin") == "D:\\data\\bin")
 ```
 
@@ -77,18 +92,16 @@ check(normalize_windows_path("D:/data/bin") == "D:\\data\\bin")
 
 #### converts UNC paths correctly
 
-- converts UNC paths correctly
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts UNC paths correctly")
 check(normalize_windows_path("//server/share") == "\\\\server\\share")
 ```
 
@@ -96,18 +109,16 @@ check(normalize_windows_path("//server/share") == "\\\\server\\share")
 
 #### handles mixed slashes
 
-- handles mixed slashes
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles mixed slashes")
 check(normalize_windows_path("C:/Users\\Alice/Documents") == "C:\\Users\\Alice\\Documents")
 ```
 
@@ -117,18 +128,16 @@ check(normalize_windows_path("C:/Users\\Alice/Documents") == "C:\\Users\\Alice\\
 
 #### detects MinGW-style paths
 
-- detects MinGW-style paths
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects MinGW-style paths")
 check(is_mingw_path("/c/Users/Alice"))
 ```
 
@@ -136,18 +145,16 @@ check(is_mingw_path("/c/Users/Alice"))
 
 #### rejects non-MinGW paths
 
-- rejects non-MinGW paths
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects non-MinGW paths")
 check(not is_mingw_path("C:/Users/Alice"))
 ```
 
@@ -155,18 +162,16 @@ check(not is_mingw_path("C:/Users/Alice"))
 
 #### converts MinGW paths to Windows format
 
-- converts MinGW paths to Windows format
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts MinGW paths to Windows format")
 check(mingw_to_windows("/c/Users/Alice") == "C:\\Users\\Alice")
 ```
 
@@ -174,18 +179,16 @@ check(mingw_to_windows("/c/Users/Alice") == "C:\\Users\\Alice")
 
 #### converts Windows paths to MinGW format
 
-- converts Windows paths to MinGW format
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts Windows paths to MinGW format")
 check(windows_to_mingw("C:\\Users\\Alice") == "/c/Users/Alice")
 ```
 
@@ -193,18 +196,16 @@ check(windows_to_mingw("C:\\Users\\Alice") == "/c/Users/Alice")
 
 #### treats MinGW paths as absolute
 
-- treats MinGW paths as absolute
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("treats MinGW paths as absolute")
 check(is_absolute_windows("/c/Users/Alice"))
 ```
 
@@ -214,18 +215,16 @@ check(is_absolute_windows("/c/Users/Alice"))
 
 #### dir_sep returns backslash
 
-- dir_sep returns backslash
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dir_sep returns backslash")
 check(dir_sep() == "\\")
 ```
 
@@ -233,18 +232,16 @@ check(dir_sep() == "\\")
 
 #### path_sep returns semicolon
 
-- path_sep returns semicolon
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("path_sep returns semicolon")
 check(path_sep() == ";")
 ```
 
@@ -252,18 +249,16 @@ check(path_sep() == ";")
 
 #### exe_ext returns .exe
 
-- exe_ext returns .exe
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exe_ext returns .exe")
 check(exe_ext() == ".exe")
 ```
 
@@ -273,18 +268,16 @@ check(exe_ext() == ".exe")
 
 #### adds .exe extension to commands without extension
 
-- adds .exe extension to commands without extension
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds .exe extension to commands without extension")
 check(resolve_command("myapp") == "myapp.exe")
 ```
 
@@ -292,18 +285,16 @@ check(resolve_command("myapp") == "myapp.exe")
 
 #### preserves commands with .exe extension
 
-- preserves commands with .exe extension
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves commands with .exe extension")
 check(resolve_command("myapp.exe") == "myapp.exe")
 ```
 
@@ -311,18 +302,17 @@ check(resolve_command("myapp.exe") == "myapp.exe")
 
 #### handles .bat and .cmd files
 
-- handles .bat and .cmd files
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles .bat and .cmd files")
 check(resolve_command("setup.bat") == "setup.bat")
 check(resolve_command("setup.cmd") == "setup.cmd")
 ```
@@ -331,18 +321,16 @@ check(resolve_command("setup.cmd") == "setup.cmd")
 
 #### preserves absolute paths
 
-- preserves absolute paths
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves absolute paths")
 check(resolve_command("C:\\tools\\myapp") == "C:\\tools\\myapp")
 ```
 
@@ -352,18 +340,16 @@ check(resolve_command("C:\\tools\\myapp") == "C:\\tools\\myapp")
 
 #### joins paths with backslashes
 
-- joins paths with backslashes
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("joins paths with backslashes")
 val path = WindowsPath.new("C:\\Users")
 check(path.join("Alice") == "C:\\Users\\Alice")
 ```
@@ -372,18 +358,16 @@ check(path.join("Alice") == "C:\\Users\\Alice")
 
 #### extracts file names from Windows paths
 
-- extracts file names from Windows paths
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts file names from Windows paths")
 val path = WindowsPath.new("C:\\Users\\Alice\\notes.txt")
 check(path.file_name() == "notes.txt")
 ```
@@ -392,18 +376,16 @@ check(path.file_name() == "notes.txt")
 
 #### handles UNC paths in Path class
 
-- handles UNC paths in Path class
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles UNC paths in Path class")
 val path = WindowsPath.new("\\\\server\\share")
 check(path.is_absolute())
 ```
@@ -414,18 +396,16 @@ check(path.is_absolute())
 
 #### executes cmd.exe commands
 
-- executes cmd.exe commands
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes cmd.exe commands")
 val result = local_shell("cmd.exe /C echo ok")
 check(result.exit_code == 0)
 ```
@@ -434,18 +414,16 @@ check(result.exit_code == 0)
 
 #### captures stdout correctly
 
-- captures stdout correctly
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("captures stdout correctly")
 val result = local_shell("cmd.exe /C echo ok")
 check(result.stdout == "ok")
 ```
@@ -456,18 +434,16 @@ check(result.stdout == "ok")
 
 #### can check if MSVC is available
 
-- can check if MSVC is available
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can check if MSVC is available")
 check(detect_windows_linker("toolchain-msvc") == "msvc")
 ```
 
@@ -475,18 +451,16 @@ check(detect_windows_linker("toolchain-msvc") == "msvc")
 
 #### can check if lld-link is available
 
-- can check if lld-link is available
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can check if lld-link is available")
 check(detect_windows_linker("toolchain-lld-link") == "lld-link")
 ```
 
@@ -494,18 +468,16 @@ check(detect_windows_linker("toolchain-lld-link") == "lld-link")
 
 #### Windows linker type has string representation
 
-- Windows linker type has string representation
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Windows linker type has string representation")
 check(detect_windows_linker("toolchain-msvc") == "msvc")
 ```
 
@@ -523,57 +495,3 @@ check(detect_windows_linker("toolchain-msvc") == "msvc")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a5f360e04eabc638d61f2e06b1428762cc3d9023287b2eeb5d60a81fe3095061`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a5f360e04eabc638d61f2e06b1428762cc3d9023287b2eeb5d60a81fe3095061`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a5f360e04eabc638d61f2e06b1428762cc3d9023287b2eeb5d60a81fe3095061`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/03_system/feature/platform/windows_spec.spl
-mirror: doc/06_spec/03_system/feature/platform/windows_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=90 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/platform/windows_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/platform/windows_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/platform/windows_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts forward slashes to backslashes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/platform/windows_spec.spl:111:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles drive letters correctly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/platform/windows_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts UNC paths correctly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/platform/windows_spec.spl:223:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can check if MSVC is available' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/feature/platform/windows_spec.spl:228:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can check if lld-link is available' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

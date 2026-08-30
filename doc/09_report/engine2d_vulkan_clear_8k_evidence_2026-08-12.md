@@ -346,7 +346,11 @@ no 8K timing row, and it does not promote the physical NVIDIA lane.
 
 The same Xvfb window surface selected a real NVIDIA RTX A6000
 (`vendor=000010de`, `device=00002230`, driver `911f8400`, Vulkan API
-`00404138`) and native `IMMEDIATE` presentation mode. Twenty 7680x4320 frames
+`00404138`) and native `IMMEDIATE` presentation mode. Stable selected-device
+identity hash: `666008366`. This is the same runtime-selected-device identity
+retained by the clear and mixed receipts above for that exact adapter
+fingerprint; recording it here closes adapter attribution only and does not
+promote Xvfb to physical-display or scanout evidence. Twenty 7680x4320 frames
 measured:
 
 | Frame class | p50 ns | p95 ns | Budget |

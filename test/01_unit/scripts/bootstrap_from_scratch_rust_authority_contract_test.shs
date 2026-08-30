@@ -19,16 +19,83 @@ mkdir -p "$tmp/source-a" "$tmp/source-b" "$tmp/source-c" "$tmp/source-d" \
 make_source() {
   dir=$1
   marker=$2
+  mkdir -p "$dir/deps"
   printf '#!/bin/sh\necho %s\n' "$marker" >"$dir/simple"
   chmod 755 "$dir/simple"
   printf 'native-%s\n' "$marker" >"$dir/libsimple_native_all.a"
   printf 'backfill-%s\n' "$marker" >"$dir/libsimple_compiler_backfill.a"
+  printf 'runtime-%s\n' "$marker" >"$dir/deps/libsimple_runtime.a"
+  printf 'hosted-%s\n' "$marker" \
+    >"$dir/deps/libspl_hosted_runtime-fixture.rlib"
+  hosted_sha=$(bootstrap_stage3_hash_file \
+    "$dir/deps/libspl_hosted_runtime-fixture.rlib")
+  {
+    echo 'schema=simple-bootstrap-hosted-runtime-authority-v1'
+    echo 'status=frozen'
+    echo 'relative_path=deps/libspl_hosted_runtime-fixture.rlib'
+    echo "sha256=$hosted_sha"
+  } >"$dir/hosted-runtime.env"
+  chmod 400 "$dir/hosted-runtime.env" \
+    "$dir/deps/libspl_hosted_runtime-fixture.rlib"
+  chmod a-w "$dir/simple" "$dir/libsimple_native_all.a" \
+    "$dir/libsimple_compiler_backfill.a" "$dir/deps/libsimple_runtime.a"
+  chmod 500 "$dir/deps" "$dir"
 }
 make_source "$tmp/source-a" A
 make_source "$tmp/source-b" B
 make_source "$tmp/source-c" C
 make_source "$tmp/source-d" D
 make_source "$tmp/target/bootstrap" A
+
+# Hosted authority receipts fail closed when absent or no longer bound to the
+# projected rlib.  Keep these cases here because Stage4 pinning consumes the
+# same verifier as production bootstrap wiring.
+cp -a "$tmp/source-a" "$tmp/missing-hosted-receipt"
+chmod 700 "$tmp/missing-hosted-receipt"
+rm "$tmp/missing-hosted-receipt/hosted-runtime.env"
+chmod 500 "$tmp/missing-hosted-receipt"
+! bootstrap_stage3_verify_hosted_runtime_authority \
+  "$tmp/missing-hosted-receipt"
+
+cp -a "$tmp/source-a" "$tmp/tampered-hosted-receipt"
+chmod 700 "$tmp/tampered-hosted-receipt"
+chmod 600 "$tmp/tampered-hosted-receipt/hosted-runtime.env"
+sed 's/^sha256=.*/sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$tmp/tampered-hosted-receipt/hosted-runtime.env" \
+  >"$tmp/tampered-hosted-receipt/hosted-runtime.env.new"
+mv "$tmp/tampered-hosted-receipt/hosted-runtime.env.new" \
+  "$tmp/tampered-hosted-receipt/hosted-runtime.env"
+chmod 400 "$tmp/tampered-hosted-receipt/hosted-runtime.env"
+chmod 500 "$tmp/tampered-hosted-receipt"
+! bootstrap_stage3_verify_hosted_runtime_authority \
+  "$tmp/tampered-hosted-receipt"
+
+# The compatibility directory is mutable legacy state, not a frozen private
+# authority.  Later transaction fixtures intentionally update it.
+chmod 700 "$tmp/target/bootstrap" "$tmp/target/bootstrap/deps"
+chmod u+w "$tmp/target/bootstrap"/* "$tmp/target/bootstrap/deps"/*
+
+# A configured authority target is one canonical, non-symlink trust root.  Its
+# parent must exist; creation never follows or accepts a symlink leaf.
+mkdir -p "$tmp/large-store"
+configured_target=$(bootstrap_stage3_prepare_authority_target_root \
+  "$tmp/large-store/compiler-target")
+[ "$configured_target" = "$tmp/large-store/compiler-target" ]
+[ -d "$configured_target" ]
+ln -s "$tmp/large-store/compiler-target" "$tmp/authority-link"
+if bootstrap_stage3_prepare_authority_target_root "$tmp/authority-link"; then
+  echo 'FAIL: symlink authority target admitted' >&2
+  exit 1
+fi
+if bootstrap_stage3_prepare_authority_target_root \
+  "$tmp/missing-parent/compiler-target" 2>/dev/null; then
+  echo 'FAIL: authority target with missing parent admitted' >&2
+  exit 1
+fi
+if bootstrap_stage3_prepare_authority_target_root relative-target; then
+  echo 'FAIL: relative authority target admitted' >&2
+  exit 1
+fi
 fp_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fp_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 fp_c=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc

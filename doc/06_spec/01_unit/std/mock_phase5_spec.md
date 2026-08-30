@@ -1,6 +1,29 @@
 # Mock Phase5 Specification
 
-> Tests covering Mock Library - Phase 5 (Trait-Based Mocking).
+> <details>
+
+<!-- sdn-diagram:id=mock_phase5_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mock_phase5_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mock_phase5_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mock_phase5_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -22,18 +45,16 @@
 
 #### creates fluent expectation for mock _(slow)_
 
-- creates fluent expectation for mock
+1. Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates fluent expectation for mock")
 val mockfn = MockFunction.create("service")
 val fluent = FluentExpectation.create(mockfn)
 expect fluent.mockfn.name == "service"
@@ -53,18 +74,13 @@ expect not has_when_args
 
 #### sets when clause _(slow)_
 
-- sets when clause
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets when clause")
 val mockfn = MockFunction.create("api")
 val fluent = FluentExpectation.create(mockfn)
 val with_when = fluent.when_called_with(["GET", "/users"])
@@ -81,18 +97,17 @@ expect with_when.when_args.?
 
 #### chains when with returns _(slow)_
 
-- chains when with returns
+1. fluent when called with
+2. expect mockfn return values len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("chains when with returns")
 val mockfn = MockFunction.create("fetch")
 val fluent = FluentExpectation.create(mockfn)
 fluent.when_called_with(["data"]).returns("result")
@@ -111,18 +126,13 @@ expect mockfn.return_values.len() > 0
 
 #### creates when builder for mock _(slow)_
 
-- creates when builder for mock
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates when builder for mock")
 val mockfn = MockFunction.create("handler")
 val when = WhenBuilder.create(mockfn)
 expect when.mockfn.name == "handler"
@@ -138,18 +148,13 @@ expect when.mockfn.name == "handler"
 
 #### sets predicate condition _(slow)_
 
-- sets predicate condition
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets predicate condition")
 val mockfn = MockFunction.create("validator")
 val when_builder = WhenBuilder.create(mockfn)
 val cond = _1.len() > 0 and _1[0] == "valid"
@@ -167,18 +172,16 @@ expect with_condition.mockfn.name == "validator"
 
 #### chains when with returns _(slow)_
 
-- chains when with returns
+1. when builder when
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("chains when with returns")
 val mockfn = MockFunction.create("processor")
 val when_builder = WhenBuilder.create(mockfn)
 val cond = _1.len() == 1
@@ -197,18 +200,17 @@ when_builder.when(cond).returns("processed")
 
 #### creates protocol mock _(slow)_
 
-- creates protocol mock
+1. expect proto method mocks len
+2. expect proto recorded calls len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates protocol mock")
 val proto = ProtocolMock.create()
 expect proto.method_mocks.len() == 0
 expect proto.recorded_calls.len() == 0
@@ -224,18 +226,17 @@ expect proto.recorded_calls.len() == 0
 
 #### mocks method with return value _(slow)_
 
-- mocks method with return value
+1. proto mock method
+2. expect proto method mocks len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("mocks method with return value")
 val proto = ProtocolMock.create()
 proto.mock_method(name="getName", args=[], return_value="John")
 expect proto.method_mocks.len() == 1
@@ -251,18 +252,17 @@ expect proto.method_mocks.len() == 1
 
 #### records method call _(slow)_
 
-- records method call
+1. proto mock method
+2. var result = proto record method call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("records method call")
 val proto = ProtocolMock.create()
 proto.mock_method(name="getValue", args=["key"], return_value="value")
 var result = proto.record_method_call("getValue", ["key"])
@@ -279,18 +279,16 @@ expect result == "value"
 
 #### returns empty string for unmocked method _(slow)_
 
-- returns empty string for unmocked method
+1. var result = proto record method call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns empty string for unmocked method")
 val proto = ProtocolMock.create()
 var result = proto.record_method_call("unmocked", [])
 expect result == ""
@@ -308,18 +306,19 @@ expect result == ""
 
 #### verifies method was called _(slow)_
 
-- verifies method was called
+1. proto mock method
+2. proto record method call
+3. expect proto verify method called
+4. expect not proto verify method called
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("verifies method was called")
 val proto = ProtocolMock.create()
 proto.mock_method(name="process", args=["data"], return_value="done")
 proto.record_method_call("process", ["data"])
@@ -337,18 +336,21 @@ expect not proto.verify_method_called("other")
 
 #### gets all calls to a method _(slow)_
 
-- gets all calls to a method
+1. proto mock method
+2. proto mock method
+3. proto record method call
+4. proto record method call
+5. var calls = proto get method calls
+6. expect calls len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets all calls to a method")
 val proto = ProtocolMock.create()
 proto.mock_method(name="compute", args=["a"], return_value="result_a")
 proto.mock_method(name="compute", args=["b"], return_value="result_b")
@@ -368,18 +370,19 @@ expect calls.len() == 2
 
 #### resets protocol mock _(slow)_
 
-- resets protocol mock
+1. proto mock method
+2. expect proto method mocks len
+3. proto reset
+4. expect proto method mocks len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("resets protocol mock")
 val proto = ProtocolMock.create()
 proto.mock_method(name="test", args=[], return_value="value")
 expect proto.method_mocks.len() == 1
@@ -399,18 +402,16 @@ expect proto.method_mocks.len() == 0
 
 #### matches exact arguments _(slow)_
 
-- matches exact arguments
+1. proto mock method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches exact arguments")
 val proto = ProtocolMock.create()
 proto.mock_method(name="api", args=["GET", "/users"], return_value="data")
 val result1 = proto.record_method_call("api", ["GET", "/users"])
@@ -429,18 +430,17 @@ expect result2 == ""
 
 #### handles multiple method signatures _(slow)_
 
-- handles multiple method signatures
+1. proto mock method
+2. proto mock method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles multiple method signatures")
 val proto = ProtocolMock.create()
 proto.mock_method(name="save", args=["user"], return_value="saved")
 proto.mock_method(name="save", args=["user", "timestamp"], return_value="saved_with_time")
@@ -462,18 +462,17 @@ expect r2 == "saved_with_time"
 
 #### creates auto mock _(slow)_
 
-- creates auto mock
+1. expect auto mock properties len
+2. expect auto mock methods len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates auto mock")
 val auto_mock = AutoMock.create("User")
 expect auto_mock.name == "User"
 expect auto_mock.properties.len() == 0
@@ -490,18 +489,19 @@ expect auto_mock.methods.len() == 0
 
 #### adds properties _(slow)_
 
-- adds properties
+1. auto mock add property
+2. auto mock add property
+3. expect auto mock properties len
+4. expect auto mock get properties
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds properties")
 val auto_mock = AutoMock.create("Service")
 auto_mock.add_property("config")
 auto_mock.add_property("state")
@@ -519,18 +519,18 @@ expect auto_mock.get_properties()[0] == "config"
 
 #### sets up methods _(slow)_
 
-- sets up methods
+1. auto mock setup method
+2. auto mock setup method
+3. expect auto mock methods len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sets up methods")
 val auto_mock = AutoMock.create("Handler")
 auto_mock.setup_method(method_name="process", args=["data"], return_value="result")
 auto_mock.setup_method(method_name="validate", args=["input"], return_value="valid")
@@ -549,18 +549,17 @@ expect auto_mock.methods.len() == 2
 
 #### calls mocked method _(slow)_
 
-- calls mocked method
+1. auto mock setup method
+2. var result = auto mock call method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calls mocked method")
 val auto_mock = AutoMock.create("Calculator")
 auto_mock.setup_method(method_name="add", args=["1", "2"], return_value="3")
 var result = auto_mock.call_method("add", ["1", "2"])
@@ -577,18 +576,16 @@ expect result == "3"
 
 #### returns empty for unmocked method _(slow)_
 
-- returns empty for unmocked method
+1. var result = auto mock call method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns empty for unmocked method")
 val auto_mock = AutoMock.create("Service")
 var result = auto_mock.call_method("unknown", [])
 expect result == ""
@@ -604,18 +601,17 @@ expect result == ""
 
 #### distinguishes between method signatures _(slow)_
 
-- distinguishes between method signatures
+1. auto mock setup method
+2. auto mock setup method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("distinguishes between method signatures")
 val auto_mock = AutoMock.create("Store")
 auto_mock.setup_method(method_name="get", args=["key"], return_value="value")
 auto_mock.setup_method(method_name="get", args=["key", "default"], return_value="value_or_default")
@@ -637,18 +633,19 @@ expect r2 == "value_or_default"
 
 #### gets all properties _(slow)_
 
-- gets all properties
+1. auto mock add property
+2. auto mock add property
+3. auto mock add property
+4. expect props len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets all properties")
 val auto_mock = AutoMock.create("Entity")
 auto_mock.add_property("id")
 auto_mock.add_property("name")
@@ -667,18 +664,19 @@ expect props.len() == 3
 
 #### gets all methods _(slow)_
 
-- gets all methods
+1. auto mock setup method
+2. auto mock setup method
+3. auto mock setup method
+4. expect methods len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gets all methods")
 val auto_mock = AutoMock.create("Interface")
 auto_mock.setup_method(method_name="method1", args=[], return_value="r1")
 auto_mock.setup_method(method_name="method2", args=["arg"], return_value="r2")
@@ -697,18 +695,19 @@ expect methods.len() == 3
 
 #### generates auto mock summary _(slow)_
 
-- generates auto mock summary
+1. auto mock add property
+2. auto mock setup method
+3. expect summary contains
+4. expect summary contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("generates auto mock summary")
 val auto_mock = AutoMock.create("Service")
 auto_mock.add_property("config")
 auto_mock.setup_method(method_name="init", args=[], return_value="initialized")
@@ -729,18 +728,18 @@ expect summary.contains("1")
 
 #### combines protocol mock with fluent expectation _(slow)_
 
-- combines protocol mock with fluent expectation
+1. proto mock method
+2. proto record method call
+3. expect proto verify method called
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("combines protocol mock with fluent expectation")
 val proto = ProtocolMock.create()
 proto.mock_method(name="fetch", args=["id"], return_value="record")
 proto.record_method_call("fetch", ["id"])
@@ -757,18 +756,22 @@ expect proto.verify_method_called("fetch")
 
 #### auto mock with multiple method signatures _(slow)_
 
-- auto mock with multiple method signatures
+1. auto mock setup method
+2. auto mock setup method
+3. auto mock setup method
+4. auto mock call method
+5. auto mock call method
+6. auto mock call method
+7. expect calls len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("auto mock with multiple method signatures")
 val auto_mock = AutoMock.create("API")
 auto_mock.setup_method(method_name="request", args=["GET"], return_value="success")
 auto_mock.setup_method(method_name="request", args=["POST", "data"], return_value="created")
@@ -792,18 +795,18 @@ expect calls[0] == "success"
 
 #### protocol mock for complex workflow _(slow)_
 
-- protocol mock for complex workflow
+1. proto mock method
+2. proto mock method
+3. proto mock method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("protocol mock for complex workflow")
 val proto = ProtocolMock.create()
 proto.mock_method(name="authenticate", args=["user", "pass"], return_value="token_123")
 proto.mock_method(name="authorize", args=["token_123"], return_value="allowed")
@@ -826,18 +829,22 @@ expect exec == "success"
 
 #### creates mock interface simulation _(slow)_
 
-- creates mock interface simulation
+1. auto mock setup method
+2. auto mock setup method
+3. auto mock setup method
+4. expect auto mock call method
+5. expect auto mock call method
+6. expect auto mock call method
+7. expect summary contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates mock interface simulation")
 val auto_mock = AutoMock.create("Database")
 auto_mock.setup_method(method_name="connect", args=["host", "port"], return_value="connected")
 auto_mock.setup_method(method_name="query", args=["SELECT *"], return_value="rows")
@@ -861,12 +868,12 @@ expect summary.contains("Database")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/mock_phase5_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Mock Library - Phase 5 (Trait-Based Mocking).
+Tests covering:
 - Mock Library - Phase 5 (Trait-Based Mocking)
 
 ## Scenario Summary
@@ -881,51 +888,3 @@ Tests covering Mock Library - Phase 5 (Trait-Based Mocking).
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c15ad153741da256c28d622ad50fdc683f804c86855deddeabdc8b749a5ecc1d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c15ad153741da256c28d622ad50fdc683f804c86855deddeabdc8b749a5ecc1d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c15ad153741da256c28d622ad50fdc683f804c86855deddeabdc8b749a5ecc1d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/std/mock_phase5_spec.spl
-mirror: doc/06_spec/01_unit/std/mock_phase5_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/mock_phase5_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/mock_phase5_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/std/mock_phase5_spec.spl:375:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates fluent expectation for mock' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/std/mock_phase5_spec.spl:386:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets when clause' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/std/mock_phase5_spec.spl:394:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'chains when with returns' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

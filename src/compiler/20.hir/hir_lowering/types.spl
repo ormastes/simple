@@ -232,6 +232,21 @@ class HirLowering:
     # re-emitted per importer so diagnostics are unchanged).
     explicit_dep_target_memo: {text: i64}
     explicit_dep_item_memo: {text: text}
+    # PAYLOADMISS (2026-08-22): negative memo for
+    # `resolve_materialized_enum_payload_origin`, keyed `{owner key} {name}`.
+    # ONLY misses are cached. A HIT is never cached, so a module that really
+    # DECLARES `Result`/`Dict`/`Option` is still resolved from its own surface
+    # every time and `lower_named_kind`'s declared-type-wins precedence is
+    # untouched. The miss is the repeated cost: run14 emitted 14,847 `Dict`,
+    # 9,857 `Option` and 7,015 `Result` advisories, each a full failed origin
+    # search over the owner's declarations, re-export routes and import table.
+    # The resolve is a pure function of (owner surface, name) over the frozen
+    # `module_surfaces` set -- it reads no symbol table and mutates nothing --
+    # so replaying a cached miss is observationally identical to re-searching.
+    # The advisory is emitted once per (owner, name) rather than once per
+    # occurrence for the same reason.
+    payload_origin_miss_memo: {text: bool}
+    payload_origin_miss_skip_count: i64
     # RISDONE (2026-08-21): completed-registration memo for
     # `register_imported_symbol`, keyed on
     # `{declaring module} {imported name} {local name} {materialize_enum}`.
@@ -269,6 +284,21 @@ class HirLowering:
     # method registration after indexing, so a spec can pin both bounds.
     impl_index_built: {text: bool}
     impl_index_positions: {text: [i64]}
+    # IMPLROWCACHE (2026-08-23): the two projections the method-registration
+    # loop actually reads out of a `ModuleSurfaceImpl` row, captured during the
+    # SAME one-per-surface sweep that fills `impl_index_positions`, keyed
+    # `{generation} {physical_index} #{position}`. Before this, the loop did
+    # `val impl_ = imported_mod.impls[pos]`, which under value semantics
+    # deep-copies the whole row INCLUDING its `Dict<text, ModuleSurfaceCallable>`
+    # of full signatures -- once per impl row per call, and this function is
+    # re-entrancy guarded but re-entered many times per importer. Both dicts are
+    # pure functions of the frozen registry, so they are shared across importers
+    # and never cleared, exactly like `impl_index_positions`.
+    # `impl_trait_name_index` holds a row ONLY when that impl `has_trait_`, so
+    # `contains_key` is the has-trait test and a trait whose name projects to ""
+    # is still distinguished from "no trait".
+    impl_method_name_index: {text: [text]}
+    impl_trait_name_index: {text: text}
     impl_index_build_count: i64
     impl_rows_visited: i64
     # NAMEIDX (2026-08-22): name -> position per frozen surface, per
@@ -282,6 +312,28 @@ class HirLowering:
     name_index_built: {text: bool}
     name_index_positions: {text: i64}
     name_index_build_count: i64
+    # GLBMEMO (2026-08-22): negative memo for `try_register_glob_reachable_symbol`,
+    # keyed `{generation} {importer surface index} {name}`. That sweep runs from
+    # `lower_named_kind`'s default arm for every UNBOUND name occurrence and has
+    # no early exit on failure -- it must visit every glob target to prove no
+    # route exists -- so the MISS path (84% of probes in run12) re-swept per
+    # occurrence, charged to whichever slot the caller was in (`sigtype`,
+    # `project`, `field_dep`). Registry-pure per importer: both questions the
+    # sweep asks are pure functions of the frozen registry, and the one
+    # importer-local step is already suppressed on repeat by the RISDONE memo,
+    # so a recorded failure can never have become a success. Only failures are
+    # recorded; a success returns before the write. The key carries the
+    # generation, so a re-frozen registry cannot be answered from a stale entry.
+    glob_reachable_miss_memo: {text: bool}
+    # Sweeps actually performed. Observable mechanism counter, same role as
+    # `explicit_dep_scan_count`: a spec pins that repeating one unbound name
+    # sweeps exactly once.
+    glob_reachable_scan_count: i64
+    # Resolved importer surface index for `glob_reachable_importer_owner`, so a
+    # repeat name in one module does not rebuild the key by three string
+    # rewrites and re-resolve it. "" = none yet.
+    glob_reachable_importer_index: i64
+    glob_reachable_importer_owner: text
     # Sweeps actually performed. Observable mechanism counter for the memo
     # above; a spec pins that N importers of one surface cause exactly one
     # sweep per (surface, dependency) pair.
@@ -348,10 +400,14 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_surface_index_by_name: {text: i64} = {}
     val empty_explicit_dep_target_memo: {text: i64} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
+    val empty_payload_origin_miss_memo: {text: bool} = {}
+    val empty_glob_reachable_miss_memo: {text: bool} = {}
     val empty_registered_import_memo: {text: bool} = {}
     val empty_dep_tail_memo: {text: bool} = {}
     val empty_impl_index_built: {text: bool} = {}
     val empty_impl_index_positions: {text: [i64]} = {}
+    val empty_impl_method_name_index: {text: [text]} = {}
+    val empty_impl_trait_name_index: {text: text} = {}
     val empty_name_index_built: {text: bool} = {}
     val empty_name_index_positions: {text: i64} = {}
     val empty_reexport_root_memo_index: {text: i64} = {}
@@ -408,6 +464,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         explicit_dep_target_memo: empty_explicit_dep_target_memo,
         explicit_dep_item_memo: empty_explicit_dep_item_memo,
         explicit_dep_scan_count: 0,
+        payload_origin_miss_memo: empty_payload_origin_miss_memo,
+        payload_origin_miss_skip_count: 0,
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
@@ -416,11 +474,17 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         dep_tail_skip_count: 0,
         impl_index_built: empty_impl_index_built,
         impl_index_positions: empty_impl_index_positions,
+        impl_method_name_index: empty_impl_method_name_index,
+        impl_trait_name_index: empty_impl_trait_name_index,
         impl_index_build_count: 0,
         impl_rows_visited: 0,
         name_index_built: empty_name_index_built,
         name_index_positions: empty_name_index_positions,
         name_index_build_count: 0,
+        glob_reachable_miss_memo: empty_glob_reachable_miss_memo,
+        glob_reachable_scan_count: 0,
+        glob_reachable_importer_index: -1,
+        glob_reachable_importer_owner: "",
         reexport_root_memo_index: empty_reexport_root_memo_index,
         reexport_root_memo_item: empty_reexport_root_memo_item,
         reexport_visit_surface_indices: empty_reexport_visit_surface_indices,
@@ -937,7 +1001,7 @@ impl HirLowering:
         result
 
     me lower_type_param(tp: ParserTypeParam) -> HirTypeParam:
-        val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false, nil)
+        val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, Visibility.Private, false, nil)
 
         var bounds: [HirType] = []
         for b in tp.bounds:

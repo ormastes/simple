@@ -1,0 +1,53 @@
+use std.gc_async_mut.svllm.model_executor.model_loader.loader.{LoaderError, load_tensor_bytes_from_pack}
+
+fn tensor_byte_status(root: text, name: text) -> text:
+    match load_tensor_bytes_from_pack(root, name):
+        Ok(_) => "ok"
+        Err(e) =>
+            match e:
+                LoaderError.PackRootNotFound => "missing_root"
+                LoaderError.ManifestInvalid => "invalid_manifest"
+                LoaderError.ChunkOpenFailed => "chunk_error"
+                LoaderError.TensorNotFound => "tensor_not_found"
+                LoaderError.TensorRangeInvalid => "tensor_range_invalid"
+                LoaderError.NvfsUnavailable => "nvfs_unavailable"
+                LoaderError.Unimplemented => "unimplemented"
+
+fn tensor_byte_len(root: text, name: text) -> i64:
+    match load_tensor_bytes_from_pack(root, name):
+        Ok(bytes) => bytes.len()
+        Err(_) => -1
+
+fn tensor_byte_at(root: text, name: text, index: i64) -> i64:
+    match load_tensor_bytes_from_pack(root, name):
+        Ok(bytes) =>
+            if index < 0 or index >= bytes.len():
+                return -1
+            bytes[index] as i64
+        Err(_) => -1
+
+describe "svLLM tensor byte range loader":
+    it "loads the declared tensor byte range from a validated pack":
+        val root = "test/fixtures/svllm/valid_pack"
+        val name = "tok_embeddings.weight"
+        expect(tensor_byte_status(root, name)).to_equal("ok")
+        expect(tensor_byte_len(root, name)).to_equal(16)
+        expect(tensor_byte_at(root, name, 0)).to_equal(48)
+        expect(tensor_byte_at(root, name, 15)).to_equal(102)
+
+    it "loads a declared tensor byte range spanning sequential chunks":
+        val root = "test/fixtures/svllm/cross_chunk_pack"
+        val name = "split.weight"
+        expect(tensor_byte_status(root, name)).to_equal("ok")
+        expect(tensor_byte_len(root, name)).to_equal(7)
+        expect(tensor_byte_at(root, name, 0)).to_equal(98)
+        expect(tensor_byte_at(root, name, 3)).to_equal(10)
+        expect(tensor_byte_at(root, name, 4)).to_equal(69)
+        expect(tensor_byte_at(root, name, 6)).to_equal(71)
+
+    it "reports missing tensor names explicitly":
+        expect(tensor_byte_status("test/fixtures/svllm/valid_pack", "missing.weight")).to_equal("tensor_not_found")
+
+    it "does not read bytes from invalid packs":
+        expect(tensor_byte_status("test/fixtures/svllm/missing_chunk_pack", "tok_embeddings.weight")).to_equal("chunk_error")
+        expect(tensor_byte_status("test/fixtures/svllm/wrong_chunk_pack", "tok_embeddings.weight")).to_equal("chunk_error")

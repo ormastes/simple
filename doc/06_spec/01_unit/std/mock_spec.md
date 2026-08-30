@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 41 | 41 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13,9 +13,9 @@
 
 ## Scenarios
 
-### Mock Library (std twin smoke test)
+### Mock Library
 
-#### creates a mock, stubs it, and verifies the call was recorded
+### MockPolicy
 
 **Manual warnings:**
 - invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
@@ -42,7 +42,7 @@ expect m.recorder.call_count("get") == 1
 
 </details>
 
-#### creates a spy and records calls
+#### tracks initialization state
 
 - creates a spy and records calls
 
@@ -63,7 +63,7 @@ expect s.was_called("ping") == true
 
 </details>
 
-#### creates a stub and stores values
+#### matches HAL patterns
 
 - creates a stub and stores values
 
@@ -124,8 +124,8 @@ Tests covering Mock Library (std twin smoke test).
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

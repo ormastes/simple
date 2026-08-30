@@ -2,6 +2,29 @@
 
 > DBFS Pager Specification
 
+<!-- sdn-diagram:id=dbfs_engine_pager_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=dbfs_engine_pager_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+dbfs_engine_pager_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=dbfs_engine_pager_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -20,7 +43,7 @@ DBFS Pager Specification
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/dbfs/dbfs_engine_pager_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 DBFS Pager Specification
@@ -35,44 +58,39 @@ Verifies the single-cache pager used by DbFsEngine:
 ## Scenarios
 
 ### DBFS Pager — alloc and write
+_Basic page alloc + write contract._
 
 #### alloc_page returns a unique PageId
-
-- alloc_page returns a unique PageId
-
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("alloc_page returns a unique PageId")
 val p = DbfsPager.new(capacity: 16)
 val id1 = p.alloc_page().unwrap()
 val id2 = p.alloc_page().unwrap()
-expect(id1).to_not_equal(id2)
+expect(id1 == id2).to_equal(false)
 ```
 
 </details>
 
 #### write_page then read_page round-trips data
 
-- write_page then read_page round-trips data
+- data set byte
+- p write page
    - Expected: got.byte_at(0) equals `0xAB`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("write_page then read_page round-trips data")
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
 val data = PageData.zeroed()
@@ -86,19 +104,13 @@ expect(got.byte_at(0)).to_equal(0xAB)
 
 #### page size constant is 8192 bytes
 
-- page size constant is 8192 bytes
-   - Expected: PAGE_SIZE_BYTES equals `8192`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("page size constant is 8192 bytes")
 expect(PAGE_SIZE_BYTES).to_equal(8192)
 ```
 
@@ -109,19 +121,17 @@ _Dirty/clean state transitions._
 
 #### newly written page is dirty
 
-- newly written page is dirty
+- p write page
    - Expected: p.is_dirty(id) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("newly written page is dirty")
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
 p.write_page(id, PageData.zeroed(), 0, 0).unwrap()
@@ -132,19 +142,18 @@ expect(p.is_dirty(id)).to_equal(true)
 
 #### page is clean after flush
 
-- page is clean after flush
+- p write page
+- p flush page
    - Expected: p.is_dirty(id) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("page is clean after flush")
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
 p.write_page(id, PageData.zeroed(), 0, 0).unwrap()
@@ -156,19 +165,17 @@ expect(p.is_dirty(id)).to_equal(false)
 
 #### unflushed pages appear in dirty_pages list
 
-- unflushed pages appear in dirty_pages list
+- p write page
    - Expected: dirty contains `id`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("unflushed pages appear in dirty_pages list")
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
 p.write_page(id, PageData.zeroed(), 0, 0).unwrap()
@@ -183,19 +190,21 @@ _LRU eviction does not corrupt content._
 
 #### evicted and re-read page returns correct data
 
-- evicted and re-read page returns correct data
+- data set byte
+- p write page
+- p flush page
+- p write page
+- p flush page
    - Expected: got.byte_at(0) equals `0x42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("evicted and re-read page returns correct data")
 val p = DbfsPager.new(capacity: 4)
 val id = p.alloc_page().unwrap()
 val data = PageData.zeroed()
@@ -220,19 +229,13 @@ _Pager must not expose a kernel-cache path._
 
 #### pager has no kernel_cache_write method
 
-- pager has no kernel_cache_write method
-   - Expected: has_method is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("pager has no kernel_cache_write method")
 # Structural check: DbfsPager does not implement kernel_cache_write.
 # Phase 5 must ensure the type does not expose this symbol.
 val p = DbfsPager.new(capacity: 4)
@@ -254,54 +257,3 @@ expect(has_method).to_equal(false)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f293b22fc20a33b980a8bedd9af2e601aa873dcff68141f09b06e18bfff2938e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f293b22fc20a33b980a8bedd9af2e601aa873dcff68141f09b06e18bfff2938e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f293b22fc20a33b980a8bedd9af2e601aa873dcff68141f09b06e18bfff2938e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/02_integration/storage/dbfs/dbfs_engine_pager_spec.spl
-mirror: doc/06_spec/02_integration/storage/dbfs/dbfs_engine_pager_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/storage/dbfs/dbfs_engine_pager_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/storage/dbfs/dbfs_engine_pager_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/storage/dbfs/dbfs_engine_pager_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/storage/dbfs/dbfs_engine_pager_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'alloc_page returns a unique PageId' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/storage/dbfs/dbfs_engine_pager_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'write_page then read_page round-trips data' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/storage/dbfs/dbfs_engine_pager_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'page size constant is 8192 bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

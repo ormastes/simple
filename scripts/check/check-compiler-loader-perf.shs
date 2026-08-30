@@ -1,0 +1,221 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+. "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+
+SIMPLE_TARGET="${SIMPLE_BINARY:-${SIMPLE_BIN:-bin/simple}}"
+RUNS="${RUNS:-5}"
+WARMUPS="${LOADER_PERF_WARMUPS:-2}"
+RUN_TIMEOUT_SECS="${LOADER_PERF_TIMEOUT_SECS:-${RUN_TIMEOUT:-120}}"
+WORKLOAD="${LOADER_PERF_WORKLOAD:-test/unit/std/standalone_test.spl}"
+ARTIFACT_DIR="${LOADER_PERF_ARTIFACT_DIR:-build/test-artifacts/05_perf/compiler_loader}"
+REPORT_PATH="${LOADER_PERF_REPORT_PATH:-doc/09_report/compiler_loader_perf.md}"
+BASELINE_RECEIPT="${LOADER_PERF_BASELINE_RECEIPT:-}"
+P95_REGRESSION_PCT="${LOADER_PERF_P95_REGRESSION_PCT:-10}"
+RSS_REGRESSION_PCT="${LOADER_PERF_RSS_REGRESSION_PCT:-10}"
+FAILED_PROBE_BASELINE=101725
+FAILED_PROBE_LIMIT=10172
+
+require_self_hosted "$SIMPLE_TARGET" "compiler/loader profiler"
+require_tool strace "failed filesystem-probe accounting"
+require_tool /usr/bin/time "wall/RSS accounting"
+require_tool timeout "bounded compiler/loader subprocesses"
+[ -f "$WORKLOAD" ] || check_untestable "loader workload is missing: $WORKLOAD"
+case "$RUNS" in *[!0-9]*|'') check_untestable "RUNS must be a positive integer" ;; esac
+[ "$RUNS" -gt 0 ] || check_untestable "RUNS must be a positive integer"
+case "$WARMUPS" in *[!0-9]*|'') check_untestable "LOADER_PERF_WARMUPS must be a non-negative integer" ;; esac
+case "$RUN_TIMEOUT_SECS" in *[!0-9]*|'') check_untestable "LOADER_PERF_TIMEOUT_SECS must be a positive integer" ;; esac
+[ "$RUN_TIMEOUT_SECS" -gt 0 ] || check_untestable "LOADER_PERF_TIMEOUT_SECS must be a positive integer"
+case "$P95_REGRESSION_PCT" in *[!0-9]*|'') check_untestable "LOADER_PERF_P95_REGRESSION_PCT must be a non-negative integer" ;; esac
+case "$RSS_REGRESSION_PCT" in *[!0-9]*|'') check_untestable "LOADER_PERF_RSS_REGRESSION_PCT must be a non-negative integer" ;; esac
+
+mkdir -p "$ARTIFACT_DIR" "$(dirname -- "$REPORT_PATH")"
+: >"$ARTIFACT_DIR/wall_ms.samples"
+: >"$ARTIFACT_DIR/rss_kib.samples"
+: >"$ARTIFACT_DIR/failed_probes.samples"
+: >"$ARTIFACT_DIR/failed_probes.raw"
+
+compiler_sha256="$(sha256sum "$SELF_HOSTED_REAL" | awk '{print $1}')"
+current_command="env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 $SELF_HOSTED_REAL check $WORKLOAD"
+current_command_key="env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 <executable> check $WORKLOAD"
+current_command_sha256="$(printf '%s' "$current_command" | sha256sum | awk '{print $1}')"
+
+# A loader warmup is a complete child-process execution. It warms the binary
+# and filesystem without contaminating measured rows; an in-process cache is
+# not treated as a loader benchmark cache.
+warmup=1
+while [ "$warmup" -le "$WARMUPS" ]; do
+    warmup_output="$ARTIFACT_DIR/warmup.$warmup.txt"
+    if timeout --foreground --signal=TERM --kill-after=5s "${RUN_TIMEOUT_SECS}s" \
+        env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+        "$SELF_HOSTED_BIN" check "$WORKLOAD" >"$warmup_output" 2>&1; then
+        :
+    else
+        status=$?
+        if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            check_fail "loader warmup timed out after ${RUN_TIMEOUT_SECS}s at iteration $warmup"
+        fi
+        check_fail "loader warmup failed at iteration $warmup (exit $status)"
+    fi
+    warmup=$((warmup + 1))
+done
+
+iteration=1
+while [ "$iteration" -le "$RUNS" ]; do
+    trace="$ARTIFACT_DIR/strace.$iteration.txt"
+    timing="$ARTIFACT_DIR/time.$iteration.txt"
+    output="$ARTIFACT_DIR/output.$iteration.txt"
+    if timeout --foreground --signal=TERM --kill-after=5s "${RUN_TIMEOUT_SECS}s" \
+        env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+        strace -f -c -o "$trace" /usr/bin/time -f '%e %M %x' -o "$timing" \
+        "$SELF_HOSTED_BIN" check "$WORKLOAD" >"$output" 2>&1; then
+        status=0
+    else
+        status=$?
+        if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            check_fail "compiler/loader workload timed out after ${RUN_TIMEOUT_SECS}s at iteration $iteration"
+        fi
+        check_fail "compiler/loader workload failed at iteration $iteration (exit $status)"
+    fi
+    set -- $(tail -n 1 "$timing")
+    [ "${3:-1}" = "0" ] || check_fail "timed compiler exited ${3:-missing} at iteration $iteration"
+    wall_ms="$(awk -v seconds="$1" 'BEGIN { printf "%.3f", seconds * 1000.0 }')"
+    rss_kib="$2"
+    failed_probes="$(awk '
+        $NF == "statx" || $NF == "readlink" {
+            if (NF >= 6) total += $(NF - 1)
+        }
+        END { print total + 0 }
+    ' "$trace")"
+    printf '%s\n' "$wall_ms" >>"$ARTIFACT_DIR/wall_ms.samples"
+    printf '%s\n' "$rss_kib" >>"$ARTIFACT_DIR/rss_kib.samples"
+    printf '%s\n' "$failed_probes" >>"$ARTIFACT_DIR/failed_probes.samples"
+    trace_sha256="$(sha256sum "$trace" | awk '{print $1}')"
+    printf 'iteration=%s failed_probes=%s trace=%s trace_sha256=%s\n' \
+        "$iteration" "$failed_probes" "$trace" "$trace_sha256" >>"$ARTIFACT_DIR/failed_probes.raw"
+    [ "$failed_probes" -le "$FAILED_PROBE_LIMIT" ] ||
+        check_fail "failed statx+readlink probes $failed_probes exceed 90% reduction limit $FAILED_PROBE_LIMIT"
+    iteration=$((iteration + 1))
+done
+
+nearest_rank() {
+    file="$1" percent="$2"
+    count="$(wc -l <"$file" | tr -d ' ')"
+    rank=$(((count * percent + 99) / 100))
+    sort -n "$file" | sed -n "${rank}p"
+}
+
+wall_p50="$(nearest_rank "$ARTIFACT_DIR/wall_ms.samples" 50)"
+wall_p95="$(nearest_rank "$ARTIFACT_DIR/wall_ms.samples" 95)"
+max_rss="$(sort -n "$ARTIFACT_DIR/rss_kib.samples" | tail -n 1)"
+max_failed="$(sort -n "$ARTIFACT_DIR/failed_probes.samples" | tail -n 1)"
+output_sha256="$(sha256sum "$ARTIFACT_DIR/output.$RUNS.txt" | awk '{print $1}')"
+failed_probe_raw_sha256="$(sha256sum "$ARTIFACT_DIR/failed_probes.raw" | awk '{print $1}')"
+receipt_path="$ARTIFACT_DIR/receipt.env"
+cat >"$receipt_path" <<EOF
+schema=compiler-loader-perf-v2
+executable_path=$SELF_HOSTED_REAL
+executable_sha256=$compiler_sha256
+command=$current_command
+command_key=$current_command_key
+command_sha256=$current_command_sha256
+workload=$WORKLOAD
+warmups=$WARMUPS
+runs=$RUNS
+timeout_secs=$RUN_TIMEOUT_SECS
+wall_samples_ms=$(paste -sd, "$ARTIFACT_DIR/wall_ms.samples")
+wall_ms_p50=$wall_p50
+wall_ms_p95=$wall_p95
+max_rss_kib=$max_rss
+failed_probe_samples=$(paste -sd, "$ARTIFACT_DIR/failed_probes.samples")
+max_failed_statx_readlink=$max_failed
+failed_probe_raw_receipt=$ARTIFACT_DIR/failed_probes.raw
+failed_probe_raw_sha256=$failed_probe_raw_sha256
+output_sha256=$output_sha256
+exit_status=0
+EOF
+
+receipt_value() {
+    awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$2"
+}
+
+baseline_status=unavailable
+baseline_reason=missing-baseline-receipt
+baseline_path=unavailable
+baseline_command=unavailable
+baseline_raw=unavailable
+baseline_wall_p95=unavailable
+baseline_max_rss=unavailable
+if [ -n "$BASELINE_RECEIPT" ] && [ -f "$BASELINE_RECEIPT" ]; then
+    baseline_schema="$(receipt_value schema "$BASELINE_RECEIPT")"
+    baseline_path="$(receipt_value executable_path "$BASELINE_RECEIPT")"
+    baseline_sha256="$(receipt_value executable_sha256 "$BASELINE_RECEIPT")"
+    baseline_command="$(receipt_value command "$BASELINE_RECEIPT")"
+    baseline_command_key="$(receipt_value command_key "$BASELINE_RECEIPT")"
+    baseline_command_sha256="$(receipt_value command_sha256 "$BASELINE_RECEIPT")"
+    baseline_workload="$(receipt_value workload "$BASELINE_RECEIPT")"
+    baseline_warmups="$(receipt_value warmups "$BASELINE_RECEIPT")"
+    baseline_runs="$(receipt_value runs "$BASELINE_RECEIPT")"
+    baseline_timeout="$(receipt_value timeout_secs "$BASELINE_RECEIPT")"
+    baseline_wall_p95="$(receipt_value wall_ms_p95 "$BASELINE_RECEIPT")"
+    baseline_max_rss="$(receipt_value max_rss_kib "$BASELINE_RECEIPT")"
+    baseline_raw="$(receipt_value failed_probe_raw_receipt "$BASELINE_RECEIPT")"
+    baseline_raw_sha256="$(receipt_value failed_probe_raw_sha256 "$BASELINE_RECEIPT")"
+    if [ -f "$baseline_raw" ]; then
+        baseline_raw_current_sha256="$(sha256sum "$baseline_raw" | awk '{print $1}')"
+    else
+        baseline_raw_current_sha256=missing
+    fi
+    if [ "$baseline_schema" = "compiler-loader-perf-v2" ] \
+        && [ -n "$baseline_path" ] && [ -x "$baseline_path" ] \
+        && [ "$(real_path "$baseline_path")" = "$baseline_path" ] \
+        && [ "$baseline_sha256" = "$(sha256sum "$baseline_path" | awk '{print $1}')" ] \
+        && [ -n "$baseline_command" ] && [ "$baseline_command_key" = "$current_command_key" ] \
+        && [ "$baseline_command_sha256" = "$(printf '%s' "$baseline_command" | sha256sum | awk '{print $1}')" ] \
+        && [ "$baseline_workload" = "$WORKLOAD" ] \
+        && [ "$baseline_warmups" = "$WARMUPS" ] && [ "$baseline_runs" = "$RUNS" ] \
+        && [ "$baseline_timeout" = "$RUN_TIMEOUT_SECS" ] \
+        && awk -v p95="$baseline_wall_p95" -v rss="$baseline_max_rss" 'BEGIN { exit !(p95 > 0 && rss > 0) }' \
+        && [ "$baseline_raw_sha256" = "$baseline_raw_current_sha256" ]; then
+        baseline_status=available
+        baseline_reason=receipt-validated
+    else
+        baseline_reason=identity-command-or-raw-receipt-mismatch
+    fi
+fi
+
+regression_status=unavailable
+if [ "$baseline_status" = available ]; then
+    if awk -v current="$wall_p95" -v baseline="$baseline_wall_p95" -v limit="$P95_REGRESSION_PCT" \
+        'BEGIN { exit !(baseline > 0 && current <= baseline * (100 + limit) / 100) }' \
+        && awk -v current="$max_rss" -v baseline="$baseline_max_rss" -v limit="$RSS_REGRESSION_PCT" \
+        'BEGIN { exit !(baseline > 0 && current <= baseline * (100 + limit) / 100) }'; then
+        regression_status=pass
+    else
+        regression_status=fail
+    fi
+fi
+
+cat >"$REPORT_PATH" <<EOF
+# Compiler/loader retained performance receipt
+
+| compiler_path | compiler_sha256 | command | workload | warmups | runs | wall_samples_ms | wall_ms_p50 | wall_ms_p95 | max_rss_kib | max_failed_statx_readlink | baseline_failed_probes | reduction_gate | baseline_status | baseline_executable_path | baseline_executable_sha256 | baseline_command | baseline_wall_ms_p95 | baseline_max_rss_kib | regression_status | exit_status | output_sha256 | failed_probe_raw_receipt | baseline_failed_probe_raw_receipt | admission |
+|---|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---|---|---:|---:|---|---:|---|---|---|
+| $SELF_HOSTED_REAL | $compiler_sha256 | $current_command | $WORKLOAD | $WARMUPS | $RUNS | $(paste -sd, "$ARTIFACT_DIR/wall_ms.samples") | $wall_p50 | $wall_p95 | $max_rss | $max_failed | $FAILED_PROBE_BASELINE | at-least-90-percent (<= $FAILED_PROBE_LIMIT) | $baseline_status:$baseline_reason | $baseline_path | ${baseline_sha256:-unavailable} | $baseline_command | $baseline_wall_p95 | $baseline_max_rss | $regression_status | 0 | $output_sha256 | $receipt_path (sha256:$failed_probe_raw_sha256) | $baseline_raw | admitted:self-hosted,no-fallback,exact-strace |
+EOF
+
+echo "compiler_loader_perf=true"
+echo "report=$REPORT_PATH"
+echo "receipt=$receipt_path"
+echo "warmups=$WARMUPS (separate loader processes; excluded from samples)"
+echo "timeout_secs=$RUN_TIMEOUT_SECS"
+echo "max_failed_probes=$max_failed"
+echo "baseline_status=$baseline_status reason=$baseline_reason"
+echo "regression_status=$regression_status"
+
+[ "$baseline_status" = available ] || check_untestable "comparable baseline receipt unavailable ($baseline_reason)"
+[ "$regression_status" = pass ] || check_fail "current p95/RSS exceeds comparable baseline regression gate"
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006
+# @evidence-display: links

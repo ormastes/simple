@@ -1,6 +1,29 @@
 # T32 Gdb Adapter Specification
 
-> Tests covering T32GdbAdapter config factories, T32GdbAdapter capabilities, T32GdbAdapter name.
+> <details>
+
+<!-- sdn-diagram:id=t32_gdb_adapter_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=t32_gdb_adapter_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+t32_gdb_adapter_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=t32_gdb_adapter_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,24 +40,13 @@
 
 #### t32-gdb config for T32 target
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- t32-gdb config for T32 target
-   - Expected: cfg.adapter_type equals `t32-gdb`
-   - Expected: cfg.port equals `20000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("t32-gdb config for T32 target")
 val cfg = AdapterConfig.for_t32_target("test.elf")
 expect(cfg.adapter_type).to_equal("t32-gdb")
 expect(cfg.port).to_equal(20000)
@@ -44,20 +56,13 @@ expect(cfg.port).to_equal(20000)
 
 #### t32-gdb bridge config
 
-- t32-gdb bridge config
-   - Expected: cfg.adapter_type equals `t32-gdb`
-   - Expected: cfg.port equals `20000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("t32-gdb bridge config")
 val cfg = AdapterConfig.t32_gdb_bridge("localhost", 20000, 2331, "test.elf")
 expect(cfg.adapter_type).to_equal("t32-gdb")
 expect(cfg.port).to_equal(20000)
@@ -67,19 +72,13 @@ expect(cfg.port).to_equal(20000)
 
 #### t32-gdb config has arm architecture
 
-- t32-gdb config has arm architecture
-   - Expected: cfg.architecture equals `arm`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("t32-gdb config has arm architecture")
 val cfg = AdapterConfig.for_t32_target("test.elf")
 expect(cfg.architecture).to_equal("arm")
 ```
@@ -88,19 +87,13 @@ expect(cfg.architecture).to_equal("arm")
 
 #### t32-gdb config has correct host
 
-- t32-gdb config has correct host
-   - Expected: cfg.host equals `myhost`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("t32-gdb config has correct host")
 val cfg = AdapterConfig.t32_gdb_bridge("myhost", 20000, 2331, "test.elf")
 expect(cfg.host).to_equal("myhost")
 ```
@@ -111,19 +104,13 @@ expect(cfg.host).to_equal("myhost")
 
 #### has reset capability
 
-- has reset capability
-   - Expected: caps.can_reset is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has reset capability")
 val caps = AdapterCapabilities.basic().with_reset().with_memory().with_registers()
 expect(caps.can_reset).to_equal(true)
 ```
@@ -132,19 +119,13 @@ expect(caps.can_reset).to_equal(true)
 
 #### has memory capability
 
-- has memory capability
-   - Expected: caps.supports_memory is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has memory capability")
 val caps = AdapterCapabilities.basic().with_reset().with_memory().with_registers()
 expect(caps.supports_memory).to_equal(true)
 ```
@@ -153,19 +134,13 @@ expect(caps.supports_memory).to_equal(true)
 
 #### has registers capability
 
-- has registers capability
-   - Expected: caps.supports_registers is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has registers capability")
 val caps = AdapterCapabilities.basic().with_reset().with_memory().with_registers()
 expect(caps.supports_registers).to_equal(true)
 ```
@@ -176,19 +151,13 @@ expect(caps.supports_registers).to_equal(true)
 
 #### adapter name is t32-gdb
 
-- adapter name is t32-gdb
-   - Expected: name equals `t32-gdb`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adapter name is t32-gdb")
 val name = "t32-gdb"
 expect(name).to_equal("t32-gdb")
 ```
@@ -197,19 +166,13 @@ expect(name).to_equal("t32-gdb")
 
 #### adapter supports trace capture
 
-- adapter supports trace capture
-   - Expected: supported is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adapter supports trace capture")
 val supported = true
 expect(supported).to_equal(true)
 ```
@@ -218,19 +181,13 @@ expect(supported).to_equal(true)
 
 #### adapter supports coverage collect
 
-- adapter supports coverage collect
-   - Expected: supported is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adapter supports coverage collect")
 val supported = true
 expect(supported).to_equal(true)
 ```
@@ -244,12 +201,12 @@ expect(supported).to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/debug/remote/t32_gdb_adapter_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering T32GdbAdapter config factories, T32GdbAdapter capabilities, T32GdbAdapter name.
+Tests covering:
 - T32GdbAdapter config factories
 - T32GdbAdapter capabilities
 - T32GdbAdapter name
@@ -266,54 +223,3 @@ Tests covering T32GdbAdapter config factories, T32GdbAdapter capabilities, T32Gd
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b804c248a7d8b2c535a07fc6354d57a537925f2b39fff058f90064513fdd186e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b804c248a7d8b2c535a07fc6354d57a537925f2b39fff058f90064513fdd186e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b804c248a7d8b2c535a07fc6354d57a537925f2b39fff058f90064513fdd186e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/app/debug/remote/t32_gdb_adapter_spec.spl
-mirror: doc/06_spec/01_unit/app/debug/remote/t32_gdb_adapter_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/debug/remote/t32_gdb_adapter_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/debug/remote/t32_gdb_adapter_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/debug/remote/t32_gdb_adapter_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/debug/remote/t32_gdb_adapter_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 't32-gdb config for T32 target' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/debug/remote/t32_gdb_adapter_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 't32-gdb bridge config' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/debug/remote/t32_gdb_adapter_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 't32-gdb config has arm architecture' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

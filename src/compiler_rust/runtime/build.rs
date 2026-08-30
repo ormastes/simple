@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../compiler/src/codegen/runtime_sffi.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
@@ -38,6 +39,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NATIVE_ALL_PROVIDER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_TLS");
 
     compile_c_runtime_sources();
 
@@ -52,6 +54,7 @@ fn main() {
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
     let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
+    let runtime_tls = env::var_os("CARGO_FEATURE_RUNTIME_TLS").is_some();
 
     // Symbols provided by simple-native-all when driver-hooks is active.
     let driver_hooks = env::var_os("CARGO_FEATURE_DRIVER_HOOKS").is_some();
@@ -94,7 +97,8 @@ fn main() {
     }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, &target_os);
+    let defined_symbols =
+        collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, runtime_tls, &target_os);
 
     generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
@@ -166,6 +170,11 @@ fn runtime_symbol_declaration(
         "rt_atomic_bool_fetch_and" => "(handle: i64, value: bool) -> bool",
         "rt_atomic_bool_fetch_or" => "(handle: i64, value: bool) -> bool",
         "rt_atomic_bool_fetch_not" => "(handle: i64) -> bool",
+        // The callable SFFI tier models booleans as I8, but this linker-anchor
+        // declaration shares a scope with the Rust wrapper's C `bool` ABI.
+        // Keep the declaration identical to the wrapper to avoid two
+        // incompatible Rust declarations for one link name.
+        "rt_progress_tls_is_initialized" => "() -> bool",
         "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
         "rt_atomic_flag_load" => "(handle: i64) -> bool",
@@ -224,6 +233,7 @@ fn compile_c_runtime_sources() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let native_all_provider = env::var_os("CARGO_FEATURE_NATIVE_ALL_PROVIDER").is_some();
     let mut c_sources = vec![
+        "runtime_backend_plugin.c",
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_timestamp.c",
@@ -407,6 +417,7 @@ fn collect_defined_runtime_symbols(
     root: &Path,
     c_root: &Path,
     runtime_regex: bool,
+    runtime_tls: bool,
     target_os: &str,
 ) -> HashSet<String> {
     let mut exported = HashSet::new();
@@ -426,6 +437,13 @@ fn collect_defined_runtime_symbols(
                 continue;
             }
             if !runtime_regex && entry_path.file_name().and_then(|name| name.to_str()) == Some("regex.rs") {
+                continue;
+            }
+            // `net_tls.rs` is compiled only with `runtime-tls`. A textual
+            // export scan used to register its no_mangle names even when the
+            // module was cfg-disabled, creating table relocations to symbols
+            // that could not exist in the archive.
+            if !runtime_tls && entry_path.file_name().and_then(|name| name.to_str()) == Some("net_tls.rs") {
                 continue;
             }
             if let Ok(file) = fs::read_to_string(&entry_path) {

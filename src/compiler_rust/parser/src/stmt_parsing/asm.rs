@@ -21,12 +21,20 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
+        // Design A.4: `asm [volatile] clobbers(rax, rcx, memory) { ... }`.
+        // The clobber list belongs to the raw braced form only.
+        let mut braced_clobbers = Vec::new();
+        if self.check_identifier("clobbers") {
+            self.advance();
+            braced_clobbers = self.parse_paren_clobber_list()?;
+        }
+
         if self.check(&TokenKind::LParen) {
             return self.parse_asm_parenthesized(start_span, is_volatile);
         }
 
         if self.check(&TokenKind::LBrace) {
-            return self.parse_asm_braced(start_span, is_volatile);
+            return self.parse_asm_braced(start_span, is_volatile, braced_clobbers);
         }
 
         if self.is_asm_string_token() {
@@ -85,7 +93,12 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_asm_braced(&mut self, start_span: Span, is_volatile: bool) -> Result<Node, ParseError> {
+    fn parse_asm_braced(
+        &mut self,
+        start_span: Span,
+        is_volatile: bool,
+        clobbers: Vec<String>,
+    ) -> Result<Node, ParseError> {
         let open_span = self.current.span;
         self.expect(&TokenKind::LBrace)?;
 
@@ -114,9 +127,27 @@ impl<'a> Parser<'a> {
             volatile: is_volatile,
             instructions,
             target_match: vec![],
-            clobbers: vec![],
+            clobbers,
             constraints: vec![],
         }))
+    }
+
+    /// `clobbers(rax, rcx, memory)` — parenthesized register/pseudo-register
+    /// list of the raw braced form (design A.4). Names are validated later,
+    /// at HIR lowering (E-ASM-CLOBBER), where the target is known.
+    fn parse_paren_clobber_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        let mut clobbers = Vec::new();
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            clobbers.push(self.expect_identifier()?);
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(clobbers)
     }
 
     fn parse_asm_parenthesized(&mut self, start_span: Span, is_volatile: bool) -> Result<Node, ParseError> {
@@ -536,11 +567,21 @@ impl<'a> Parser<'a> {
                 for part in parts {
                     match part {
                         crate::token::FStringToken::Literal(s) => text.push_str(s),
-                        crate::token::FStringToken::Expr(e) => text.push_str(e),
+                        // `{name}` in an asm template is an OPERAND placeholder,
+                        // not an interpolation: keep the braces so MIR lowering
+                        // can rewrite it to LLVM's `$N` (mir/asm_operands.rs).
+                        // Flattening to the bare name emitted `csrr result, sstatus`.
+                        crate::token::FStringToken::Expr(e) => {
+                            text.push('{');
+                            text.push_str(e);
+                            text.push('}');
+                        }
                         crate::token::FStringToken::ExprWithFormat(e, spec) => {
+                            text.push('{');
                             text.push_str(e);
                             text.push(':');
                             text.push_str(spec);
+                            text.push('}');
                         }
                     }
                 }

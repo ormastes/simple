@@ -15,7 +15,7 @@
 # must still agree bit-for-bit with the scalar oracle.
 
 use std.spec
-use common.gpu.engine2d.scalar_oracle.{oracle_src_over_const, oracle_hash_span}
+use common.gpu.engine2d.scalar_oracle.{oracle_src_over_const, oracle_src_over_image, oracle_hash_span}
 use common.gpu.engine2d.kernel_registry.{
     kernel_table_new,
     kernel_table_register,
@@ -24,6 +24,7 @@ use common.gpu.engine2d.kernel_registry.{
     span_batch_new,
     span_batch_push,
     KERNEL_OP_SRC_OVER_CONST,
+    KERNEL_OP_SRC_OVER_IMAGE,
     KERNEL_PROVIDER_SCALAR,
     KERNEL_PROVIDER_SIMD_ISA,
     KERNEL_FORMAT_ARGB8888_STRAIGHT,
@@ -136,4 +137,30 @@ describe "simd_span_batch_execute — real provider dispatch (not silently disca
 
         assert_true(executed == 1)
         assert_true(batch.non_scalar_lookups == 0)  # fell back to scalar, exactly as the sabotage predicts
+        assert_true(oracle_hash_span(dst_scalar, 0, n) == oracle_hash_span(dst_dispatch, 0, n))
+
+    it "dispatches a registered 8K image blend through the in-place span provider":
+        val n: i64 = 7680
+        var dst_scalar = filled(n, 41)
+        var dst_dispatch = filled(n, 41)
+        val src = filled(n, 97)
+        var unused_mask: [u32] = []
+        oracle_src_over_image(dst_scalar, 0, src, 0, n)
+
+        var table = kernel_table_new()
+        assert_true(kernel_table_register(table, KERNEL_OP_SRC_OVER_IMAGE,
+                                          KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                          KERNEL_ALIGN_UNKNOWN,
+                                          KERNEL_SPAN_CONTIGUOUS,
+                                          KERNEL_BUCKET_LARGE,
+                                          KERNEL_PROVIDER_SIMD_ISA, true, true))
+        kernel_table_seal(table)
+        var batch = span_batch_new(1)
+        assert_true(span_batch_push(batch, KERNEL_OP_SRC_OVER_IMAGE, 0, 0, n, 0, 0))
+        val executed = simd_span_batch_execute(batch, dst_dispatch, src, unused_mask, table,
+                                               KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                               KERNEL_ALIGN_UNKNOWN,
+                                               KERNEL_SPAN_CONTIGUOUS)
+        assert_true(executed == 1)
+        assert_true(batch.non_scalar_lookups == 1)
         assert_true(oracle_hash_span(dst_scalar, 0, n) == oracle_hash_span(dst_dispatch, 0, n))

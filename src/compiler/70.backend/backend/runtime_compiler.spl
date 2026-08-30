@@ -107,11 +107,16 @@ pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: 
     val target_arch_text = if target.contains("-"): target.split("-")[0] else: target
     val target_arch = hosted_c_arch_kind(target_arch_text)
     val host_kind = hosted_c_arch_kind(host_arch_name)
-    val requires_cross = target_arch != "" and host_kind != "" and target_arch != host_kind
-    if target_arch == "" or host_kind == "" or not hosted_c_target_os_matches(target, host_os_name):
+    val os_matches = hosted_c_target_os_matches(target, host_os_name)
+    val linux_to_mingw = host_os_name == "linux" and target.ends_with("-pc-windows-gnu")
+    val requires_cross = target_arch != "" and host_kind != "" and
+        (target_arch != host_kind or not os_matches)
+    if target_arch == "" or host_kind == "" or (not os_matches and not linux_to_mingw):
         return HostedCCompilerPlan(requires_cross: requires_cross, supported: false, command: "")
     if not requires_cross:
         return HostedCCompilerPlan(requires_cross: false, supported: true, command: "")
+    if linux_to_mingw:
+        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "x86_64-w64-mingw32-gcc")
     if host_os_name == "linux" and target_arch == "aarch64":
         return HostedCCompilerPlan(requires_cross: true, supported: true, command: "aarch64-linux-gnu-gcc")
     if host_os_name == "linux" and target_arch == "riscv64":
@@ -275,6 +280,56 @@ fn _runtime_dir_not_found_message() -> text:
 # Runtime Compilation
 # ============================================================================
 
+# ============================================================================
+# Runtime Object Cache
+# ============================================================================
+
+fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dynload: bool, include_stage4_legacy_compat: bool, target: text, ext: text) -> text:
+    """Directory holding prebuilt C-runtime objects for this exact input set.
+
+    The C runtime was recompiled from source on EVERY native build: 27
+    `clang -c` invocations, serially, into a PID-keyed temp prefix that was
+    then deleted. Landed as 71347b901b6 (2026-08-23, LINKPERF: 103s of a 108s
+    hello-world build) and clobbered by the f1e0fff1662 merge restore; re-
+    measured 2026-08-28 on the stage2 pure-Simple binary: 27 clang execs,
+    53s of a 57s hello-world native-build, byte-identical on a warm rerun.
+    This is a pure memo: the key covers the compiler, every flag-affecting
+    option, the target, and the sha256 of the CONTENT of every .c/.h under
+    the runtime source tree (content, not size+mtime, so it cannot go stale),
+    so any change to any input misses the cache and recompiles. Returns ""
+    when caching is unavailable or disabled (SIMPLE_RT_OBJ_CACHE=0), in which
+    case the caller compiles exactly as before.
+    """
+    if (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") == "0":
+        return ""
+    if _is_windows():
+        return ""
+    # VERIFY (2026-08-28): `riscv_vec` and `host_arch` close two key holes found
+    # auditing this memo. `SIMPLE_RUNTIME_RISCV64_VECTOR=1` adds
+    # `-march=rv64gcv -mabi=lp64d` to runtime_simd_dispatch.c, and
+    # `host_arch()` adds `-mno-outline-atomics` when target == "host" on
+    # aarch64 -- both change the emitted object while leaving every other key
+    # input identical, so without them a flag flip would hit a stale object.
+    # Adding inputs to the key can only cause MORE misses, never fewer.
+    val riscv_vec = env_get_nullable("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? ""
+    val flag_sig = "v3;cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()}"
+    var cmd = "( printf '%s\\n' '" + flag_sig + "'; '" + cc + "' --version 2>/dev/null; "
+    cmd = cmd + "find '" + rt_dir + "' -type f \\( -name '*.c' -o -name '*.h' \\) 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null "
+    cmd = cmd + ") | sha256sum 2>/dev/null | cut -c1-40"
+    val (out, err, code) = backend_shell_tuple(cmd)
+    if code != 0:
+        return ""
+    val key = out.trim()
+    if key.len() < 16:
+        return ""
+    val root = env_get_nullable("SIMPLE_RT_OBJ_CACHE_DIR") ?? ""
+    val base = if root != "": root else: "{_get_temp_dir()}/simple-rt-objcache"
+    val dir = base + "/" + key
+    val (mout, merr, mcode) = backend_shell_tuple("mkdir -p '" + dir + "'")
+    if mcode != 0:
+        return ""
+    dir
+
 fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool = true, compiler: text = "", include_stage4_legacy_compat: bool = false) -> Result<[text], text>:
     """Compile all C runtime source files to object files.
 
@@ -319,7 +374,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     # this array's flat `{rt_dir}/{name}.c` naming does not support without
     # also teaching the object-path builder below to create nested
     # directories -- left as a follow-up, not silently dropped.
-    var sources = ["runtime", "runtime_native", "runtime_contracts", "runtime_rocm", "runtime_renderdoc", "runtime_directx_core", "runtime_thread", "runtime_memtrack", "runtime_timestamp", "runtime_fork", "runtime_process", "runtime_simd_utf8", "runtime_simd_search", "runtime_simd_case", "runtime_simd_dispatch", "runtime_packed_span", "runtime_font", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_framebuffer", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
+    var sources = ["runtime", "runtime_native", "runtime_backend_plugin", "runtime_contracts", "runtime_coverage_core", "runtime_rocm", "runtime_renderdoc", "runtime_directx_core", "runtime_thread", "runtime_memtrack", "runtime_timestamp", "runtime_fork", "runtime_process", "runtime_process_owned", "runtime_memory", "runtime_simd_utf8", "runtime_simd_search", "runtime_simd_case", "runtime_simd_dispatch", "runtime_packed_span", "runtime_font", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_framebuffer", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     val use_msvc = _is_msvc_cc(cc)
@@ -329,7 +384,9 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     var objects = [
         "{object_prefix}runtime{ext}",
         "{object_prefix}runtime_native{ext}",
+        "{object_prefix}runtime_backend_plugin{ext}",
         "{object_prefix}runtime_contracts{ext}",
+        "{object_prefix}runtime_coverage_core{ext}",
         "{object_prefix}runtime_rocm{ext}",
         "{object_prefix}runtime_renderdoc{ext}",
         "{object_prefix}runtime_directx_core{ext}",
@@ -338,6 +395,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         "{object_prefix}runtime_timestamp{ext}",
         "{object_prefix}runtime_fork{ext}",
         "{object_prefix}runtime_process{ext}",
+        "{object_prefix}runtime_process_owned{ext}",
+        "{object_prefix}runtime_memory{ext}",
         "{object_prefix}runtime_simd_utf8{ext}",
         "{object_prefix}runtime_simd_search{ext}",
         "{object_prefix}runtime_simd_case{ext}",
@@ -361,6 +420,11 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         sources = sources.push("runtime_dynload")
         objects = objects.push("{object_prefix}runtime_dynload{ext}")
     var object_count = 0
+    val cache_dir = _runtime_object_cache_dir(
+        rt_dir, cc, opt_level, include_dynload,
+        include_stage4_legacy_compat, target, ext)
+    if trace:
+        print "[RT-COMPILE] object cache dir={cache_dir}"
     if trace:
         print "[RT-COMPILE] starting loop over {sources.len()} sources"
 
@@ -383,7 +447,13 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # MSVC cl.exe flags (/Gy enables function-level linking for /OPT:REF)
             val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
             comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
+            # runtime_memory.c is always in this bundle and canonically owns
+            # the overlapping allocator/pointer ABI, including native-all.
+            comp_args.push("/DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             if include_dynload:
+                # Only the standalone core-C composition may suppress hosted
+                # providers. native-all needs runtime_native/thread/process
+                # hosted fallbacks even though runtime_memory remains present.
                 comp_args.push("/DSIMPLE_CORE_C_STANDALONE=1")
                 # runtime_dynload.c is in this bundle and owns spl_dlopen/
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
@@ -401,7 +471,12 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push("-ffunction-sections")
             comp_args.push("-fdata-sections")
             comp_args.push("-std=gnu11")
+            # Keep runtime_memory.c as the sole allocator/pointer ABI owner in
+            # both dynload and native-all/non-dynload compositions.
+            comp_args.push("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             if include_dynload:
+                # Standalone core-C suppresses hosted fallbacks; native-all
+                # must retain them and therefore must not receive this flag.
                 comp_args.push("-DSIMPLE_CORE_C_STANDALONE=1")
                 # runtime_dynload.c is in this bundle and owns spl_dlopen/
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
@@ -421,12 +496,38 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(obj_path)
             comp_args.push(src_path)
 
-        val (comp_out, comp_err, comp_code) = process_run(cc, comp_args)
+        val cache_obj = if cache_dir != "": cache_dir + "/" + name + ext else: ""
+        var cache_hit = false
+        var cache_obj_exists = false
+        if cache_obj != "":
+            cache_obj_exists = file_exists(cache_obj)
+        if cache_obj_exists:
+            val (hit_out, hit_err, hit_code) = backend_shell_tuple(
+                "cp -f '" + cache_obj + "' '" + obj_path + "'")
+            if hit_code == 0:
+                cache_hit = true
+                if trace:
+                    print "[RT-COMPILE] cache hit: {name}.c"
+        var comp_out = ""
+        var comp_err = ""
+        var comp_code = 0
+        if not cache_hit:
+            val (run_out, run_err, run_code) = process_run(cc, comp_args)
+            comp_out = run_out
+            comp_err = run_err
+            comp_code = run_code
         if trace:
             print "[RT-COMPILE] compile result: code={comp_code}"
         if comp_code != 0:
             cleanup_runtime_objects(objects)
             return Err("Failed to compile {name}.c:\n{comp_out}{comp_err}")
+        if cache_obj != "" and not cache_hit:
+            # Publish via a private staging name + rename so concurrent builds
+            # never observe a half-written object.
+            val stage = cache_obj + ".tmp." + "{compile_pid}"
+            backend_shell_tuple(
+                "cp -f '" + obj_path + "' '" + stage + "' && mv -f '"
+                + stage + "' '" + cache_obj + "'")
 
         object_count = object_count + 1
 

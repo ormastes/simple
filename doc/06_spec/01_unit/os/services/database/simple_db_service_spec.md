@@ -1,15 +1,38 @@
-# Simple Db Service Specification
+# SimpleOS Database Service
 
 > Tests covering SimpleOS database command core.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+Status: source contract implemented; live RV64 QEMU proof pending. Stubs: 0.
 
-<details>
-<summary>Full Scenario Manual</summary>
+## Primary flow
 
-# Simple Db Service Specification
+1. Send `POST /db` with `CREATE settings`.
+2. Reuse the same service instance for `INSERT settings theme dark`.
+3. Send `SELECT settings theme` and require the response body `dark`.
+4. Require connection-close framing with no computed `Content-Length` header.
+
+The boot HTTP listener calls an exported wrapper around one module-owned,
+literal-initialized `SimpleDbService`. That avoids copying mutable service state
+through the RV64 listener loop. Non-DB requests keep the existing web path.
+
+## Failure behavior
+
+- Empty, malformed, oversized, duplicate, missing-table, and missing-key
+  commands return explicit errors without mutating stored state.
+- Requests are capped at 1024 bytes; commands at 256 bytes.
+- Body slicing clamps to the request cap instead of depending on the broken RV64
+  native `text.len()` result.
+- The service holds at most 16 tables and 128 rows.
+
+## Purpose and audience
+Verifies the simple db service behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 

@@ -65,7 +65,7 @@ for missing or non-SMF artifact paths.
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -93,7 +93,7 @@ expect(bad.error_msg).to_equal("empty library name")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,7 +121,7 @@ expect(opened.handle_id).to_equal(77)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -153,10 +153,10 @@ expect(wrong_ext.error_msg).to_equal("not an smf artifact")
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/nfr/low_dependency_ui_dynsmf.md`
-- **Plan:** `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md`
-- **Design:** `doc/05_design/low_dependency_ui_dynsmf.md`
-- **Research:** `doc/01_research/local/low_dependency_ui_dynsmf.md`
+- **Requirements:** [doc/02_requirements/nfr/low_dependency_ui_dynsmf.md](doc/02_requirements/nfr/low_dependency_ui_dynsmf.md)
+- **Plan:** [doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md](doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md)
+- **Design:** [doc/05_design/low_dependency_ui_dynsmf.md](doc/05_design/low_dependency_ui_dynsmf.md)
+- **Research:** [doc/01_research/local/low_dependency_ui_dynsmf.md](doc/01_research/local/low_dependency_ui_dynsmf.md)
 
 
 </details>

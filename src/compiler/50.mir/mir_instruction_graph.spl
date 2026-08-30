@@ -4,9 +4,14 @@ use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.hir.hir_definitions.{HirContractBlock}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, VhdlHardwareMetadata}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.*
+# Preserve terminal providers when this graph is re-exported by mir_data.
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
 
 struct MirInst:
     """MIR instruction."""
@@ -243,6 +248,14 @@ struct MirFunction:
     memory_banks: i64       # @memory(n)/@memory(banks=n) port banking count
     verification_contract: HirContractBlock?
 
+    # Asm-embedding contract (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md A.2)
+    # threaded from @naked/@section/@align/@global. Defaults keep every
+    # existing MirFunction constructor valid.
+    is_naked: bool = false       # emit `naked noinline`, body = one raw asm block, `unreachable` terminator
+    section: text = ""           # `section "<name>"` on the define; "" = target default
+    align: i64 = 0               # `align <n>` on the define; 0 = target default
+    is_global: bool = false      # unmangled symbol, external linkage
+
 impl MirFunction:
     # update field list when MirFunction gains fields — spread operator fails cross-module
     static fn with_blocks(func: MirFunction, new_blocks: [MirBlock]) -> MirFunction:
@@ -272,7 +285,11 @@ impl MirFunction:
             unroll_factor: func.unroll_factor,
             pipeline_ii: func.pipeline_ii,
             memory_banks: func.memory_banks,
-            verification_contract: func.verification_contract
+            verification_contract: func.verification_contract,
+            is_naked: func.is_naked,
+            section: func.section,
+            align: func.align,
+            is_global: func.is_global
         )
 
 """Function body wrapper for borrow checking."""
@@ -400,5 +417,6 @@ struct MirModule:
     statics: Dict<SymbolId, MirStatic>
     constants: Dict<SymbolId, MirConstant>
     types: Dict<SymbolId, MirTypeDef>
+    external_layout_traces: [MirExternalLayoutTraceV1] = []
 
 export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop

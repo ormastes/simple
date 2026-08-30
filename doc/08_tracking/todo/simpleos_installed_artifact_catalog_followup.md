@@ -25,7 +25,7 @@ bootstrap wiring and the launch transaction remain unimplemented.
 ## Catalog lifecycle implemented in the current draft
 
 - package-private, one-way bootstrap session and population surface;
-- maximum 16 immutable records and 8 exact aliases per record, with one shared
+- maximum 17 immutable records per target and 8 exact aliases per record, with one shared
   collision domain and no reuse;
 - deep-owned bounded manifest/alias retention and deep-owned public lookup;
 - exact target, nonzero lowercase content digest, signer, scheme, and detached
@@ -36,7 +36,7 @@ bootstrap wiring and the launch transaction remain unimplemented.
 - no loader, filesystem, namespace, or scheduler authority.
 
 The focused loader-package spec covers the public bounded input gate, forged
-and stale bootstrap sessions, the 16-record ceiling, one-way seal, and nested
+and stale bootstrap sessions, the 17-record ceiling, one-way seal, and nested
 caller/output copy isolation. The pure transition oracle documents the required
 committed-unknown quarantine rule but is not raw-mutex serialization evidence.
 Direct raw-mutex failure injection remains unavailable; no test or build was

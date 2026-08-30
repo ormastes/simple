@@ -1,0 +1,277 @@
+"""Canonical signed identity for one exact primary-tool release."""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1,
+    EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS}
+use os.kernel.loader.primary_linux_tool_catalog_bundle_v1.{
+    PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1,
+    primary_linux_tool_catalog_required_paths_v1}
+
+pub const PRIMARY_TOOL_RELEASE_DESCRIPTOR_DOMAIN_V1: text =
+    "simpleos.primary-tool-release.v1"
+pub const PRIMARY_TOOL_RELEASE_PAYLOAD_MAX_BYTES_V1: i64 = 268435456
+pub const PRIMARY_TOOL_RELEASE_SCR1_MAX_BYTES_V1: i64 = 16777216
+pub const PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1: i64 = 536870912
+
+pub struct PrimaryToolReleaseDescriptorRowV1:
+    canonical_path: text
+    payload_sha256: text
+    scr1_sha256: text
+
+pub struct PrimaryToolReleaseDescriptorV1:
+    domain: text
+    target: ManifestTarget
+    release_id: text
+    signer_key_id: text
+    rows: [PrimaryToolReleaseDescriptorRowV1]
+    signature: [u8]
+
+pub struct PrimaryToolReleaseDescriptorCheckV1:
+    ok: bool
+    reason: text
+
+fn _lower_token_v1(value: text, maximum: i64) -> bool:
+    if value.len() == 0 or value.len() > maximum: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val valid = (code >= 97 and code <= 122) or
+            (code >= 48 and code <= 57) or code == 45 or code == 46 or code == 95
+        if not valid: return false
+        index = index + 1
+    true
+
+fn _lower_sha256_v1(value: text) -> bool:
+    if value.len() != 64 or value == "0" * 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _target_valid_v1(target: ManifestTarget) -> bool:
+    target.os == "simpleos" and target.abi == "simpleos" and
+        (target.arch == "x86" or target.arch == "x86_64" or
+         target.arch == "arm" or target.arch == "aarch64" or
+         target.arch == "riscv32" or target.arch == "riscv64")
+
+fn _append_field_v1(body: text, name: text, value: text) -> text:
+    body + name + "=" + value.len().to_text() + ":" + value + "\n"
+
+fn _shape_reason_v1(descriptor: PrimaryToolReleaseDescriptorV1) -> text:
+    if descriptor.domain != PRIMARY_TOOL_RELEASE_DESCRIPTOR_DOMAIN_V1 or
+        not _lower_token_v1(descriptor.domain, 64):
+        return "domain-invalid"
+    if not _target_valid_v1(descriptor.target): return "target-invalid"
+    if not _lower_token_v1(descriptor.release_id, 128): return "release-id-invalid"
+    if not _lower_token_v1(descriptor.signer_key_id, 128):
+        return "signer-key-id-invalid"
+    val required = primary_linux_tool_catalog_required_paths_v1()
+    if required.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        descriptor.rows.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        return "row-count-invalid"
+    var index: i64 = 0
+    while index < required.len():
+        val row = descriptor.rows[index]
+        if row.canonical_path != required[index]: return "row-order-invalid"
+        if not _lower_sha256_v1(row.payload_sha256):
+            return "payload-sha256-invalid"
+        if not _lower_sha256_v1(row.scr1_sha256): return "scr1-sha256-invalid"
+        index = index + 1
+    ""
+
+pub fn primary_tool_release_descriptor_signing_bytes_v1(
+    descriptor: PrimaryToolReleaseDescriptorV1
+) -> Result<[u8], text>:
+    val reason = _shape_reason_v1(descriptor)
+    if reason != "": return Err(reason)
+    var body = ""
+    body = _append_field_v1(body, "domain", descriptor.domain)
+    body = _append_field_v1(body, "target-os", descriptor.target.os)
+    body = _append_field_v1(body, "target-arch", descriptor.target.arch)
+    body = _append_field_v1(body, "target-abi", descriptor.target.abi)
+    body = _append_field_v1(body, "release-id", descriptor.release_id)
+    body = _append_field_v1(body, "signer-key-id", descriptor.signer_key_id)
+    body = body + "row-count=" + PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1.to_text() + "\n"
+    var index: i64 = 0
+    while index < descriptor.rows.len():
+        val prefix = "row-" + index.to_text() + "-"
+        val row = descriptor.rows[index]
+        body = _append_field_v1(body, prefix + "path", row.canonical_path)
+        body = _append_field_v1(body, prefix + "payload-sha256", row.payload_sha256)
+        body = _append_field_v1(body, prefix + "scr1-sha256", row.scr1_sha256)
+        index = index + 1
+    Ok(text_to_bytes_pure(body))
+
+pub fn primary_tool_release_descriptor_shape_valid_v1(
+    descriptor: PrimaryToolReleaseDescriptorV1,
+    expected_target: ManifestTarget,
+    expected_key_id: text
+) -> PrimaryToolReleaseDescriptorCheckV1:
+    val reason = _shape_reason_v1(descriptor)
+    if reason != "":
+        return PrimaryToolReleaseDescriptorCheckV1(ok: false, reason: reason)
+    if descriptor.target != expected_target:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "target-mismatch")
+    if not _lower_token_v1(expected_key_id, 128) or
+        descriptor.signer_key_id != expected_key_id:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "signer-key-id-mismatch")
+    if descriptor.signature.len() != 64:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "signature-invalid")
+    PrimaryToolReleaseDescriptorCheckV1(ok: true, reason: "")
+
+pub fn primary_tool_release_descriptor_verify_v1(
+    descriptor: PrimaryToolReleaseDescriptorV1,
+    trusted_signers: [ExecutableManifestTrustedSignerV1],
+    expected_target: ManifestTarget,
+    expected_key_id: text
+) -> PrimaryToolReleaseDescriptorCheckV1:
+    val shaped = primary_tool_release_descriptor_shape_valid_v1(
+        descriptor, expected_target, expected_key_id)
+    if not shaped.ok: return shaped
+    val signing = primary_tool_release_descriptor_signing_bytes_v1(descriptor)
+    val signing_bytes = match signing:
+        case Ok(bytes): bytes
+        case Err(reason): return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: reason)
+    if trusted_signers.len() == 0 or
+        trusted_signers.len() > EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "trusted-signers-invalid")
+    var matching_count: i64 = 0
+    var matching_key: [u8] = []
+    var signer_index: i64 = 0
+    while signer_index < trusted_signers.len():
+        val signer = trusted_signers[signer_index]
+        if not _lower_token_v1(signer.key_id, 128) or
+            signer.public_key.len() != 32:
+            return PrimaryToolReleaseDescriptorCheckV1(
+                ok: false, reason: "trusted-signers-invalid")
+        var prior: i64 = 0
+        while prior < signer_index:
+            if trusted_signers[prior].key_id == signer.key_id:
+                return PrimaryToolReleaseDescriptorCheckV1(
+                    ok: false, reason: "trusted-signer-not-unique")
+            prior = prior + 1
+        if signer.key_id == descriptor.signer_key_id:
+            matching_count = matching_count + 1
+            matching_key = signer.public_key
+        signer_index = signer_index + 1
+    if matching_count != 1:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "trusted-signer-not-unique")
+    if matching_key.len() != 32:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "trusted-signer-invalid")
+    if not pure_ed25519_verify(
+        matching_key, signing_bytes, descriptor.signature):
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "signature-invalid")
+    PrimaryToolReleaseDescriptorCheckV1(ok: true, reason: "")
+
+pub fn primary_tool_release_descriptor_media_lengths_valid_v1(
+    payload_lengths: [i64], scr1_lengths: [i64]
+) -> bool:
+    """Validate exact media bounds without allocating the represented bytes."""
+    if payload_lengths.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        scr1_lengths.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        return false
+    var aggregate: i64 = 0
+    var index: i64 = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        val payload_length = payload_lengths[index]
+        val scr1_length = scr1_lengths[index]
+        if payload_length <= 0 or
+            payload_length > PRIMARY_TOOL_RELEASE_PAYLOAD_MAX_BYTES_V1 or
+            scr1_length <= 0 or
+            scr1_length > PRIMARY_TOOL_RELEASE_SCR1_MAX_BYTES_V1:
+            return false
+        if payload_length > PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1 - aggregate:
+            return false
+        aggregate = aggregate + payload_length
+        if scr1_length > PRIMARY_TOOL_RELEASE_MEDIA_MAX_BYTES_V1 - aggregate:
+            return false
+        aggregate = aggregate + scr1_length
+        index = index + 1
+    true
+
+pub fn primary_tool_release_descriptor_verify_media_observations_v1(
+    descriptor: PrimaryToolReleaseDescriptorV1,
+    trusted_signers: [ExecutableManifestTrustedSignerV1],
+    expected_target: ManifestTarget,
+    expected_key_id: text,
+    payload_sha256: [text],
+    payload_lengths: [i64],
+    scr1_sha256: [text],
+    scr1_lengths: [i64]
+) -> PrimaryToolReleaseDescriptorCheckV1:
+    """Authenticate five ordered, already-hashed bounded media observations."""
+    val signed = primary_tool_release_descriptor_verify_v1(
+        descriptor, trusted_signers, expected_target, expected_key_id)
+    if not signed.ok: return signed
+    if payload_sha256.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        scr1_sha256.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        payload_lengths.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        scr1_lengths.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "media-row-count-invalid")
+    if not primary_tool_release_descriptor_media_lengths_valid_v1(
+        payload_lengths, scr1_lengths):
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "media-bounds-invalid")
+    var index: i64 = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        if not _lower_sha256_v1(payload_sha256[index]) or
+            not _lower_sha256_v1(scr1_sha256[index]):
+            return PrimaryToolReleaseDescriptorCheckV1(
+                ok: false, reason: "media-digest-invalid")
+        if payload_sha256[index] != descriptor.rows[index].payload_sha256 or
+            scr1_sha256[index] != descriptor.rows[index].scr1_sha256:
+            return PrimaryToolReleaseDescriptorCheckV1(
+                ok: false, reason: "media-digest-mismatch")
+        index = index + 1
+    PrimaryToolReleaseDescriptorCheckV1(ok: true, reason: "")
+
+pub fn primary_tool_release_descriptor_verify_media_v1(
+    descriptor: PrimaryToolReleaseDescriptorV1,
+    trusted_signers: [ExecutableManifestTrustedSignerV1],
+    expected_target: ManifestTarget,
+    expected_key_id: text,
+    payloads: [[u8]],
+    scr1_records: [[u8]]
+) -> PrimaryToolReleaseDescriptorCheckV1:
+    """Authenticate the descriptor and bind all five supplied media pairs."""
+    if payloads.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1 or
+        scr1_records.len() != PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "media-row-count-invalid")
+    var payload_lengths: [i64] = []
+    var scr1_lengths: [i64] = []
+    var index: i64 = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        payload_lengths.push(payloads[index].len())
+        scr1_lengths.push(scr1_records[index].len())
+        index = index + 1
+    if not primary_tool_release_descriptor_media_lengths_valid_v1(
+        payload_lengths, scr1_lengths):
+        return PrimaryToolReleaseDescriptorCheckV1(
+            ok: false, reason: "media-bounds-invalid")
+    var payload_sha256: [text] = []
+    var scr1_sha256: [text] = []
+    index = 0
+    while index < PRIMARY_LINUX_TOOL_PAYLOAD_COUNT_V1:
+        payload_sha256.push(sha256_u8_hex(payloads[index]))
+        scr1_sha256.push(sha256_u8_hex(scr1_records[index]))
+        index = index + 1
+    primary_tool_release_descriptor_verify_media_observations_v1(
+        descriptor, trusted_signers, expected_target, expected_key_id,
+        payload_sha256, payload_lengths, scr1_sha256, scr1_lengths)

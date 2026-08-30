@@ -1,36 +1,6 @@
 # BUG: a `bool`-declared parameter accepts a non-bool silently — and the JIT corrupts it
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-(re-verified 2026-08-17). Do not close this file.
-
-## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
-
-On the deployed seed (`bin/simple`, Rust seed dated 2026-08-16):
-
-```
-take_bool(42)  ->  got = true
-
-Results: 1 total, 1 passed, 0 failed
-```
-
-The VALUE-CORRUPTION symptom is gone: `42` no longer arrives as `42` in a
-`bool` parameter, and is not re-tagged to `<special:44>`. It is now coerced to
-`true`.
-
-WHAT IS STILL OPEN, and why coercion is not the fix this file asked for: the
-filing's expected outcome was a COMPILE ERROR rejecting a non-bool argument to
-a `bool`-typed parameter. Silent coercion removes the visible corruption while
-leaving the type hole open -- an int still passes where only a bool is legal,
-it just does so quietly now. That is a strictly harder defect to notice than
-the one originally filed, so the file stays OPEN on the rejection half.
-
-NOT PROVED: the `.?` and JIT-lane halves of the filing were not probed
-separately; only the interpreter lane was exercised.
-
---- original filing below, kept for history ---
-
-**Status (original):** OPEN
+**Status:** OPEN
 **Found:** 2026-08-04
 **Related — SAME root cause, found independently by parallel lanes the same day.
 Fix once, close all of these. This file is the UNIT-tier record; its unique
@@ -196,27 +166,3 @@ have had `check(opt.?)` rewritten to `check(opt != nil)`, which is why those
 two files are green while the other 28 identical files are red. That workaround
 hid the defect rather than removing it, and it should be reverted once the real
 fix lands.
-
-## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
-
-Classified by CONTENT (not SHA ancestry), per the fleet brief's CORRECTIONS.
-
-`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs` now
-defines `present_value_as_bool_arg`, whose `_ => Some(Value::Bool(true))` arm is
-the line this doc's triage row cites. Its own doc-comment states the design
-decision explicitly:
-
-> "This coerces rather than rejects. Rejecting a non-`bool` argument is the
-> stricter reading of the same defect, but it would turn thousands of existing
-> call sites into hard errors at once; that belongs in its own change."
-
-and quantifies the blast radius as **2,174 call sites in 1,676 spec files**
-(`verify(x.?)` against `fn verify(condition: bool)`).
-
-**Verdict: STILL-OPEN, and deliberately so.** The value-corruption half is
-fixed in source; the rejection half is an intentional deferral, not an
-oversight. This worker did NOT change it: making it reject is a tree-wide
-breaking change that needs its own reviewed lane, not a drive-by patch.
-
-**Not proven:** no `Results:` line was obtained. See the "Execution blocked"
-note appended to the sibling docs in this slice.

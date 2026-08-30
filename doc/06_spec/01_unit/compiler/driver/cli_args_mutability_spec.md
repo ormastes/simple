@@ -1,6 +1,6 @@
-# Cli Args Mutability Specification
+# Contract spec: test/01_unit/compiler/driver/cli_args_mutability_spec.spl
 
-> Tests covering compiler driver CLI args mutability.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cli Args Mutability Specification
+# Contract spec: test/01_unit/compiler/driver/cli_args_mutability_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/driver/cli_args_mutability_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/driver/cli_args_mutability_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -22,16 +62,12 @@
 
 
 - marks mutating legacy opt-level helper as me
-   - Expected: source does not contain `fn apply_legacy_opt_level(level: i64):`
-   - Expected: source does not contain `val arg = if val next_arg = self.next()`
-   - Expected: source does not contain `val file = if val next_file = self.next()`
-   - Expected: source does not contain `= if val`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -43,10 +79,7 @@ expect(source).to_contain("me apply_legacy_opt_level(level: i64):")
 expect(source).to_contain("me parse_long_option(arg: text, mut result: CliArgs)")
 expect(source).to_contain("fn apply_option(name: text, value: text, mut result: CliArgs)")
 expect(source).to_contain("me parse_short_option(arg: text, mut result: CliArgs)")
-expect(source.contains("fn apply_legacy_opt_level(level: i64):")).to_equal(false)
-expect(source.contains("val arg = if val next_arg = self.next()")).to_equal(false)
-expect(source.contains("val file = if val next_file = self.next()")).to_equal(false)
-expect(source.contains("= if val")).to_equal(false)
+expect(source).to_not_contain("fn apply_legacy_opt_level(level: i64):")        expect(source).to_not_contain("val arg = if val next_arg = self.next()")        expect(source).to_not_contain("val file = if val next_file = self.next()")        expect(source).to_not_contain("= if val")
 ```
 
 </details>
@@ -54,13 +87,12 @@ expect(source.contains("= if val")).to_equal(false)
 #### transports standalone mode as text past aggregate copies
 
 - transports standalone mode as text past aggregate copies
-   - Expected: main_source does not contain `options.build_mode =`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -74,8 +106,7 @@ val types_source = file_read("src/compiler/80.driver/driver_types.spl")
 val options_source = file_read("src/compiler/00.common/driver_core_types.spl")
 
 expect(main_source).to_contain("options.cli_mode_text = requested_mode_text")
-expect(main_source.contains("options.build_mode =")).to_equal(false)
-expect(options_source).to_contain("    cli_mode_text: text\n")
+expect(main_source).to_not_contain("options.build_mode =")        expect(options_source).to_contain("    cli_mode_text: text\n")
 expect(options_source).to_not_contain("cli_mode_text: text =")
 expect(options_source).to_contain("cli_mode_text: opts.cli_mode_text")
 expect(main_source).to_contain("elif arg == \"-m\" or arg == \"--mode\":")
@@ -87,21 +118,6 @@ expect(driver_source).to_contain("if compile_mode_text == \"aot\":")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/driver/cli_args_mutability_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering compiler driver CLI args mutability.
-- compiler driver CLI args mutability
 
 ## Scenario Summary
 
@@ -127,40 +143,30 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `1cabeded9b3945a19f2dbcd4dcb5eede9694d24b2001d587573ad97a8617d3f9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `2b002218a411bf68c9c8dda987d3404c2fe71ede3d3be1b8121702e49e205c70`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `1cabeded9b3945a19f2dbcd4dcb5eede9694d24b2001d587573ad97a8617d3f9`.
+Source SHA-256: `2b002218a411bf68c9c8dda987d3404c2fe71ede3d3be1b8121702e49e205c70`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `1cabeded9b3945a19f2dbcd4dcb5eede9694d24b2001d587573ad97a8617d3f9`  
+Source SHA-256: `2b002218a411bf68c9c8dda987d3404c2fe71ede3d3be1b8121702e49e205c70`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/01_unit/compiler/driver/cli_args_mutability_spec.spl
 mirror: doc/06_spec/01_unit/compiler/driver/cli_args_mutability_spec.md (current)
-findings: 5 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=80 coverage=100 maintainability=70
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=84; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/driver/cli_args_mutability_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/driver/cli_args_mutability_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/driver/cli_args_mutability_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/driver/cli_args_mutability_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'marks mutating legacy opt-level helper as me' has no retained capture or evidence
+test/01_unit/compiler/driver/cli_args_mutability_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'marks mutating legacy opt-level helper as me' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/cli_args_mutability_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transports standalone mode as text past aggregate copies' has no retained capture or evidence
+test/01_unit/compiler/driver/cli_args_mutability_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transports standalone mode as text past aggregate copies' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

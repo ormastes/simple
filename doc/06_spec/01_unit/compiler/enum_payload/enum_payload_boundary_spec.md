@@ -23,6 +23,7 @@ Hardening plan `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 Hardening plan `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`
 §15 Phase 4 "preserve enum payload metadata end to end", §20.7 row S1.
 
@@ -59,6 +60,7 @@ been shown to lose recorded parser/lowering state when read back afterward.
 Dict landmine (.claude/rules/code-style.md): `enums` values are STRUCTS, so
 presence/lookup goes through `contains_key(...)` + index read, never `.get()`.
 
+```
 ## Scenarios
 
 ### enum payload metadata survives the parser boundary

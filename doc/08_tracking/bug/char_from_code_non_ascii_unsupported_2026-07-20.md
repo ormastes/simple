@@ -1,17 +1,48 @@
 # char_from_code / text_dot_from_char_code drop all non-ASCII codepoints
 
 - **Filed:** 2026-07-20
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
-  matches the already-shipping `browser_engine` production workaround for
-  the same bug (see below); the canonical `bin/simple test` verdict is
-  still red (14 / 2 failures) due to a separate, pre-existing SSpec
-  evaluator infrastructure gap, not a logic defect — see "Evaluator
-  disagreement" below before treating this as fully closed
+- **Status:** Unicode encoding fix present in source (2026-07-20); native ABI
+  convergence is **held, not admitted** (reconciled 2026-08-16). Local commit
+  `20b37d580c03` routes Rust codegen to the canonical symbol but is not on
+  `origin/main`; the hosted-provider/legacy-alias correction described below
+  remains an uncommitted lane change. No current pure-Simple bootstrap PASS,
+  deployment, or push is claimed.
 - **Severity:** medium (blocks multilingual glyph paths; no crash)
-- **Found by:** incidental — while triaging the stale codex font branch (`origin/codex/font-vulkan-static-toolchain-20260719`) against main. Not a branch defect; both defects are on main today.
+- **Found by:** incidental — while triaging the stale codex font branch
+  (`origin/codex/font-vulkan-static-toolchain-20260719`) against main. It was
+  not a branch defect; both defects were on main at filing time.
 
-## Fix landed (2026-07-20)
+## 2026-08-16 native ABI reconciliation
+
+The canonical cross-runtime contract is exactly
+`rt_char_from_code(code: i64) -> i64`. The argument is an untagged Unicode
+scalar and the result is the raw `i64` bits of a runtime text handle. Neither
+side may be declared through a target-sized/tagged `RuntimeValue` LLVM type.
+
+The intended provider set is now:
+
+- pure-Simple: `src/runtime/simple_core/core_string.spl`;
+- core C: `src/runtime/runtime_native.c` plus `src/runtime/runtime.h`;
+- hosted Rust: `src/compiler_rust/runtime/src/value/collections.rs`.
+
+The hosted Rust provider is therefore **live design, not dead code**. It
+returns a real allocated empty text for invalid scalars (not `RuntimeValue::NIL`)
+and exports `text_dot_from_char_code(i64) -> i64` only as a delegating legacy
+alias for older seed artifacts. New lowering must call `rt_char_from_code`.
+
+This is recovery-lane state, not release evidence. Commit `20b37d580c03`
+contains the held routing change; the exact raw-`i64` LLVM declarations,
+hosted provider, legacy alias, registrations, and source-contract assertions
+are a follow-up working-tree correction. Rust builds or tests can diagnose
+that correction, but cannot admit it. Admission still requires a qualified
+pure-Simple self-hosted runtime. At reconciliation time normal bootstrap is
+blocked before Stage 1 by the unavailable planner-v2 admission producer, and
+the three bounded Stage-3 pure-Simple attempts ended at
+`unsupported LLVM value conversion from double to ptr` in
+`std.common.format.format_fixed`. Consequently there is no current runtime
+PASS or deployment claim for this fix.
+
+## Source-fix history and held correction
 
 - `char_from_code_inline` (`src/lib/common/string_core.spl`): ASCII fast
   table (9/10/11/12/13 + 32..126) unchanged; everything else now UTF-8
@@ -52,20 +83,22 @@
   -mno-red-zone` command (exit 0) and with `-fsyntax-only` (exit 0). Not
   touched: arm32/arm64/riscv64 define `text_dot_from_char_code` zero times
   (confirmed unchanged) — no duplicate-symbol risk introduced.
-- `text_dot_from_char_code` (`src/compiler_rust/runtime/src/value/collections.rs`):
-  added an explicit `(0..=0x10FFFF).contains(&code)` guard before the
-  truncating `code as u32` cast, so an out-of-range i64 (e.g. `0x100000041`)
-  is rejected instead of silently truncating to a low-32-bit value that
-  looks valid (`0x100000041 as u32 == 0x41 == 'A'`). **This function is
-  confirmed dead code on main today** — codegen for `.chr()`/`.to_char()`
-  routes to the pure-Simple side, not this symbol — fixed only for class
-  completeness per the original report. `cargo check -p simple-runtime`
-  passes.
+- Hosted Rust character provider
+  (`src/compiler_rust/runtime/src/value/collections.rs`): the July fix first
+  hardened the legacy `text_dot_from_char_code` helper with an explicit
+  `(0..=0x10FFFF).contains(&code)` guard before `code as u32`, preventing a
+  value such as `0x100000041` from truncating to `0x41` (`'A'`). The current
+  correction promotes `rt_char_from_code(i64) -> i64` as the hosted canonical
+  provider and keeps `text_dot_from_char_code` as a delegating compatibility
+  export. Both return an allocated UTF-8 runtime string, including a real
+  empty string for invalid input. Historical Rust checks remain diagnostic;
+  they are not pure-Simple admission evidence.
 
-### Primitives tried and rejected
+### Primitives evaluated during diagnosis
 
-Two other byte/codepoint-to-text primitives were tried while diagnosing the
-verification-evaluator disagreement below, both rejected:
+Two other byte/codepoint-to-text primitives were evaluated while diagnosing
+the verification-evaluator disagreement below. The byte-array form was
+rejected; the scalar form later became the canonical native ABI:
 - `bytes_to_string(bytes: [u8]) -> text` — declared identically in ~18
   stdlib files, including the two touched here originally. Does **not**
   link: there is no `bytes_to_string` runtime symbol, only
@@ -76,17 +109,19 @@ verification-evaluator disagreement below, both rejected:
 - `rt_char_from_code(code: i64) -> text` — the canonical scalar
   codepoint-in/text-out ABI backing `.chr()`/`.to_char()`
   (`src/runtime/simple_core/core_string.spl`, mirrored in
-  `runtime_native.c`/`runtime.c`). Current compiler source now registers a
-  Rust-side interpreter handler; retained binaries still need rebuilding
-  before `bin/simple run` and `bin/simple test` can use it.
+  `runtime_native.c`/`runtime.c`). Real runtime symbol, but this seed
+  binary's interpreter has no Rust-side handler for it: both `bin/simple
+  run` and `bin/simple test` fail with `unknown extern function:
+  rt_char_from_code`.
 
-### Verification
+### Historical verification (diagnostic only)
 
 Probe (`.chr()`-equivalent bare `char_from_code(code)` calls) across ASCII
 (65), Latin-1 (0xE9 é, 2 bytes), CJK (0x4E2D 中, 3 bytes), emoji (0x1F600
 😀, 4 bytes), and invalid inputs (0xD800 surrogate, 0x110000 out of range,
-0x100000041 far out of range) — all correct under `bin/simple run`
-(interpreted seed evaluator).
+0x100000041 far out of range) — all correct under the then-used interpreted
+seed evaluator. This result is retained as diagnostic history and is not a
+pure-Simple self-hosted PASS.
 
 Regression specs added/updated (also mirrored into the `test/unit/`
 duplicate tree, which had stale pre-fix assertions for the same source
@@ -114,13 +149,15 @@ purely-ASCII assertions in the same spec files, and the switch to a scalar
 wrong" and "SSpec can't run `char_from_code_inline` at all"). Filed as a
 follow-up rather than chased further per this fix's scope.
 
-## Summary
+## Historical summary
 
-`chr()` / `to_char()` cannot produce any non-ASCII character. The two implementations
-that back it are each independently wrong above U+007F, in *different* ways, so the
-Simple path and the baremetal path also disagree with each other.
+At filing time, `chr()` / `to_char()` could not produce any non-ASCII
+character. The two implementations then backing it were independently wrong
+above U+007F in different ways, so the Simple and baremetal paths disagreed.
+The source encoding fixes address that original defect; current closure still
+depends on admission of the reconciled native ABI described above.
 
-## Evidence (verified on `origin/main` @ dc2e9a675b2)
+## Historical evidence (verified on `origin/main` @ dc2e9a675b2)
 
 **1. Pure-Simple path — returns empty text.**
 Compiler codegen resolves a bare `char_from_code` call to the pure-Simple implementation
@@ -154,34 +191,37 @@ This sits directly under the shared-multilingual-GPU-font work. Main already car
 complex-script shapers (`src/lib/skia/feature/shaper/selected_arabic.spl`,
 `selected_complex.spl`, `font_fallback.spl`) whose codepoints cannot round-trip through
 `chr()`. Per `.claude/rules/board-runnable.md` the baremetal variant must also hold on real
-hardware, and today it renders multilingual text incorrectly there.
+hardware. At filing time it rendered multilingual text incorrectly there.
 
-## Suggested fix
+## Historical suggested fix
 
 Main **already has** a correct encoder — `src/lib/common/encoding/utf8.spl`:
 
     fn utf8_encode_one(codepoint: i64) -> [i64]        # :128
     fn utf8_codepoint_byte_len(codepoint: i64) -> i64  # :163
 
-Route `char_from_code_inline` through `utf8_encode_one` instead of the ASCII table, and
-replace the C mask with the equivalent UTF-8 encode (keeping main's existing
-`RuntimeValue` signature — do **not** adopt the codex branch's `int64_t` signature, which
-is caller-convention-incompatible with main).
+The original proposal was to route `char_from_code_inline` through
+`utf8_encode_one` instead of the ASCII table and replace the C mask with the
+equivalent UTF-8 encode. Those source-level encoding changes landed. Its
+warning against an `int64_t` signature described the ABI at that historical
+revision and is superseded by the reconciled raw-`i64` contract above.
 
-Return-on-invalid should be agreed once and applied to both paths: reject surrogates
-(U+D800..U+DFFF) and anything above U+10FFFF.
+The selected return-on-invalid policy rejects surrogates (U+D800..U+DFFF) and
+anything above U+10FFFF. Character-conversion providers return empty text for
+those inputs; they must not return NIL or silently truncate the scalar.
 
 ## Landmines for whoever fixes this
 
 - `text_dot_from_char_code` is defined in the **x86_64** boot stubs only — arm32, arm64 and
   riscv64 define it zero times. Adding it to those three TUs risks duplicate-symbol/link
   breakage on the OS boot path. Verify per-arch before touching them.
-- The codex branch's version of this function is **not** a usable drop-in: it takes a raw
-  `int64_t` where main takes a `RuntimeValue` + `DECODE_INT`, and it reroutes codegen away
-  from the pure-Simple implementation (violating the repo's Pure-Simple-First rule and
-  forcing every runtime profile to export a symbol main does not need).
-- A related latent bug in `src/compiler_rust/runtime/src/value/collections.rs`: that
-  crate's `text_dot_from_char_code` lacks a `0..=0x10FFFF` guard, so `code as u32`
-  truncates and `0x100000041` returns `'A'` instead of NIL. It is currently **dead code**
-  on main (codegen routes to the Simple side), so it is not urgent — but fix it in the same
-  pass if that function is ever brought back into service.
+- Do not restore the old `RuntimeValue` + `DECODE_INT` declaration at this
+  boundary. The reconciled ABI is exact raw `i64 -> i64` across pure-Simple,
+  core C, hosted Rust, Cranelift, LLVM declarations, and runtime registries.
+  A target-sized/tagged declaration can narrow the text handle and recreate
+  the native failure.
+- The hosted Rust provider must retain the pre-cast scalar-range check:
+  without it, `code as u32` makes `0x100000041` appear to be `'A'`. Invalid
+  scalars must produce an allocated empty text, and the legacy
+  `text_dot_from_char_code` export must delegate to `rt_char_from_code` rather
+  than becoming a second implementation.

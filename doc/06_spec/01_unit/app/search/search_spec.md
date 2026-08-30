@@ -1,6 +1,29 @@
-# Search Specification
+# Search Unit Tests
 
-> Tests covering Text Search, Pattern Search, Symbol Search, Search Results.
+> 1. check
+
+<!-- sdn-diagram:id=search_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=search_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+search_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=search_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,18 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Search Specification
+# Search Unit Tests
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #APP-SEARCH-001 |
+| Category | App \| Search |
+| Status | Implemented |
+| Source | `test/01_unit/app/search/search_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
 
@@ -17,22 +51,16 @@
 
 #### exact match
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- exact match
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("exact match")
 val text = "hello world"
 check(text.contains("hello"))
 ```
@@ -41,18 +69,16 @@ check(text.contains("hello"))
 
 #### case sensitive match
 
-- case sensitive match
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("case sensitive match")
 val text = "Hello"
 check(text != "hello")
 ```
@@ -61,18 +87,16 @@ check(text != "hello")
 
 #### case insensitive match
 
-- case insensitive match
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("case insensitive match")
 val text = "Hello"
 val lower = "hello"
 check(text.len() == lower.len())
@@ -82,18 +106,16 @@ check(text.len() == lower.len())
 
 #### no match returns empty
 
-- no match returns empty
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("no match returns empty")
 val text = "hello"
 check(not text.contains("xyz"))
 ```
@@ -102,18 +124,16 @@ check(not text.contains("xyz"))
 
 #### match at start
 
-- match at start
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("match at start")
 val text = "hello world"
 check(text.starts_with("hello"))
 ```
@@ -122,18 +142,16 @@ check(text.starts_with("hello"))
 
 #### match at end
 
-- match at end
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("match at end")
 val text = "hello world"
 check(text.ends_with("world"))
 ```
@@ -144,18 +162,16 @@ check(text.ends_with("world"))
 
 #### wildcard pattern
 
-- wildcard pattern
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("wildcard pattern")
 val pattern = "*.spl"
 check(pattern.contains("*"))
 ```
@@ -164,18 +180,16 @@ check(pattern.contains("*"))
 
 #### recursive pattern
 
-- recursive pattern
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recursive pattern")
 val pattern = "**/*.spl"
 check(pattern.contains("**"))
 ```
@@ -184,18 +198,16 @@ check(pattern.contains("**"))
 
 #### directory filter
 
-- directory filter
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("directory filter")
 val dir = "src/"
 check(dir.ends_with("/"))
 ```
@@ -204,18 +216,16 @@ check(dir.ends_with("/"))
 
 #### extension filter
 
-- extension filter
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extension filter")
 val ext = ".spl"
 check(ext.starts_with("."))
 ```
@@ -226,18 +236,16 @@ check(ext.starts_with("."))
 
 #### find function by name
 
-- find function by name
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("find function by name")
 val query = "fn main"
 check(query.starts_with("fn"))
 ```
@@ -246,18 +254,16 @@ check(query.starts_with("fn"))
 
 #### find class by name
 
-- find class by name
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("find class by name")
 val query = "class Point"
 check(query.starts_with("class"))
 ```
@@ -266,18 +272,16 @@ check(query.starts_with("class"))
 
 #### find trait by name
 
-- find trait by name
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("find trait by name")
 val query = "trait Display"
 check(query.starts_with("trait"))
 ```
@@ -286,18 +290,16 @@ check(query.starts_with("trait"))
 
 #### find enum by name
 
-- find enum by name
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("find enum by name")
 val query = "enum Color"
 check(query.starts_with("enum"))
 ```
@@ -308,18 +310,16 @@ check(query.starts_with("enum"))
 
 #### result has file path
 
-- result has file path
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("result has file path")
 val path = "src/main.spl"
 check(path.ends_with(".spl"))
 ```
@@ -328,18 +328,16 @@ check(path.ends_with(".spl"))
 
 #### result has line number
 
-- result has line number
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("result has line number")
 val line = 42
 check(line > 0)
 ```
@@ -348,18 +346,16 @@ check(line > 0)
 
 #### result has column number
 
-- result has column number
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("result has column number")
 val col = 10
 check(col > 0)
 ```
@@ -368,18 +364,16 @@ check(col > 0)
 
 #### result has context
 
-- result has context
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("result has context")
 val context = "fn main():"
 check(context.len() > 0)
 ```
@@ -388,42 +382,23 @@ check(context.len() > 0)
 
 #### results are sorted by relevance
 
-- results are sorted by relevance
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("results are sorted by relevance")
 val scores = [100, 80, 60, 40]
 check(scores[0] > scores[1])
 check(scores[1] > scores[2])
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/search/search_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Text Search, Pattern Search, Symbol Search, Search Results.
-- Text Search
-- Pattern Search
-- Symbol Search
-- Search Results
 
 ## Scenario Summary
 
@@ -437,51 +412,3 @@ Tests covering Text Search, Pattern Search, Symbol Search, Search Results.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1c9a29f2ddb16c6e900a978b9e3afb704d25eb2bcfefb53a223e09021cb43bfd`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1c9a29f2ddb16c6e900a978b9e3afb704d25eb2bcfefb53a223e09021cb43bfd`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1c9a29f2ddb16c6e900a978b9e3afb704d25eb2bcfefb53a223e09021cb43bfd`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/search/search_spec.spl
-mirror: doc/06_spec/01_unit/app/search/search_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/search/search_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/search/search_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/search/search_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exact match' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/search/search_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'case sensitive match' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/search/search_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'case insensitive match' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

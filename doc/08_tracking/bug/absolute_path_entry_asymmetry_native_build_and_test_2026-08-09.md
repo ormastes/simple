@@ -1,9 +1,6 @@
 # Absolute paths are mishandled in opposite directions by `native-build --entry` and `simple test` -- 2026-08-09
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
-## Status: OPEN (usability / fail-open). READ-DERIVED filing -- neither half was re-executed for this doc.
+## Status: PARTIALLY FIXED (Half 1 implemented 2026-08-16; admitted Stage 2/4 verification pending). Half 2 remains OPEN / fail-open.
 
 Two CLI entry points disagree about absolute paths, and they fail in *opposite*
 ways. Anyone who hits one will eventually hit the other, so both halves are
@@ -21,12 +18,46 @@ the repo root works.** Observed today; it cost a fence iteration before the
 absolute path was recognised as the variable.
 
 Failure mode: LOUD and misleading. The message asserts the source does not
-exist, when the real condition is that the entry resolver does not accept an
-already-absolute path (it appears to join the argument onto a base directory
-unconditionally). The diagnostic names the wrong cause, which is what makes it
-expensive.
+exist, but the retained Phase-2 evidence identified a narrower cause: the
+single-file collector applied recursive/bulk exclusions to the full spelling.
+`test/foo.spl` does not contain `/test/`, while
+`/workspace/test/foo.spl` does, so only the absolute spelling was discarded.
 
 **Workaround:** pass `--entry` as a path relative to the invocation root.
+
+### 2026-08-16 containment
+
+`_driver_collect_sources` now exempts only the direct `.spl` source whose
+physical identity exactly matches `SIMPLE_NATIVE_BUILD_ENTRY`. Directory-walk
+prefilters and unrelated explicit paths retain the existing exclusions. A
+focused unit regression uses the retained failing fixture
+`test/fixtures/compiler/type_multiline_signature_valid.spl`, proves its
+absolute spelling remains filtered with both an empty and a nonmatching entry,
+and proves only the exact requested absolute spelling is collected.
+
+Latest retained failure evidence:
+
+- compiler authority: admitted pure-Simple Phase 2,
+  SHA-256 `530779a2240d35bfe7ce8834dfdb203b0f30651113a5708f91f853c3a94d654c`;
+- rejected existing entry:
+  `/mnt/data/worktrees/stage4-debug-frozen/test/fixtures/compiler/type_multiline_signature_valid.spl`;
+- log:
+  `build/native_probe/phase2-compiler-tools-matrix-20260816/compiler-smf-probe.log`.
+
+This is implementation evidence only until a newly produced pure-Simple
+compiler passes the focused native-build probe. Rust-seed/interpreter unit
+evidence is diagnostic and cannot admit Stage 4.
+
+Diagnostic verification on 2026-08-16:
+
+- the exact admitted Stage-2 bootstrap capsule could not run the spec because
+  that capsule intentionally exposes no `test` command (`unknown command`), so
+  this was an infrastructure result and measured no criterion;
+- installed pure-Simple CLI SHA-256
+  `877dace60ce8eb11b656670b701019af5b4a0fb51b861832492bb5779237118b`
+  ran the focused interpreter spec: 6 declared, 6 executed, 6 passed;
+- evidence:
+  `build/native_probe/phase2-absolute-entry-fix-20260816/focused-spec-bin-simple.log`.
 
 ## Half 2 -- `simple test <ABSOLUTE path>` runs nothing and exits 0 (silent, worse)
 

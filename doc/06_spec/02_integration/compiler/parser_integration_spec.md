@@ -31,8 +31,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("parses simple function")
 val code = "fn add(x, y): x + y"
 check(code.contains("fn"))
 ```
@@ -47,7 +45,7 @@ check(code.contains("fn"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -699,8 +697,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("parses simple import")
 val code = "use std.spec"
 check(code.contains("use"))
 ```
@@ -715,7 +711,7 @@ check(code.contains("use"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -803,8 +799,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("handles comparison precedence")
 val code = "x + 1 < y * 2"
 check(code.contains("<"))
 ```
@@ -819,7 +813,7 @@ check(code.contains("<"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -983,31 +977,6 @@ check(code.contains("class"))
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/02_integration/compiler/parser_integration_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Parser Function Parsing Integration, Parser Class Parsing Integration, Parser Expression Parsing Integration, Parser Statement Parsing Integration, Parser Control Flow Integration, Parser Pattern Matching Integration, Parser Type Annotation Integration, Parser Import Parsing Integration, Parser Operator Precedence Integration, Parser Error Recovery Integration, Parser Performance Integration.
-- Parser Function Parsing Integration
-- Parser Class Parsing Integration
-- Parser Expression Parsing Integration
-- Parser Statement Parsing Integration
-- Parser Control Flow Integration
-- Parser Pattern Matching Integration
-- Parser Type Annotation Integration
-- Parser Import Parsing Integration
-- Parser Operator Precedence Integration
-- Parser Error Recovery Integration
-- Parser Performance Integration
 
 ## Scenario Summary
 

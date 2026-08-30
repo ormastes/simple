@@ -122,3 +122,21 @@ gcov arc as the coverage outcome and uses line-local pair ordinals only as a
 stable wire encoding for the existing two-outcome receipt structure. It does
 not claim MC/DC or reconstruct C boolean expressions. The four promotion-
 critical SIMD predicates retain their explicit runtime decision IDs.
+
+## 2026-08-08 independent-oracle reproducibility refresh
+
+NIST continues to identify FIPS 203 as the normative ML-KEM definition and
+still records the 2025-11-17 planned errata update. This confirms that the
+implementation/profile version must remain part of every fixture, artifact,
+cache, and receipt identity rather than treating `ML-KEM-768` as sufficient by
+itself. Source: [NIST FIPS 203](https://csrc.nist.gov/pubs/fips/203/final).
+
+For a free/open differential oracle, current CIRCL documents FIPS-203 ML-KEM
+512/768/1024 and its maintained v1.6.3 release, while mlkem-native remains a
+portable C90 FIPS-203 implementation with a separate optimized backend. The
+repository must keep both outside the runtime trust boundary: a pinned,
+offline Go+CIRCL comparator should consume the same Set A/B/C bytes and emit
+only digests/equality plus toolchain and module hashes. It must fail explicitly
+when its pinned module cache or toolchain is unavailable; historical logs alone
+are not rerunnable independent evidence. Sources: [CIRCL](https://github.com/cloudflare/circl),
+[mlkem-native](https://github.com/pq-code-package/mlkem-native).

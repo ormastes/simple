@@ -6,7 +6,7 @@
 # - Validation: validate_spec
 # - Test Structure: extract_quoted_name, extract_inline_docstring, extract_test_structure
 
-use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists, spec_kw_line}
+use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists}
 use std.math_repr.{to_text, render_latex_raw}
 
 # ============================================================================
@@ -21,7 +21,7 @@ fn parse_id_attr(line: text) -> text:
 
     # Extract content between quotes
     val after_prefix = trimmed[5:]  # Remove "#[id("
-    val without_suffix = if after_prefix.ends_with(")]"): after_prefix[:-2] else: after_prefix
+    val without_suffix = after_prefix.trim_end_matches(")]")
     val inner = without_suffix.trim()
 
     if inner.starts_with("\"") and inner.ends_with("\"") and inner.len() >= 2:
@@ -89,32 +89,24 @@ fn parse_spipe_file(path: text) -> Result<SspecDoc, text>:
             if id != "":
                 feature_ids.push(id)
 
-        # Check for top-level doc block start, including modern """# Title form.
-        if trimmed == "\"\"\"" or line.starts_with("\"\"\""):
+        # Check for doc block start (standalone """ on its own line)
+        if trimmed == "\"\"\"":
             val start_line = i
+            i = i + 1
 
             var block_lines: [text] = []
             var found_end = false
-            if trimmed != "\"\"\"":
-                val opening_content = line[3:]
-                if opening_content.ends_with("\"\"\""):
-                    block_lines.push(opening_content[:-3])
-                    found_end = true
-                else:
-                    block_lines.push(opening_content)
 
             # Collect lines until closing """
-            if not found_end:
+            while i < lines.len():
+                val block_line = lines[i]
+
+                if block_line.trim() == "\"\"\"":
+                    found_end = true
+                    break
+
+                block_lines.push(block_line)
                 i = i + 1
-                while i < lines.len():
-                    val block_line = lines[i]
-
-                    if block_line.trim() == "\"\"\"":
-                        found_end = true
-                        break
-
-                    block_lines.push(block_line)
-                    i = i + 1
 
             val block_content = block_lines.join("\n") + "\n"
 
@@ -369,23 +361,13 @@ fn validate_spec(doc: SspecDoc) -> ValidationResult:
     var scenario_count = 0
     for line in doc.raw_content.split("\n"):
         val trimmed = line.trim()
-        # Single source of truth for what a scenario line looks like — the
-        # legacy bare form `it "name":` AND the modern call form `it("name"):`.
-        # Counting only the legacy one made every modern SSpec render as
-        # having zero scenarios.
-        if is_scenario_line(trimmed):
+        if trimmed.starts_with("it \""):
             scenario_count = scenario_count + 1
     val docs_present = doc.doc_blocks.len() > 0 or scenario_count > 0
 
     var doc_lines = 0
     for block in doc.doc_blocks:
-        # Preserve split semantics (even empty content is one line) without
-        # allocating a temporary line array for every documentation block.
-        var block_line_count = 1
-        for ch in block.content:
-            if ch == "\n":
-                block_line_count = block_line_count + 1
-        doc_lines = doc_lines + block_line_count
+        doc_lines = doc_lines + block.content.split("\n").len()
     if doc_lines == 0 and scenario_count > 0:
         # Auto manuals include scenario summaries plus folded executable SSpec.
         doc_lines = scenario_count * 10
@@ -995,12 +977,9 @@ fn scenario_prev_title(lines: [text], scenario_index: i64) -> text:
 fn is_scenario_line(trimmed: text) -> bool:
     if not trimmed.contains("\""):
         return false
-    # Both spellings are live: the legacy bare form (`it "name":`) and the
-    # modern call form (`it("name"):`). Recognising only the bare form made
-    # every modern SSpec look like it declared zero scenarios.
-    spec_kw_line(trimmed, "it") or spec_kw_line(trimmed, "slow_it") or
-        spec_kw_line(trimmed, "pending") or spec_kw_line(trimmed, "skip_it") or
-        spec_kw_line(trimmed, "skip it")
+    trimmed.starts_with("it ") or trimmed.starts_with("slow_it ") or
+        trimmed.starts_with("pending ") or trimmed.starts_with("skip_it ") or
+        trimmed.starts_with("skip it ")
 
 fn scenario_title_at(lines: [text], scenario_index: i64) -> text:
     if scenario_index < 0 or scenario_index >= lines.len():
@@ -1305,14 +1284,6 @@ fn step_helper_label_from_source(trimmed: text) -> text:
     if not trimmed.starts_with("step("):
         return ""
     if trimmed.contains("\""):
-        # Span the FIRST to the LAST quote rather than taking the first quoted
-        # segment: a label carrying an escaped quote (step("session \"main\""))
-        # splits into several segments, and a first-segment reader truncated it
-        # at the backslash — manuals showed `- Create session \`.
-        val open_at = trimmed.find("\"")
-        val close_at = trimmed.rfind("\"")
-        if close_at > open_at:
-            return trimmed[open_at + 1:close_at].replace("\\\"", "\"")
         return extract_quoted_name(trimmed)
     ""
 
@@ -1469,11 +1440,7 @@ fn manual_expected_value_label(value: text) -> text:
         label = label[0:77] + "... (full value in folded executable source)"
     label
 
-fn assertion_expected_summary(raw_trimmed: text) -> text:
-    # Strip the same-line oracle marker first: without this the rendered
-    # expected value swallowed the comment, e.g.
-    #   Expected: s.session_index equals `0)  # oracle: index 0 is the first ...`
-    val trimmed = without_trailing_oracle_comment(raw_trimmed)
+fn assertion_expected_summary(trimmed: text) -> text:
     if not trimmed.starts_with("expect("):
         return ""
     var expected_true = false
@@ -1646,23 +1613,12 @@ fn render_rendered_scenario_toggle(lines: [text]) -> text:
         i = i + 1
     "<details>\n<summary>Rendered scenario source</summary>\n\n" + quoted.join("\n") + "\n\n</details>\n\n"
 
-fn custom_block_opener_at(line: text, index: i32, opener: text) -> bool:
-    if index + opener.len() > line.len():
-        return false
-    if line[index:index + opener.len()] != opener:
-        return false
-    if index == 0:
-        return true
-    not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(
-        line[index - 1:index]
-    )
-
 fn extract_custom_block_exprs(line: text, block_name: text) -> [text]:
     var exprs: [text] = []
     var i = 0
     val opener = block_name + "{"
     while i + 1 < line.len():
-        if custom_block_opener_at(line, i, opener):
+        if i + opener.len() <= line.len() and line[i:i + opener.len()] == opener:
             var depth = 1
             var j = i + opener.len()
             var expr_parts: [text] = []
@@ -1709,7 +1665,7 @@ fn render_line_with_custom_blocks(line: text) -> text:
     var i = 0
     val opener = "m{"
     while i < line.len():
-        if custom_block_opener_at(line, i, opener):
+        if i + opener.len() <= line.len() and line[i:i + opener.len()] == opener:
             var depth = 1
             var j = i + opener.len()
             var expr_parts: [text] = []
@@ -1769,97 +1725,6 @@ fn collect_scenario_body(lines: [text], start: i64, end_index: i64) -> [text]:
         k = k + 1
     body
 
-fn pending_call_parenthesis_delta(line: text) -> i32:
-    var delta = 0
-    var in_string = false
-    var escaped = false
-    var index = 0
-    while index < line.len():
-        val ch = line[index:index + 1]
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                in_string = false
-        elif ch == "\"":
-            in_string = true
-        elif ch == "(":
-            delta = delta + 1
-        elif ch == ")":
-            delta = delta - 1
-        index = index + 1
-    delta
-
-fn literal_pending_call(call: text) -> bool:
-    if not call.starts_with("pending(\""):
-        return false
-    if not call.ends_with("\")"):
-        return false
-    val reason = call.slice(9, call.len() - 2)
-    reason != "" and not reason.contains("\"")
-
-fn scenario_body_is_unconditional_pending(body: [text]) -> bool:
-    val source = strip_leading_docstring(body)
-    var statement_indent = -1
-    for raw_line in source:
-        val line = raw_line.trim()
-        if line == "" or line.starts_with("#"):
-            continue
-        val indent = count_leading_indent(raw_line)
-        if statement_indent < 0 or indent < statement_indent:
-            statement_indent = indent
-    if statement_indent < 0:
-        return false
-
-    var index = 0
-    while index < source.len():
-        val line = source[index].trim()
-        if (
-            line.starts_with("pending(") and
-            count_leading_indent(source[index]) == statement_indent
-        ):
-            var call = ""
-            var depth = 0
-            var call_end = index
-            while call_end < source.len():
-                val part = source[call_end].trim()
-                call = call + part
-                depth = depth + pending_call_parenthesis_delta(part)
-                if depth == 0:
-                    break
-                if depth < 0:
-                    return false
-                call_end = call_end + 1
-            if depth != 0 or not literal_pending_call(call):
-                index = index + 1
-                continue
-            var next = call_end + 1
-            while next < source.len():
-                val next_line = source[next].trim()
-                if next_line == "" or next_line.starts_with("#"):
-                    next = next + 1
-                    continue
-                if (
-                    count_leading_indent(source[next]) == statement_indent and
-                    next_line == "return"
-                ):
-                    return true
-                break
-        index = index + 1
-    false
-
-fn scenario_at_is_unconditional_pending(
-    lines: [text], scenario_index: i64
-) -> bool:
-    val end_index = find_scenario_body_end(
-        lines, scenario_index + 1, count_leading_indent(lines[scenario_index])
-    )
-    scenario_body_is_unconditional_pending(
-        collect_scenario_body(lines, scenario_index + 1, end_index)
-    )
-
 fn extract_test_structure_with_default(content: text, default_visibility: text) -> text:
     val lines = content.split("\n")
     val file_visibility = file_manual_visibility(lines)
@@ -1892,7 +1757,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             continue
 
         # describe block -> H3
-        if spec_kw_line(trimmed, "describe"):
+        if trimmed.starts_with("describe ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             result_parts.push("### {name}\n")
 
@@ -1927,7 +1792,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             result_parts.push("\n")
 
         # skip it / skip_it -> skipped scenario
-        elif (spec_kw_line(trimmed, "skip it") or spec_kw_line(trimmed, "skip_it")):
+        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1941,7 +1806,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             i = next_index - 1
 
         # pending -> pending bullet
-        elif spec_kw_line(trimmed, "pending"):
+        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1955,7 +1820,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             i = next_index - 1
 
         # slow it -> slow bullet
-        elif spec_kw_line(trimmed, "slow_it"):
+        elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1964,15 +1829,11 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "folded"))
             val capture = scenario_capture_policy(lines, i)
-            val suffix = if scenario_body_is_unconditional_pending(body):
-                " _(slow, pending)_"
-            else:
-                " _(slow)_"
-            result_parts.push(render_manual_scenario(name, suffix, final_body, visibility, capture))
+            result_parts.push(render_manual_scenario(name, " _(slow)_", final_body, visibility, capture))
             i = next_index - 1
 
         # regular it -> check bullet
-        elif spec_kw_line(trimmed, "it"):
+        elif trimmed.starts_with("it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1982,13 +1843,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            val suffix = if scenario_body_is_unconditional_pending(body):
-                " _(pending)_"
-            else:
-                ""
-            result_parts.push(render_manual_scenario(
-                name, suffix, final_body, visibility, capture
-            ))
+            result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture))
             i = next_index - 1
 
         i = i + 1

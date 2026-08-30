@@ -1,7 +1,6 @@
 # @tag: system, gpu, simpleos, processing-ir, cpu-fallback, source-contract
 
 use std.spec.{describe, it, expect}
-use std.io_runtime.{file_exists, file_read}
 use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_STATUS_FAIL,
     SIMPLEOS_HOST_GPU_STATUS_FALLBACK,
@@ -15,13 +14,10 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_fallback_receipt_valid
 }
 use app.simpleos_gpu_host.daemon_runner.{simpleos_gpu_processing_min_offload_elements}
-
-val HOST = "src/app/simpleos_gpu_host/daemon_runner.spl"
-val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
-val GUEST_BRIDGE = "src/os/lib/gpu_bridge/host_gpu_ivshmem.spl"
-val QEMU_WRAPPER = "scripts/check/check-simpleos-qemu-host-gpu-2d.shs"
-val RAW = "src/lib/nogc_sync_mut/ptr/raw.spl"
-val RAW_RUNTIME = "src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs"
+use std.common.processing.processing_ir.{
+    processing_ir_fill_u32, processing_ir_fill_rect_u32,
+    processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal
+}
 
 fn fallback_receipt(status: i64, reason: i64, handle: i64, identity: i64, source: i64, run_id_hash: i64, frame_id: i64) -> HostGpuIvshmemReceipt:
     HostGpuIvshmemReceipt(
@@ -157,12 +153,12 @@ describe "SimpleOS processing CPU fallback policy contract":
         expect(source).to_contain("export host_gpu_ivshmem_device_receipt_valid, host_gpu_ivshmem_fallback_receipt_valid")
 
         val good = fallback_receipt(SIMPLEOS_HOST_GPU_STATUS_FALLBACK, SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, 0, 0, SIMPLEOS_HOST_GPU_READBACK_CPU, 31, 5)
-        expect(host_gpu_ivshmem_fallback_receipt_valid(good, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(true)
+        expect(host_gpu_ivshmem_fallback_receipt_valid(good, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(true)  # oracle: honest CPU fallback receipt accepted
         val wrong_status = fallback_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, 0, 0, SIMPLEOS_HOST_GPU_READBACK_CPU, 31, 5)
-        expect(host_gpu_ivshmem_fallback_receipt_valid(wrong_status, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)
+        expect(host_gpu_ivshmem_fallback_receipt_valid(wrong_status, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)  # oracle: non-fallback status rejected
         val native_handle = fallback_receipt(SIMPLEOS_HOST_GPU_STATUS_FALLBACK, SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, 41, 0, SIMPLEOS_HOST_GPU_READBACK_CPU, 31, 5)
-        expect(host_gpu_ivshmem_fallback_receipt_valid(native_handle, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)
+        expect(host_gpu_ivshmem_fallback_receipt_valid(native_handle, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)  # oracle: forged native provenance rejected
         val wrong_source = fallback_receipt(SIMPLEOS_HOST_GPU_STATUS_FALLBACK, SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, 0, 0, 1, 31, 5)
-        expect(host_gpu_ivshmem_fallback_receipt_valid(wrong_source, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)
+        expect(host_gpu_ivshmem_fallback_receipt_valid(wrong_source, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)  # oracle: non-CPU readback source rejected
         val wrong_correlation = fallback_receipt(SIMPLEOS_HOST_GPU_STATUS_FALLBACK, SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, 0, 0, SIMPLEOS_HOST_GPU_READBACK_CPU, 0, 5)
-        expect(host_gpu_ivshmem_fallback_receipt_valid(wrong_correlation, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)
+        expect(host_gpu_ivshmem_fallback_receipt_valid(wrong_correlation, 7, 31, 5, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 64)).to_equal(false)  # oracle: run-id correlation mismatch rejected

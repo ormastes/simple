@@ -1,13 +1,13 @@
-# host_library_capability_adapter_spec
+# SOSIX Host Library Capability Adapter
 
 > REQ-SQ-014 library capability consumer contract.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+The host owner is injected as a callback and is invoked only for a canonical
+accepted plan. Invalid capabilities, blank identities, and forged public plan
+values fail closed before callback dispatch.
 
-<details>
-<summary>Full Scenario Manual</summary>
+Executable source:
+`test/01_unit/os/sosix/host_library_capability_adapter_spec.spl`
 
 # host_library_capability_adapter_spec
 

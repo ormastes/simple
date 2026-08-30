@@ -1,6 +1,29 @@
 # Verify Test Quality Gate Specification
 
-> Tests covering anti-dummy / anti-stub verify gate.
+> 1. "        expect
+
+<!-- sdn-diagram:id=verify_test_quality_gate_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=verify_test_quality_gate_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+verify_test_quality_gate_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=verify_test_quality_gate_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,17 @@
 
 #### fails on tautological test assertions
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- fails on tautological test assertions
+1. "        expect
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on tautological test assertions")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "bad_spec.spl",
     "describe \"x\":\n" +
@@ -47,19 +64,13 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on placeholder pass helper in tests
 
-- fails on placeholder pass helper in tests
-   - Expected: report.status equals `FAIL`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on placeholder pass helper in tests")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "pass_spec.spl",
     "describe \"x\":\n" +
@@ -73,19 +84,13 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on print based skip placeholders in tests
 
-- fails on print based skip placeholders in tests
-   - Expected: report.status equals `FAIL`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on print based skip placeholders in tests")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "print_skip_spec.spl",
     "describe \"x\":\n" +
@@ -100,19 +105,17 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on examples with no real assertion
 
-- fails on examples with no real assertion
+1. "        run check
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on examples with no real assertion")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "empty_example_spec.spl",
     "describe \"x\":\n" +
@@ -126,19 +129,17 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on boolean-wrapper assertions in tests
 
-- fails on boolean-wrapper assertions in tests
+1. "        expect
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on boolean-wrapper assertions in tests")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "wrapped_bool_spec.spl",
     "describe \"x\":\n" +
@@ -152,24 +153,22 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on negative boolean-wrapper assertions in tests
 
-- fails on negative boolean-wrapper assertions in tests
+1. "        expect
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on negative boolean-wrapper assertions in tests")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "wrapped_false_bool_spec.spl",
     "describe \"x\":\n" +
     "    it \"y\":\n" +
-    "        expect(code).to_not_equal(0)\n")
+    "        expect(code == 0).to_equal(false)\n")
 val report = build_test_quality_verify_report("fixture", [path], false)
 expect(report.status).to_equal("FAIL")
 ```
@@ -178,19 +177,17 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on obvious stub implementations in source
 
-- fails on obvious stub implementations in source
+1. "fn answer
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on obvious stub implementations in source")
 val path = write_fixture(TEST_QUALITY_SOURCE_FIXTURES,
     "stub_impl.spl",
     "fn answer(x: i64) -> i64:\n" +
@@ -203,19 +200,19 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on explicit production placeholders in source
 
-- fails on explicit production placeholders in source
+1. "fn answer
+
+2. "    pass todo
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on explicit production placeholders in source")
 val path = write_fixture(TEST_QUALITY_SOURCE_FIXTURES,
     "placeholder_impl.spl",
     "fn answer(x: i64) -> i64:\n" +
@@ -228,19 +225,17 @@ expect(report.status).to_equal("FAIL")
 
 #### fails on local suppression of placeholder quality lints
 
-- fails on local suppression of placeholder quality lints
+1. "        expect
    - Expected: report.status equals `FAIL`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("fails on local suppression of placeholder quality lints")
 val suppression = "@" + "allow(spipe_placeholder_tests)\n"
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "suppressed_spec.spl",
@@ -256,19 +251,17 @@ expect(report.status).to_equal("FAIL")
 
 #### warns on registered visible debt markers
 
-- warns on registered visible debt markers
+1. "        expect
    - Expected: report.status equals `WARN`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("warns on registered visible debt markers")
 val path = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "registered_debt_spec.spl",
     "# TODO: [test][P2] registered fixture debt\n" +
@@ -294,19 +287,19 @@ expect(rendered).to_contain("registered visible debt marker")
 
 #### passes on clean test and source fixtures
 
-- passes on clean test and source fixtures
+1. "        expect
+
+2. "fn identity
    - Expected: report.status equals `PASS`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("passes on clean test and source fixtures")
 val good_test = write_fixture(TEST_QUALITY_TEST_FIXTURES,
     "good_spec.spl",
     "describe \"x\":\n" +
@@ -325,19 +318,17 @@ expect(render_test_quality_verify_report(report)).to_contain("STATUS: PASS")
 
 #### warns on Pure Simple dummy accessor lints in verify quality
 
-- warns on Pure Simple dummy accessor lints in verify quality
+1. "    fn get value
    - Expected: report.status equals `WARN`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("warns on Pure Simple dummy accessor lints in verify quality")
 val path = write_fixture(TEST_QUALITY_SOURCE_FIXTURES,
     "dummy_accessor.spl",
     "class Meter:\n" +
@@ -359,12 +350,12 @@ expect(rendered).to_contain("ACC001")
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/verify_test_quality_gate_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering anti-dummy / anti-stub verify gate.
+Tests covering:
 - anti-dummy / anti-stub verify gate
 
 ## Scenario Summary
@@ -379,51 +370,3 @@ Tests covering anti-dummy / anti-stub verify gate.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b32b53de0fea20229c4861554743a98371b2f00a9662925f2a89030f47654c3f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b32b53de0fea20229c4861554743a98371b2f00a9662925f2a89030f47654c3f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b32b53de0fea20229c4861554743a98371b2f00a9662925f2a89030f47654c3f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/app/verify_test_quality_gate_spec.spl
-mirror: doc/06_spec/02_integration/app/verify_test_quality_gate_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/verify_test_quality_gate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/verify_test_quality_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/app/verify_test_quality_gate_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails on tautological test assertions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/verify_test_quality_gate_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails on placeholder pass helper in tests' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/verify_test_quality_gate_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails on print based skip placeholders in tests' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

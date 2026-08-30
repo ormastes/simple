@@ -98,19 +98,6 @@ before durable read, write, and ordered flush submission.
 
 Kernel targets and SimpleOS userland triples are separate catalog fields. Canonical userland targets are selected once; every builder, manifest, sysroot path, and receipt derives from the catalog. RISC-V feature/ABI spelling is frozen before implementation and must match actual hardware/toolchain support.
 
-The filesystem-resident toolchain admission vocabulary covers exactly the six
-canonical userland triples: x86_64/i686, AArch64/ARMv7, and RV64GC/RV32IMAC.
-Admission maps those triples to the matching kernel `Architecture` value, but
-does not promote structural candidates to runtime PASS. The 32-bit bootstrap
-guest tuple uses the same `*-unknown-simpleos` identity and catalog-selected
-QEMU binary as its target profile; bare-metal `*-unknown-none*` spellings are
-not interchangeable with userland artifact identity.
-Scheduler terminal evidence retains the loader-authenticated manifest target
-OS, architecture, and ABI from each adopted executable image. The LLVM hello
-authority requires all three compiler/linker/output-image observations to match
-the requested canonical triple, preventing a six-target whitelist from
-relabeling evidence produced by a different architecture.
-
 ### Role construction
 
 Per-target isolated workspaces produce separate compiler, interpreter, loader, and dispatcher artifacts. Aliases may share bytes only through explicit manifest `alias_of`. A pure-Simple admitted compiler receipt is required; Rust seed or unsupported Stage 2/3 commands fail closed.
@@ -122,9 +109,6 @@ Build/install guest-native `clang`, `clang++`, `ld.lld`, selected LLVM tools, he
 ### Tool inventory
 
 Generate one manifest from declared tool descriptors, never a source scan at runtime. A supported tool record includes implementation owner, artifact digest, capabilities, targets, filesystems, representative command, expected output/exit, error command, and evidence IDs. Partial/unavailable/blocked records are visible and cannot launch as supported.
-The full profile requires all six canonical target bindings. Manifest rows may
-remain blocked while payload or execution evidence is absent; expanding target
-identity never fabricates an artifact digest or evidence receipt.
 
 ## Server design
 
@@ -136,13 +120,6 @@ Production owners are explicit:
 - SSHD: `src/os/apps/sshd/`.
 
 `src/lib/nogc_sync_mut/http_server/` supplies hardened policy and becomes a compatibility adapter to the async production owner. During the freestanding DBFS migration, `src/os/apps/dbd/dbd.spl::DbdServer` is the single temporary owner of its listener FD, `ServerLifecycleV1`, engine, and bounded WAL state; one `DbdLiveClientSessionV1` owns each accepted connection's TLS fixed-ring stream, `DbdMutableAuthRequestOwnerV1`, session budgets, and `DbdAuthenticatedRespIngressV1`. The production hot path and focused tests mutate that live owner directly; no by-value DBD TLS ingest wrapper is exported. Auth ingress accepts only bounded RESP `AUTH principal credential` array framing after TLS authentication, keeps the credential in mutable byte storage, performs digest-only identity admission through its owned `DbdAuthSession`, and wipes auth storage on all exits. The authenticated command owner keeps incomplete RESP in a fixed mutable byte ring, advances its framing state once per byte, classifies repeated AUTH before conversion, and copies only a complete non-credential frame once into the canonical text parser. Taking or closing wipes owned ring bytes. Rejection is encrypted and consumes the existing four-attempt lockout budget. Durable mutations use bounded `ChecksummedBase64V1` journal records: canonical base64 preserves empty, whitespace, control-bearing, Unicode RESP values without line injection, and SHA-256 binds the exact encoded argument sequence before replay applies any command. Production replay admits J1 records only; unsigned pre-J1 scalar records fail closed. A future legacy importer must be an offline, one-shot migration owner that rewrites and verifies the complete journal before production replay. It cannot become Ready while DBFS, a boot mutable-credential source, and certificate/private-key/typed-entropy TLS owners are unavailable. The final migration moves this state behind the canonical DB service facade before `src/os/apps/dbd/` becomes a stateless adapter; the two owners must never be live concurrently.
-
-Mutation admission follows the canonical Redis engine rather than the narrower
-journal encoder. `SET`, `DEL`, `INCR`, `EXPIRE`, and `FLUSHALL` are all treated
-as mutations. Only `SET` and single-key `DEL` currently have exact J1 restart
-semantics; the other three fail before dispatch with `durable command
-unsupported`, preventing an acknowledged memory-only state change. Their
-time/order/destructive replay semantics must be designed before admission.
 
 ### Lifecycle
 
@@ -166,30 +143,6 @@ Generated/authenticated host keys and configured credential providers replace ha
 
 ## WM design
 
-Input delivery is a parent-authoritative commit. The adapter submits a copied
-`WmInputEvent` plus lifecycle generation and monotonic sequence. `WmService`
-checks generation, nonzero/owned target, equality with the canonical focused
-window, sequence freshness, committed-text size, and bounded queue capacity in
-that order. Only then does it advance `last_input_sequence` and reserve one
-queue slot. This ordering makes retry after a stale focus target deterministic.
-`send_input_to_owner` is the production wrapper around this reservation; it
-always releases the slot after synchronous IPC, while a send failure consumes
-the sequence as an anti-replay fence and records `input-delivery-failed`.
-
-Focus changes reorder the fixed-capacity bottom-to-top stack and damage both
-old and new window regions. Owner death removes the window, exposes its damaged
-region, and focuses the surviving stack top. Restart advances the lifecycle
-generation and clears focus, damage, queues, input sequence, presentation
-receipt, ECS windows, and owner registries. Host/manual evidence labels its
-domain; unavailable live guest, architecture, or physical rows remain BLOCKED.
-
-The shell configures damage bounds from the compositor framebuffer once.
-Admission first rejects malformed/stale candidates, then clips each rectangle,
-coalesces touching/overlapping regions transitively, and commits only if the
-normalized result remains within 64 regions. Restart preflights generation
-exhaustion and destroys the old IPC port before changing canonical state;
-either teardown fails with the old owner intact or the reset commits fully.
-
 `WmService` owns window identity/owner, geometry, focus/z-order, input dispatch, lifecycle generation, and restart. Raw input adapters submit bounded typed events. Accepted actions mutate once and publish an immutable revisioned scene. Renderer consumes a frozen scene, returns a generation/revision/frame receipt, and presentation succeeds only after scanout/readback correlation.
 
 Create/focus/move/resize/redraw/close and owner-death cleanup are real service transitions. Pointer capture and keyboard focus are separate. Restart closes old ingress/resources, increments generation, rebuilds state, and requires a new first-frame receipt. Host seams and stores are adapters/projections only.
@@ -202,7 +155,7 @@ Environment is an exact enum: `QemuSystem`, `NativeHost`, or `PhysicalBoard`. Ph
 
 The primary-tool manifest is declaration-only and closed over seven categories. Administration, archive/compression, networking, and package management are `Unavailable`. Checksums (`/usr/bin/sha256sum`, `/usr/bin/md5sum`), text processing (`/usr/bin/grep`), and process monitoring (`/usr/bin/ps`) are `Blocked`: their real pure-Simple/VFS implementations and canonical launcher gates exist, while target bytes, digests, loader tokens, and admitted FAT32/DBFS/NVFS execution receipts do not. One shared launcher result contract carries the canonical path plus empty digest/receipt and explicit absent loader-authority state; this copied diagnostic record is never authority. Direct, alias, background, pipeline, `which`, and PATH paths must resolve through those gates. Promotion still requires an artifact digest, exact three-target and three-filesystem bindings, representative operation/error evidence, evidence-owner admission, and consumption of the live loader-owned token.
 
-Performance receipts contain warmup, at least ten raw timing samples paired with raw RSS samples, p50/p95/p99/max, a recomputed maximum RSS, exact centered CV evidence, CPU/frequency/noise metadata, and applicability. Their bounded verified artifact set contains the distinct fixture, configuration, binary, image, and baseline identities. A read-only projection reports performance applicability and contract admission for dashboards, but carries no cryptographic or ledger authority and fails closed when runtime inputs are absent. The ledger rejects a native budget claim from TCG or a comparable claim with CV >5%.
+Performance receipts contain warmup, at least ten raw timing samples paired with raw RSS samples, p50/p95/p99/max, a recomputed maximum RSS, exact centered CV evidence, CPU/frequency/noise metadata, and applicability. Their bounded verified artifact set contains the distinct fixture, configuration, binary, image, and baseline identities. The ledger rejects a native budget claim from TCG or a comparable claim with CV >5%.
 
 Counters:
 
@@ -249,30 +202,3 @@ Backend dispatch is extracted into `mount_driver_dispatch.spl`, leaving
 `mount_table.spl` at 736 lines. `dbfs_driver.spl` remains above the 800-line
 maintainability limit; splitting its durability/replay owners is still a
 release blocker rather than a license to expand it further.
-
-## Wave 4 bounded-owner and evidence addendum (2026-08-21)
-
-The FAT facade delegates cohesive operations to `_Fat32Filesystem` modules, but
-the boot owner retains and publishes one mounted value. NVMe boot state and
-leases feed dedicated DMA and positioned-I/O owners; VFS performs bounded
-backend-neutral dispatch and mutation. These splits reduce file size and copy
-hazards without creating another mount namespace.
-
-Every x86_64/AArch64/RV64 server entry follows:
-
-```text
-authenticated media parse -> execute-open binding -> ISA task adoption
--> scheduler wait/collect -> bounded exit/server receipt
-```
-
-No path-only compatibility call may bypass that chain. RV64 loads program
-ranges directly from FAT with bounded traversal, allocation checkpoint rollback,
-aggregate-size and W^X rejection. The retained legacy symbol is a fail-closed
-compatibility surface, not an executor.
-
-Target build scripts select the common `simpleos_tool` closure and validate the
-admitted builder plus target ELF. LLVM provisioning additionally validates
-static target binaries, sysroot inputs, and receipt digests, then explicitly
-records `execution_claim=false`. Promotion requires a fresh guest process to
-open the exact mounted paths and produce the compile, link, run, protocol, and
-exit oracles; static/source checks cannot fill those fields.

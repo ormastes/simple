@@ -37,10 +37,9 @@ The helper constructs a built-in, hot, pipeline-pass provider so runtime hotspot
   `dynamic_pass_registry_skipped_names_for_backend_budget` so backend planners
   can reject high-cost dynamic plugins when the current compile-cost budget is
   low or medium.
-- Keep `run_manifest_pattern_rules_for_backend` as a compatibility routing
-  surface. Manifest rewrite metadata remains loadable, but execution is
-  quarantined and returns the original MIR until each rewrite kind has a
-  machine-checked legality contract. Rules-only manifests remain
+- Add `run_manifest_pattern_rules_for_backend` so manifest-provided pattern
+  rewrites execute only when at least one registered pass from that manifest is
+  applicable to the requested backend. Rules-only manifests remain
   backend-neutral because they have no pass-policy anchor.
 
 Backend policy lets Simple keep SSA/escape/borrow-informed pre-optimization for
@@ -241,9 +240,9 @@ for both backends.
 - Registered dynamic pass descriptors can be filtered by both backend and
   compile-cost budget; high-cost LLVM plugins are skipped under a medium
   budget while low-cost LLVM plugins remain selected.
-- Manifest pattern metadata is routed by Cranelift/`cranlift` and LLVM backend
-  policy without deleting live MIR. The compatibility executor is identity
-  until def-use, effect, trap, and verifier gates authorize a rewrite kind.
+- Manifest pattern rules are applied to real MIR for Cranelift/`cranlift` when
+  the registered pass applies, and are skipped for LLVM when backend policy
+  excludes that pass.
 
 `test/01_unit/compiler/mir_opt/var_reassign_analysis_spec.spl` adds MIR analyzer coverage:
 

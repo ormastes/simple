@@ -14,6 +14,15 @@ const WFFI_NULL_FUNCTION: i64 = 2;
 const WFFI_UNSUPPORTED_SIGNATURE: i64 = 3;
 const WFFI_INVALID_OUTPUT: i64 = 4;
 
+unsafe extern "C" {
+    /// Native C twin compiled from `runtime_backend_plugin.c`.
+    pub fn spl_backend_plugin_run_v1(
+        path_bytes: RuntimeValue,
+        request_bytes: RuntimeValue,
+        mir_bytes: RuntimeValue,
+    ) -> RuntimeValue;
+}
+
 fn store_i64_output(out: RuntimeValue, value: i64) -> bool {
     if rt_array_len(out) < 1 {
         return false;

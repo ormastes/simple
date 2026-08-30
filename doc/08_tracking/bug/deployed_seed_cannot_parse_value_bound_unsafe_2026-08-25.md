@@ -89,3 +89,19 @@ harness is correct; the compiler running it is stale.
 - Rollback receipt (pre/post copies, hashes, smoke, exact restore command):
   `/mnt/data/tmp/claude-1000/seed-rollback/RECEIPT.md`.
 - `DIFF_FILTER=utf8 sh scripts/check/check-engine-differential.shs` on the refreshed seed: `PASS — 17 fixture(s) checked, unbaselined divergence(s)=0` (exit 0) — the gate has a verdict again, no longer blind.
+
+## Re-confirmed 2026-08-26 (audit pass)
+
+Re-ran the 5-line probe against the currently-deployed
+`bin/release/x86_64-unknown-linux-gnu/simple` on the host (hash
+`ae73a992d514f353005adcddcf252497e80fb52ccda5eab8b9db4b35e795427e`, mtime
+2026-08-26 01:16 — redeployed again since this record's 05:16 UTC entry, still
+post-fix):
+
+```
+$ bin/release/x86_64-unknown-linux-gnu/simple run unsafe_vb.spl
+V=/home/ormastes
+```
+
+Fix still holds; no regression. No change needed to this record beyond this
+confirmation.

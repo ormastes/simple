@@ -2,6 +2,30 @@
 
 > Checks the modeled list filtering, sorting, selection, empty state, and source helpers.
 
+<!-- sdn-diagram:id=agents_list_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=agents_list_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+agents_list_spec -> std
+agents_list_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=agents_list_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -20,7 +44,7 @@ Checks the modeled list filtering, sorting, selection, empty state, and source h
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/agents_list_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks the modeled list filtering, sorting, selection, empty state, and source helpers.
@@ -31,11 +55,6 @@ Checks the modeled list filtering, sorting, selection, empty state, and source h
 
 #### filters by query and source
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- filters by query and source
 - Search matches description, source filter narrows visible rows
    - Expected: visible.len() equals `1`
    - Expected: visible[0].id equals `agent-qa`
@@ -46,12 +65,10 @@ Checks the modeled list filtering, sorting, selection, empty state, and source h
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters by query and source")
 step("Search matches description, source filter narrows visible rows")
 val items = sampleAgentsListItems()
 val state = AgentsListState.new("test plans", "user", "")
@@ -66,8 +83,10 @@ expect(filterAgents(items, "Write", "builtin")[0].name).to_equal("Docs")
 
 #### sorts by name and keeps selection stable
 
-- sorts by name and keeps selection stable
 - Unsorted input renders alphabetically and selection moves with wrapping
+- AgentListItem new
+- AgentListItem new
+- AgentListItem new
    - Expected: sorted[0].id equals `a`
    - Expected: sorted[1].id equals `m`
    - Expected: sorted[2].id equals `z`
@@ -78,12 +97,10 @@ expect(filterAgents(items, "Write", "builtin")[0].name).to_equal("Docs")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("sorts by name and keeps selection stable")
 step("Unsorted input renders alphabetically and selection moves with wrapping")
 val items = [
     AgentListItem.new("z", "Zeta", "last", "project", "sonnet", "ready", [], false, true),
@@ -104,19 +121,16 @@ expect(findAgentById(items, "missing")).to_be_nil()
 
 #### renders selected rows and summaries
 
-- renders selected rows and summaries
 - Render includes header counts, selected marker, source label, and summary parts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("renders selected rows and summaries")
 step("Render includes header counts, selected marker, source label, and summary parts")
 val items = sampleAgentsListItems()
 val state = AgentsListState.new("", "all", "agent-review")
@@ -133,11 +147,10 @@ expect(renderAgentSummary(items[1])).to_contain("status idle")
 
 #### normalizes empty state and model selection
 
-- normalizes empty state and model selection
 - No matches explain the active filters; models clamp selection to first visible row
    - Expected: renderAgentsEmptyState(AgentsListState.new("", "all", "")) equals `agentsListEmptyMessage()`
    - Expected: model.state.selectedId equals `agent-docs`
-   - Expected: model.selectedItem() == nil is false
+   - Expected: model.selectedItem().? is true
    - Expected: selected.name equals `Docs`
    - Expected: createAgentsList([]).render() equals `agentsListEmptyMessage()`
 
@@ -145,12 +158,10 @@ expect(renderAgentSummary(items[1])).to_contain("status idle")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("normalizes empty state and model selection")
 step("No matches explain the active filters; models clamp selection to first visible row")
 val items = sampleAgentsListItems()
 val emptyState = AgentsListState.new("missing", "project", "")
@@ -158,7 +169,7 @@ expect(renderAgentsEmptyState(AgentsListState.new("", "all", ""))).to_equal(agen
 expect(renderAgentsList(items, emptyState)).to_contain("No agents match search \"missing\" and source Project")
 val model = AgentsListModel.new(items, AgentsListState.new("docs", "builtin", "agent-review"))
 expect(model.state.selectedId).to_equal("agent-docs")
-expect(model.selectedItem() == nil).to_equal(false)
+expect(model.selectedItem().?).to_equal(true)
 if val Some(selected) = model.selectedItem():
     expect(selected.name).to_equal("Docs")
 expect(createAgentsList([]).render()).to_equal(agentsListEmptyMessage())
@@ -168,7 +179,6 @@ expect(createAgentsList([]).render()).to_equal(agentsListEmptyMessage())
 
 #### exports source helper parity
 
-- exports source helper parity
 - Source labels and upstream helper names are stable
    - Expected: sourceDisplayName("built-in") equals `Built-in`
    - Expected: sourceBadge("project") equals `[Project]`
@@ -183,12 +193,10 @@ expect(createAgentsList([]).render()).to_equal(agentsListEmptyMessage())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exports source helper parity")
 step("Source labels and upstream helper names are stable")
 expect(sourceDisplayName("built-in")).to_equal("Built-in")
 expect(sourceBadge("project")).to_equal("[Project]")
@@ -218,54 +226,3 @@ expect(agentsListSourceLinesModeled()).to_equal(439)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `38f54c7fad231ef34a5a90676b3316b0883607a7a80c88150705495e03e55445`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `38f54c7fad231ef34a5a90676b3316b0883607a7a80c88150705495e03e55445`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `38f54c7fad231ef34a5a90676b3316b0883607a7a80c88150705495e03e55445`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/tools/llm/claude_full/components/agents_list_spec.spl
-mirror: doc/06_spec/03_system/tools/llm/claude_full/components/agents_list_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/tools/llm/claude_full/components/agents_list_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/llm/claude_full/components/agents_list_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/claude_full/components/agents_list_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/components/agents_list_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'filters by query and source' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/components/agents_list_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sorts by name and keeps selection stable' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/components/agents_list_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders selected rows and summaries' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

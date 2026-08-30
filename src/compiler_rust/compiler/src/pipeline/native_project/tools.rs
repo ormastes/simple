@@ -350,6 +350,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        "runtime_process_owned.c",
+        "runtime_coverage_core.c",
+        "runtime_core_host_services.c",
+        "runtime_memory.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
@@ -443,6 +447,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-std=gnu11")
             .arg("-D_GNU_SOURCE")
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+            .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
@@ -1793,7 +1798,10 @@ fn project_stage4_archive_closure(
                 temp_dir.display()
             )
         })?;
-        let cc = find_c_compiler();
+        // The closure object must use the same object format as its archive
+        // inputs.  In particular, a Linux-hosted MinGW build must not feed PE
+        // members to the host compiler's ELF `ld -r` driver.
+        let cc = target_c_compiler(effective_target());
         let mut closure_cmd = std::process::Command::new(&cc);
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]

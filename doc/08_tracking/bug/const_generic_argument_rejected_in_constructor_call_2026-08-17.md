@@ -45,9 +45,6 @@ Reproduce-first evidence, deployed pre-fix binary: `2 examples, 1 failure` and
 deployed binary older than 2026-08-17 still reports the stale
 `Unexpected token: expected expression, found Comma`.
 
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
-- Status: FIXED (diagnostic); const generics themselves remain unimplemented by design
 - Status: STILL-OPEN (P3) — layer 1 (diagnostic) FIXED **and now deployed**;
   layer 2 (const generic parameters) unimplemented by recorded design decision.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00), then by

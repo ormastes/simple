@@ -196,7 +196,25 @@ fn _run_in_cgroup_v2(scope: ExecutionResourceScope, scope_path: text, cmd: text,
         process.usage
     ObservedProcessResult(stdout: process.stdout, stderr: process.stderr, usage: usage, stdout_truncated: process.stdout_truncated, stderr_truncated: process.stderr_truncated, runtime_error: if process.usage.exit_code == 125: 125 else: process.runtime_error)
 
+# `ulimit -u` (RLIMIT_NPROC) is not POSIX: dash -- /bin/sh on Debian/Ubuntu -- rejects
+# it with "Illegal option -u", so a pid cap must run under a shell that implements it.
+# Returns "" when the scope needs a pid cap and no such shell exists: the caller then
+# FAILS CLOSED (exit 125 receipt) instead of silently running unlimited.
+fn _limit_shell(scope: ExecutionResourceScope) -> text:
+    if scope.budget.max_pids <= 0:
+        return "/bin/sh"
+    for shell in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/bin/ksh", "/usr/bin/ksh", "/bin/zsh", "/usr/bin/zsh"]:
+        if file_exists(shell):
+            return shell
+    ""
+
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
+    val shell = _limit_shell(scope)
+    if shell == "":
+        return ObservedProcessResult(
+            stdout: "",
+            stderr: "resource scope: max_pids={scope.budget.max_pids} requires a shell with `ulimit -u` (bash/ksh/zsh); none found, refusing to run unlimited",
+            usage: _unavailable_usage(0, 125), stdout_truncated: false, stderr_truncated: false, runtime_error: 125)
     var prefix = ""
     val memory_bytes = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
     if memory_bytes > 0:
@@ -210,7 +228,7 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     var command = prefix + "exec " + _shell_quote(cmd)
     for arg in args:
         command = command + " " + _shell_quote(arg)
-    val process = process_run_observed_bounded("/bin/sh", ["-c", command], scope.timeout_ms, scope.max_output_bytes)
+    val process = process_run_observed_bounded(shell, ["-c", command], scope.timeout_ms, scope.max_output_bytes)
     val termination = if process.usage.exit_code == 125:
         TerminationCause.InfrastructureFailure
     elif scope.budget.max_cpu_ms > 0 and process.usage.signal == 24:

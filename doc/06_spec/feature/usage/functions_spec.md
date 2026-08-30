@@ -1,16 +1,5 @@
 # Function Definitions Specification
 
-> Tests for function definition and invocation.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Function Definitions Specification
-
 Tests for function definition and invocation.
 
 ## At a Glance
@@ -20,442 +9,9 @@ Tests for function definition and invocation.
 | Feature IDs | #1004 |
 | Category | Language |
 | Status | In Progress |
-| Source | `test/feature/usage/functions_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Tests for function definition and invocation.
-Verifies function parameters, return types, implicit returns, and various calling patterns.
-
-## Scenarios
-
-### Function Definitions
-
-#### basic function definition
-
-#### defines function with explicit return type
-
-- defines function with explicit return type
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("defines function with explicit return type")
-fn add(a: i32, b: i32) -> i32:
-    return a + b
-expect add(2, 3) == 5
-```
-
-</details>
-
-#### uses implicit return of last expression
-
-- uses implicit return of last expression
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses implicit return of last expression")
-fn multiply(a: i32, b: i32) -> i32:
-    a * b
-expect multiply(3, 4) == 12
-```
-
-</details>
-
-#### calls function with no parameters
-
-- calls function with no parameters
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("calls function with no parameters")
-fn get_greeting() -> text:
-    "Hello, World!"
-expect get_greeting() == "Hello, World!"
-```
-
-</details>
-
-#### function parameters
-
-#### passes multiple parameters
-
-- passes multiple parameters
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("passes multiple parameters")
-fn combine(x: i32, y: i32, z: i32) -> i32:
-    x + y + z
-expect combine(1, 2, 3) == 6
-```
-
-</details>
-
-#### uses type inference for parameters
-
-- uses type inference for parameters
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses type inference for parameters")
-fn double(x):
-    x * 2
-expect double(5) == 10
-```
-
-</details>
-
-#### uses named arguments
-
-- uses named arguments
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses named arguments")
-fn create_point(x: i32, y: i32) -> text:
-    "{x}, {y}"
-expect create_point(x: 3, y: 4) == "3, 4"
-```
-
-</details>
-
-#### function return types
-
-#### returns single value
-
-- returns single value
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("returns single value")
-fn square(x: i32) -> i32:
-    x * x
-expect square(5) == 25
-```
-
-</details>
-
-#### returns early with explicit return
-
-- returns early with explicit return
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("returns early with explicit return")
-fn get_sign(x: i32) -> text:
-    if x < 0:
-        return "negative"
-    "positive"
-expect get_sign(-5) == "negative"
-```
-
-</details>
-
-#### returns without explicit type annotation
-
-- returns without explicit type annotation
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("returns without explicit type annotation")
-fn concat(a: text, b: text):
-    a + b
-expect concat("hello", "world") == "helloworld"
-```
-
-</details>
-
-#### function with no return
-
-#### executes function with side effects
-
-- executes function with side effects
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("executes function with side effects")
-var counter = 0
-counter = counter + 1
-expect counter == 1
-```
-
-</details>
-
-#### calls function multiple times
-
-- calls function multiple times
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("calls function multiple times")
-fn set_value(x: i32) -> i32:
-    x
-val result = set_value(42)
-expect result == 42
-```
-
-</details>
-
-#### higher-order functions
-
-#### accepts function parameter
-
-- accepts function parameter
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("accepts function parameter")
-fn apply(f: fn(i32) -> i32, x: i32) -> i32:
-    f(x)
-fn double(n: i32) -> i32:
-    n * 2
-expect apply(double, 5) == 10
-```
-
-</details>
-
-#### uses lambda function
-
-- uses lambda function
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses lambda function")
-fn apply(f: fn(i32) -> i32, x: i32) -> i32:
-    f(x)
-expect apply(\n: n + 10, 5) == 15
-```
-
-</details>
-
-#### returns function
-
-- returns function
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("returns function")
-fn make_adder(x: i32) -> fn(i32) -> i32:
-    \y: x + y
-val add_five = make_adder(5)
-expect add_five(3) == 8
-```
-
-</details>
-
-#### generic functions
-
-#### defines generic function
-
-- defines generic function
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("defines generic function")
-fn identity<T>(x: T) -> T:
-    x
-expect identity(42) == 42
-```
-
-</details>
-
-#### uses generic with constraints
-
-- uses generic with constraints
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses generic with constraints")
-fn get_first<T>(items: List<T>) -> Option<T>:
-    items.first
-val result = get_first([1, 2, 3])
-expect result == 1
-```
-
-</details>
-
-#### uses multiple type parameters
-
-- uses multiple type parameters
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses multiple type parameters")
-fn pair<A, B>(a: A, b: B) -> text:
-    "pair"
-expect pair(1, "hello") == "pair"
-```
-
-</details>
-
-#### recursive functions
-
-#### defines recursive factorial function
-
-- defines recursive factorial function
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("defines recursive factorial function")
-fn factorial(n: i32) -> i32:
-    if n <= 1:
-        1
-    else:
-        n * factorial(n - 1)
-expect factorial(5) == 120
-```
-
-</details>
-
-#### uses tail recursion
-
-- uses tail recursion
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("uses tail recursion")
-fn sum_to(n: i32) -> i32:
-    if n <= 0:
-        0
-    else:
-        n + sum_to(n - 1)
-expect sum_to(10) == 55
-```
-
-</details>
+| Source | `test/03_system/feature/usage/functions_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -467,53 +23,39 @@ expect sum_to(10) == 55
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+Tests for function definition and invocation.
+Verifies function parameters, return types, implicit returns, and various calling patterns.
 
-</details>
+## Evidence
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-Requirements covered by the scenarios in this manual:
+### Artifacts
 
-- `REQ-SSPEC-FEATURE`
-<!-- sspec-maintain:traceability:end -->
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/functions/result.json` |
 
-<!-- sspec-maintain:provenance:start -->
-## Generation history
+## Scenarios
 
-- Canonical SPipe generation for source `4305a7c331fd763ded0c9c048bf57ae43a9fbc20787010412fb80dbd1a3ad320`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4305a7c331fd763ded0c9c048bf57ae43a9fbc20787010412fb80dbd1a3ad320`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4305a7c331fd763ded0c9c048bf57ae43a9fbc20787010412fb80dbd1a3ad320`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/feature/usage/functions_spec.spl
-mirror: doc/06_spec/feature/usage/functions_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/feature/usage/functions_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/feature/usage/functions_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/feature/usage/functions_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defines function with explicit return type' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/functions_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses implicit return of last expression' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/functions_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls function with no parameters' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+- defines function with explicit return type
+- uses implicit return of last expression
+- calls function with no parameters
+- passes multiple parameters
+- uses type inference for parameters
+- uses named arguments
+- returns single value
+- returns early with explicit return
+- returns without explicit type annotation
+- executes function with side effects
+- calls function multiple times
+- accepts function parameter
+- uses lambda function
+- returns function
+- defines generic function
+- uses generic with constraints
+- uses multiple type parameters
+- defines recursive factorial function
+- uses tail recursion

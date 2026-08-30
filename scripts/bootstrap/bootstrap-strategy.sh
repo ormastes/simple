@@ -253,6 +253,7 @@ event task-start stage-engine building
         ulimit -v $((critical_memory * 1024)) || exit 70
     fi
     SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
+    SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER="$generation_dir/stage2-cleanup.ready" \
     SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
     perl -e '
         use strict; use warnings;

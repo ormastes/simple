@@ -1,196 +1,53 @@
-# async_effects_spec
+# Asynchronous Effects and Async/Await
 
-> Purpose: async effect behavior is observed through the production async
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# async_effects_spec
-
-Purpose: async effect behavior is observed through the production async
+Asynchronous effects integrate Simple's effect system with async/await concurrency, allowing effectful computations to suspend and resume without blocking. This enables composable async pipelines where effects like logging, error handling, or I/O propagate through awaited call chains. This spec validates that async functions correctly carry and propagate effects across suspension points.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Category | Language Features |
-| Status | Active |
-| Source | `test/feature/usage/async_effects_spec.spl` |
-| Updated | 2026-08-27 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Feature IDs | #RUNTIME-011 |
+| Category | Runtime |
+| Status | In Progress |
+| Source | `test/03_system/feature/usage/async_effects_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple spipe-docgen` (Rust) |
 
-## Purpose and audience
-Purpose: async effect behavior is observed through the production async
-primitives (std.async_core Poll, std.async.future Future) — readiness,
-suspension, and value transport across poll boundaries — instead of a pending
-scaffold. Audience: runtime engineers maintaining the async core.
+## Overview
 
-## Scenarios
+Asynchronous effects integrate Simple's effect system with async/await concurrency,
+allowing effectful computations to suspend and resume without blocking. This enables
+composable async pipelines where effects like logging, error handling, or I/O propagate
+through awaited call chains. This spec validates that async functions correctly carry
+and propagate effects across suspension points.
 
-### Async Effects
-
-#### a ready computation resolves without suspension
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- Verify: Poll.Ready reports ready and unwraps its value
-   - Expected: p.is_ready() is true
-   - Expected: p.is_pending() is false
-   - Expected: p.unwrap() equals `42`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+## Syntax
 
 ```simple
-# @req REQ-SSPEC-FEATURE
-step("Verify: Poll.Ready reports ready and unwraps its value")
-val p: Poll<i64> = Poll.Ready(42)
-expect(p.is_ready()).to_equal(true)  # oracle: ready poll is ready
-expect(p.is_pending()).to_equal(false)  # oracle: ready poll is not pending
-expect(p.unwrap()).to_equal(42)  # oracle: transported value survives the poll boundary
+async fn fetch_data(url: text) -> text with IO, Error:
+val response = await http_get(url)
+response.body
+
+val result = await fetch_data("https://example.com")
 ```
 
-</details>
+## Key Concepts
 
-#### a pending computation suspends instead of resolving
+| Concept | Description |
+|---------|-------------|
+| Async/Await | Syntax for non-blocking suspension and resumption of coroutines |
+| Effect Propagation | Effects declared on async functions carry through await boundaries |
+| Effect Handler | A construct that intercepts and processes effects from async computations |
+| Suspension Point | A location where an async function yields control until a result is ready |
 
-- Verify: Poll.Pending reports suspension
-   - Expected: p.is_pending() is true
-   - Expected: p.is_ready() is false
+## Evidence
 
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-<details>
-<summary>Executable SSpec</summary>
+### Artifacts
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("Verify: Poll.Pending reports suspension")
-val p: Poll<i64> = Poll.Pending
-expect(p.is_pending()).to_equal(true)  # oracle: pending poll reports suspension
-expect(p.is_ready()).to_equal(false)  # oracle: pending poll is not ready
-```
-
-</details>
-
-#### a future carries its effectful result across the await boundary
-
-- Verify: resolved future polls to a ready value and maps onward
-   - Expected: f.is_ready() is true
-   - Expected: f.poll().unwrap() equals `7`
-   - Expected: mapped.poll().unwrap() equals `8`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("Verify: resolved future polls to a ready value and maps onward")
-val f = Future.from_value(7)
-expect(f.is_ready()).to_equal(true)  # oracle: eager future is immediately resolvable
-expect(f.poll().unwrap()).to_equal(7)  # oracle: value crosses the await boundary intact
-val mapped = f.map(fn (x): x + 1)
-expect(mapped.poll().unwrap()).to_equal(8)  # oracle: mapped future transports the transformed value
-```
-
-</details>
-
-#### a pending future stays suspended until it becomes ready
-
-- Verify: pending future polls pending, not ready
-   - Expected: f.is_ready() is false
-   - Expected: f.poll().is_pending() is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("Verify: pending future polls pending, not ready")
-val f: Future<i64> = Future.pending()
-expect(f.is_ready()).to_equal(false)  # oracle: pending future suspends
-expect(f.poll().is_pending()).to_equal(true)  # oracle: polling does not fabricate readiness
-```
-
-</details>
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-FEATURE`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a649c57e42e2e8c2664091328a11d740f497909c78192a7f5311caf5cc24eaf1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a649c57e42e2e8c2664091328a11d740f497909c78192a7f5311caf5cc24eaf1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a649c57e42e2e8c2664091328a11d740f497909c78192a7f5311caf5cc24eaf1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/feature/usage/async_effects_spec.spl
-mirror: doc/06_spec/feature/usage/async_effects_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/feature/usage/async_effects_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/feature/usage/async_effects_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/feature/usage/async_effects_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'a ready computation resolves without suspension' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/async_effects_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'a pending computation suspends instead of resolving' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/async_effects_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'a future carries its effectful result across the await boundary' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/async_effects/result.json` |

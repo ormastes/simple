@@ -108,11 +108,16 @@ pub enum HirStmt {
     Calc {
         steps: Vec<HirCalcStep>,
     },
-    /// Raw inline assembly block with no operand bindings.
-    /// Backend-specific codegen treats this as an opaque side-effecting statement.
+    /// Inline assembly block. `operands` is empty for a raw block; otherwise it
+    /// carries the `in(reg) expr` / `out(reg) place` / `inout(reg) place`
+    /// bindings in source order so codegen can build the LLVM constraint string
+    /// and substitute `{name}` placeholders. `clobbers` lists `clobber(reg)`
+    /// register names.
     InlineAsm {
         instructions: Vec<String>,
         volatile: bool,
+        operands: Vec<HirAsmOperand>,
+        clobbers: Vec<String>,
     },
     /// Defer statement for RAII/cleanup patterns
     /// defer: body or defer expr
@@ -121,6 +126,29 @@ pub enum HirStmt {
     Defer {
         body: Vec<HirStmt>,
     },
+}
+
+/// Direction of an inline-asm operand binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirAsmOperandKind {
+    /// `in(reg) expr` — value read by the asm.
+    In,
+    /// `out(reg) place` / `lateout(reg) place` — value written by the asm.
+    Out,
+    /// `inout(reg) place` — read then written through the same register.
+    InOut,
+}
+
+/// One `name = in(reg) expr` style operand of an inline-asm block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirAsmOperand {
+    /// Placeholder name used as `{name}` in the template, if any.
+    pub name: Option<String>,
+    pub kind: HirAsmOperandKind,
+    /// Register class (`reg`) or an explicit register name (`eax`, `a0`, `x0`).
+    pub reg: String,
+    /// The bound expression: any expression for `In`, an lvalue for `Out`/`InOut`.
+    pub expr: HirExpr,
 }
 
 /// A single step in a calculational proof

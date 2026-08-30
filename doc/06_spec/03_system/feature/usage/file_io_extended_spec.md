@@ -2,6 +2,29 @@
 
 > Extended File I/O operations including line-based reading, append operations,
 
+<!-- sdn-diagram:id=file_io_extended_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=file_io_extended_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+file_io_extended_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=file_io_extended_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -21,7 +44,7 @@ Extended File I/O operations including line-based reading, append operations,
 | Category | Infrastructure |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/file_io_extended_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Extended File I/O operations including line-based reading, append operations,
@@ -35,22 +58,22 @@ Self-contained: all I/O functions defined inline via extern fn declarations.
 
 #### reads multiple lines correctly
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- reads multiple lines correctly
+1. write file
+2. expect result is ok
+3. Ok
+4. expect lines len
+5. Err
+6. fail
+7. remove file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads multiple lines correctly")
 val test_path = "/tmp/simple_test_multiline.txt"
 val content = "line1\nline2\nline3"
 write_file(test_path, content)
@@ -74,18 +97,22 @@ remove_file(test_path)
 
 #### reads empty file as empty list
 
-- reads empty file as empty list
+1. write file
+2. expect result is ok
+3. Ok
+4. expect lines len
+5. Err
+6. fail
+7. remove file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reads empty file as empty list")
 val test_path = "/tmp/simple_test_empty_lines.txt"
 write_file(test_path, "")
 
@@ -107,18 +134,21 @@ remove_file(test_path)
 
 #### appends to existing file
 
-- appends to existing file
+1. write file
+2. expect result is ok
+3. Ok
+4. Err
+5. fail
+6. remove file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("appends to existing file")
 val test_path = "/tmp/simple_test_append.txt"
 write_file(test_path, "Hello")
 
@@ -139,18 +169,22 @@ remove_file(test_path)
 
 #### creates file if not exists
 
-- creates file if not exists
+1. remove file
+2. expect result is ok
+3. expect file exist
+4. Ok
+5. Err
+6. fail
+7. remove file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates file if not exists")
 val test_path = "/tmp/simple_test_append_new.txt"
 
 if file_exist(test_path):
@@ -176,18 +210,22 @@ remove_file(test_path)
 
 #### preserves binary data exactly
 
-- preserves binary data exactly
+1. expect write result is ok
+2. expect read result is ok
+3. Ok
+4. expect bytes len
+5. Err
+6. fail
+7. remove file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves binary data exactly")
 val test_path = "/tmp/simple_test_binary.bin"
 val data = [0, 127, 255, 1, 128]
 
@@ -217,18 +255,24 @@ remove_file(test_path)
 
 #### moves file to new location
 
-- moves file to new location
+1. write file
+2. remove file
+3. expect result is ok
+4. expect file exist
+5. expect file exist
+6. Ok
+7. Err
+8. fail
+9. remove file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("moves file to new location")
 val src_path = "/tmp/simple_test_move_src.txt"
 val dest_path = "/tmp/simple_test_move_dest.txt"
 write_file(src_path, "content to move")
@@ -257,18 +301,21 @@ remove_file(dest_path)
 
 #### creates nested directories
 
-- creates nested directories
+1. expect result is ok
+2. expect file exist
+3. remove dir
+4. remove dir
+5. remove dir
+6. remove dir
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates nested directories")
 val nested_path = "/tmp/simple_test_nested/a/b/c"
 
 val result = create_dir_all(nested_path)
@@ -288,18 +335,28 @@ remove_dir("/tmp/simple_test_nested")
 
 #### returns all files recursively
 
-- returns all files recursively
+1. create dir all
+2. write file
+3. create dir
+4. write file
+5. expect result is ok
+6. Ok
+7. expect entries len
+8. Err
+9. fail
+10. remove file
+11. remove dir
+12. remove file
+13. remove dir
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns all files recursively")
 val base = "/tmp/simple_test_walk"
 create_dir_all(base)
 write_file(base + "/file1.txt", "1")
@@ -328,18 +385,17 @@ remove_dir(base)
 
 #### gets absolute path
 
-- gets absolute path
+1. expect cwd len
+2. expect cwd starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gets absolute path")
 val cwd = current_dir()
 expect cwd.len() > 0
 expect cwd.starts_with("/") == true
@@ -351,18 +407,20 @@ expect cwd.starts_with("/") == true
 
 #### removes directory and contents
 
-- removes directory and contents
+1. create dir all
+2. write file
+3. write file
+4. expect result is ok
+5. expect file exist
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("removes directory and contents")
 val base = "/tmp/simple_test_rmall"
 create_dir_all(base + "/sub/deep")
 write_file(base + "/file.txt", "content")
@@ -379,18 +437,16 @@ expect file_exist(base) == false
 
 #### extracts filename without extension
 
-- extracts filename without extension
+1. expect stem
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts filename without extension")
 expect stem("file.txt") == "file"
 ```
 
@@ -398,18 +454,16 @@ expect stem("file.txt") == "file"
 
 #### handles multiple dots
 
-- handles multiple dots
+1. expect stem
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles multiple dots")
 expect stem("archive.tar.gz") == "archive.tar"
 ```
 
@@ -417,18 +471,16 @@ expect stem("archive.tar.gz") == "archive.tar"
 
 #### handles no extension
 
-- handles no extension
+1. expect stem
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles no extension")
 expect stem("README") == "README"
 ```
 
@@ -438,18 +490,16 @@ expect stem("README") == "README"
 
 #### computes relative path
 
-- computes relative path
+1. expect relative path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes relative path")
 expect relative_path("/a/b/c/file.txt", "/a/b") == "c/file.txt"
 ```
 
@@ -457,18 +507,16 @@ expect relative_path("/a/b/c/file.txt", "/a/b") == "c/file.txt"
 
 #### handles same path
 
-- handles same path
+1. expect relative path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles same path")
 expect relative_path("/a/b", "/a/b") == ""
 ```
 
@@ -478,18 +526,16 @@ expect relative_path("/a/b", "/a/b") == ""
 
 #### joins two paths
 
-- joins two paths
+1. expect path join
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("joins two paths")
 expect path_join("/home/user", "file.txt") == "/home/user/file.txt"
 ```
 
@@ -499,18 +545,16 @@ expect path_join("/home/user", "file.txt") == "/home/user/file.txt"
 
 #### read_lines fails for non-existent file
 
-- read_lines fails for non-existent file
+1. expect result is err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("read_lines fails for non-existent file")
 val result = read_lines("/tmp/nonexistent_file_12345.txt")
 expect result.is_err() == true
 ```
@@ -519,18 +563,16 @@ expect result.is_err() == true
 
 #### read_bytes fails for non-existent file
 
-- read_bytes fails for non-existent file
+1. expect result is err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("read_bytes fails for non-existent file")
 val result = read_bytes("/tmp/nonexistent_file_12345.bin")
 expect result.is_err() == true
 ```
@@ -539,18 +581,16 @@ expect result.is_err() == true
 
 #### move_file fails for non-existent source
 
-- move_file fails for non-existent source
+1. expect result is err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("move_file fails for non-existent source")
 val result = move_file("/tmp/nonexistent_12345.txt", "/tmp/dest.txt")
 expect result.is_err() == true
 ```
@@ -559,18 +599,16 @@ expect result.is_err() == true
 
 #### walk_dir fails for non-existent directory
 
-- walk_dir fails for non-existent directory
+1. expect result is err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("walk_dir fails for non-existent directory")
 val result = walk_dir("/tmp/nonexistent_dir_12345")
 expect result.is_err() == true
 ```
@@ -589,51 +627,3 @@ expect result.is_err() == true
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `5e13fbade4055e1c0dcd3ba544b46bd76ac2c40bf3b544a30005ce15a748ef76`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `5e13fbade4055e1c0dcd3ba544b46bd76ac2c40bf3b544a30005ce15a748ef76`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `5e13fbade4055e1c0dcd3ba544b46bd76ac2c40bf3b544a30005ce15a748ef76`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/file_io_extended_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/file_io_extended_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/file_io_extended_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/file_io_extended_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/file_io_extended_spec.spl:229:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads multiple lines correctly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/file_io_extended_spec.spl:250:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads empty file as empty list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/file_io_extended_spec.spl:276:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'appends to existing file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,6 +1,29 @@
 # Server Specification
 
-> Tests covering Health Endpoint, Models Endpoint, Chat Completion Response, Anthropic Response, Error Response, Route Handling.
+> <details>
+
+<!-- sdn-diagram:id=server_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=server_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+server_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=server_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,13 @@
 
 #### returns ok status
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- returns ok status
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns ok status")
 val resp = build_health_response()
 expect(resp).to_contain("\"ok\"")
 ```
@@ -41,18 +55,13 @@ expect(resp).to_contain("\"ok\"")
 
 #### returns service name
 
-- returns service name
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns service name")
 val resp = build_health_response()
 expect(resp).to_contain("llm_caret")
 ```
@@ -61,18 +70,13 @@ expect(resp).to_contain("llm_caret")
 
 #### returns version
 
-- returns version
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns version")
 val resp = build_health_response()
 expect(resp).to_contain("0.1.0")
 ```
@@ -83,18 +87,13 @@ expect(resp).to_contain("0.1.0")
 
 #### returns list object
 
-- returns list object
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns list object")
 val resp = build_models_response()
 expect(resp).to_contain("\"list\"")
 ```
@@ -103,18 +102,13 @@ expect(resp).to_contain("\"list\"")
 
 #### includes claude sonnet
 
-- includes claude sonnet
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes claude sonnet")
 val resp = build_models_response()
 expect(resp).to_contain("claude-sonnet-4-20250514")
 ```
@@ -123,18 +117,13 @@ expect(resp).to_contain("claude-sonnet-4-20250514")
 
 #### includes claude opus
 
-- includes claude opus
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes claude opus")
 val resp = build_models_response()
 expect(resp).to_contain("claude-opus-4-20250514")
 ```
@@ -143,18 +132,13 @@ expect(resp).to_contain("claude-opus-4-20250514")
 
 #### includes gpt-4o
 
-- includes gpt-4o
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes gpt-4o")
 val resp = build_models_response()
 expect(resp).to_contain("gpt-4o")
 ```
@@ -165,18 +149,13 @@ expect(resp).to_contain("gpt-4o")
 
 #### includes content
 
-- includes content
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes content")
 val resp = build_chat_completion_response("Hello!", "gpt-4o", "stop")
 expect(resp).to_contain("Hello!")
 ```
@@ -185,18 +164,13 @@ expect(resp).to_contain("Hello!")
 
 #### includes model
 
-- includes model
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes model")
 val resp = build_chat_completion_response("Hi", "gpt-4o", "stop")
 expect(resp).to_contain("gpt-4o")
 ```
@@ -205,18 +179,13 @@ expect(resp).to_contain("gpt-4o")
 
 #### includes finish reason
 
-- includes finish reason
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes finish reason")
 val resp = build_chat_completion_response("Hi", "gpt-4o", "stop")
 expect(resp).to_contain("stop")
 ```
@@ -225,18 +194,13 @@ expect(resp).to_contain("stop")
 
 #### has chat.completion object type
 
-- has chat.completion object type
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has chat.completion object type")
 val resp = build_chat_completion_response("Hi", "gpt-4o", "stop")
 expect(resp).to_contain("chat.completion")
 ```
@@ -245,18 +209,13 @@ expect(resp).to_contain("chat.completion")
 
 #### has assistant role
 
-- has assistant role
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has assistant role")
 val resp = build_chat_completion_response("Hi", "gpt-4o", "stop")
 expect(resp).to_contain("assistant")
 ```
@@ -267,18 +226,13 @@ expect(resp).to_contain("assistant")
 
 #### includes text content
 
-- includes text content
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes text content")
 val resp = build_anthropic_response("Hello!", "claude-sonnet-4-20250514", "end_turn")
 expect(resp).to_contain("Hello!")
 ```
@@ -287,18 +241,13 @@ expect(resp).to_contain("Hello!")
 
 #### has message type
 
-- has message type
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has message type")
 val resp = build_anthropic_response("Hi", "claude-sonnet-4-20250514", "end_turn")
 expect(resp).to_contain("\"message\"")
 ```
@@ -307,18 +256,13 @@ expect(resp).to_contain("\"message\"")
 
 #### includes stop reason
 
-- includes stop reason
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes stop reason")
 val resp = build_anthropic_response("Hi", "claude-sonnet-4-20250514", "end_turn")
 expect(resp).to_contain("end_turn")
 ```
@@ -329,18 +273,13 @@ expect(resp).to_contain("end_turn")
 
 #### includes error message
 
-- includes error message
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes error message")
 val resp = build_error_response("not found", 404)
 expect(resp).to_contain("not found")
 ```
@@ -349,18 +288,13 @@ expect(resp).to_contain("not found")
 
 #### includes status code
 
-- includes status code
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes status code")
 val resp = build_error_response("bad request", 400)
 expect(resp).to_contain("400")
 ```
@@ -371,18 +305,13 @@ expect(resp).to_contain("400")
 
 #### handles health check
 
-- handles health check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles health check")
 val resp = handle_route("GET", "/v1/health", "")
 expect(resp).to_contain("ok")
 ```
@@ -391,18 +320,13 @@ expect(resp).to_contain("ok")
 
 #### handles models list
 
-- handles models list
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles models list")
 val resp = handle_route("GET", "/v1/models", "")
 expect(resp).to_contain("list")
 ```
@@ -411,18 +335,13 @@ expect(resp).to_contain("list")
 
 #### returns 404 for unknown path
 
-- returns 404 for unknown path
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns 404 for unknown path")
 val resp = handle_route("GET", "/unknown", "")
 expect(resp).to_contain("not found")
 ```
@@ -431,18 +350,13 @@ expect(resp).to_contain("not found")
 
 #### returns error for empty chat completion
 
-- returns error for empty chat completion
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns error for empty chat completion")
 val resp = handle_route("POST", "/v1/chat/completions", "")
 expect(resp).to_contain("messages required")
 ```
@@ -451,21 +365,21 @@ expect(resp).to_contain("messages required")
 
 #### returns 501 for valid chat request
 
-- returns 501 for valid chat request
+1. var body =  LB
+2. body = body +  Q
+3. body = body +  RB
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns 501 for valid chat request")
-var body = LB()
-body = body + Q() + "content" + Q() + ":" + Q() + "Hello" + Q()
-body = body + RB()
+var body = _LB()
+body = body + _Q() + "content" + _Q() + ":" + _Q() + "Hello" + _Q()
+body = body + _RB()
 val resp = handle_route("POST", "/v1/chat/completions", body)
 expect(resp).to_contain("501")
 ```
@@ -479,12 +393,12 @@ expect(resp).to_contain("501")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/server_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Health Endpoint, Models Endpoint, Chat Completion Response, Anthropic Response, Error Response, Route Handling.
+Tests covering:
 - Health Endpoint
 - Models Endpoint
 - Chat Completion Response
@@ -504,51 +418,3 @@ Tests covering Health Endpoint, Models Endpoint, Chat Completion Response, Anthr
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `9aacfec8bd48d09659e4a589195f7b837a139d7ca9317fb893e132615ecfd95e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `9aacfec8bd48d09659e4a589195f7b837a139d7ca9317fb893e132615ecfd95e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `9aacfec8bd48d09659e4a589195f7b837a139d7ca9317fb893e132615ecfd95e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/llm_caret/server_spec.spl
-mirror: doc/06_spec/01_unit/app/llm_caret/server_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/llm_caret/server_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/llm_caret/server_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/llm_caret/server_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns ok status' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/server_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns service name' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/server_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns version' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

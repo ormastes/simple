@@ -1,10 +1,33 @@
 # Gpu Target Contract Specification
 
-> Tests covering GPU target contract.
+> <details>
+
+<!-- sdn-diagram:id=gpu_target_contract_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=gpu_target_contract_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+gpu_target_contract_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=gpu_target_contract_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,27 +40,13 @@
 
 #### normalizes CUDA OpenCL and auto target metadata
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- normalizes CUDA OpenCL and auto target metadata
-   - Expected: auto_target.valid is true
-   - Expected: auto_target.normalized_target equals `auto`
-   - Expected: auto_target.backend_order equals `gpu_target_metadata_default_backend_order()`
-   - Expected: cuda.normalized_target equals `cuda`
-   - Expected: opencl.normalized_target equals `opencl`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("normalizes CUDA OpenCL and auto target metadata")
 val auto_target = parse_gpu_kernel_target("")
 val cuda = parse_gpu_kernel_target("ptx")
 val opencl = parse_gpu_kernel_target("opencl-spirv")
@@ -54,27 +63,13 @@ expect(opencl.summary()).to_contain("valid=true")
 
 #### normalizes explicit HIP ROCm and Vulkan target metadata through common aliases
 
-- normalizes explicit HIP ROCm and Vulkan target metadata through common aliases
-   - Expected: hip.valid is true
-   - Expected: hip.normalized_target equals `hip`
-   - Expected: hip.backend_order equals `hip`
-   - Expected: rocm.valid is true
-   - Expected: rocm.normalized_target equals `hip`
-   - Expected: spirv.valid is true
-   - Expected: spirv.normalized_target equals `vulkan`
-   - Expected: normalize_gpu_target_metadata_name("cl") equals `opencl`
-   - Expected: auto_target.backend_order equals `vulkan,metal,cuda,hip,opencl`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("normalizes explicit HIP ROCm and Vulkan target metadata through common aliases")
 val hip = parse_gpu_kernel_target("hip-cpp")
 val rocm = parse_gpu_kernel_target("rocm")
 val spirv = parse_gpu_kernel_target("spirv")
@@ -95,35 +90,14 @@ expect(auto_target.backend_order).to_equal("vulkan,metal,cuda,hip,opencl")
 
 #### normalizes Metal and WebGPU target metadata without claiming codegen emission
 
-- normalizes Metal and WebGPU target metadata without claiming codegen emission
-   - Expected: metal.valid is true
-   - Expected: metal.normalized_target equals `metal`
-   - Expected: metal.backend_order equals `metal`
-   - Expected: metal.reason equals `portable-source-target`
-   - Expected: msl.normalized_target equals `metal.normalized_target`
-   - Expected: msl.backend_order equals `metal.backend_order`
-   - Expected: metal_shading_language.normalized_target equals `metal.normalized_target`
-   - Expected: metal_shading_language.backend_order equals `metal.backend_order`
-   - Expected: webgpu.valid is true
-   - Expected: webgpu.normalized_target equals `webgpu`
-   - Expected: webgpu.backend_order equals `webgpu`
-   - Expected: webgpu.reason equals `browser-wasm-bridge`
-   - Expected: wgpu.normalized_target equals `webgpu`
-   - Expected: normalize_gpu_target_metadata_name("webgpu-wgsl") equals `webgpu`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("normalizes Metal and WebGPU target metadata without claiming codegen emission")
-val metal = parse_gpu_kernel_target("metal")
-val msl = parse_gpu_kernel_target("msl")
-val metal_shading_language = parse_gpu_kernel_target("metal-shading-language")
+val metal = parse_gpu_kernel_target("msl")
 val webgpu = parse_gpu_kernel_target("wgsl")
 val wgpu = parse_gpu_kernel_target("wgpu")
 
@@ -131,10 +105,6 @@ expect(metal.valid).to_equal(true)
 expect(metal.normalized_target).to_equal("metal")
 expect(metal.backend_order).to_equal("metal")
 expect(metal.reason).to_equal("portable-source-target")
-expect(msl.normalized_target).to_equal(metal.normalized_target)
-expect(msl.backend_order).to_equal(metal.backend_order)
-expect(metal_shading_language.normalized_target).to_equal(metal.normalized_target)
-expect(metal_shading_language.backend_order).to_equal(metal.backend_order)
 expect(webgpu.valid).to_equal(true)
 expect(webgpu.normalized_target).to_equal("webgpu")
 expect(webgpu.backend_order).to_equal("webgpu")
@@ -145,43 +115,11 @@ expect(normalize_gpu_target_metadata_name("webgpu-wgsl")).to_equal("webgpu")
 
 </details>
 
-#### keeps VHDL aliases outside GPU kernel target selection
-
-- keeps VHDL aliases outside GPU kernel target selection
-   - Expected: vhdl.valid is false
-   - Expected: vhdl.normalized_target equals `vhdl`
-   - Expected: vhdl.backend_order equals ``
-   - Expected: vhdl.reason equals `unsupported-gpu-target`
-   - Expected: fpga.valid is false
-   - Expected: fpga.normalized_target equals `vhdl`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("keeps VHDL aliases outside GPU kernel target selection")
-val vhdl = parse_gpu_kernel_target("vhdl")
-val fpga = parse_gpu_kernel_target("fpga")
-
-expect(vhdl.valid).to_equal(false)
-expect(vhdl.normalized_target).to_equal("vhdl")
-expect(vhdl.backend_order).to_equal("")
-expect(vhdl.reason).to_equal("unsupported-gpu-target")
-expect(fpga.valid).to_equal(false)
-expect(fpga.normalized_target).to_equal("vhdl")
-```
-
-</details>
-
 #### rejects unsupported GPU targets with explicit diagnostics
 
-- rejects unsupported GPU targets with explicit diagnostics
-   - Expected: has_error is true
+- var checker = GpuKernelChecker create
+- checker check target
+   - Expected: err.? is true
    - Expected: checker.has_errors() is true
    - Expected: checker.error_count() equals `1`
 
@@ -189,20 +127,15 @@ expect(fpga.normalized_target).to_equal("vhdl")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("rejects unsupported GPU targets with explicit diagnostics")
 val err = check_gpu_kernel_target("directx")
-var has_error = false
-if val _ = err:
-    has_error = true
 var checker = GpuKernelChecker.create("bad_kernel")
 checker.check_target("directx", 7)
 
-expect(has_error).to_equal(true)
+expect(err.?).to_equal(true)
 expect(checker.has_errors()).to_equal(true)
 expect(checker.error_count()).to_equal(1)
 ```
@@ -211,29 +144,20 @@ expect(checker.error_count()).to_equal(1)
 
 #### validates backend order lists for tagged GPU offload
 
-- validates backend order lists for tagged GPU offload
-   - Expected: has_bad_backend is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("validates backend order lists for tagged GPU offload")
 val ok = validate_gpu_backend_order("vulkan,metal,cuda,hip,webgpu")
 val rocm_ok = validate_gpu_backend_order("rocm,opencl,cuda")
 val bad = validate_gpu_backend_order("cuda,directx")
-var has_bad_backend = false
-if val _ = bad:
-    has_bad_backend = true
 
 expect(ok).to_be_nil()
 expect(rocm_ok).to_be_nil()
-expect(has_bad_backend).to_equal(true)
+expect(bad.?).to_equal(true)
 ```
 
 </details>
@@ -245,74 +169,23 @@ expect(has_bad_backend).to_equal(true)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/semantics/gpu_target_contract_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering GPU target contract.
+Tests covering:
 - GPU target contract
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-COMPILER`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `fb6d8e26e7eb5421ab8c0c5b860acb4a3b1bd941c84fdff2e7524ffa668acd19`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `fb6d8e26e7eb5421ab8c0c5b860acb4a3b1bd941c84fdff2e7524ffa668acd19`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `fb6d8e26e7eb5421ab8c0c5b860acb4a3b1bd941c84fdff2e7524ffa668acd19`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/compiler/semantics/gpu_target_contract_spec.spl
-mirror: doc/06_spec/01_unit/compiler/semantics/gpu_target_contract_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler/semantics/gpu_target_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/semantics/gpu_target_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/semantics/gpu_target_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/semantics/gpu_target_contract_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes CUDA OpenCL and auto target metadata' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/semantics/gpu_target_contract_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes explicit HIP ROCm and Vulkan target metadata through common aliases' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/semantics/gpu_target_contract_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes Metal and WebGPU target metadata without claiming codegen emission' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

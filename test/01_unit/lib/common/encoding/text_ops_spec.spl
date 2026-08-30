@@ -1,0 +1,99 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""Direct branch matrix for legacy mode-aware Unicode text operations."""
+# @cover src/lib/common/encoding/text_ops.spl 100%
+
+use std.spec.step
+
+use std.spec.*
+use std.common.encoding.char_mode.{CharMode, set_char_mode}
+use std.common.encoding.text_ops.{
+    text_len_mode, text_char_at_mode, text_slice_mode, text_chars_mode,
+    codepoint_display_width, text_display_width, codepoint_script,
+    UnicodeScript, text_char_at_indexed, text_slice_indexed, text_len_indexed}
+use std.encoding.width_index.{WidthIndex}
+
+describe "mode-aware text operations":
+    # @manual scenario evidence
+    """Covers every reachable decision under the validated-text invariant."""
+
+    it "uses explicit byte semantics in UTF-8 compatibility mode":
+        # @req REQ-SSPEC-LIB
+        step("uses explicit byte semantics in UTF-8 compatibility mode")
+        set_char_mode(CharMode.Utf8)
+        expect(text_len_mode("abc")).to_equal(3)
+        expect(text_char_at_mode("abc", 1)).to_equal("b")
+        expect(text_char_at_mode("abc", -1)).to_equal("")
+        expect(text_char_at_mode("abc", 3)).to_equal("")
+        expect(text_slice_mode("abcd", -2, 20)).to_equal("abcd")
+        expect(text_slice_mode("abcd", 3, 2)).to_equal("")
+        expect(text_chars_mode("abc")).to_equal(["a", "b", "c"])
+
+    it "uses scalar semantics in FullUnicode compatibility mode":
+        # @req REQ-SSPEC-LIB
+        step("uses scalar semantics in FullUnicode compatibility mode")
+        set_char_mode(CharMode.FullUnicode)
+        val value = "Aé한😀"
+        expect(text_len_mode(value)).to_equal(4)
+        expect(text_char_at_mode(value, 0)).to_equal("A")
+        expect(text_char_at_mode(value, 1)).to_equal("é")
+        expect(text_char_at_mode(value, 2)).to_equal("한")
+        expect(text_char_at_mode(value, 3)).to_equal("😀")
+        expect(text_char_at_mode(value, 4)).to_equal("")
+        expect(text_slice_mode(value, 1, 3)).to_equal("é한")
+        expect(text_slice_mode(value, 4, 9)).to_equal("")
+        expect(text_slice_mode(value, 9, 10)).to_equal("")
+        expect(text_chars_mode(value)).to_equal(["A", "é", "한", "😀"])
+        set_char_mode(CharMode.Utf8)
+
+    it "classifies zero narrow and wide display ranges":
+        # @req REQ-SSPEC-LIB
+        step("classifies zero narrow and wide display ranges")
+        for cp in [0, 31, 127, 0x0300, 0x1AB0, 0x1DC0, 0xFE20,
+                0x200B, 0x200C, 0x200D, 0xFEFF, 0x00AD]:
+            expect(codepoint_display_width(cp)).to_equal(0)
+        for cp in [0x4E00, 0x3400, 0x20000, 0xF900, 0xAC00, 0x1100,
+                0x2329, 0x3000, 0x3040, 0x30A0, 0x3100, 0x3130,
+                0x3190, 0x3200, 0x3300, 0xFF01, 0xFFE0]:
+            expect(codepoint_display_width(cp)).to_equal(2)
+        expect(codepoint_display_width(0x0041)).to_equal(1)
+        expect(text_display_width("Aé 한\u{0301}")).to_equal(5)
+
+    it "classifies every simplified script range and fallthrough":
+        # @req REQ-SSPEC-LIB
+        step("classifies every simplified script range and fallthrough")
+        val cps = [0x0041, 0x1E00, 0x0400, 0x0600, 0x0750, 0x08A0,
+            0xFB50, 0xFE70, 0x0900, 0xA8E0, 0x0980, 0xAC00, 0x1100,
+            0x3130, 0xA960, 0xD7B0, 0x4E00, 0x3400, 0x20000,
+            0x3040, 0xF900, 0x0030, 0x2000, 0x3000, 0x10FFFF]
+        val scripts = [UnicodeScript.Latin, UnicodeScript.Latin,
+            UnicodeScript.Cyrillic, UnicodeScript.Arabic,
+            UnicodeScript.Arabic, UnicodeScript.Arabic, UnicodeScript.Arabic,
+            UnicodeScript.Arabic, UnicodeScript.Devanagari,
+            UnicodeScript.Devanagari, UnicodeScript.Bengali,
+            UnicodeScript.Hangul, UnicodeScript.Hangul, UnicodeScript.Hangul,
+            UnicodeScript.Hangul, UnicodeScript.Hangul, UnicodeScript.CJK,
+            UnicodeScript.CJK, UnicodeScript.CJK, UnicodeScript.CJK,
+            UnicodeScript.CJK, UnicodeScript.Common, UnicodeScript.Common,
+            UnicodeScript.Common, UnicodeScript.Unknown]
+        var i: i64 = 0
+        while i < cps.len():
+            expect(codepoint_script(cps[i])).to_equal(scripts[i])
+            i = i + 1
+
+    it "delegates indexed access slicing and length to WidthIndex":
+        # @req REQ-SSPEC-LIB
+        step("delegates indexed access slicing and length to WidthIndex")
+        val index = WidthIndex.for_text("Aé한😀")
+        expect(text_char_at_indexed(index, 2)).to_equal("한")
+        expect(text_char_at_indexed(index, 9)).to_equal("")
+        expect(text_slice_indexed(index, 1, 3)).to_equal("é한")
+        expect(text_slice_indexed(index, -1, 3)).to_equal("")
+        expect(text_len_indexed(index)).to_equal(4)
+        index.free()

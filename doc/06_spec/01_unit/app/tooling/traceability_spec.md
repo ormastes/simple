@@ -1,5 +1,30 @@
 # Traceability Checker Specification
 
+> <details>
+
+<!-- sdn-diagram:id=traceability_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=traceability_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+traceability_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=traceability_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 16 | 16 | 0 | 0 |
@@ -21,7 +46,7 @@
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/app/tooling/traceability_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
@@ -30,23 +55,13 @@
 
 #### normalizes date suffixed slugs
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- normalizes date suffixed slugs
-   - Expected: normalize_slug("security_aop_architecture_2026-03-28") equals `security_aop_architecture`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("normalizes date suffixed slugs")
 expect(normalize_slug("security_aop_architecture_2026-03-28")).to_equal("security_aop_architecture")
 ```
 
@@ -54,18 +69,13 @@ expect(normalize_slug("security_aop_architecture_2026-03-28")).to_equal("securit
 
 #### extracts relative paths from markdown and plain text
 
-- extracts relative paths from markdown and plain text
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts relative paths from markdown and plain text")
 val content = """
 ```
 
@@ -75,19 +85,13 @@ val content = """
 
 #### evaluates addition
 
-- evaluates addition
-   - Expected: 1 + 1 equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("evaluates addition")
 expect(1 + 1).to_equal(2)
 ```
 
@@ -97,19 +101,13 @@ expect(1 + 1).to_equal(2)
 
 #### evaluates addition
 
-- evaluates addition
-   - Expected: 1 + 1 equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("evaluates addition")
 expect(1 + 1).to_equal(2)
 ```
 
@@ -119,19 +117,13 @@ expect(1 + 1).to_equal(2)
 
 #### evaluates addition
 
-- evaluates addition
-   - Expected: 1 + 1 equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("evaluates addition")
 expect(1 + 1).to_equal(2)
 ```
 
@@ -149,59 +141,3 @@ expect(1 + 1).to_equal(2)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-- `REQ-SEC-001:`
-- `REQ-SEC-002:`
-- `REQ-SEC-001`
-- `REQ-FOO-001:`
-- `REQ-FOO-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7ebb5744d16afdccf5a703aa43605c3904ad98dfc5009b72a7980bb56ca4ef6a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7ebb5744d16afdccf5a703aa43605c3904ad98dfc5009b72a7980bb56ca4ef6a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7ebb5744d16afdccf5a703aa43605c3904ad98dfc5009b72a7980bb56ca4ef6a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/tooling/traceability_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/traceability_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/traceability_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/traceability_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/traceability_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/tooling/traceability_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes date suffixed slugs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/traceability_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts relative paths from markdown and plain text' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/traceability_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts REQ and NFR identifiers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

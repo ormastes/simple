@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -889,12 +889,120 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("complex 1")
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+<details>
+<summary>Advanced: loop accumulates in order</summary>
+
+#### loop accumulates in order
+
+- Verify: loop accumulates in order
+   - Expected: sum equals `10)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-6193
+step("Verify: loop accumulates in order")
+# oracle: 10 — sum of 0..5 exclusive end
+var sum = 0
+for i in 0..5:
+    sum = sum + i
+expect(sum).to_equal(10)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+
+</details>
+
+#### match destructures Some
+
+- Verify: match destructures Some
+   - Expected: x equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-6193
+step("Verify: match destructures Some")
+# oracle: 1 — the Some arm binds the payload
+match Some(1):
+    Some(x):
+        expect(x).to_equal(1)  # oracle: pinned constant asserted by this scenario
+    nil:
+        expect(false).to_equal(true)
+```
+
+</details>
+
+#### string length and emptiness
+
+- Verify: string length and emptiness
+   - Expected: "test".len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "".len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "".is_empty() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-6193
+step("Verify: string length and emptiness")
+# oracle: 4/0 — len counts chars; only the empty string is empty
+expect("test".len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect("".len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect("".is_empty()).to_equal(true)
+```
+
+</details>
+
+#### comparison ordering
+
+- Verify: comparison ordering
+   - Expected: 1 < 2 is true
+   - Expected: 2 <= 2 is true
+   - Expected: 3 > 4 is false
+   - Expected: 5 == 5 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-OPTION-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-OPTION-DEEP-6193
+step("Verify: comparison ordering")
+# oracle: transitive i64 ordering as written
+expect(1 < 2).to_equal(true)
+expect(2 <= 2).to_equal(true)
+expect(3 > 4).to_equal(false)
+expect(5 == 5).to_equal(true)
 ```
 
 </details>

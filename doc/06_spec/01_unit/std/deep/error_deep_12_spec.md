@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -824,13 +824,15 @@ Reproduction: this block contains the complete executable scenario source.
 step("match 1")
 
 match Some(1):
-    Some(x): check(x == 1)
-    nil: check(false)
+    Some(x):
+        expect(x).to_equal(1)  # oracle: pinned constant asserted by this scenario
+    nil:
+        expect(false).to_equal(true)
 ```
 
 </details>
 
-#### match 2
+#### string length and emptiness
 
 - match 2
 
@@ -852,7 +854,7 @@ match nil:
 
 </details>
 
-#### nested 1
+#### comparison ordering
 
 - nested 1
 
@@ -874,7 +876,7 @@ for i in 0..3:
 
 </details>
 
-#### complex 1
+#### integer arithmetic and abs
 
 - complex 1
 

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,7 +17,7 @@
 
 #### caps blockers and explains deductions across weak dimensions
 
-- caps blockers and explains deductions across weak dimensions
+- Verify: caps blockers and explains deductions across weak dimensions
 
 
 <details>
@@ -27,8 +27,8 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("caps blockers and explains deductions across weak dimensions")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: caps blockers and explains deductions across weak dimensions")
 val report = analyze_sspec_text("weak_spec.spl", "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n")
 expect(report.score.raw_aggregate).to_be_greater_than(report.score.effective_aggregate)
 expect(report.score.effective_aggregate).to_be_less_than(50)
@@ -40,7 +40,7 @@ expect(report.findings.len()).to_be_greater_than(5)
 
 #### awards all seven dimensions only to professional structural facts
 
-- awards all seven dimensions only to professional structural facts
+- Verify: awards all seven dimensions only to professional structural facts
    - Expected: report.score.effective_aggregate equals `100`
    - Expected: report.findings.len() equals `0`
    - Expected: report.scenario_count equals `1`
@@ -54,8 +54,8 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("awards all seven dimensions only to professional structural facts")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: awards all seven dimensions only to professional structural facts")
 val report = analyze_sspec_text("good_spec.spl", professional_source())
 expect(report.score.effective_aggregate).to_equal(100)
 expect(report.findings.len()).to_equal(0)
@@ -67,7 +67,7 @@ expect(report.real_assertion_count).to_equal(1)
 
 #### rejects an arithmetic tautology as a real oracle
 
-- rejects an arithmetic tautology as a real oracle
+- Verify: rejects an arithmetic tautology as a real oracle
    - Expected: report.real_assertion_count equals `0`
    - Expected: report.score.blocker_count equals `2`
    - Expected: finding_ids(report) contains `SSDOC-ORA-001`
@@ -81,8 +81,8 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rejects an arithmetic tautology as a real oracle")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: rejects an arithmetic tautology as a real oracle")
 val source = professional_source().replace("expect(production_result).to_equal(\"ready\")",
     "expect(1).to_equal(1)")
 val report = analyze_sspec_text("tautology_spec.spl", source)
@@ -98,7 +98,7 @@ expect(finding_ids(report).contains("SSDOC-ORA-002")).to_equal(true)
 
 #### extracts scenario source and rendered manual facts separately
 
-- extracts scenario source and rendered manual facts separately
+- Verify: extracts scenario source and rendered manual facts separately
    - Expected: source_facts.step_count equals `1`
    - Expected: source_facts.capture_count equals `1`
    - Expected: manual_facts.visible_step_count equals `1`
@@ -111,8 +111,8 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts scenario source and rendered manual facts separately")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: extracts scenario source and rendered manual facts separately")
 val source_facts = extract_sspec_source_facts("x_spec.spl", professional_source())
 val manual_facts = extract_sspec_manual_facts("x_spec.md",
     "# Workflow\n\n1. Exercise production\n\n## Evidence\n\nREQ-001\n\n## Verification\n\n## Troubleshooting\n\nSource SHA-256: abc\n")
@@ -127,7 +127,7 @@ expect(manual_facts.evidence_block_count).to_be_greater_than(0)
 
 #### keeps the stable rule catalog explainable and separate from SPIPE lint
 
-- keeps the stable rule catalog explainable and separate from SPIPE lint
+- Verify: keeps the stable rule catalog explainable and separate from SPIPE lint
    - Expected: rules[0].rule_id.starts_with("SSDOC-") is true
    - Expected: sspec_lint_rule_references() equals `[`
 
@@ -139,8 +139,8 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps the stable rule catalog explainable and separate from SPIPE lint")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: keeps the stable rule catalog explainable and separate from SPIPE lint")
 val rules = sspec_rule_definitions()
 expect(rules.len()).to_be_greater_than(15)
 expect(rules[0].rule_id.starts_with("SSDOC-")).to_equal(true)
@@ -155,7 +155,7 @@ expect(sspec_lint_rule_references()).to_equal([
 
 #### offers a certain EasyFix only for supported mechanical syntax
 
-- offers a certain EasyFix only for supported mechanical syntax
+- Verify: offers a certain EasyFix only for supported mechanical syntax
    - Expected: fixable is true
 
 
@@ -166,8 +166,8 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("offers a certain EasyFix only for supported mechanical syntax")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: offers a certain EasyFix only for supported mechanical syntax")
 val report = analyze_sspec_text("fix_spec.spl", "@step Do work\n" + professional_source())
 var fixable = false
 for finding in report.findings:
@@ -182,7 +182,7 @@ expect(render_sarif_report(report)).to_contain("\"fixes\":[")
 
 #### keeps fingerprints stable across unrelated line movement and applies baselines
 
-- keeps fingerprints stable across unrelated line movement and applies baselines
+- Verify: keeps fingerprints stable across unrelated line movement and applies baselines
    - Expected: first.findings[0].fingerprint equals `moved.findings[0].fingerprint`
    - Expected: analyze_sspec_text("./weak_spec.spl", "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n").source_path equals `weak_spec.spl`
    - Expected: based.findings[0].baseline_state equals `unchanged`
@@ -196,8 +196,8 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps fingerprints stable across unrelated line movement and applies baselines")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: keeps fingerprints stable across unrelated line movement and applies baselines")
 val first = analyze_sspec_text("weak_spec.spl", "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n")
 val moved = analyze_sspec_text("weak_spec.spl", "\n\ndescribe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n")
 expect(first.findings[0].fingerprint).to_equal(moved.findings[0].fingerprint)
@@ -211,7 +211,7 @@ expect(based.resolved_fingerprints).to_equal(["resolved-id"])
 
 #### marks missing stale and current mirrors from content identities
 
-- marks missing stale and current mirrors from content identities
+- Verify: marks missing stale and current mirrors from content identities
    - Expected: analyze_sspec_pair_text("test/x_spec.spl", source, None).mirror_state equals `missing`
    - Expected: analyze_sspec_pair_text("test/x_spec.spl", source, Some("old")).mirror_state equals `stale`
    - Expected: analyze_sspec_pair_text("test/x_spec.spl", source, Some(manual)).mirror_state equals `current`
@@ -224,8 +224,8 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("marks missing stale and current mirrors from content identities")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: marks missing stale and current mirrors from content identities")
 val source = professional_source()
 val report = analyze_sspec_text("test/x_spec.spl", source)
 expect(analyze_sspec_pair_text("test/x_spec.spl", source, None).mirror_state).to_equal("missing")
@@ -238,7 +238,7 @@ expect(analyze_sspec_pair_text("test/x_spec.spl", source, Some(manual)).mirror_s
 
 #### renders deterministic full JSON and SARIF metadata
 
-- renders deterministic full JSON and SARIF metadata
+- Verify: renders deterministic full JSON and SARIF metadata
    - Expected: render_json_report(report) equals `json`
 
 
@@ -249,8 +249,8 @@ Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders deterministic full JSON and SARIF metadata")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: renders deterministic full JSON and SARIF metadata")
 val report = baseline_sspec_report(analyze_sspec_text("weak_spec.spl",
     "describe \"weak\":\n    it \"is unresolved\":\n        pass_todo\n"), [])
 val json = render_json_report(report)
@@ -267,7 +267,7 @@ expect(sarif).to_contain("\"baselineState\":\"new\"")
 
 #### keeps cache identities deterministic
 
-- keeps cache identities deterministic
+- Verify: keeps cache identities deterministic
    - Expected: a equals `b`
    - Expected: sspec_finding_baseline_state("x", ["x"]) equals `unchanged`
    - Expected: sspec_resolved_fingerprints(["x"], ["x", "y"]) equals `["y"]`
@@ -280,8 +280,8 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps cache identities deterministic")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: keeps cache identities deterministic")
 val a = sspec_cache_identity("a", "source", "mirror", "rules", "config", "tool")
 val b = sspec_cache_identity("a", "source", "mirror", "rules", "config", "tool")
 expect(a).to_equal(b)
@@ -293,7 +293,7 @@ expect(sspec_resolved_fingerprints(["x"], ["x", "y"])).to_equal(["y"])
 
 #### invalidates every cache identity dimension independently
 
-- invalidates every cache identity dimension independently
+- Verify: invalidates every cache identity dimension independently
 
 
 <details>
@@ -303,8 +303,8 @@ Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("invalidates every cache identity dimension independently")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: invalidates every cache identity dimension independently")
 val base = sspec_cache_identity("test/a_spec.spl", "source-a",
     "mirror-a", "rules-a", "config-a", "tool-a")
 expect(sspec_cache_identity("test/b_spec.spl", "source-a",
@@ -325,7 +325,7 @@ expect(sspec_cache_identity("test/a_spec.spl", "source-a",
 
 #### keeps reference scaffolds byte deterministic
 
-- keeps reference scaffolds byte deterministic
+- Verify: keeps reference scaffolds byte deterministic
    - Expected: second equals `first`
 
 
@@ -336,8 +336,8 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps reference scaffolds byte deterministic")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: keeps reference scaffolds byte deterministic")
 val reference = "# Reference\n## REQ-017: report status\n" +
     "Action: Run the status probe\nExpected: status is visible\n"
 val first = scaffold_reference_text("reference.md", reference)
@@ -351,19 +351,21 @@ expect(first).to_contain("REQ-017 <- reference.md:2")
 
 #### detects dangling requirements local arithmetic and unexplained literals
 
-- detects dangling requirements local arithmetic and unexplained literals
+- Verify: detects dangling requirements local arithmetic and unexplained literals
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects dangling requirements local arithmetic and unexplained literals")
-val source = "\"\"\"## Purpose and audience\nREQ-404\n\"\"\"\n" +
+step("Verify: detects dangling requirements local arithmetic and unexplained literals")
+# REQ-404 is a real # @req comment with no scenario binding (dangling).
+# Since 2026-08-22 the scanner skips triple-quoted string content, so a
+# REQ id in prose no longer counts as declared.
+val source = "# @req: REQ-404\n" +
     "describe \"behavior\":\n    it \"returns a value\":\n" +
     "        step(\"Calculate locally\")\n        val result = 7\n" +
     "        expect(result).to_equal(7)\n"
@@ -377,7 +379,7 @@ expect(ids).to_contain("SSDOC-TRC-003")
 
 #### requires owner and reason and refuses blocker suppression
 
-- requires owner and reason and refuses blocker suppression
+- Verify: requires owner and reason and refuses blocker suppression
    - Expected: parse_sspec_suppressions("SSDOC-MNT-007||because\n").is_err() is true
    - Expected: apply_sspec_suppressions(report, suppressions).is_err() is true
 
@@ -389,8 +391,8 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires owner and reason and refuses blocker suppression")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: requires owner and reason and refuses blocker suppression")
 expect(parse_sspec_suppressions("SSDOC-MNT-007||because\n").is_err()).to_equal(true)
 val report = analyze_sspec_text("blocked_spec.spl",
     "describe \"blocked\":\n    it \"has no oracle\":\n        step(\"Run\")\n")
@@ -404,7 +406,7 @@ match parse_sspec_suppressions("SSDOC-ORA-001|qa-owner|not acceptable\n"):
 
 #### composes idempotent professional provenance around the SPipe manual
 
-- composes idempotent professional provenance around the SPipe manual
+- Verify: composes idempotent professional provenance around the SPipe manual
    - Expected: second.content equals `first.content`
    - Expected: first.report.mirror_state equals `current`
 
@@ -416,8 +418,8 @@ Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("composes idempotent professional provenance around the SPipe manual")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: composes idempotent professional provenance around the SPipe manual")
 val base = "# Feature\n## Purpose and audience\n## Scope and preconditions\n" +
     "## Primary workflow\n1. Exercise production\n## Requirements and traceability\n" +
     "REQ-001\n## Evidence\nCaptured result\n## Verification and outcomes\n" +
@@ -437,7 +439,7 @@ expect(first.report.mirror_state).to_equal("current")
 
 #### reports declared lifecycle paths that no longer resolve
 
-- reports declared lifecycle paths that no longer resolve
+- Verify: reports declared lifecycle paths that no longer resolve
 
 
 <details>
@@ -447,8 +449,8 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("reports declared lifecycle paths that no longer resolve")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: reports declared lifecycle paths that no longer resolve")
 val source = professional_source().replace("doc/05_design/x.md",
     "doc/05_design/definitely_missing_ssdoc_fixture.md")
 val report = inspect_sspec_lifecycle_links(
@@ -460,7 +462,7 @@ expect(finding_ids(report)).to_contain("SSDOC-MNT-009")
 
 #### rejects overlapping EasyFix replacements before any write
 
-- rejects overlapping EasyFix replacements before any write
+- Verify: rejects overlapping EasyFix replacements before any write
    - Expected: sspec_source_is_stale("before", "after") is true
    - Expected: sspec_source_is_stale("same", "same") is false
 
@@ -472,8 +474,8 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rejects overlapping EasyFix replacements before any write")
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: rejects overlapping EasyFix replacements before any write")
 var first = EasyFix.create("SSDOC-TEST-1", "first",
     FixConfidence.Certain)
 first.add_replacement(Replacement.create("fixture.spl", 0, 4, 1, 1,
@@ -490,22 +492,58 @@ expect(sspec_source_is_stale("same", "same")).to_equal(false)
 
 </details>
 
-#### counts standalone assert_equal/assert_true as real oracles
+#### counts parenless check statements as real oracles
 
-- counts standalone assert_equal/assert_true as real oracles
+- Verify: counts parenless check statements as real oracles
    - Expected: finding_ids(report) does not contain `SSDOC-ORA-001`
-   - Expected: source contains `assert_equal(`
+   - Expected: finding_ids(tautology) contains `SSDOC-ORA-001`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("counts standalone assert_equal/assert_true as real oracles")
+step("Verify: counts parenless check statements as real oracles")
+# The usage-spec family asserts via parenless `check cond` statements —
+# the scorer must count them (and parenless `expect_not cond`, the SFFI
+# contract form), while still rejecting `check true`.
+val body = "describe \"sets\":\n    it \"holds three elements\":\n" +
+    "        # @req: REQ-012\n" +
+    "        step(\"Build the set\")\n" +
+    "        val nums = [1, 2, 3]\n" +
+    "        check nums.len() == 3\n" +
+    "        expect_not nums.contains(9)\n"
+val source = "\"\"\"\n## Purpose and audience\n## Operator workflow\n" +
+    "# @manual: primary\nREQ-012\ndoc/01_research/local/x.md\ndoc/03_plan/sys_test/x.md\n" +
+    "doc/04_architecture/x.md\ndoc/05_design/x.md\n\"\"\"\n" + body
+val report = analyze_sspec_text("parenless_check_spec.spl", source)
+expect(report.real_assertion_count).to_be_greater_than(0)
+expect(finding_ids(report).contains("SSDOC-ORA-001")).to_equal(false)
+val tautology = analyze_sspec_text("tautology_check_spec.spl",
+    source.replace("check nums.len() == 3", "check true")
+        .replace("expect_not nums.contains(9)", ""))
+expect(finding_ids(tautology).contains("SSDOC-ORA-001")).to_equal(true)
+```
+
+</details>
+
+#### counts standalone assert_equal/assert_true as real oracles
+
+- Verify: counts standalone assert_equal/assert_true as real oracles
+   - Expected: finding_ids(report) does not contain `SSDOC-ORA-001`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: counts standalone assert_equal/assert_true as real oracles")
 # Binary/domain specs assert via the repo's preferred standalone
 # assertions — the scorer must not report ORA-001 "no real executed
 # assertion" for them.
@@ -522,26 +560,27 @@ val source = "\"\"\"\n## Purpose and audience\n## Operator workflow\n" +
 val report = analyze_sspec_text("standalone_spec.spl", source)
 expect(report.real_assertion_count).to_be_greater_than(0)
 expect(finding_ids(report).contains("SSDOC-ORA-001")).to_equal(false)
-expect(source.contains("assert_equal(")).to_equal(true)
+# The fixture fed to the analyzer must actually exercise the
+# standalone-assert form (it is analyzer input, not system evidence).
+expect(source.split("assert_equal(").len()).to_be_greater_than(1)
 ```
 
 </details>
 
 #### scores typed binary and TUI evidence as real captures on both sides
 
-- scores typed binary and TUI evidence as real captures on both sides
+- Verify: scores typed binary and TUI evidence as real captures on both sides
    - Expected: finding_ids(binary_report) does not contain `SSDOC-EVD-001`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("scores typed binary and TUI evidence as real captures on both sides")
+step("Verify: scores typed binary and TUI evidence as real captures on both sides")
 # Source side: modern typed-evidence calls (compare_evidence,
 # evidence_manifest, binary_layout, terminal_grid) must count as
 # captures — regression for the scorer's binary/UI blind spot.
@@ -590,7 +629,7 @@ expect(tui_facts.capture_count).to_be_greater_than(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/sspec_maintain/scoring_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-22 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -602,8 +641,8 @@ Tests covering SSpec maintenance scoring.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -611,59 +650,44 @@ Tests covering SSpec maintenance scoring.
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-- `REQ-001\n`
-- `REQ-SSPEC-APP`
-- `REQ-017:`
-- `REQ-012\n"`
-- `REQ-011\n"`
-<!-- sspec-maintain:traceability:end -->
-
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `c9eadeed153bea65c3c6782595032d3379b906b26d75ea10e3c86263aa21d1a1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `7acd2e99412ab57b023afbd3a61bf615aa291cd0eb2439f4f2f81baa329dc68c`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `c9eadeed153bea65c3c6782595032d3379b906b26d75ea10e3c86263aa21d1a1`.
+Source SHA-256: `7acd2e99412ab57b023afbd3a61bf615aa291cd0eb2439f4f2f81baa329dc68c`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `c9eadeed153bea65c3c6782595032d3379b906b26d75ea10e3c86263aa21d1a1`  
+Source SHA-256: `7acd2e99412ab57b023afbd3a61bf615aa291cd0eb2439f4f2f81baa329dc68c`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **73/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 87/100
 source: test/01_unit/app/sspec_maintain/scoring_spec.spl
 mirror: doc/06_spec/01_unit/app/sspec_maintain/scoring_spec.md (current)
-findings: 6 blockers: 2
-  narrative=100 structure=100 oracle=20
-  traceability=60 evidence=70 coverage=100 maintainability=100
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=55 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=73; blocker cap makes effective=49
-test/01_unit/app/sspec_maintain/scoring_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
+doc/06_spec/01_unit/app/sspec_maintain/scoring_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
 test/01_unit/app/sspec_maintain/scoring_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/sspec_maintain/scoring_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/app/sspec_maintain/scoring_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'caps blockers and explains deductions across weak dimensions' has no retained capture or evidence
+test/01_unit/app/sspec_maintain/scoring_spec.spl:10:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'caps blockers and explains deductions across weak dimensions' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/sspec_maintain/scoring_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'awards all seven dimensions only to professional structural facts' has no retained capture or evidence
+test/01_unit/app/sspec_maintain/scoring_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'awards all seven dimensions only to professional structural facts' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/sspec_maintain/scoring_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects an arithmetic tautology as a real oracle' has no retained capture or evidence
+test/01_unit/app/sspec_maintain/scoring_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects an arithmetic tautology as a real oracle' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
+
+<!-- doc06-layout-migration: Historical generated/manual evidence retained; authoritative executable source remains at test/01_unit/app/sspec_maintain/scoring_spec.spl. -->

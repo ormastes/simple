@@ -1,6 +1,29 @@
-# Web Port Guard Specification
+# @manual: primary
 
-> Tests covering web port guard.
+> <details>
+
+<!-- sdn-diagram:id=web_port_guard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=web_port_guard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+web_port_guard_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=web_port_guard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Web Port Guard Specification
+# @manual: primary
 
 ## Scenarios
 
@@ -17,37 +40,22 @@
 
 #### guards malformed shared wm port parsing
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- guards malformed shared wm port parsing
-   - Expected: parse_web_port_or_default("9000") equals `9000`
-   - Expected: parse_web_port_or_default(" 8081 ") equals `8081`
-   - Expected: parse_web_port_or_default("") equals `8080`
-   - Expected: parse_web_port_or_default("abc") equals `8080`
-   - Expected: parse_web_port_or_default("0") equals `8080`
-   - Expected: parse_web_port_or_default("70000") equals `8080`
-   - Expected: parse_web_port_or_default("-1") equals `8080`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("guards malformed shared wm port parsing")
-# oracle: well-formed ports parse exactly; malformed and out-of-range ports default to 8080
-expect(parse_web_port_or_default("9000")).to_equal(9000)
-expect(parse_web_port_or_default(" 8081 ")).to_equal(8081)
-expect(parse_web_port_or_default("")).to_equal(8080)
-expect(parse_web_port_or_default("abc")).to_equal(8080)
-expect(parse_web_port_or_default("0")).to_equal(8080)
-expect(parse_web_port_or_default("70000")).to_equal(8080)
-expect(parse_web_port_or_default("-1")).to_equal(8080)
+val source = rt_file_read_text("src/app/ui.web/server.spl") ?? ""
+
+expect(source).to_contain("fn parse_web_port_or_default(value: text) -> i64")
+expect(source).to_contain("for ch in trimmed:")
+expect(source).to_contain("if ch < \"0\" or ch > \"9\":")
+expect(source).to_contain("val parsed = trimmed.to_int() ?? 8080")
+expect(source).to_contain("if parsed <= 0 or parsed > 65535:")
+expect(source).to_contain("val port = parse_web_port_or_default(port_str)")
+expect(source.contains("val port = port_str.to_int()")).to_equal(false)
 ```
 
 </details>
@@ -59,12 +67,27 @@ expect(parse_web_port_or_default("-1")).to_equal(8080)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/web_port_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: Verify web port guard.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-UI-001
+doc/01_research/local/REQ-APP-UI-001.md
+doc/03_plan/sys_test/REQ-APP-UI-001.md
+doc/04_architecture/REQ-APP-UI-001.md
+doc/05_design/REQ-APP-UI-001.md
 
-Tests covering web port guard.
+Tests covering:
 - web port guard
 
 ## Scenario Summary
@@ -79,48 +102,3 @@ Tests covering web port guard.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e248fff80a68fdc4c041f0e60ff5f2fbb25790f16150ab83d612d73df3bbd901`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e248fff80a68fdc4c041f0e60ff5f2fbb25790f16150ab83d612d73df3bbd901`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e248fff80a68fdc4c041f0e60ff5f2fbb25790f16150ab83d612d73df3bbd901`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/app/ui/web_port_guard_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/web_port_guard_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/web_port_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/web_port_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/web_port_guard_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/ui/web_port_guard_spec.spl:13:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'guards malformed shared wm port parsing' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -49,6 +49,7 @@ Visibility modifiers (`public`, `private`, `protected`) control which scopes may
 
 ## Overview
 
+```simple
 Visibility modifiers (`public`, `private`, `protected`) control which scopes may
 access a given struct field, class method, or module-level declaration. `public`
 members are accessible everywhere, `private` members only within the defining
@@ -58,6 +59,7 @@ feature is implemented; planned tests will verify compile-time rejection of
 illegal access, correct scoping across module boundaries, and interaction with
 the existing MDSOC capsule visibility system.
 
+```
 ## Syntax
 
 ```simple

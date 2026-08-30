@@ -27,6 +27,9 @@ fn codegen_inline_asm_single_instruction_collects_cli() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["cli".to_string()],
             volatile: false,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -50,6 +53,9 @@ fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["cli".to_string(), "hlt".to_string()],
             volatile: false,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -74,6 +80,9 @@ fn native_inline_asm_x86_target_uses_intel_syntax() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["mov ax, 0x28".to_string(), "ltr ax".to_string()],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -103,6 +112,9 @@ fn native_inline_asm_riscv_target_preserves_raw_instructions() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["wfi".to_string(), "j .".to_string()],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -131,6 +143,9 @@ fn native_inline_asm_skips_unresolved_simple_operands() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["mov {out}, cr3".to_string()],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -167,6 +182,9 @@ fn native_inline_asm_c_skips_simple_operand_directives() {
                 "options(nostack)".to_string(),
             ],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -201,13 +219,16 @@ fn main() -> i64:
         &body[0],
         HirStmt::InlineAsm {
             instructions,
-            volatile: true
+            volatile: true,
+            ..
         } if instructions == &vec!["sti".to_string()]
     ));
 }
 
 #[test]
-fn hir_operand_bound_inline_asm_remains_noop() {
+fn hir_operand_bound_inline_asm_lowers_with_operands() {
+    // Until 2026-08-28 an operand-bound block was silently DROPPED (this test
+    // pinned that as "remains_noop"). It now lowers with its operands.
     let body = lower_body(
         r#"
 fn main() -> i64:
@@ -216,5 +237,8 @@ fn main() -> i64:
     return 0
 "#,
     );
-    assert!(!body.iter().any(|stmt| matches!(stmt, HirStmt::InlineAsm { .. })));
+    assert!(body.iter().any(|stmt| matches!(
+        stmt,
+        HirStmt::InlineAsm { operands, .. } if operands.len() == 1
+    )));
 }

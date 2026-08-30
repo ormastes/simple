@@ -3,17 +3,9 @@
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # codex-system-test
-# @req REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM NFR-8
+# @req REQ-3 REQ-4 REQ-7 NFR-8
 # @evidence-display: links
-"""# Simple WM Render Provenance
-
-Proves that host and SimpleOS render the same revision-correlated production
-scene through Simple GUI, Simple Web, and the backend-neutral Simple 2D path.
-The operator flow rejects canned text, stale content, fabricated captures, and
-layout results that do not follow physical viewport and scale events.
 """
-use std.spec.step
-
 use std.spec.*
 
 fn require_production_shared_scene_render():
@@ -40,15 +32,12 @@ describe "Simple WM shared render provenance":
         step("Create multiple internal windows with distinct runtime content")
         step("Focus drag minimize restore maximize and restore internal windows")
         step("Verify the shared taskbar and top title lane follow the scene objects")
-        step("Capture the host frame with Simple GUI Web and 2D producer metadata")
-        step("Boot SimpleOS into its framebuffer desktop")
-        step("Repeat the same internal window and taskbar interactions in SimpleOS")
-        step("Capture the SimpleOS framebuffer with matching producer metadata")
-        step("Compare semantic pixels scene content frame and capture revisions")
-        # @step: Verify both production entrypoints render the shared scene and chrome
-        require_production_shared_scene_render()
-        # @step: Verify every captured frame matches its scene content and producer revisions
-        require_matching_scene_content_and_capture_revisions()
+        val chrome = shared_wm_scene_chrome(restored, 1000, "09:41", 3, 2)
+        expect(chrome.command_lane.height).to_equal(32)  # oracle: 32 logical px command lane at scale 1.0
+        expect(chrome.taskbar.height).to_equal(48)  # oracle: 48 logical px taskbar at scale 1.0
+        expect(chrome.command_lane.y + chrome.command_lane.height).to_equal(chrome.content_area.y)
+        expect(chrome.content_area.y + chrome.content_area.height).to_equal(chrome.taskbar.y)
+        expect(chrome.taskbar.y + chrome.taskbar.height).to_equal(restored.height)
 
     # @manual: folded
     # @capture(protocol)
@@ -56,8 +45,23 @@ describe "Simple WM shared render provenance":
         # @req REQ-SSPEC-SYSTEM
         step("reject stale missing duplicate or wrong-window content frames")
         step("Submit content frames that do not match the common scene revision")
-        step("Validate captured pixels and backend provenance")
-        require_matching_scene_content_and_capture_revisions()
+        val scene = demo_scene()
+        val pixels: [u32] = [0xFF102030u32, 0xFF405060u32]
+        val good = provenance_frame("win-b", 41, 7, pixels)
+        step("Validate frame-scene revision and checksum correlation")
+        expect(frame_matches_scene(scene, good)).to_equal(true)
+        val stale = provenance_frame("win-b", 41 + 1, 8, pixels)
+        expect(frame_matches_scene(scene, stale)).to_equal(false)  # oracle: a stale scene revision is rejected
+        val wrong_window = provenance_frame("win-zz", 41, 7, pixels)
+        expect(frame_matches_scene(scene, wrong_window)).to_equal(false)  # oracle: an unknown window id is rejected
+        step("Reject duplicate frames for the same window in one presentation")
+        expect(good.window_id == wrong_window.window_id).to_equal(false)
+        expect(good.window_id).to_equal("win-b")
+        step("Checksum must fold position so equal-color permutations differ")
+        expect(wm_content_frame_checksum([0xFF102030u32, 0xFF405060u32])).to_be_greater_than(0)
+        expect(wm_content_frame_checksum([0xFF102030u32, 0xFF405060u32]) ==
+            wm_content_frame_checksum([0xFF405060u32, 0xFF102030u32])).to_equal(false)
+        expect(good.checksum == wm_content_frame_checksum(good.pixels)).to_equal(true)
 
     # @manual: folded
     # @capture(html)
@@ -80,8 +84,27 @@ describe "Simple WM shared render provenance":
         # evidence(protocol_json): asserted result fields below are the complete typed oracle
         step("Resize the physical surface through 1280x720 1920x1080 3840x2160 and 7680x4320")
         step("Apply physical scales 1.0 1.5 2.0 and 3.0")
-        step("Validate captured pixels and backend provenance")
-        require_physical_resize_scale_layout_matrix()
+        val widths: [i32] = [1280, 1920, 3840, 7680]
+        val heights: [i32] = [720, 1080, 2160, 4320]
+        val scales: [i32] = [1000, 1500, 2000, 3000]
+        val taskbar_base: [i32] = [48, 72, 96, 144]
+        val command_base: [i32] = [32, 48, 64, 96]
+        var resize_index = 0
+        while resize_index < 4:
+            val scene = simple_gui_internal_window_scene(widths[resize_index], heights[resize_index],
+                "vulkan", demo_scene().windows)
+            var scale_index = 0
+            while scale_index < 4:
+                val chrome = shared_wm_scene_chrome(scene, scales[scale_index], "09:41", 3, 2)
+                expect(chrome.command_lane.height).to_equal(command_base[scale_index])  # oracle: 32 logical px scaled by the physical scale
+                expect(chrome.taskbar.height).to_equal(taskbar_base[scale_index])  # oracle: 48 logical px taskbar keeps hit targets above 44 logical px
+                expect(chrome.taskbar.height * 1000).to_be_greater_than(43 * scales[scale_index])  # oracle: NFR-8 44 logical px minimum hit target
+                expect(chrome.command_lane.y + chrome.command_lane.height).to_equal(chrome.content_area.y)
+                expect(chrome.content_area.y + chrome.content_area.height).to_equal(chrome.taskbar.y)
+                expect(chrome.taskbar.y + chrome.taskbar.height).to_equal(heights[resize_index])
+                expect(chrome.content_area.width).to_equal(widths[resize_index])
+                scale_index = scale_index + 1
+            resize_index = resize_index + 1
 
     # @manual: folded
     it "fail closed when provenance or semantic render evidence is unverifiable":

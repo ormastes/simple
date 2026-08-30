@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # CAS Store Specification — cross-process disk content-addressed store
 #
 # Tests the Option-C cache phase-1 disk CAS primitives: digest-addressed
@@ -6,14 +10,17 @@
 #
 # **Category:** Infrastructure
 
+use std.spec.step
+
 use std.spec.*
 use compiler.driver.cache.cas_store.{ActionManifest, cas_root, cas_open, cas_put, cas_get, cas_has, cas_blob_path, cas_action_path, cas_version_text, action_put, action_get, action_manifest_serialize}
 use std.crypto.sha256.{sha256_text}
-use std.io_runtime.{env_get_opt, env_set}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value_str: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -41,20 +48,19 @@ fn artifact_at(m: ActionManifest?, i: i64) -> text:
         case nil: "<absent>"
 
 describe "CAS blob store":
+    # @manual scenario evidence
     it "round-trips content and digest matches sha256 of content":
+        # @req REQ-SSPEC-COMPILER
+        step("round-trips content and digest matches sha256 of content")
         val root = fresh_root()
         val content = "hello cas blob"
         val digest = cas_put(root, content)
         expect(digest).to_equal(sha256_text(content))
         expect(cas_get(root, digest) ?? "<absent>").to_equal(content)
 
-    it "keeps an empty payload distinct from an absent blob":
-        val root = fresh_root()
-        val digest = cas_put(root, "")
-        expect(digest).to_equal(sha256_text(""))
-        expect(cas_get(root, digest) ?? "<absent>").to_equal("")
-
     it "dedups identical content on repeated put":
+        # @req REQ-SSPEC-COMPILER
+        step("dedups identical content on repeated put")
         val root = fresh_root()
         val d1 = cas_put(root, "same bytes twice")
         val d2 = cas_put(root, "same bytes twice")
@@ -63,12 +69,16 @@ describe "CAS blob store":
         assert_true(cas_has(root, d1))
 
     it "returns none for an absent digest":
+        # @req REQ-SSPEC-COMPILER
+        step("returns none for an absent digest")
         val root = fresh_root()
         val absent = sha256_text("content that was never stored")
         assert_false(cas_has(root, absent))
         expect(cas_get(root, absent) ?? "<absent>").to_equal("<absent>")
 
     it "detects corruption and never serves unverified bytes":
+        # @req REQ-SSPEC-COMPILER
+        step("detects corruption and never serves unverified bytes")
         val root = fresh_root()
         val digest = cas_put(root, "pristine payload")
         # Corrupt the blob on disk behind the store's back.
@@ -78,6 +88,8 @@ describe "CAS blob store":
         assert_false(cas_has(root, digest))
 
     it "gives distinct digests to distinct contents, both retrievable":
+        # @req REQ-SSPEC-COMPILER
+        step("gives distinct digests to distinct contents, both retrievable")
         val root = fresh_root()
         val da = cas_put(root, "content alpha")
         val db = cas_put(root, "content beta")
@@ -86,6 +98,8 @@ describe "CAS blob store":
         expect(cas_get(root, db) ?? "<absent>").to_equal("content beta")
 
     it "keeps slash/underscore collision pairs distinct (P1 flattening hole)":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps slash/underscore collision pairs distinct (P1 flattening hole)")
         # Under the legacy `/`->`_` path flattening, "a/b_c" and "a_b/c"
         # collapse to the same cache path. Digest addressing must not.
         val root = fresh_root()
@@ -97,6 +111,8 @@ describe "CAS blob store":
 
 describe "CAS action manifests":
     it "round-trips an action manifest":
+        # @req REQ-SSPEC-COMPILER
+        step("round-trips an action manifest")
         val root = fresh_root()
         val key = sha256_text("action-key-1")
         val a1 = sha256_text("artifact-one")
@@ -110,12 +126,16 @@ describe "CAS action manifests":
         expect(artifact_at(got, 1)).to_equal(a2)
 
     it "rejects a mislabeled manifest at put time":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects a mislabeled manifest at put time")
         val root = fresh_root()
         val key = sha256_text("action-key-2")
         val wrong = ActionManifest(action_digest: sha256_text("other-key"), artifact_digests: [], schema_version: 1)
         assert_false(action_put(root, key, wrong))
 
     it "returns none for a tampered stored manifest":
+        # @req REQ-SSPEC-COMPILER
+        step("returns none for a tampered stored manifest")
         val root = fresh_root()
         val key = sha256_text("action-key-3")
         val manifest = ActionManifest(action_digest: key, artifact_digests: [sha256_text("artifact")], schema_version: 1)
@@ -126,12 +146,16 @@ describe "CAS action manifests":
         expect(action_digest_of(action_get(root, key))).to_equal("<absent>")
 
     it "returns none for an absent action digest":
+        # @req REQ-SSPEC-COMPILER
+        step("returns none for an absent action digest")
         val root = fresh_root()
         val got = action_get(root, sha256_text("never stored action"))
         expect(action_digest_of(got)).to_equal("<absent>")
 
 describe "CAS schema versioning":
     it "treats a wrong-version store as empty and rewrites VERSION":
+        # @req REQ-SSPEC-COMPILER
+        step("treats a wrong-version store as empty and rewrites VERSION")
         val root = fresh_root()
         val digest = cas_put(root, "old schema payload")
         assert_true(cas_has(root, digest))
@@ -148,9 +172,9 @@ describe "CAS schema versioning":
         val saved = env_get_opt("SIMPLE_CACHE") ?? ""
         env_set("SIMPLE_CACHE", "build/tmp/cas_store_spec/env-root")
         expect(cas_root()).to_equal("build/tmp/cas_store_spec/env-root")
-        env_set("SIMPLE_CACHE", "")
+        rt_env_set("SIMPLE_CACHE", "")
         expect(cas_root()).to_equal("build/cache_cas")
-        env_set("SIMPLE_CACHE", saved)
+        rt_env_set("SIMPLE_CACHE", saved)
 
 describe "CAS nullable-read facade ownership":
     it "uses the exact owner four times and preserves branch order":

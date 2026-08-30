@@ -1,10 +1,34 @@
 # Spipe Docgen Scenario Body Specification
 
-> Tests covering spipe docgen scenario body extraction.
+> <details>
+
+<!-- sdn-diagram:id=spipe_docgen_scenario_body_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=spipe_docgen_scenario_body_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+spipe_docgen_scenario_body_spec -> app
+spipe_docgen_scenario_body_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=spipe_docgen_scenario_body_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 64 | 64 | 0 | 0 |
+| 56 | 56 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,158 +41,60 @@
 
 #### renders scenario bodies as dedented Simple code fences
 
-- renders scenario bodies as dedented Simple code fences
-   - Expected: structure does not contain `\n### evaluates addition`
-   - Expected: structure).to_contain("expect(result equals `5)"`
-   - Expected: structure).to_contain("> val result = $2 + 3$<br>\n> expect(result equals `5)"`
-   - Expected: structure does not contain `Rendered `m\{...\}``
-   - Expected: structure does not contain `**Plain text**`
-   - Expected: structure does not contain `<summary>Raw scenario source</summary>`
-   - Expected: structure does not contain ````latex`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders scenario bodies as dedented Simple code fences")
 val source = "describe \"Math Block Arithmetic\":\n" +
     "    it \"evaluates addition\":\n" +
-    "        val result = m\{ 2 + 3 \}\n" +
+    "        val result = m{ 2 + 3 }\n" +
     "        expect(result).to_equal(5)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_not_equal("x")
+expect(structure == "x").to_equal(false)
 expect(structure).to_contain("#### evaluates addition")
-expect(structure.contains("\n### evaluates addition")).to_equal(false)
-expect(structure).to_contain("val result = m\{ 2 + 3 \}")
+expect(structure.contains("### evaluates addition")).to_equal(false)
+expect(structure).to_contain("val result = m{ 2 + 3 }")
 expect(structure).to_contain("expect(result).to_equal(5)")
 expect(structure).to_contain("<summary>Executable SSpec</summary>")
 expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")
 expect(structure).to_contain("Reproduction: this block contains the complete executable scenario source.")
 expect(structure).to_contain("<summary>Rendered scenario source</summary>")
 expect(structure).to_contain("> val result = $2 + 3$<br>\n> expect(result).to_equal(5)")
-expect(structure.contains("Rendered `m\{...\}`")).to_equal(false)
+expect(structure.contains("Rendered `m{...}`")).to_equal(false)
 expect(structure.contains("**Plain text**")).to_equal(false)
 expect(structure.contains("<summary>Raw scenario source</summary>")).to_equal(false)
 expect(structure.contains("```latex")).to_equal(false)
 ```
 
+<details>
+<summary>Rendered scenario source</summary>
+
+> val source = "describe \"Math Block Arithmetic\":\n" +<br>
+>     "    it \"evaluates addition\":\n" +<br>
+>     "        val result = $2 + 3$\n" +<br>
+>     "        expect(result).to_equal(5)\n"<br>
+> val structure = extract_test_structure(source)<br>
+> expect(structure == "x").to_equal(false)<br>
+> expect(structure).to_contain("#### evaluates addition")<br>
+> expect(structure.contains("### evaluates addition")).to_equal(false)<br>
+> expect(structure).to_contain("val result = $2 + 3$")<br>
+> expect(structure).to_contain("expect(result).to_equal(5)")<br>
+> expect(structure).to_contain("<summary>Executable SSpec</summary>")<br>
+> expect(structure).to_contain("Runnable source: 2 lines folded for reproduction.")<br>
+> expect(structure).to_contain("Reproduction: this block contains the complete executable scenario source.")<br>
+> expect(structure).to_contain("<summary>Rendered scenario source</summary>")<br>
+> expect(structure).to_contain("> val result = $2 + 3$<br>\n> expect(result).to_equal(5)")<br>
+> expect(structure.contains("Rendered `$..$`")).to_equal(false)<br>
+> expect(structure.contains("**Plain text**")).to_equal(false)<br>
+> expect(structure.contains("<summary>Raw scenario source</summary>")).to_equal(false)<br>
+> expect(structure.contains("```latex")).to_equal(false)
+
 </details>
 
 #### keeps an escaped quote inside a step label instead of truncating it
-
-- keeps an escaped quote inside a step label instead of truncating it
-   - Expected: structure does not contain `- Create session \\\n`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("keeps an escaped quote inside a step label instead of truncating it")
-val source = "describe \"Naming\":\n" +
-    "    it \"names the session\":\n" +
-    "        step(\"Create session \\\"main\\\" at index 0\")\n" +
-    "        expect(1).to_equal(1)\n"
-val structure = extract_test_structure(source)
-# oracle: a first-quoted-segment reader stopped at the backslash and
-# emitted the bare prefix `- Create session \\`.
-expect(structure).to_contain("- Create session \"main\" at index 0")
-expect(structure.contains("- Create session \\\n")).to_equal(false)
-```
-
-</details>
-
-#### keeps a same-line oracle marker out of the rendered expected value
-
-- keeps a same-line oracle marker out of the rendered expected value
-   - Expected: structure does not contain `# oracle: POSIX default rows``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("keeps a same-line oracle marker out of the rendered expected value")
-val source = "describe \"Oracle marker\":\n" +
-    "    it \"documents its expected value\":\n" +
-    "        step(\"Read the default geometry\")\n" +
-    "        expect(p.height).to_equal(24)  # oracle: POSIX default rows\n"
-val structure = extract_test_structure(source)
-# oracle: SSDOC-ORA-003 requires the marker on the SAME line as the
-# assertion, so the renderer must drop it rather than fold it into the
-# value; it previously rendered as `24)  # oracle: POSIX default rows`.
-expect(structure).to_contain("Expected: p.height equals `24`")
-expect(structure.contains("# oracle: POSIX default rows`")).to_equal(false)
-```
-
-</details>
-
-#### leaves an assertion without an oracle marker unchanged
-
-- leaves an assertion without an oracle marker unchanged
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("leaves an assertion without an oracle marker unchanged")
-val source = "describe \"Plain\":\n" +
-    "    it \"adds\":\n" +
-    "        step(\"Add one and one\")\n" +
-    "        expect(1 + 1).to_equal(2)\n"
-val structure = extract_test_structure(source)
-expect(structure).to_contain("Expected: 1 + 1 equals `2`")
-```
-
-</details>
-
-#### keeps literal CSS identifiers ending in m out of math blocks
-
-- keeps literal CSS identifiers ending in m out of math blocks
-   - Expected: structure does not contain `$margin:0$`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("keeps literal CSS identifiers ending in m out of math blocks")
-val css = "html,body,form" + 123.to_char() + "margin:0" + 125.to_char()
-val source = "describe \"CSS literal\":\n" +
-    "    it \"keeps the form rule exact\":\n" +
-    "        val html = \"<style>" + css + "</style>\"\n" +
-    "        expect(html).to_contain(\"form\")\n"
-val structure = extract_test_structure(source)
-expect(structure).to_contain(css)
-expect(structure.contains("$margin:0$")).to_equal(false)
-expect(
-    structure.contains("<summary>Rendered scenario source</summary>")
-).to_equal(false)
-```
-
-</details>
 
 #### strips leading scenario docstrings from rendered code
 
@@ -205,21 +131,13 @@ expect(structure.contains("Explains the scenario.")).to_equal(false)
 
 #### does not emit a code fence for single-line pass scenarios
 
-- does not emit a code fence for single-line pass scenarios
-   - Expected: structure does not contain ````simple`
-   - Expected: structure does not contain `<summary>Executable SSpec</summary>`
-   - Expected: structure does not contain `Raw scenario source`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not emit a code fence for single-line pass scenarios")
 val source = "describe \"Empty bodies\":\n" +
     "    it \"has no multiline body\": pass\n"
 val structure = extract_test_structure(source)
@@ -233,19 +151,13 @@ expect(structure.contains("Raw scenario source")).to_equal(false)
 
 #### renders skip_it scenarios with skipped marker and body
 
-- renders skip_it scenarios with skipped marker and body
-   - Expected: structure).to_contain("```simple\nexpect(\"reason\" equals `"reason")\n```"`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders skip_it scenarios with skipped marker and body")
 val source = "describe \"Skipped scenarios\":\n" +
     "    skip_it \"documents underscore skipped scenarios\":\n" +
     "        expect(\"reason\").to_equal(\"reason\")\n"
@@ -258,19 +170,13 @@ expect(structure).to_contain("```simple\nexpect(\"reason\").to_equal(\"reason\")
 
 #### folds scenarios marked as advanced manual content
 
-- folds scenarios marked as advanced manual content
-   - Expected: structure).to_contain("```simple\nexpect(\"edge\" equals `"edge")\n```"`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folds scenarios marked as advanced manual content")
 val source = "describe \"Manual visibility\":\n" +
     "    # @manual: folded\n" +
     "    it \"documents an edge case without dominating the manual\":\n" +
@@ -286,20 +192,13 @@ expect(structure).to_contain("```simple\nexpect(\"edge\").to_equal(\"edge\")\n``
 
 #### skips scenarios marked as hidden manual content
 
-- skips scenarios marked as hidden manual content
-   - Expected: structure does not contain `keeps helper-only checks out of the manual`
-   - Expected: structure does not contain `expect("helper").to_equal("helper")`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("skips scenarios marked as hidden manual content")
 val source = "describe \"Manual visibility\":\n" +
     "    # @manual: skip\n" +
     "    it \"keeps helper-only checks out of the manual\":\n" +
@@ -316,18 +215,13 @@ expect(structure).to_contain("#### keeps primary scenario visible")
 
 #### folds all scenarios when file manual metadata is folded
 
-- folds all scenarios when file manual metadata is folded
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folds all scenarios when file manual metadata is folded")
 val source = "# @manual-file: folded\n" +
     "describe \"Manual visibility\":\n" +
     "    it \"keeps detailed file collapsed\":\n" +
@@ -341,20 +235,13 @@ expect(structure).to_contain("#### keeps detailed file collapsed")
 
 #### skips all scenarios when file manual metadata is skip
 
-- skips all scenarios when file manual metadata is skip
-   - Expected: structure does not contain `keeps generated helper file out of the manual`
-   - Expected: structure does not contain `expect("helper").to_equal("helper")`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("skips all scenarios when file manual metadata is skip")
 val source = "# @manual-file: skip\n" +
     "describe \"Manual visibility\":\n" +
     "    it \"keeps generated helper file out of the manual\":\n" +
@@ -368,19 +255,13 @@ expect(structure.contains("expect(\"helper\").to_equal(\"helper\")")).to_equal(f
 
 #### lets scenario manual metadata override folded file default
 
-- lets scenario manual metadata override folded file default
-   - Expected: structure does not contain `<summary>Advanced: shows the primary flow in a detailed file</summary>`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("lets scenario manual metadata override folded file default")
 val source = "# @manual-file: folded\n" +
     "describe \"Manual visibility\":\n" +
     "    # @manual: show\n" +
@@ -395,18 +276,16 @@ expect(structure.contains("<summary>Advanced: shows the primary flow in a detail
 
 #### folds scenarios from folder manual config
 
-- folds scenarios from folder manual config
+1. file write
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folds scenarios from folder manual config")
 file_write("build/sspec-manual.sdn", "manual: folded\n")
 val source = "describe \"Folder visibility\":\n" +
     "    it \"keeps folder detail collapsed\":\n" +
@@ -420,20 +299,13 @@ expect(structure).to_contain("<summary>Advanced: keeps folder detail collapsed</
 
 #### hides inline setup scenarios from top-level manual output
 
-- hides inline setup scenarios from top-level manual output
-   - Expected: structure does not contain `app is open`
-   - Expected: structure does not contain `expect("open").to_equal("open")`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("hides inline setup scenarios from top-level manual output")
 val source = "describe \"Inline setup\":\n" +
     "    # @inline\n" +
     "    it \"app is open\":\n" +
@@ -450,7 +322,9 @@ expect(structure).to_contain("#### user continues from setup")
 
 #### expands prev inline setup without rendering Previous label
 
-- expands prev inline setup without rendering Previous label
+1. "        user open app
+2. "    # @prev
+3. "        user enter login
    - Expected: structure does not contain `#### app is open`
    - Expected: structure does not contain `Previous:`
 
@@ -458,12 +332,10 @@ expect(structure).to_contain("#### user continues from setup")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("expands prev inline setup without rendering Previous label")
 val source = "describe \"Inline setup\":\n" +
     "    # @inline\n" +
     "    it \"app is open\":\n" +
@@ -482,19 +354,18 @@ expect(structure.contains("Previous:")).to_equal(false)
 
 #### expands bare prev from the nearest previous scenario
 
-- expands bare prev from the nearest previous scenario
+1. "        admin start server
+2. "        operator send request
    - Expected: structure does not contain `#### server is running`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("expands bare prev from the nearest previous scenario")
 val source = "describe \"Previous setup\":\n" +
     "    # @inline\n" +
     "    it \"server is running\":\n" +
@@ -512,7 +383,10 @@ expect(structure).to_contain("```simple\nadmin.start_server()\noperator.send_req
 
 #### expands include scenario body at the call site
 
-- expands include scenario body at the call site
+1. "        user confirm dialog
+2. "        user add item
+3. "        # @include
+4. "        user finish checkout
    - Expected: structure does not contain `#### user confirms dialog`
    - Expected: structure does not contain `# @include`
 
@@ -520,12 +394,10 @@ expect(structure).to_contain("```simple\nadmin.start_server()\noperator.send_req
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("expands include scenario body at the call site")
 val source = "describe \"Inline include\":\n" +
     "    # @inline\n" +
     "    it \"user confirms dialog\":\n" +
@@ -545,20 +417,18 @@ expect(structure.contains("# @include")).to_equal(false)
 
 #### renders step helper calls as manual steps
 
-- renders step helper calls as manual steps
-   - Expected: structure does not contain `1. Open the dashboard`
-   - Expected: structure does not contain `2. Choose the status filter`
+1. "        step
+2. "        step
+   - Expected: structure does not contain `1. Open the dashboard\n\n2. Choose the status filter`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders step helper calls as manual steps")
 val source = "describe \"Step helper\":\n" +
     "    it \"operator follows a readable flow\":\n" +
     "        step(\"Open the dashboard\")\n" +
@@ -567,12 +437,11 @@ val source = "describe \"Step helper\":\n" +
     "        expect(\"filtered\").to_equal(\"filtered\")\n"
 val structure = extract_test_structure(source)
 expect(structure).to_contain("#### operator follows a readable flow")
-expect(structure).to_contain("- Open the dashboard")
+expect(structure).to_contain("1. Open the dashboard")
 expect(structure).to_contain("   - Expected: \"ready\" equals `ready`")
-expect(structure).to_contain("- Choose the status filter")
+expect(structure).to_contain("2. Choose the status filter")
 expect(structure).to_contain("   - Expected: \"filtered\" equals `filtered`")
-expect(structure.contains("1. Open the dashboard")).to_equal(false)
-expect(structure.contains("2. Choose the status filter")).to_equal(false)
+expect(structure.contains("1. Open the dashboard\n\n2. Choose the status filter")).to_equal(false)
 expect(structure).to_contain("```simple\nstep(\"Open the dashboard\")")
 ```
 
@@ -580,22 +449,21 @@ expect(structure).to_contain("```simple\nstep(\"Open the dashboard\")")
 
 #### includes inline scenario step helpers in generated manual steps
 
-- includes inline scenario step helpers in generated manual steps
+1. "        step
+2. "        step
+3. "        # @include
+4. "        step
    - Expected: structure does not contain `#### operator has an authenticated session`
-   - Expected: structure does not contain `1. Open the sign-in page`
-   - Expected: structure does not contain `2. Submit valid credentials`
-   - Expected: structure does not contain `3. Open the actions panel`
+   - Expected: structure does not contain `1. Open the sign-in page\n\n2. Submit valid credentials`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes inline scenario step helpers in generated manual steps")
 val source = "describe \"Inline step include\":\n" +
     "    # @inline\n" +
     "    it \"operator has an authenticated session\":\n" +
@@ -608,12 +476,10 @@ val source = "describe \"Inline step include\":\n" +
 val structure = extract_test_structure(source)
 expect(structure.contains("#### operator has an authenticated session")).to_equal(false)
 expect(structure).to_contain("#### operator reviews dashboard actions")
-expect(structure).to_contain("- Open the sign-in page")
-expect(structure).to_contain("- Submit valid credentials")
-expect(structure).to_contain("- Open the actions panel")
-expect(structure.contains("1. Open the sign-in page")).to_equal(false)
-expect(structure.contains("2. Submit valid credentials")).to_equal(false)
-expect(structure.contains("3. Open the actions panel")).to_equal(false)
+expect(structure).to_contain("1. Open the sign-in page")
+expect(structure).to_contain("2. Submit valid credentials")
+expect(structure).to_contain("3. Open the actions panel")
+expect(structure.contains("1. Open the sign-in page\n\n2. Submit valid credentials")).to_equal(false)
 expect(structure).to_contain("   - Expected: \"actions\" equals `actions`")
 expect(structure).to_contain("```simple\nstep(\"Open the sign-in page\")\nstep(\"Submit valid credentials\")\nstep(\"Open the actions panel\")")
 ```
@@ -622,19 +488,18 @@ expect(structure).to_contain("```simple\nstep(\"Open the sign-in page\")\nstep(\
 
 #### renders warning for missing prev scenario target
 
-- renders warning for missing prev scenario target
+1. "    # @prev
+2. "        user enter login
    - Expected: structure does not contain `# @manual-warning`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders warning for missing prev scenario target")
 val source = "describe \"Missing previous\":\n" +
     "    # @prev(\"app is open\")\n" +
     "    it \"user logs in\":\n" +
@@ -648,19 +513,19 @@ expect(structure.contains("# @manual-warning")).to_equal(false)
 
 #### renders warning for missing include target and removes metadata from source
 
-- renders warning for missing include target and removes metadata from source
+1. "        user start flow
+2. "        # @include
+3. "        user finish flow
    - Expected: structure does not contain `# @include`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders warning for missing include target and removes metadata from source")
 val source = "describe \"Missing include\":\n" +
     "    it \"user finishes flow\":\n" +
     "        user.start_flow()\n" +
@@ -676,18 +541,19 @@ expect(structure.contains("# @include")).to_equal(false)
 
 #### renders warning for prev scenario expansion cycles
 
-- renders warning for prev scenario expansion cycles
+1. "    # @prev
+2. "        setup first
+3. "    # @prev
+4. "        setup second
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders warning for prev scenario expansion cycles")
 val source = "describe \"Previous cycle\":\n" +
     "    # @prev(\"second setup\")\n" +
     "    it \"first setup\":\n" +
@@ -706,19 +572,20 @@ expect(structure).to_contain("```simple\nsetup.second()\n```")
 
 #### renders warning for include scenario expansion cycles
 
-- renders warning for include scenario expansion cycles
+1. "        # @include
+2. "        flow first
+3. "        # @include
+4. "        flow second
    - Expected: structure does not contain `# @include`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders warning for include scenario expansion cycles")
 val source = "describe \"Include cycle\":\n" +
     "    it \"first branch\":\n" +
     "        # @include(\"second branch\")\n" +
@@ -738,19 +605,13 @@ expect(structure.contains("# @include")).to_equal(false)
 
 #### folds slow scenarios by default but allows manual show override
 
-- folds slow scenarios by default but allows manual show override
-   - Expected: structure does not contain `<summary>Advanced: shows important slow operator flow</summary>`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folds slow scenarios by default but allows manual show override")
 val source = "describe \"Slow manual visibility\":\n" +
     "    slow_it \"keeps stress detail folded\":\n" +
     "        expect(\"stress\").to_equal(\"stress\")\n" +
@@ -766,67 +627,15 @@ expect(structure.contains("<summary>Advanced: shows important slow operator flow
 
 </details>
 
-#### classifies only an unconditional top-level literal pending return
-
-- classifies only an unconditional top-level literal pending return
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 30 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("classifies only an unconditional top-level literal pending return")
-val source = "describe \"Runtime pending\":\n" +
-    "    it \"waits for the unavailable fixture\":\n" +
-    "        expect(\"control\").to_equal(\"control\")\n" +
-    "        pending(\n" +
-    "            \"fixture unavailable\"\n" +
-    "        )\n" +
-    "        return\n" +
-    "    it \"keeps a conditional host gate active\":\n" +
-    "        if host_is_unavailable():\n" +
-    "            pending(\"host unavailable\")\n" +
-    "            return\n" +
-    "        expect(\"active\").to_equal(\"active\")\n" +
-    "    slow_it \"waits for the slow fixture\":\n" +
-    "        pending(\"slow fixture unavailable\")\n" +
-    "        return\n"
-val structure = extract_test_structure(source)
-expect(structure).to_contain(
-    "#### waits for the unavailable fixture _(pending)_"
-)
-expect(structure).to_contain(
-    "#### keeps a conditional host gate active"
-)
-expect(structure.contains(
-    "#### keeps a conditional host gate active _(pending)_"
-)).to_equal(false)
-expect(structure).to_contain(
-    "#### waits for the slow fixture _(slow, pending)_"
-)
-```
-
-</details>
-
 #### folds intensive detail scenarios by default but allows manual show override
 
-- folds intensive detail scenarios by default but allows manual show override
-   - Expected: structure does not contain `<summary>Advanced: shows primary matrix operator flow</summary>`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("folds intensive detail scenarios by default but allows manual show override")
 val source = "describe \"Manual visibility\":\n" +
     "    it \"covers protocol matrix lock rows\":\n" +
     "        expect(\"matrix\").to_equal(\"matrix\")\n" +
@@ -850,7 +659,7 @@ expect(structure.contains("<summary>Advanced: shows primary matrix operator flow
 
 #### renders bare capture as after step tui scenario evidence
 
-- renders bare capture as after step tui scenario evidence
+1. "        user open app
    - Expected: structure does not contain `**Scenario capture:** tui after_step`
    - Expected: structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\" equals `"open")\n```"`
 
@@ -858,21 +667,18 @@ expect(structure.contains("<summary>Advanced: shows primary matrix operator flow
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders bare capture as after step tui scenario evidence")
 val source = "describe \"Capture policy\":\n" +
     "    # @capture\n" +
     "    it \"captures app after every step\":\n" +
-    "        # @step: User open app\n" +
     "        user.open_app()\n" +
     "        expect(\"open\").to_equal(\"open\")\n"
 val structure = extract_test_structure(source)
 expect(structure).to_contain("#### captures app after every step")
-expect(structure).to_contain("- User open app\n   - TUI capture: after_step")
+expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
 expect(structure.contains("**Scenario capture:** tui after_step")).to_equal(false)
 expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_equal(\"open\")\n```")
 ```
@@ -881,7 +687,9 @@ expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_eq
 
 #### renders explicit capture kind and mode from enum-like metadata
 
-- renders explicit capture kind and mode from enum-like metadata
+1. "    # @capture
+2. "        user open app
+3. "        user finish flow
    - Expected: structure does not contain `1. User open app\n   - GUI capture: after_scenario`
    - Expected: structure does not contain `**Scenario capture:** gui after_scenario`
 
@@ -889,22 +697,18 @@ expect(structure).to_contain("```simple\nuser.open_app()\nexpect(\"open\").to_eq
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders explicit capture kind and mode from enum-like metadata")
 val source = "describe \"Capture policy\":\n" +
     "    # @capture(after_scenario, gui)\n" +
     "    it \"captures the final rendered window\":\n" +
-    "        # @step: User open app\n" +
     "        user.open_app()\n" +
-    "        # @step: User finish flow\n" +
     "        user.finish_flow()\n" +
     "        expect(\"done\").to_equal(\"done\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app\n- User finish flow\n   - GUI capture: after_scenario (HTML preferred when available)")
+expect(structure).to_contain("1. User open app\n\n2. User finish flow\n   - GUI capture: after_scenario (HTML preferred when available)")
 expect(structure.contains("1. User open app\n   - GUI capture: after_scenario")).to_equal(false)
 expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(false)
 ```
@@ -913,7 +717,9 @@ expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(
 
 #### renders step capture metadata without keeping metadata in source code
 
-- renders step capture metadata without keeping metadata in source code
+1. "        user open app
+2. "        # @capture
+3. "        user submit login
    - Expected: structure does not contain `**Step captures:**`
    - Expected: structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\" equals `"ok")\n```"`
    - Expected: structure does not contain `# @capture(api)`
@@ -922,23 +728,19 @@ expect(structure.contains("**Scenario capture:** gui after_scenario")).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders step capture metadata without keeping metadata in source code")
 val source = "describe \"Capture policy\":\n" +
     "    it \"captures request evidence for submit\":\n" +
-    "        # @step: User open app\n" +
     "        user.open_app()\n" +
-    "        # @step: User submit login\n" +
     "        # @capture(api)\n" +
     "        user.submit_login()\n" +
     "        expect(\"ok\").to_equal(\"ok\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app")
-expect(structure).to_contain("- User submit login\n   - API capture: after_step")
+expect(structure).to_contain("1. User open app")
+expect(structure).to_contain("2. User submit login\n   - API capture: after_step")
 expect(structure.contains("**Step captures:**")).to_equal(false)
 expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
 expect(structure.contains("# @capture(api)")).to_equal(false)
@@ -948,7 +750,10 @@ expect(structure.contains("# @capture(api)")).to_equal(false)
 
 #### lets step capture off suppress inherited scenario capture
 
-- lets step capture off suppress inherited scenario capture
+1. "        user open app
+2. "        # @capture
+3. "        user enter password
+4. "        user submit login
    - Expected: structure does not contain `Capture: off`
    - Expected: structure does not contain `# @capture(off)`
 
@@ -956,25 +761,20 @@ expect(structure.contains("# @capture(api)")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("lets step capture off suppress inherited scenario capture")
 val source = "describe \"Capture policy\":\n" +
     "    # @capture\n" +
     "    it \"skips capture for a sensitive step\":\n" +
-    "        # @step: User open app\n" +
     "        user.open_app()\n" +
-    "        # @step: User enter password\n" +
     "        # @capture(off)\n" +
     "        user.enter_password()\n" +
-    "        # @step: User submit login\n" +
     "        user.submit_login()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app\n   - TUI capture: after_step")
-expect(structure).to_contain("- User enter password\n- User submit login\n   - TUI capture: after_step")
+expect(structure).to_contain("1. User open app\n   - TUI capture: after_step")
+expect(structure).to_contain("2. User enter password\n\n3. User submit login\n   - TUI capture: after_step")
 expect(structure.contains("Capture: off")).to_equal(false)
 expect(structure.contains("# @capture(off)")).to_equal(false)
 ```
@@ -983,19 +783,17 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 
 #### falls back to capture summary when no manual step can be derived
 
-- falls back to capture summary when no manual step can be derived
+1. "    # @capture
    - Expected: structure does not contain `1. `
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("falls back to capture summary when no manual step can be derived")
 val source = "describe \"Capture policy\":\n" +
     "    # @capture(api)\n" +
     "    it \"captures assertion-only evidence\":\n" +
@@ -1009,7 +807,8 @@ expect(structure.contains("1. ")).to_equal(false)
 
 #### does not render fallback capture summaries for capture off
 
-- does not render fallback capture summaries for capture off
+1. "    # @capture
+2. "        # @capture
    - Expected: structure does not contain `Scenario capture`
    - Expected: structure does not contain `Step captures`
    - Expected: structure does not contain `off before`
@@ -1019,12 +818,10 @@ expect(structure.contains("1. ")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not render fallback capture summaries for capture off")
 val source = "describe \"Capture policy\":\n" +
     "    # @capture(off)\n" +
     "    it \"keeps assertion-only capture off silent\":\n" +
@@ -1041,9 +838,8 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 
 #### renders explicit step metadata before folded executable source
 
-- renders explicit step metadata before folded executable source
-   - Expected: structure does not contain `1. User open app`
-   - Expected: structure does not contain `2. Submit login form`
+1. "        user open app
+2. "        user submit login
    - Expected: structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\" equals `"ok")\n```"`
    - Expected: structure does not contain `# @step: Submit login form`
 
@@ -1051,24 +847,19 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders explicit step metadata before folded executable source")
 val source = "describe \"Manual steps\":\n" +
     "    it \"uses readable manual step text\":\n" +
-    "        # @step: User open app\n" +
     "        user.open_app()\n" +
     "        # @step: Submit login form\n" +
     "        user.submit_login()\n" +
     "        expect(\"ok\").to_equal(\"ok\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- User open app")
-expect(structure).to_contain("- Submit login form")
-expect(structure.contains("1. User open app")).to_equal(false)
-expect(structure.contains("2. Submit login form")).to_equal(false)
+expect(structure).to_contain("1. User open app")
+expect(structure).to_contain("2. Submit login form")
 expect(structure).to_contain("```simple\nuser.open_app()\nuser.submit_login()\nexpect(\"ok\").to_equal(\"ok\")\n```")
 expect(structure.contains("# @step: Submit login form")).to_equal(false)
 ```
@@ -1077,20 +868,17 @@ expect(structure.contains("# @step: Submit login form")).to_equal(false)
 
 #### renders expected result bullets from contains assertions
 
-- renders expected result bullets from contains assertions
-   - Expected: structure does not contain `1. Operator lists MCP tools`
+1. "        val output = send mcp
    - Expected: structure does not contain `   - Evidence:`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders expected result bullets from contains assertions")
 val source = "describe \"Manual expected results\":\n" +
     "    it \"summarizes protocol assertions\":\n" +
     "        # @step: Operator lists MCP tools\n" +
@@ -1099,8 +887,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        expect(output.contains(\"\\\"protocolVersion\\\":\\\"2025-06-18\\\"\")).to_equal(true)\n" +
     "        expect(output.contains(\"error\")).to_equal(false)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator lists MCP tools")
-expect(structure.contains("1. Operator lists MCP tools")).to_equal(false)
+expect(structure).to_contain("1. Operator lists MCP tools")
 expect(structure.contains("   - Evidence:")).to_equal(false)
 expect(structure).to_contain("   - Expected: output contains `debug_create_session`")
 expect(structure).to_contain("   - Expected: output contains `\"protocolVersion\":\"2025-06-18\"`")
@@ -1111,19 +898,18 @@ expect(structure).to_contain("   - Expected: output does not contain `error`")
 
 #### places exec capture and evidence under the producing step
 
-- places exec capture and evidence under the producing step
+1. "        # @capture
+2. "        val output = run smoke
    - Expected: structure does not contain `# @capture(exec)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("places exec capture and evidence under the producing step")
 val source = "describe \"Manual expected results\":\n" +
     "    it \"summarizes command output\":\n" +
     "        # @step: Operator runs the smoke command\n" +
@@ -1132,7 +918,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        expect(output.contains(\"PASS smoke\")).to_equal(true)\n" +
     "        expect(output.contains(\"panic\")).to_equal(false)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator runs the smoke command\n   - Exec capture: after_step\n   - Evidence: execution result verified by 2 expected checks")
+expect(structure).to_contain("1. Operator runs the smoke command\n   - Exec capture: after_step\n   - Evidence: execution result verified by 2 expected checks")
 expect(structure).to_contain("   - Expected: output contains `PASS smoke`")
 expect(structure).to_contain("   - Expected: output does not contain `panic`")
 expect(structure.contains("# @capture(exec)")).to_equal(false)
@@ -1142,19 +928,18 @@ expect(structure.contains("# @capture(exec)")).to_equal(false)
 
 #### keeps concrete scenario helper provider evidence manual-readable
 
-- keeps concrete scenario helper provider evidence manual-readable
+1. "        # @capture
+2. "        val protocol evidence = capture api protocol fields
    - Expected: structure does not contain `# @capture(protocol)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps concrete scenario helper provider evidence manual-readable")
 val source = "describe \"MCP manual provider evidence\":\n" +
     "    it \"summarizes protocol provider artifacts\":\n" +
     "        # @step: Operator records the MCP tools/list provider evidence\n" +
@@ -1163,7 +948,7 @@ val source = "describe \"MCP manual provider evidence\":\n" +
     "        expect(protocol_evidence.body.contains(\"params: jsonrpc=2.0; method=tools/list; id=2\")).to_equal(true)\n" +
     "        expect(protocol_evidence.body.contains(\"response fields: protocolVersion=2025-06-18; result.tools=present; error=absent\")).to_equal(true)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator records the MCP tools/list provider evidence\n   - Protocol capture: after_step\n   - Evidence: protocol response verified by 2 expected checks")
+expect(structure).to_contain("1. Operator records the MCP tools/list provider evidence\n   - Protocol capture: after_step\n   - Evidence: protocol response verified by 2 expected checks")
 expect(structure).to_contain("   - Expected: protocol_evidence.body contains `params: jsonrpc=2.0; method=tools/list; id=2`")
 expect(structure).to_contain("   - Expected: protocol_evidence.body contains `response fields: protocolVersion=2025-06-18; result.tools=present; error=absent`")
 expect(structure).to_contain("capture_api_protocol_fields(\"MCP tools/list protocol exchange\"")
@@ -1174,19 +959,20 @@ expect(structure.contains("# @capture(protocol)")).to_equal(false)
 
 #### places concrete provider artifacts under the producing step
 
-- places concrete provider artifacts under the producing step
+1. "        # @capture
+2. "        # @artifact
+3. "        ui open screen
+4. "        operator review payload
    - Expected: structure does not contain `# @artifact`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("places concrete provider artifacts under the producing step")
 val source = "describe \"Manual artifacts\":\n" +
     "    it \"captures provider output\":\n" +
     "        # @step: Operator opens the captured screen\n" +
@@ -1197,8 +983,8 @@ val source = "describe \"Manual artifacts\":\n" +
     "        # @artifact: artifacts/protocol.json\n" +
     "        operator.review_payload()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator opens the captured screen\n   - TUI capture: after_step\n   - Artifact: text `artifacts/screen.ansi`")
-expect(structure).to_contain("- Operator reviews protocol payload\n   - Artifact: json `artifacts/protocol.json`")
+expect(structure).to_contain("1. Operator opens the captured screen\n   - TUI capture: after_step\n   - Artifact: text `artifacts/screen.ansi`")
+expect(structure).to_contain("2. Operator reviews protocol payload\n   - Artifact: json `artifacts/protocol.json`")
 expect(structure.contains("# @artifact")).to_equal(false)
 expect(structure).to_contain("```simple\nui.open_screen()\noperator.review_payload()\n```")
 ```
@@ -1207,7 +993,7 @@ expect(structure).to_contain("```simple\nui.open_screen()\noperator.review_paylo
 
 #### summarizes long expected result values but keeps full source folded
 
-- summarizes long expected result values but keeps full source folded
+1. "        val output = send mcp
    - Expected: structure does not contain `Create a debug session with a long schema payload``
    - Expected: structure).to_contain("expect(output contains `"{\\"jsonrpc\\":\\"2.0\\",\\"result\\":{\\"tools\\":[{\\"name\\":\\"debug_cre... (full value in folded executable source)`
 
@@ -1227,7 +1013,7 @@ val source = "describe \"Manual expected results\":\n" +
     "        val output = send_mcp(input)\n" +
     "        expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator checks protocol payload")
+expect(structure).to_contain("1. Operator checks protocol payload")
 expect(structure).to_contain("full value in folded executable source")
 expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
 expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")).to_equal(true)")
@@ -1237,7 +1023,7 @@ expect(structure).to_contain("expect(output.contains(\"{\\\"jsonrpc\\\":\\\"2.0\
 
 #### summarizes long direct json equality values but keeps full source folded
 
-- summarizes long direct json equality values but keeps full source folded
+1. "        val payload = read payload
    - Expected: structure does not contain `Create a debug session with a long schema payload``
    - Expected: structure).to_contain("expect(payload equals `"\{\\"jsonrpc\\":\\"2.0\\",\\"result\\":\{\\"tools\\":[\{\\"name\\":\\"debug_... (full value in folded executable source)`
 
@@ -1278,14 +1064,40 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders quoted step metadata before folded executable source")
+val source = "describe \"Manual expected results\":\n" +
+    "    it \"summarizes large json payload equality\":\n" +
+    "        # @step: Operator verifies the exact payload\n" +
+    "        val payload = read_payload()\n" +
+    "        expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")\n"
+val structure = extract_test_structure(source)
+expect(structure).to_contain("1. Operator verifies the exact payload")
+expect(structure).to_contain("   - Expected: payload equals `{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"debug_create_session\",\"des... (full value in folded executable source)`")
+expect(structure.contains("Create a debug session with a long schema payload`")).to_equal(false)
+expect(structure).to_contain("expect(payload).to_equal(\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"debug_create_session\\\",\\\"description\\\":\\\"Create a debug session with a long schema payload\\\"}]}}\")")
+```
+
+</details>
+
+#### renders quoted step metadata before folded executable source
+
+1. "        # @step
+2. "        user open dashboard
+   - Expected: structure does not contain `# @step("Open the dashboard")`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 val source = "describe \"Manual steps\":\n" +
     "    it \"uses quoted manual step text\":\n" +
     "        # @step(\"Open the dashboard\")\n" +
     "        user.open_dashboard()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Open the dashboard")
+expect(structure).to_contain("1. Open the dashboard")
 expect(structure).to_contain("```simple\nuser.open_dashboard()\n```")
 expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
 ```
@@ -1294,7 +1106,8 @@ expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
 
 #### allows capture metadata between step label and action
 
-- allows capture metadata between step label and action
+1. "        # @capture
+2. "        user submit login
    - Expected: structure does not contain `unused step metadata`
    - Expected: structure does not contain `# @step: Submit login form`
    - Expected: structure does not contain `# @capture(api)`
@@ -1303,19 +1116,17 @@ expect(structure.contains("# @step(\"Open the dashboard\")")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows capture metadata between step label and action")
 val source = "describe \"Manual steps\":\n" +
     "    it \"captures a labeled action\":\n" +
     "        # @step: Submit login form\n" +
     "        # @capture(api)\n" +
     "        user.submit_login()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Submit login form\n   - API capture: after_step")
+expect(structure).to_contain("1. Submit login form\n   - API capture: after_step")
 expect(structure.contains("unused step metadata")).to_equal(false)
 expect(structure).to_contain("```simple\nuser.submit_login()\n```")
 expect(structure.contains("# @step: Submit login form")).to_equal(false)
@@ -1326,7 +1137,10 @@ expect(structure.contains("# @capture(api)")).to_equal(false)
 
 #### allows step metadata before executable setup lines
 
-- allows step metadata before executable setup lines
+1. "    # @capture
+2. "        val input = init request
+3. "        val output = send mcp
+4. "        val ok = output contains
    - Expected: structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output contains `"protocolVersion")\nexpect(ok`
    - Expected: structure does not contain `unused step metadata`
    - Expected: structure does not contain `# @step: Operator`
@@ -1335,12 +1149,10 @@ expect(structure.contains("# @capture(api)")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows step metadata before executable setup lines")
 val source = "describe \"Manual steps\":\n" +
     "    # @capture(after_scenario, protocol)\n" +
     "    it \"labels protocol setup prose\":\n" +
@@ -1351,8 +1163,8 @@ val source = "describe \"Manual steps\":\n" +
     "        val ok = output.contains(\"protocolVersion\")\n" +
     "        expect(ok).to_equal(true)\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator sends an initialize request")
-expect(structure).to_contain("- Operator verifies the initialize response\n   - Protocol capture: after_scenario\n   - Evidence: protocol response verified by 1 expected check")
+expect(structure).to_contain("1. Operator sends an initialize request")
+expect(structure).to_contain("2. Operator verifies the initialize response\n   - Protocol capture: after_scenario\n   - Evidence: protocol response verified by 1 expected check")
 expect(structure).to_contain("```simple\nval input = init_request(\"1\")\nval output = send_mcp(input)\nval ok = output.contains(\"protocolVersion\")\nexpect(ok).to_equal(true)\n```")
 expect(structure.contains("unused step metadata")).to_equal(false)
 expect(structure.contains("# @step: Operator")).to_equal(false)
@@ -1362,20 +1174,22 @@ expect(structure.contains("# @step: Operator")).to_equal(false)
 
 #### keeps prev executable source stable with step-local capture metadata
 
-- keeps prev executable source stable with step-local capture metadata
-   - Expected: structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\nval output = send(input)\nexpect(output equals `"ok")\n```"`
+1. "        # @capture
+2. "        val init = build init
+3. "        val req = build request
+4. "    # @prev
+5. "        val output = send
+   - Expected: structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\n\nval output = send(input)\nexpect(output equals `"ok")\n```"`
    - Expected: structure does not contain `val req = build_request()\nval req = build_request()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps prev executable source stable with step-local capture metadata")
 val source = "describe \"Manual steps\":\n" +
     "    # @inline\n" +
     "    it \"setup protocol\":\n" +
@@ -1390,9 +1204,9 @@ val source = "describe \"Manual steps\":\n" +
     "        val output = send(input)\n" +
     "        expect(output).to_equal(\"ok\")\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Operator initializes protocol\n   - Protocol capture: after_step")
-expect(structure).to_contain("- Operator checks response")
-expect(structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\nval output = send(input)\nexpect(output).to_equal(\"ok\")\n```")
+expect(structure).to_contain("1. Operator initializes protocol\n   - Protocol capture: after_step")
+expect(structure).to_contain("2. Operator checks response")
+expect(structure).to_contain("```simple\nval init = build_init()\nval req = build_request()\nval input = init + req\n\nval output = send(input)\nexpect(output).to_equal(\"ok\")\n```")
 expect(structure.contains("val req = build_request()\nval req = build_request()")).to_equal(false)
 ```
 
@@ -1400,7 +1214,8 @@ expect(structure.contains("val req = build_request()\nval req = build_request()"
 
 #### allows capture off between step label and action
 
-- allows capture off between step label and action
+1. "        # @capture
+2. "        user enter password
    - Expected: structure does not contain `TUI capture: after_step`
    - Expected: structure does not contain `Capture: off`
    - Expected: structure does not contain `unused step metadata`
@@ -1411,12 +1226,10 @@ expect(structure.contains("val req = build_request()\nval req = build_request()"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows capture off between step label and action")
 val source = "describe \"Manual steps\":\n" +
     "    # @capture\n" +
     "    it \"labels a sensitive action without capture\":\n" +
@@ -1424,7 +1237,7 @@ val source = "describe \"Manual steps\":\n" +
     "        # @capture(off)\n" +
     "        user.enter_password()\n"
 val structure = extract_test_structure(source)
-expect(structure).to_contain("- Enter password")
+expect(structure).to_contain("1. Enter password")
 expect(structure.contains("TUI capture: after_step")).to_equal(false)
 expect(structure.contains("Capture: off")).to_equal(false)
 expect(structure.contains("unused step metadata")).to_equal(false)
@@ -1437,10 +1250,9 @@ expect(structure.contains("# @capture(off)")).to_equal(false)
 
 #### does not derive manual steps from control flow lines
 
-- does not derive manual steps from control flow lines
+1. "        if user needs login
+2. "            user open login
    - Expected: structure does not contain `1. if user needs login`
-   - Expected: structure does not contain `- If user needs login`
-   - Expected: structure does not contain `- User open login`
    - Expected: structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\" equals `"ready")\n```"`
 
 
@@ -1460,9 +1272,7 @@ val source = "describe \"Manual steps\":\n" +
     "        expect(\"ready\").to_equal(\"ready\")\n"
 val structure = extract_test_structure(source)
 expect(structure.contains("1. if user needs login")).to_equal(false)
-expect(structure.contains("- If user needs login")).to_equal(false)
-expect(structure.contains("- User open login")).to_equal(false)
-expect(structure).to_contain("#### keeps control flow as executable detail")
+expect(structure).to_contain("1. User open login")
 expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\").to_equal(\"ready\")\n```")
 ```
 
@@ -1470,8 +1280,30 @@ expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_l
 
 #### keeps checker-style calls as executable source instead of inventing prose
 
-- keeps checker-style calls as executable source instead of inventing prose
-   - Expected: structure does not contain `- Then login succeeds`
+1. "        Then login succeeds
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = "describe \"Manual steps\":\n" +
+    "    it \"shows checker helper prose\":\n" +
+    "        Then_login_succeeds()\n"
+val structure = extract_test_structure(source)
+expect(structure).to_contain("1. Then login succeeds")
+expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
+```
+
+</details>
+
+#### warns about empty step metadata without leaking it into source
+
+1. "        user open app
+   - Expected: structure does not contain ````simple\n# @step`
 
 
 <details>
@@ -1481,14 +1313,36 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps checker-style calls as executable source instead of inventing prose")
+val source = "describe \"Manual steps\":\n" +
+    "    it \"keeps control flow as executable detail\":\n" +
+    "        if user.needs_login():\n" +
+    "            user.open_login()\n" +
+    "        expect(\"ready\").to_equal(\"ready\")\n"
+val structure = extract_test_structure(source)
+expect(structure.contains("1. if user needs login")).to_equal(false)
+expect(structure).to_contain("1. User open login")
+expect(structure).to_contain("```simple\nif user.needs_login():\n    user.open_login()\nexpect(\"ready\").to_equal(\"ready\")\n```")
+```
+
+</details>
+
+#### renders checker-style calls as readable manual steps
+
+1. "        Then login succeeds
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 val source = "describe \"Manual steps\":\n" +
     "    it \"shows checker helper prose\":\n" +
     "        Then_login_succeeds()\n"
 val structure = extract_test_structure(source)
-expect(structure.contains("- Then login succeeds")).to_equal(false)
-expect(structure).to_contain("#### shows checker helper prose")
+expect(structure).to_contain("1. Then login succeeds")
 expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
 ```
 
@@ -1496,27 +1350,24 @@ expect(structure).to_contain("```simple\nThen_login_succeeds()\n```")
 
 #### warns about empty step metadata without leaking it into source
 
-- warns about empty step metadata without leaking it into source
-   - Expected: structure does not contain `- User open app`
+1. "        user open app
    - Expected: structure does not contain ````simple\n# @step`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("warns about empty step metadata without leaking it into source")
 val source = "describe \"Manual steps\":\n" +
     "    it \"keeps empty step metadata actionable\":\n" +
     "        # @step\n" +
     "        user.open_app()\n"
 val structure = extract_test_structure(source)
 expect(structure).to_contain("**Manual warnings:**\n- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
-expect(structure.contains("- User open app")).to_equal(false)
+expect(structure).to_contain("1. User open app")
 expect(structure).to_contain("```simple\nuser.open_app()\n```")
 expect(structure.contains("```simple\n# @step")).to_equal(false)
 ```
@@ -1525,20 +1376,13 @@ expect(structure.contains("```simple\n# @step")).to_equal(false)
 
 #### warns about unused step metadata without leaking it into source
 
-- warns about unused step metadata without leaking it into source
-   - Expected: structure).to_contain("```simple\nexpect(\"ok\" equals `"ok")\n```"`
-   - Expected: structure does not contain ````simple\n# @step`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("warns about unused step metadata without leaking it into source")
 val source = "describe \"Manual steps\":\n" +
     "    it \"keeps unused step metadata actionable\":\n" +
     "        # @step: Review final status\n" +
@@ -1553,18 +1397,17 @@ expect(structure.contains("```simple\n# @step")).to_equal(false)
 
 #### renders multiple manual warnings without blanking entries
 
-- renders multiple manual warnings without blanking entries
+1. "    # @capture
+2. "        user open app
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("renders multiple manual warnings without blanking entries")
 val source = "describe \"Manual warnings\":\n" +
     "    # @manual: spotlight\n" +
     "    # @capture(video)\n" +
@@ -1575,26 +1418,20 @@ val structure = extract_test_structure(source)
 expect(structure).to_contain("- invalid manual visibility metadata: # @manual: spotlight (expected show, folded, detail, or skip)")
 expect(structure).to_contain("- invalid capture metadata value: video (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)")
 expect(structure).to_contain("- invalid step metadata value: empty (expected # @step: Text or # @step(\"Text\"))")
-expect(structure).to_contain("```simple\nuser.open_app()\n```")
+expect(structure).to_contain("1. User open app")
 ```
 
 </details>
 
 #### warns about invalid scenario manual metadata
 
-- warns about invalid scenario manual metadata
-   - Expected: structure).to_contain("expect(\"visible\" equals `"visible")"`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("warns about invalid scenario manual metadata")
 val source = "describe \"Manual metadata diagnostics\":\n" +
     "    # @manual: spotlight\n" +
     "    it \"keeps invalid manual metadata actionable\":\n" +
@@ -1609,7 +1446,8 @@ expect(structure).to_contain("expect(\"visible\").to_equal(\"visible\")")
 
 #### warns about invalid scenario capture metadata without rendering a false capture
 
-- warns about invalid scenario capture metadata without rendering a false capture
+1. "    # @capture
+2. "        user open app
    - Expected: structure does not contain `**Scenario capture:** tui after_step`
    - Expected: structure does not contain `# @capture(video)`
 
@@ -1617,12 +1455,10 @@ expect(structure).to_contain("expect(\"visible\").to_equal(\"visible\")")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("warns about invalid scenario capture metadata without rendering a false capture")
 val source = "describe \"Capture metadata diagnostics\":\n" +
     "    # @capture(video)\n" +
     "    it \"keeps invalid scenario capture actionable\":\n" +
@@ -1638,19 +1474,19 @@ expect(structure.contains("# @capture(video)")).to_equal(false)
 
 #### warns about invalid step capture metadata and strips it from source
 
-- warns about invalid step capture metadata and strips it from source
+1. "        user open app
+2. "        # @capture
+3. "        user capture screen
    - Expected: structure does not contain `# @capture(video)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("warns about invalid step capture metadata and strips it from source")
 val source = "describe \"Capture metadata diagnostics\":\n" +
     "    it \"keeps invalid step capture actionable\":\n" +
     "        user.open_app()\n" +
@@ -1666,53 +1502,44 @@ expect(structure.contains("# @capture(video)")).to_equal(false)
 
 #### captures the math_blocks golden scenario body
 
-- captures the math_blocks golden scenario body
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("captures the math_blocks golden scenario body")
 val source = read_file("test/03_system/feature/usage/math_blocks_spec.spl")
 val structure = extract_test_structure(source)
 expect(structure).to_contain("#### evaluates addition")
-# The golden scenario also carries a step() anchor, a @req tag and a
-# same-line oracle marker; the fence is the FAITHFUL source, so all
-# four lines belong in it.
-expect(structure).to_contain("```simple\n" +
-    "step(\"Verify: evaluates addition\")\n" +
-    "# @req: REQ-FEATURE-MathBloc-001\n" +
-    "val result = m\{ 2 + 3 \}\n" +
-    "expect(result).to_equal(5)  # oracle: value fixed by the spec contract\n" +
-    "```")
-expect(structure).to_contain("> val result = $2 + 3$<br>")
+expect(structure).to_contain("```simple\nval result = m{ 2 + 3 }\nexpect(result).to_equal(5)\n```")
 expect(structure).to_contain("#### evaluates sqrt of 16")
 expect(structure).to_contain("sqrt")
 ```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> val source = read_file("test/03_system/feature/usage/math_blocks_spec.spl")<br>
+> val structure = extract_test_structure(source)<br>
+> expect(structure).to_contain("#### evaluates addition")<br>
+> expect(structure).to_contain("```simple\nval result = $2 + 3$\nexpect(result).to_equal(5)\n```")<br>
+> expect(structure).to_contain("#### evaluates sqrt of 16")<br>
+> expect(structure).to_contain("sqrt")
+
+</details>
 
 </details>
 
 #### generates through the pure Simple generator path
 
-- generates through the pure Simple generator path
-   - Expected: e equals ``
-   - Expected: e equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("generates through the pure Simple generator path")
 val parsed_result = parse_spipe_file("test/03_system/feature/usage/math_blocks_spec.spl")
 match parsed_result:
     case Err(e):
@@ -1737,152 +1564,15 @@ match parsed_result:
 
 </details>
 
-#### counts an unconditional top-level pending return without hiding active scenarios
-
-- counts an unconditional top-level pending return without hiding active scenarios
-   - Expected: e equals ``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 49 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("counts an unconditional top-level pending return without hiding active scenarios")
-val root = "/tmp/spipe_docgen_pending_" +
-    time_now_unix_micros().to_string()
-val content = "describe \"Runtime pending\":\n" +
-    "    it \"waits for a fixture\":\n" +
-    "        expect(\"control\").to_equal(\"control\")\n" +
-    "        pending(\n" +
-    "            \"fixture unavailable\"\n" +
-    "        )\n" +
-    "        return\n" +
-    "    it \"keeps a conditional gate active\":\n" +
-    "        if host_is_unavailable():\n" +
-    "            pending(\"host unavailable\")\n" +
-    "            return\n" +
-    "        expect(\"active\").to_equal(\"active\")\n" +
-    "    slow_it \"waits for a slow fixture\":\n" +
-    "        pending(\"slow fixture unavailable\")\n" +
-    "        return\n"
-val doc = SspecDoc(
-    file_path:
-        "test/01_unit/app/tooling/runtime_pending_fixture_spec.spl",
-    raw_content: content,
-    doc_blocks: [],
-    feature_title: "Runtime Pending",
-    feature_ids: [],
-    metadata: FeatureMetadata.empty()
-)
-match generate_feature_doc(doc, root):
-    case Err(e):
-        expect(e).to_equal("")
-    case Ok(path):
-        val generated = file_read(path)
-        expect(generated).to_contain(
-            "#### waits for a fixture _(pending)_"
-        )
-        expect(generated).to_contain("| Active scenarios | 1 |")
-        expect(generated).to_contain("| Pending scenarios | 2 |")
-        expect(generated).to_contain(
-            "#### keeps a conditional gate active"
-        )
-        expect(generated.contains(
-            "#### keeps a conditional gate active _(pending)_"
-        )).to_equal(false)
-        expect(generated).to_contain("| Total scenarios | 3 |")
-        expect(generated).to_contain(
-            "#### waits for a slow fixture _(slow, pending)_"
-        )
-val _cleanup_pending = dir_remove_all(root)
-```
-
-</details>
-
-#### parses inline manual docstrings and replaces longer generated files
-
-- parses inline manual docstrings and replaces longer generated files
-   - Expected: dir_create(spec_dir, true) is true
-   - Expected: dir_create(output_subdir, true) is true
-   - Expected: file_write(output_path, "STALE_TRAILER".repeat(4096)) is true
-   - Expected: e equals ``
-   - Expected: parsed.doc_blocks.len() equals `1`
-   - Expected: parsed.feature_title equals `Inline Manual`
-   - Expected: e equals ``
-   - Expected: generated does not contain `STALE_TRAILER`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 39 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("parses inline manual docstrings and replaces longer generated files")
-val nonce = time_now_unix_micros().to_string()
-val root = "/tmp/spipe_docgen_inline_" + nonce
-val spec_dir = root + "/test/03_system/feature"
-val output_dir = root + "/manuals"
-val output_subdir = output_dir + "/03_system/feature"
-val spec_path = spec_dir + "/inline_manual_spec.spl"
-val output_path = output_subdir + "/inline_manual_spec.md"
-expect(dir_create(spec_dir, true)).to_equal(true)
-expect(dir_create(output_subdir, true)).to_equal(true)
-expect(file_write(spec_path,
-    "\"\"\"# Inline Manual\n\n## Overview\nInline scope prose.\n\"\"\"\n" +
-    "describe \"Inline behavior\":\n    it \"passes\":\n        expect(1).to_equal(1)\n"
-)).to_equal(true)
-expect(file_write(output_path, "STALE_TRAILER".repeat(4096))).to_equal(true)
-
-match parse_spipe_file(spec_path):
-    case Err(e):
-        expect(e).to_equal("")
-    case Ok(parsed):
-        expect(parsed.doc_blocks.len()).to_equal(1)
-        expect(parsed.feature_title).to_equal("Inline Manual")
-        val doc = SspecDoc(
-            file_path: parsed.file_path,
-            raw_content: parsed.raw_content,
-            doc_blocks: parsed.doc_blocks,
-            feature_title: parsed.feature_title,
-            feature_ids: parsed.feature_ids,
-            metadata: extract_metadata(parsed)
-        )
-        match generate_feature_doc(doc, output_dir):
-            case Err(e):
-                expect(e).to_equal("")
-            case Ok(path):
-                val generated = read_file(path)
-                expect(generated).to_start_with("# Inline Manual\n\n> Inline scope prose.")
-                expect(generated.contains("STALE_TRAILER")).to_equal(false)
-val _cleanup = dir_remove_all(root)
-```
-
-</details>
-
 #### mirrors the source spec folder under the output directory
 
-- mirrors the source spec folder under the output directory
-   - Expected: e equals ``
-   - Expected: e equals ``
-   - Expected: path equals `/tmp/03_system/feature/usage/math_blocks_spec.md`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("mirrors the source spec folder under the output directory")
 val parsed_result = parse_spipe_file("test/03_system/feature/usage/math_blocks_spec.spl")
 match parsed_result:
     case Err(e):
@@ -1902,16 +1592,17 @@ match parsed_result:
             case Err(e):
                 expect(e).to_equal("")
             case Ok(path):
-                expect(path).to_equal("/tmp/03_system/feature/usage/math_blocks_spec.md")
+                expect(path).to_equal("/tmp/test/03_system/feature/usage/math_blocks_spec.md")
 ```
 
 </details>
 
-#### mirrors test tiers directly under the manual root
+#### writes test manuals under doc test folder except formal verification
 
-- mirrors test tiers directly under the manual root
+1. metadata: FeatureMetadata empty
    - Expected: e equals ``
-   - Expected: path equals `/tmp/01_unit/app/lint_spec.md`
+   - Expected: path equals `/tmp/test/01_unit/app/lint_spec.md`
+2. metadata: FeatureMetadata empty
    - Expected: e equals ``
    - Expected: path equals `/tmp/00_formal_verification/compiler/cache_correctness_spec.md`
 
@@ -1919,12 +1610,10 @@ match parsed_result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("mirrors test tiers directly under the manual root")
 val unit_doc = SspecDoc(
     file_path: "test/01_unit/app/lint_spec.spl",
     raw_content: "describe \"Lint\":\n    it \"passes\":\n        expect(\"ok\").to_equal(\"ok\")\n",
@@ -1938,7 +1627,7 @@ match unit_result:
     case Err(e):
         expect(e).to_equal("")
     case Ok(path):
-        expect(path).to_equal("/tmp/01_unit/app/lint_spec.md")
+        expect(path).to_equal("/tmp/test/01_unit/app/lint_spec.md")
 
 val formal_doc = SspecDoc(
     file_path: "test/00_formal_verification/compiler/cache_correctness_spec.spl",
@@ -1954,130 +1643,15 @@ match formal_result:
         expect(e).to_equal("")
     case Ok(path):
         expect(path).to_equal("/tmp/00_formal_verification/compiler/cache_correctness_spec.md")
-
-val absolute_doc = SspecDoc(
-    file_path: "/workspace/test/01_unit/app/absolute_spec.spl",
-    raw_content: "describe \"Absolute\":\n    it \"passes\":\n        expect(1).to_equal(1)\n",
-    doc_blocks: [], feature_title: "Absolute", feature_ids: [], metadata: FeatureMetadata.empty()
-)
-match generate_feature_doc(absolute_doc, "/tmp"):
-    case Err(e): expect(e).to_equal("")
-    case Ok(path): expect(path).to_equal("/tmp/01_unit/app/absolute_spec.md")
-
-val windows_doc = SspecDoc(
-    file_path: "C:\\workspace\\test\\03_system\\app\\windows_spec.spl",
-    raw_content: "describe \"Windows\":\n    it \"passes\":\n        expect(1).to_equal(1)\n",
-    doc_blocks: [], feature_title: "Windows", feature_ids: [], metadata: FeatureMetadata.empty()
-)
-match generate_feature_doc(windows_doc, "/tmp"):
-    case Err(e): expect(e).to_equal("")
-    case Ok(path): expect(path).to_equal("/tmp/03_system/app/windows_spec.md")
-
-val traversal_doc = SspecDoc(
-    file_path: "test/../outside_spec.spl",
-    raw_content: "describe \"Traversal\":\n    it \"fails\":\n        expect(1).to_equal(1)\n",
-    doc_blocks: [], feature_title: "Traversal", feature_ids: [], metadata: FeatureMetadata.empty()
-)
-match generate_feature_doc(traversal_doc, "/tmp"):
-    case Err(e): expect(e).to_contain("escapes the documentation root")
-    case Ok(path): expect(path).to_equal("")
-```
-
-</details>
-
-#### fails closed for missing or undocumented inputs
-
-- fails closed for missing or undocumented inputs
-   - Expected: dir_create(root, true) is true
-   - Expected: dir_create(documented_dir, true) is true
-   - Expected: malformed_status equals `1`
-   - Expected: malformed_wrote_default is false
-   - Expected: unknown_status equals `1`
-   - Expected: unknown_wrote_default is false
-   - Expected: file_write(stub_path, "# no docstring and no scenarios: a genuine stub\n") is true
-   - Expected: run_spipe_docgen([stub_path, "--output", root + "/stub", "--no-index"]) equals `1`
-   - Expected: run_spipe_docgen([root + "/missing_spec.spl", "--no-index"]) equals `1`
-   - Expected: file_write(output_file, "not a directory") is true
-   - Expected: run_spipe_docgen([stub_path, "--output", stub_index_output]) equals `1`
-   - Expected: file_exists(stub_index_output + "/INDEX.md") is false
-   - Expected: dir_create(index_error_output + "/INDEX.md", true) is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 59 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("fails closed for missing or undocumented inputs")
-val nonce = time_now_unix_micros().to_string()
-val root = "/tmp/spipe_docgen_contract_" + nonce
-val _cleanup_before = dir_remove_all(root)
-expect(dir_create(root, true)).to_equal(true)
-
-val documented_dir = root + "/test/03_system/feature/usage"
-expect(dir_create(documented_dir, true)).to_equal(true)
-val documented_path = documented_dir + "/documented_" + nonce + "_spec.spl"
-expect(file_write(documented_path,
-    "\"\"\"\n# Documented Fixture\n\n## Overview\nSelf-contained docgen status fixture.\n\"\"\"\n" +
-    "describe \"Documented\":\n    it \"passes\":\n        expect(1).to_equal(1)\n"
-)).to_equal(true)
-
-expect(run_spipe_docgen([
-    documented_path,
-    "--output", root + "/success", "--no-index"
-])).to_equal(0)
-
-val default_output = "doc/06_spec/03_system/feature/usage/documented_" + nonce + "_spec.md"
-val malformed_status = run_spipe_docgen([documented_path, "--output", "--no-index"])
-val malformed_wrote_default = file_exists(default_output)
-if malformed_wrote_default:
-    val _deleted_default = file_delete(default_output)
-expect(malformed_status).to_equal(1)
-expect(malformed_wrote_default).to_equal(false)
-
-val unknown_status = run_spipe_docgen([documented_path, "--outpt", root + "/ignored", "--no-index"])
-val unknown_wrote_default = file_exists(default_output)
-if unknown_wrote_default:
-    val _deleted_unknown_default = file_delete(default_output)
-expect(unknown_status).to_equal(1)
-expect(unknown_wrote_default).to_equal(false)
-
-val stub_path = root + "/spipe_docgen_undocumented_spec.spl"
-expect(file_write(stub_path, "# no docstring and no scenarios: a genuine stub\n")).to_equal(true)
-expect(run_spipe_docgen([stub_path, "--output", root + "/stub", "--no-index"])).to_equal(1)
-expect(run_spipe_docgen([root + "/missing_spec.spl", "--no-index"])).to_equal(1)
-
-val output_file = root + "/output_is_file"
-expect(file_write(output_file, "not a directory")).to_equal(true)
-expect(run_spipe_docgen([
-    documented_path,
-    "--output", output_file, "--no-index"
-])).to_equal(1)
-
-val stub_index_output = root + "/stub_index"
-expect(run_spipe_docgen([stub_path, "--output", stub_index_output])).to_equal(1)
-expect(file_exists(stub_index_output + "/INDEX.md")).to_equal(false)
-
-val index_error_output = root + "/index_error"
-expect(dir_create(index_error_output + "/INDEX.md", true)).to_equal(true)
-expect(run_spipe_docgen([
-    documented_path,
-    "--output", index_error_output
-])).to_equal(1)
-
-val _cleanup_after = dir_remove_all(root)
 ```
 
 </details>
 
 #### generates auto docs with scenarios immediately after the title
 
-- generates auto docs with scenarios immediately after the title
+1. metadata: FeatureMetadata empty
    - Expected: e equals ``
-   - Expected: generated does not contain `> <details>`
+   - Expected: before_scenarios equals `# Manual First\n\n`
    - Expected: before_scenarios does not contain `## At a Glance`
    - Expected: before_scenarios does not contain `## Overview`
    - Expected: before_scenarios does not contain `## Scenario Summary`
@@ -2086,12 +1660,10 @@ val _cleanup_after = dir_remove_all(root)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("generates auto docs with scenarios immediately after the title")
 val doc = SspecDoc(
     file_path: "test/feature/app/manual_first_spec.spl",
     raw_content: "describe \"Manual First\":\n    it \"operator performs the primary flow\":\n        user.open_app()\n        val status = \"open\"\n        expect(status).to_equal(\"open\")\n",
@@ -2106,17 +1678,9 @@ match result:
         expect(e).to_equal("")
     case Ok(path):
         val generated = read_file(path)
-        expect(generated).to_start_with("# Manual First\n\n> Tests covering Manual First.")
-        expect(generated.contains("> <details>")).to_equal(false)
         val before_scenarios = generated.split("## Scenarios")[0]
         val after_scenarios_parts = generated.split("## Scenarios")
-        expect(before_scenarios).to_equal(
-            "# Manual First\n\n> Tests covering Manual First.\n\n" +
-            "| Tests | Active | Skipped | Pending |\n" +
-            "|-------|--------|---------|--------:|\n" +
-            "| 1 | 1 | 0 | 0 |\n\n" +
-            "<details>\n<summary>Full Scenario Manual</summary>\n\n" +
-            "# Manual First\n\n")
+        expect(before_scenarios).to_equal("# Manual First\n\n")
         expect(before_scenarios.contains("## At a Glance")).to_equal(false)
         expect(before_scenarios.contains("## Overview")).to_equal(false)
         expect(before_scenarios.contains("## Scenario Summary")).to_equal(false)
@@ -2131,7 +1695,7 @@ match result:
 
 #### links screenshots and embeds TUI capture evidence in generated docs
 
-- links screenshots and embeds TUI capture evidence in generated docs
+1. file write
    - Expected: e equals ``
    - Expected: generated does not contain `![Screenshots: main.png](doc/06_spec/image/feature/app/ui_capture_spec/main.png)`
    - Expected: generated does not contain ``N/A``
@@ -2140,12 +1704,10 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("links screenshots and embeds TUI capture evidence in generated docs")
 val tui_path = "/tmp/spipe_docgen_ui_capture.txt"
 file_write(tui_path, "Simple UI\n[OK] Ready\n")
 val metadata = FeatureMetadata(
@@ -2193,7 +1755,7 @@ match result:
 
 #### lets users link all evidence instead of embedding TUI captures
 
-- lets users link all evidence instead of embedding TUI captures
+1. file write
    - Expected: e equals ``
    - Expected: generated does not contain `![TUI Captures: tui.png]`
    - Expected: generated does not contain `<summary>spipe_docgen_ui_capture_links.txt</summary>`
@@ -2202,12 +1764,10 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("lets users link all evidence instead of embedding TUI captures")
 val tui_path = "/tmp/spipe_docgen_ui_capture_links.txt"
 file_write(tui_path, "Simple UI\n[OK] Ready\n")
 val metadata = FeatureMetadata(
@@ -2253,19 +1813,13 @@ match result:
 
 #### lets users embed all image evidence when requested
 
-- lets users embed all image evidence when requested
-   - Expected: e equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("lets users embed all image evidence when requested")
 val metadata = FeatureMetadata(
     id: "ui.capture.embed_all",
     category: "Application",
@@ -2312,75 +1866,23 @@ match result:
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering spipe docgen scenario body extraction.
+Tests covering:
 - spipe docgen scenario body extraction
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 64 |
-| Active scenarios | 64 |
+| Total scenarios | 56 |
+| Active scenarios | 56 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-- `REQ-FEATURE-MathBloc-001\n"`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d3058d289f51d6292ef4def00ff2365b16125143f514ecdf48900152d99d5bb8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d3058d289f51d6292ef4def00ff2365b16125143f514ecdf48900152d99d5bb8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d3058d289f51d6292ef4def00ff2365b16125143f514ecdf48900152d99d5bb8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/spipe_docgen_scenario_body_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/spipe_docgen_scenario_body_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/spipe_docgen_scenario_body_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders scenario bodies as dedented Simple code fences' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps an escaped quote inside a step label instead of truncating it' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps a same-line oracle marker out of the rendered expected value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

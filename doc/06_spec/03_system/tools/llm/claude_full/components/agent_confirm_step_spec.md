@@ -1,17 +1,40 @@
 # Claude Full ConfirmStep Component
 
-> Exercises the owned wizard-confirm gate behaviorally through the importable
+> Checks the real owned ConfirmStep source for confirmation summary, validation,
+
+<!-- sdn-diagram:id=agent_confirm_step_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=agent_confirm_step_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+agent_confirm_step_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=agent_confirm_step_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Claude Full ConfirmStep Component
 
-Exercises the owned wizard-confirm gate behaviorally through the importable
+Checks the real owned ConfirmStep source for confirmation summary, validation,
 
 ## At a Glance
 
@@ -20,73 +43,165 @@ Exercises the owned wizard-confirm gate behaviorally through the importable
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Exercises the owned wizard-confirm gate behaviorally through the importable
-ConfirmStep wrapper. As a wizard user I see a confirmation gate that only
-enables when the draft is complete, so an incomplete draft can never be
-submitted. The modeled TypeScript source parity floor is asserted through the
-wrapper's own source-lines helper.
+Checks the real owned ConfirmStep source for confirmation summary, validation,
+create button state, status rendering, source helpers, and compile/run health.
 
 ## Scenarios
 
 ### Claude full ConfirmStep component
 
-#### gates confirmation on draft completeness
+#### models confirmation summary fields
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- gates confirmation on draft completeness
-- Check the confirm gate title
-   - Expected: confirmStepWrapperTitle() equals `Confirm agent`
-- An incomplete draft is not ready to create
-- A complete draft is ready to create
-   - Expected: confirmStepWrapperStatus(true) equals `Ready to create`
+- Read ConfirmStep source
+- Assert summary model and renderer are present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gates confirmation on draft completeness")
-step("Check the confirm gate title")
-expect(confirmStepWrapperTitle()).to_equal("Confirm agent")
+step("Read ConfirmStep source")
+val source = confirmStepSource()
 
-step("An incomplete draft is not ready to create")
-expect(confirmStepWrapperStatus(false)).to_contain("Missing required fields")
-
-step("A complete draft is ready to create")
-expect(confirmStepWrapperStatus(true)).to_equal("Ready to create")
+step("Assert summary model and renderer are present")
+expect(source).to_contain("class ConfirmAgentSummary")
+expect(source).to_contain("fn confirmAgentSummary")
+expect(source).to_contain("fn renderConfirmSummary")
+expect(source).to_contain("Name: ")
+expect(source).to_contain("Description: ")
+expect(source).to_contain("Prompt: ")
+expect(source).to_contain("Model: ")
+expect(source).to_contain("Tools: ")
+expect(source).to_contain("Source: ")
+expect(source).to_contain("File: ")
+expect(source).to_contain("Validation: ")
 ```
 
 </details>
 
-#### keeps the modeled source parity floor
+#### models validation and create button enabled state
 
-- keeps the modeled source parity floor
-- Assert the wrapper reports its modeled source floor
-   - Expected: confirmStepWrapperSourceLinesModeled() equals `73`
+- Read ConfirmStep source
+- Assert validation logic and button state are real
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps the modeled source parity floor")
-step("Assert the wrapper reports its modeled source floor")
-expect(confirmStepWrapperSourceLinesModeled()).to_be_greater_than(0)
-expect(confirmStepWrapperSourceLinesModeled()).to_equal(73)
+step("Read ConfirmStep source")
+val source = confirmStepSource()
+
+step("Assert validation logic and button state are real")
+expect(source).to_contain("fn validateConfirmDraft")
+expect(source).to_contain("name is required")
+expect(source).to_contain("description is required")
+expect(source).to_contain("prompt is required")
+expect(source).to_contain("model is required")
+expect(source).to_contain("source is invalid")
+expect(source).to_contain("agent name already exists")
+expect(source).to_contain("fn canCreateAgent")
+expect(source).to_contain("fn confirmEnabledLabel")
+expect(source).to_contain("Create button: ")
+```
+
+</details>
+
+#### models error and success statuses
+
+- Read ConfirmStep source
+- Assert status transitions and labels
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read ConfirmStep source")
+val source = confirmStepSource()
+
+step("Assert status transitions and labels")
+expect(source).to_contain("class ConfirmStepState")
+expect(source).to_contain("fn submitConfirmStep")
+expect(source).to_contain("fn failConfirmStep")
+expect(source).to_contain("fn markConfirmCreating")
+expect(source).to_contain("success | ")
+expect(source).to_contain("error | ")
+expect(source).to_contain("creating | ")
+expect(source).to_contain("idle | Ready to create")
+expect(source).to_contain("Created ")
+expect(source).to_contain("Create failed")
+```
+
+</details>
+
+#### exports source helpers and keeps the parity floor
+
+- Read ConfirmStep source
+- Assert helper names, line floor, and blocked stub markers
+   - Expected: source does not contain `pass" + "_todo`
+   - Expected: source does not contain `TO" + "DO`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read ConfirmStep source")
+val source = confirmStepSource()
+
+step("Assert helper names, line floor, and blocked stub markers")
+expect(source).to_contain("fn confirmStepModeledSourceFile")
+expect(source).to_contain("src/components/agents/new-agent-creation/wizard-steps/ConfirmStep.tsx")
+expect(source).to_contain("fn confirmStepModeledSourceHelper")
+expect(source).to_contain("\"createAgent\"")
+expect(source).to_contain("fn confirmStepModeledValidationHelper")
+expect(source).to_contain("\"validateAgentDefinition\"")
+expect(source).to_contain("fn confirmStepSourceLinesModeled() -> i64:")
+expect(source).to_contain("377")
+expect(sourceLineCount(source)).to_be_greater_than(376)
+expect(source.contains("pass" + "_todo")).to_equal(false)
+expect(source.contains("TO" + "DO")).to_equal(false)
+```
+
+</details>
+
+#### compiles the owned source file
+
+- Run ConfirmStep through the interpreter
+- Assert compile/run success
+   - Expected: code equals `0`
+   - Expected: stdout + stderr equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run ConfirmStep through the interpreter")
+val (stdout, stderr, code) = rt_process_run("bin/simple", ["run", confirmStepPath()])
+
+step("Assert compile/run success")
+expect(code).to_equal(0)
+expect(stdout + stderr).to_equal("")
 ```
 
 </details>
@@ -95,59 +210,11 @@ expect(confirmStepWrapperSourceLinesModeled()).to_equal(73)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `464758bc2bd190a45cfe68cd3ab0a159c874709b7e51570449cc857ea2e296f6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `464758bc2bd190a45cfe68cd3ab0a159c874709b7e51570449cc857ea2e296f6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `464758bc2bd190a45cfe68cd3ab0a159c874709b7e51570449cc857ea2e296f6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.spl
-mirror: doc/06_spec/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'gates confirmation on draft completeness' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the modeled source parity floor' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

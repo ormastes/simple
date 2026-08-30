@@ -17,116 +17,52 @@ use std.spec.step
 use std.spec.*
 
 use std.gc_async_mut.gpu.browser_engine.glass_comparison_runner.{identify_missing_features}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_debug_layout_by_id,
-    simple_web_layout_debug_style_by_id,
-    simple_web_layout_render_html_draw_ir
-}
-use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
-use common.ui.web_render_api.{
-    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
-    WEB_RENDER_TARGET_PURE_SIMPLE,
-    web_render_adapter_request
-}
-use std.gc_async_mut.ui.web_render_pixel_backend.{
-    web_render_draw_ir_request_to_pixel_artifact
-}
-
-val WIDTH: i32 = 80
-val HEIGHT: i32 = 48
 
 fn _contains(items: [text], needle: text) -> bool:
-    for item in items:
-        if item == needle:
+    var i = 0
+    while i < items.len():
+        if items[i] == needle:
             return true
+        i = i + 1
     false
 
-fn _draw_ir_command_by_id(
-    commands: [DrawIrCommand], component_id: text
-) -> DrawIrCommand:
-    for command in commands:
-        if command.component_id == component_id:
-            return command
-    fail("missing Draw IR command: {component_id}")
-    commands[0]
+describe "Glass comparison feature gap detection":
 
-fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
-    for property in command.computed_style:
-        if property.key == key:
-            return property.value
-    fail("missing Draw IR computed style: {key}")
-    ""
+    it "does not report supported before and after pseudo-elements as missing":
+        val html = "<style>.card::before { content: 'A'; } .card::after { content: 'B'; }</style><div class='card'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "pseudo-elements (::before/::after)")).to_equal(false)
 
-fn _draw_ir_has_style(command: DrawIrCommand, key: text) -> bool:
-    for property in command.computed_style:
-        if property.key == key:
-            return true
-    false
+    it "still reports unsupported glass effect features":
+        val html = "<style>.panel { backdrop-filter: blur(12px); box-shadow: 0 8px 24px #000; }</style><div class='panel'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "backdrop-filter: blur()")).to_equal(true)
+        expect(_contains(missing, "box-shadow (multi-layer)")).to_equal(false)
 
-fn _pixel_count(pixels: [u32], color: u32) -> i32:
-    var count = 0
-    for pixel in pixels:
-        if pixel == color:
-            count = count + 1
-    count
+    it "does not report multi-layer box shadow as unsupported":
+        val html = "<style>.panel { box-shadow: 0 8px 24px #000, 0 2px 6px #333; }</style><div class='panel'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "box-shadow (multi-layer)")).to_equal(false)
 
-fn _expect_web_layout(
-    html: text, component_id: text,
-    x: i32, y: i32, width: i32, height: i32
-):
-    expect(simple_web_layout_debug_style_by_id(
-        html, component_id, "display"
-    )).to_equal("block")
-    expect(simple_web_layout_debug_layout_by_id(
-        html, WIDTH, HEIGHT, component_id, "x"
-    )).to_equal(x.to_string())
-    expect(simple_web_layout_debug_layout_by_id(
-        html, WIDTH, HEIGHT, component_id, "y"
-    )).to_equal(y.to_string())
-    expect(simple_web_layout_debug_layout_by_id(
-        html, WIDTH, HEIGHT, component_id, "w"
-    )).to_equal(width.to_string())
-    expect(simple_web_layout_debug_layout_by_id(
-        html, WIDTH, HEIGHT, component_id, "h"
-    )).to_equal(height.to_string())
+    it "does not report linear gradients as unsupported":
+        val html = "<style>.panel { background: linear-gradient(180deg, #fff, #000); }</style><div class='panel'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "linear-gradient()")).to_equal(false)
 
-fn _expect_draw_ir_rect(
-    composition: DrawIrComposition, component_id: text,
-    x: i32, y: i32, width: i32, height: i32
-) -> DrawIrCommand:
-    val command = _draw_ir_command_by_id(
-        composition.batches[0].commands, component_id
-    )
-    expect(command.component_id).to_equal(component_id)
-    expect(command.x).to_equal(x)
-    expect(command.y).to_equal(y)
-    expect(command.width).to_equal(width)
-    expect(command.height).to_equal(height)
-    command
+    it "does not report simple translate transforms as unsupported":
+        val html = "<style>.panel { transform: translate(4px, 4px); }</style><div class='panel'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "transform")).to_equal(false)
 
-fn _glass_composition(html: text) -> DrawIrComposition:
-    simple_web_layout_render_html_draw_ir(html, WIDTH, HEIGHT)
+    it "still reports unsupported transform functions":
+        val html = "<style>.panel { transform: rotate(5deg); }</style><div class='panel'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "transform")).to_equal(true)
 
-fn _glass_pixels(
-    html: text, composition: DrawIrComposition
-) -> [u32]:
-    val request = web_render_adapter_request(
-        WEB_RENDER_TARGET_PURE_SIMPLE,
-        "css-effects",
-        "CSS effects",
-        html,
-        "",
-        "",
-        WIDTH,
-        HEIGHT
-    ).with_pixel_output()
-    val artifact = web_render_draw_ir_request_to_pixel_artifact(
-        request, composition, "cpu"
-    )
-    expect(artifact.engine2d_status).to_equal(
-        WEB_RENDER_ENGINE2D_STATUS_RENDERED
-    )
-    artifact.pixels
+    it "still reports multi-function translate transforms as partial":
+        val html = "<style>.panel { transform: translate(4px, 4px) translateX(2px); }</style><div class='panel'></div>"
+        val missing = identify_missing_features(html)
+        expect(_contains(missing, "transform")).to_equal(true)
 
 describe "REQ-WEB-BROWSER-003/004: CSS effects admission and fallback":
     # @manual: show
@@ -166,8 +102,7 @@ describe "REQ-WEB-BROWSER-003/004: CSS effects admission and fallback":
     # @capture(html)
     # @capture(artifact)
     it "should preserve the explicit backdrop sampling fallback":
-        # @req REQ-SSPEC-SYSTEM
-        step("should preserve the explicit backdrop sampling fallback")
+        step("Verify: should preserve the explicit backdrop sampling fallback")
         val html = (
             "<style>html,body{{margin:0}}:root{--glass-blur:12px;" +
             "--glass-saturation:145%}#panel{width:16px;height:8px;" +
@@ -233,8 +168,7 @@ describe "REQ-WEB-BROWSER-003/004: CSS effects admission and fallback":
     # @capture(html)
     # @capture(artifact)
     it "should lower admitted multi-layer shadows through canonical owners":
-        # @req REQ-SSPEC-SYSTEM
-        step("should lower admitted multi-layer shadows through canonical owners")
+        step("Verify: should lower admitted multi-layer shadows through canonical owners")
         val html = (
             "<style>html,body{{margin:0}}#panel{width:8px;height:6px;" +
             "background:#fff;box-shadow:4px 0 0 #dc2626," +
@@ -269,8 +203,7 @@ describe "REQ-WEB-BROWSER-003/004: CSS effects admission and fallback":
     # @capture(html)
     # @capture(artifact)
     it "should lower an admitted linear gradient through canonical owners":
-        # @req REQ-SSPEC-SYSTEM
-        step("should lower an admitted linear gradient through canonical owners")
+        step("Verify: should lower an admitted linear gradient through canonical owners")
         val html = (
             "<style>html,body{{margin:0}}#panel{width:8px;height:6px;" +
             "background:linear-gradient(180deg,#dc2626,#2563eb)}" +
@@ -301,8 +234,7 @@ describe "REQ-WEB-BROWSER-003/004: CSS effects admission and fallback":
     # @capture(html)
     # @capture(artifact)
     it "should lower admitted pixel and percentage translations":
-        # @req REQ-SSPEC-SYSTEM
-        step("should lower admitted pixel and percentage translations")
+        step("Verify: should lower admitted pixel and percentage translations")
         val pixel_html = (
             "<style>html,body{{margin:0}}#panel{width:4px;height:4px;" +
             "background:#16a34a;transform:translate(4px,4px)}" +
@@ -348,8 +280,7 @@ describe "REQ-WEB-BROWSER-003/004: CSS effects admission and fallback":
     # @capture(html)
     # @capture(artifact)
     it "should keep unsupported transform forms explicit and fail closed":
-        # @req REQ-SSPEC-SYSTEM
-        step("should keep unsupported transform forms explicit and fail closed")
+        step("Verify: should keep unsupported transform forms explicit and fail closed")
         val rotate_html = (
             "<style>html,body{{margin:0}}#panel{width:8px;height:8px;" +
             "background:#0f766e;transform:rotate(5deg)}" +

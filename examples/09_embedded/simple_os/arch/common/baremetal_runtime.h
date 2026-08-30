@@ -43,7 +43,7 @@ typedef int64_t RuntimeValue;
 #define TAG_SPECIAL 0x3ULL
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int64_t)(v) >> 3)
+#define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))
@@ -67,43 +67,23 @@ typedef int64_t RuntimeValue;
 #define HEAP_MAP    3
 #define HEAP_OBJECT 4
 
-/* Native-compiler heap header contract: object type is a single byte at
- * offset 0 and gc_flags a byte at offset 1 (codegen loads both as I8).
- * gc_flags bit 0x08 (BYTE_PACKED) marks a [u8] array whose payload is packed
- * bytes (1 byte/element) instead of 8-byte tagged RuntimeValue slots.
- * Splitting the old uint32 `type` keeps type checks correct when flags are
- * set; the byte layout is unchanged when flags are zero (little-endian). */
-#define BAREMETAL_GC_BYTE_PACKED 0x08
-
 typedef struct {
-    uint8_t  type;
-    uint8_t  gc_flags;
-    uint16_t reserved;
+    uint32_t type;
     uint32_t size;
 } HeapHeader;
 
 typedef struct {
     HeapHeader hdr;
-    uint64_t   len;     /* MUST be uint64_t to match compiler-emitted objects */
+    uint32_t   len;
     char       data[];
 } RuntimeString;
 
-/* Compiler-emitted string layout contract: len is a u64 at offset 8 and the
- * character payload starts at offset 16. A uint32_t len here shifted every
- * data[] read 4 bytes early (bug: x64_rt_extras_runtime_string_layout_mismatch). */
-_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must be at offset 8");
-_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must be at offset 16");
-
 typedef struct {
-    HeapHeader    hdr;
-    uint64_t      len;
-    uint64_t      cap;
-    RuntimeValue *items;
+    HeapHeader   hdr;
+    uint32_t     len;
+    uint32_t     cap;
+    RuntimeValue items[];
 } RuntimeArray;
-
-_Static_assert(offsetof(RuntimeArray, len) == 8, "RuntimeArray.len must be at offset 8");
-_Static_assert(offsetof(RuntimeArray, items) == 24, "RuntimeArray.items must be at offset 24");
-_Static_assert(sizeof(RuntimeArray) == 32, "RuntimeArray header must be 32 bytes");
 
 typedef struct {
     HeapHeader    hdr;
@@ -127,7 +107,6 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
-RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right);
 RuntimeValue rt_value_to_string(RuntimeValue val);
 RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);

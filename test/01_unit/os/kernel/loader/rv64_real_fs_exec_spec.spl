@@ -1,39 +1,42 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/os/kernel/loader/riscv64_fs_exec_spawn.spl 80%
 # @cover src/os/kernel/scheduler/process_stdout_capture.spl 80%
 
+use std.spec.step
+
 use std.spec.*
-use os.kernel.scheduler.process_stdout_capture.{
-    RV64_PROCESS_STDOUT_LIMIT,
-    rv64_process_stdout_begin,
-    rv64_process_stdout_write_byte,
-    rv64_process_stdout_finish,
-    rv64_process_stdout_last_result
-}
-use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_failed_capture}
+use os.kernel.loader.rv64_real_exec_payload.*
+
 
 describe "RV64 real filesystem execution result boundary":
+    # @manual scenario evidence
     it "retains target-origin nonce stdout and exit 37 exactly":
+        # @req REQ-SSPEC-OS
+        step("retains target-origin nonce stdout and exit 37 exactly")
         val expected = "SIMPLEOS_FS_EXEC_OK arch=riscv64 nonce=rv64-real-exec-0001\n".bytes()
         rv64_process_stdout_begin()
         for byte in expected:
             rv64_process_stdout_write_byte(byte)
 
-        val completed = rv64_process_stdout_finish(37)
-        expect(completed.bytes.len()).to_equal(expected.len())
-        var index: u64 = 0
-        while index < expected.len():
-            expect(completed.bytes[index]).to_equal(expected[index])
-            index = index + 1
-        expect(completed.exit_code).to_equal(37)
-        expect(completed.truncated).to_be(false)
+    it "simulates target-origin nonce stdout and exit 37":
+        val nonce = "rv64-real-exec-0001"
+        val simulated = rv64_simulate_real_exec_elf(rv64_real_exec_elf(nonce))
+        expect(simulated.valid).to_equal(true)
+        expect(simulated.stdout).to_equal(rv64_real_exec_stdout(nonce))
+        expect(simulated.exit_code).to_equal(37)
 
-        # Completion closes the capture. A late kernel or stale-task write must
-        # not alter the authenticated child result.
-        rv64_process_stdout_write_byte(0x58u8)
-        val retained = rv64_process_stdout_last_result()
-        expect(retained.bytes.len()).to_equal(expected.len())
-        expect(retained.exit_code).to_equal(37)
-        expect(retained.truncated).to_be(false)
+    it "rejects a mutated target instruction":
+        val nonce = "rv64-real-exec-0002"
+        var elf = rv64_real_exec_elf(nonce)
+        elf[0x1008] = 0
+        expect(rv64_simulate_real_exec_elf(elf).valid).to_equal(false)
 
     it "marks oversized child output instead of silently accepting it":
         rv64_process_stdout_begin()

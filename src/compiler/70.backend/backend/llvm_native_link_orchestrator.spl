@@ -17,7 +17,7 @@ use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_s
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target}
 use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -36,6 +36,29 @@ use compiler.backend.backend.simpleos_native_linkers.{link_simpleos_x86_64, link
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
+
+fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
+        runtime_bundle: text, requires_cross: bool, hosted_os: text,
+        mingw: bool) -> text:
+    """Select native-all without relying on nested branch writeback."""
+    if stage4_requested or runtime_path == "" or requires_cross:
+        return ""
+    if not native_all_allowed_for_runtime_bundle(runtime_bundle):
+        return ""
+    val name = if hosted_os == "windows" and not mingw:
+        "simple_native_all.lib"
+    else:
+        "libsimple_native_all.a"
+    val archive = runtime_path + "/" + name
+    if file_exists(archive):
+        return archive
+    ""
+
+fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
+    """Append one optional provider through return-value ownership."""
+    if path == "":
+        return inputs
+    inputs.push(path)
 
 fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
     """Link LLVM-compiled user objects with C runtime into a native executable.
@@ -87,7 +110,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_riscv32(user_objects, output, verbose)
 
-    val hosted_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val hosted_target = options.target_triple
     val hosted_os = host_os()
     val hosted_arch = host_arch()
     val hosted_plan = hosted_c_compiler_plan(hosted_target, hosted_os, hosted_arch)
@@ -114,15 +137,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # modules calling seed-owned externs (e.g. bootstrap_main's
     # rt_native_build), which the C runtime objects do not define; without it
     # the link dies with "undefined symbol: rt_native_build" (#146/#79).
-    var bootstrap_native_all = ""
     val runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
     val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
-    if not stage4_requested and runtime_path != "" and not hosted_plan.requires_cross:
-        if native_all_allowed_for_runtime_bundle(runtime_bundle):
-            val native_all_name = if hosted_os == "windows" and not _is_mingw(): "simple_native_all.lib" else: "libsimple_native_all.a"
-            val native_all = runtime_path + "/" + native_all_name
-            if file_exists(native_all):
-                bootstrap_native_all = native_all
+    val bootstrap_native_all = _llvm_bootstrap_native_all_path(
+        stage4_requested, runtime_path, runtime_bundle,
+        hosted_plan.requires_cross, hosted_os, _is_mingw())
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
@@ -471,8 +490,11 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             runtime_object_i = runtime_object_i + 1
         if bootstrap_support_obj != "":
             all_objects = all_objects.push(bootstrap_support_obj)
-        if bootstrap_native_all != "":
-            all_objects = all_objects.push(bootstrap_native_all)
+        # Caller objects precede the archive so their undefined symbols drive
+        # normal member extraction. Keep the optional append outside a nested
+        # branch: self-hosted branch writeback previously dropped this input.
+        all_objects = _llvm_append_link_input_if_present(
+            all_objects, bootstrap_native_all)
         all_objects = all_objects.push(entry_obj_path)
     # External providers are intentionally not temporary runtime objects: do
     # not pass them to cleanup_runtime_objects or delete them after linking.
@@ -517,7 +539,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         allow_duplicate_definitions: not stage4_requested,
         allow_cc_fallback: not stage4_requested,
         retained_symbols: retained_symbols,
-        extra_flags: llvm_external_provider_rpath_flags(external_providers)
+        extra_flags: llvm_external_provider_rpath_flags(external_providers),
+        target_triple: hosted_target,
+        linker_abi: native_linker_abi_for_target(hosted_target)
     )
     if trace:
         print "[LLVM-LINK] calling link_to_native..."

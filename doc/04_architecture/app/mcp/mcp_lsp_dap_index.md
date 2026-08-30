@@ -1,7 +1,31 @@
 # MCP/LSP/DAP Integration - Documentation Index
 
-**Last Updated**: 2026-02-04
-**Phase**: Phase 1 Complete ✅
+<!-- codex-architecture -->
+
+**Last Updated**: 2026-08-14
+**Status**: Historical phase index, reconciled with current architecture
+
+> The phase numbering below records the 2026-02-04 plan and is retained as
+> historical evidence. For debugging ownership, the authoritative decision is
+> [`simple_unified_debugging_evidence.md`](../../simple_unified_debugging_evidence.md):
+> one `DebugServiceV1` owns mutable sessions; DAP remains IDE-facing; MCP, CLI
+> and Lab are clients; legacy debug traits are migration adapters.
+
+## Current debug-service state
+
+Implemented in the current tree: `DebugWireV1`, session/target/capability/event/
+probe/evidence/receipt/policy contracts; a central in-process session registry;
+policy authorization and receipts; probe lifecycle; normalized evidence
+manifests and a bundle writer; fail-closed wire dispatch/execution; a legacy
+`DebugBackend` bridge; and a live host capability-doctor path. The minimal CLI
+surface parses `inspect`, `probe`, `reproduce`, and `replay`, but deliberately
+fails closed without a live service-issued context.
+
+Not yet complete: DAP handler and `DebugAdapter` migration, MCP debug commands,
+the stable out-of-process adapter host, native raw evidence acquisition,
+reproduce/replay executors, full policy enforcement, and domain adapters for
+SQL, browser/Wasm, embedded, server, desktop, and mobile. Therefore neither
+source presence nor successful parsing may be reported as live support.
 
 ---
 
@@ -33,7 +57,7 @@
 |-----------|--------|-------|------------|
 | **MCP** | ✅ Complete | Production | Add Resources + Prompts (Phase 2) |
 | **LSP** | ⚠️ Partial | Phase 1/4 | Integrate Query API (Phase 3) |
-| **DAP** | ⚠️ Partial | Phase 1/4 | Integrate Hook API (Phase 4) |
+| **DAP** | ⚠️ Partial | Protocol + adapters | Migrate handlers and adapter ownership to `DebugServiceV1` |
 | **Query API** | ✅ Designed | Design | Implement FFI (Phase 3) |
 | **Hook API** | ✅ Designed | Design | Implement FFI (Phase 4) |
 
@@ -247,6 +271,8 @@
 3. **Resilient**: Work with partial/broken code
 4. **Safe**: Cannot crash interpreter
 5. **Non-intrusive**: Minimal overhead when not debugging
+6. **Single owner**: Mutable debug sessions belong to `DebugServiceV1`; clients carry IDs
+7. **Evidence-driven**: Every action is policy checked and receipted against an exact build
 
 ### Technical Choices
 

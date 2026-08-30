@@ -762,8 +762,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let fn_type = self.backend.context_ref().void_type().fn_type(&[], false);
         let asm = self.backend.context_ref().create_inline_asm(
             fn_type,
-            instructions.join("\n"),
-            String::new(),
+            super::raw_asm::raw_asm_template(instructions),
+            "~{memory}".to_string(),
             volatile,
             false,
             Some(InlineAsmDialect::ATT),

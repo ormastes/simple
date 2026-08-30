@@ -1,6 +1,29 @@
 # Skip Ignore Integration Specification
 
-> Tests covering Skip/Ignore Integration Tests, Platform-specific tests, Runtime mode detection, Architecture detection, Hardware capabilities, Complete environment profile, Real-world skip patterns, Real-world ignore patterns, Simplified decorator usage, Complex multi-condition examples, Conditional skip with skip_if, only_on usage, Performance with multiple decorators, Documentation examples.
+> 1. check
+
+<!-- sdn-diagram:id=skip_ignore_integration_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=skip_ignore_integration_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+skip_ignore_integration_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=skip_ignore_integration_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### demonstrates platform detection concept
 
-- demonstrates platform detection concept
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("demonstrates platform detection concept")
 # Platform detection would use get_platform_os() etc.
 val platform = "linux"
 check(platform != "")
@@ -40,18 +61,16 @@ check(platform != "")
 
 #### demonstrates Unix vs Windows distinction
 
-- demonstrates Unix vs Windows distinction
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("demonstrates Unix vs Windows distinction")
 val is_unix = true
 check(is_unix == true)
 ```
@@ -62,18 +81,16 @@ check(is_unix == true)
 
 #### identifies current runtime mode
 
-- identifies current runtime mode
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies current runtime mode")
 val mode = "interpreter"
 check(mode != "")
 ```
@@ -84,18 +101,17 @@ check(mode != "")
 
 #### identifies CPU architecture
 
-- identifies CPU architecture
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies CPU architecture")
 val arch = "x86_64"
 val bits = 64
 check(arch != "")
@@ -108,18 +124,16 @@ check(bits == 64)
 
 #### checks available hardware
 
-- checks available hardware
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks available hardware")
 val cores = 4
 check(cores > 0)
 ```
@@ -130,18 +144,16 @@ check(cores > 0)
 
 #### prints complete environment information
 
-- prints complete environment information
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("prints complete environment information")
 check(true)
 ```
 
@@ -151,18 +163,16 @@ check(true)
 
 #### example: skip on Windows (concept)
 
-- example: skip on Windows (concept)
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: skip on Windows (concept)")
 val reason = "chmod() not yet implemented on Windows"
 check(reason != "")
 ```
@@ -171,18 +181,16 @@ check(reason != "")
 
 #### example: skip in interpreter mode (concept)
 
-- example: skip in interpreter mode (concept)
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: skip in interpreter mode (concept)")
 val reason = "Generics need static compilation"
 check(reason != "")
 ```
@@ -191,18 +199,16 @@ check(reason != "")
 
 #### example: skip without hardware (concept)
 
-- example: skip without hardware (concept)
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: skip without hardware (concept)")
 val reason = "Acceleration required"
 check(reason != "")
 ```
@@ -213,18 +219,16 @@ check(reason != "")
 
 #### example: ignore Unix fork on Windows (concept)
 
-- example: ignore Unix fork on Windows (concept)
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: ignore Unix fork on Windows (concept)")
 val reason = "fork() is Unix-only, no Windows equivalent"
 check(reason != "")
 ```
@@ -233,18 +237,16 @@ check(reason != "")
 
 #### example: ignore 32-bit architecture (concept)
 
-- example: ignore 32-bit architecture (concept)
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: ignore 32-bit architecture (concept)")
 val reason = "64-bit pointers required"
 check(reason != "")
 ```
@@ -255,18 +257,16 @@ check(reason != "")
 
 #### example: using platform skip
 
-- example: using platform skip
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: using platform skip")
 val reason = "Not yet ported"
 check(reason != "")
 ```
@@ -275,18 +275,16 @@ check(reason != "")
 
 #### example: using interpreter skip
 
-- example: using interpreter skip
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: using interpreter skip")
 val reason = "Compiled mode needed"
 check(reason != "")
 ```
@@ -297,18 +295,16 @@ check(reason != "")
 
 #### example: CI-only network test
 
-- example: CI-only network test
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: CI-only network test")
 val reason = "Network test only in CI"
 check(reason != "")
 ```
@@ -317,18 +313,16 @@ check(reason != "")
 
 #### example: multi-skip
 
-- example: multi-skip
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: multi-skip")
 val reason = "Windows interpreter mode not fully supported"
 check(reason != "")
 ```
@@ -339,18 +333,16 @@ check(reason != "")
 
 #### example: skip if no CI environment
 
-- example: skip if no CI environment
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: skip if no CI environment")
 val reason = "CI environment required"
 check(reason != "")
 ```
@@ -359,18 +351,16 @@ check(reason != "")
 
 #### example: skip on complex condition
 
-- example: skip on complex condition
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: skip on complex condition")
 val reason = "Not supported on certain configs"
 check(reason != "")
 ```
@@ -381,18 +371,16 @@ check(reason != "")
 
 #### example: Linux-only test
 
-- example: Linux-only test
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: Linux-only test")
 val platform = "linux"
 check(platform == "linux")
 ```
@@ -401,18 +389,16 @@ check(platform == "linux")
 
 #### example: compiled mode only
 
-- example: compiled mode only
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("example: compiled mode only")
 val mode = "compiled"
 check(mode == "compiled")
 ```
@@ -423,18 +409,16 @@ check(mode == "compiled")
 
 #### creates decorators quickly
 
-- creates decorators quickly
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates decorators quickly")
 var i = 0
 while i < 10:
     val reason = "Test {i}"
@@ -448,18 +432,16 @@ while i < 10:
 
 #### README example: platform-specific skip
 
-- README example: platform-specific skip
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("README example: platform-specific skip")
 val reason = "chmod() not available on Windows"
 check(reason != "")
 ```
@@ -468,18 +450,16 @@ check(reason != "")
 
 #### README example: hardware requirement
 
-- README example: hardware requirement
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("README example: hardware requirement")
 val reason = "Required for neural network test"
 check(reason != "")
 ```
@@ -488,18 +468,16 @@ check(reason != "")
 
 #### README example: ignore fundamentally unsupported
 
-- README example: ignore fundamentally unsupported
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("README example: ignore fundamentally unsupported")
 val reason = "Unix fork() API - no Windows equivalent"
 check(reason != "")
 ```
@@ -513,12 +491,12 @@ check(reason != "")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/skip_ignore_integration_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Skip/Ignore Integration Tests, Platform-specific tests, Runtime mode detection, Architecture detection, Hardware capabilities, Complete environment profile, Real-world skip patterns, Real-world ignore patterns, Simplified decorator usage, Complex multi-condition examples, Conditional skip with skip_if, only_on usage, Performance with multiple decorators, Documentation examples.
+Tests covering:
 - Skip/Ignore Integration Tests
 - Platform-specific tests
 - Runtime mode detection
@@ -546,51 +524,3 @@ Tests covering Skip/Ignore Integration Tests, Platform-specific tests, Runtime m
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `8af7a65ca592311b22ea7d4e8185aa0a18663b78f136efda7a8fbd742d4f0ee9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `8af7a65ca592311b22ea7d4e8185aa0a18663b78f136efda7a8fbd742d4f0ee9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `8af7a65ca592311b22ea7d4e8185aa0a18663b78f136efda7a8fbd742d4f0ee9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/std/skip_ignore_integration_spec.spl
-mirror: doc/06_spec/01_unit/std/skip_ignore_integration_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/skip_ignore_integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/skip_ignore_integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/std/skip_ignore_integration_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'demonstrates platform detection concept' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/std/skip_ignore_integration_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'demonstrates Unix vs Windows distinction' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/std/skip_ignore_integration_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'identifies current runtime mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

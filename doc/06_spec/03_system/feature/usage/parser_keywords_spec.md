@@ -2,6 +2,29 @@
 
 > Tests that all Simple language keywords are correctly recognized and
 
+<!-- sdn-diagram:id=parser_keywords_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=parser_keywords_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+parser_keywords_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=parser_keywords_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 22 | 22 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests that all Simple language keywords are correctly recognized and
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/parser_keywords_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests that all Simple language keywords are correctly recognized and
@@ -33,22 +56,13 @@ parsed in their appropriate contexts.
 
 #### val declares immutable variable
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- val declares immutable variable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("val declares immutable variable")
 val x = 42
 expect x == 42
 ```
@@ -57,18 +71,13 @@ expect x == 42
 
 #### var declares mutable variable
 
-- var declares mutable variable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("var declares mutable variable")
 var x = 0
 x = 42
 expect x == 42
@@ -80,18 +89,13 @@ expect x == 42
 
 #### parses if statement
 
-- parses if statement
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses if statement")
 val result = if true:
     1
 else:
@@ -103,18 +107,13 @@ expect result == 1
 
 #### parses elif statement
 
-- parses elif statement
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses elif statement")
 val x = 2
 val result = if x == 1:
     "one"
@@ -132,18 +131,13 @@ expect result == "two"
 
 #### parses while loop
 
-- parses while loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses while loop")
 var x = 0
 while x < 3:
     x = x + 1
@@ -160,18 +154,13 @@ expect x == 3
 
 #### parses for loop
 
-- parses for loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses for loop")
 var sum = 0
 for i in [1, 2, 3]:
     sum = sum + i
@@ -188,18 +177,13 @@ expect sum == 6
 
 #### parses break in loop
 
-- parses break in loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses break in loop")
 var x = 0
 while true:
     x = x + 1
@@ -218,18 +202,13 @@ expect x == 5
 
 #### parses continue in loop
 
-- parses continue in loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses continue in loop")
 var sum = 0
 for i in [1, 2, 3, 4, 5]:
     if i == 3:
@@ -245,18 +224,18 @@ expect sum == 12
 
 #### parses return statement
 
-- parses return statement
+1. fn early return
+2. expect early return
+3. expect early return
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses return statement")
 fn early_return(x: i64) -> i64:
     if x < 0:
         return 0
@@ -269,18 +248,13 @@ expect early_return(5) == 5
 
 #### parses match expression
 
-- parses match expression
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses match expression")
 val result = match 42:
     case 0 => "zero"
     case 42 => "forty-two"
@@ -294,18 +268,18 @@ expect result == "forty-two"
 
 #### parses and operator
 
-- parses and operator
+1. expect
+2. expect
+3. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses and operator")
 expect (true and true) == true
 expect (true and false) == false
 expect (false and true) == false
@@ -315,18 +289,18 @@ expect (false and true) == false
 
 #### parses or operator
 
-- parses or operator
+1. expect
+2. expect
+3. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses or operator")
 expect (true or true) == true
 expect (true or false) == true
 expect (false or false) == false
@@ -336,18 +310,17 @@ expect (false or false) == false
 
 #### parses not operator
 
-- parses not operator
+1. expect
+2. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses not operator")
 expect (not false) == true
 expect (not true) == false
 ```
@@ -356,18 +329,16 @@ expect (not true) == false
 
 #### parses in operator
 
-- parses in operator
+1. expect not
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses in operator")
 expect 2 in [1, 2, 3]
 expect not (5 in [1, 2, 3])
 ```
@@ -378,18 +349,13 @@ expect not (5 in [1, 2, 3])
 
 #### parses true
 
-- parses true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses true")
 val x = true
 expect x
 ```
@@ -398,18 +364,13 @@ expect x
 
 #### parses false
 
-- parses false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses false")
 val x = false
 expect not x
 ```
@@ -418,18 +379,13 @@ expect not x
 
 #### parses nil
 
-- parses nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses nil")
 val x = nil
 expect x == nil
 ```
@@ -438,18 +394,17 @@ expect x == nil
 
 #### parses self in method
 
-- parses self in method
+1. expect p get x
+2. expect p get y
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses self in method")
 val p = TestPoint(x: 42, y: 10)
 expect p.get_x() == 42
 expect p.get_y() == 10
@@ -461,18 +416,17 @@ expect p.get_y() == 10
 
 #### parses fn declaration
 
-- parses fn declaration
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses fn declaration")
 fn add(a: i64, b: i64) -> i64:
     a + b
 expect add(3, 4) == 7
@@ -482,18 +436,19 @@ expect add(3, 4) == 7
 
 #### parses nested function
 
-- parses nested function
+1. fn outer
+2. fn inner
+3. inner
+4. expect outer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses nested function")
 fn outer(x: i64) -> i64:
     fn inner(y: i64) -> i64:
         y * 2
@@ -505,18 +460,16 @@ expect outer(5) == 11
 
 #### parses lambda expression
 
-- parses lambda expression
+1. expect double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses lambda expression")
 val double = \x: x * 2
 expect double(5) == 10
 ```
@@ -525,18 +478,18 @@ expect double(5) == 10
 
 #### parses higher-order function
 
-- parses higher-order function
+1. fn apply
+2. f
+3. expect apply
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses higher-order function")
 fn apply(f: fn(i64) -> i64, x: i64) -> i64:
     f(x)
 expect apply(\n: n + 1, 5) == 6
@@ -556,51 +509,3 @@ expect apply(\n: n + 1, 5) == 6
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `00aff34ff2cea1d0476cac61b7af3c0d5b62eda518679722295c917403aa2d72`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `00aff34ff2cea1d0476cac61b7af3c0d5b62eda518679722295c917403aa2d72`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `00aff34ff2cea1d0476cac61b7af3c0d5b62eda518679722295c917403aa2d72`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/parser_keywords_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/parser_keywords_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/parser_keywords_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/parser_keywords_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/parser_keywords_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'val declares immutable variable' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_keywords_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'var declares mutable variable' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_keywords_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses if statement' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

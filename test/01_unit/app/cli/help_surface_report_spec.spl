@@ -1,0 +1,89 @@
+use std.spec
+use app.cli.help_surface_inventory.{
+    CliSurfaceCommandRowV1, CliSurfaceSnapshotV1,
+    cli_surface_snapshot_v1,
+}
+use app.cli.help_surface_report.{
+    cli_surface_migration_report_markdown_v1,
+    cli_surface_generated_help_text_v1,
+    cli_surface_generated_help_text_checked_v1,
+    cli_surface_completion_candidates_v1,
+    cli_surface_completion_candidates_checked_v1,
+    cli_surface_completion_candidates_with_extensions_v1,
+}
+
+fn snapshot_with_help_drift() -> CliSurfaceSnapshotV1:
+    val current = cli_surface_snapshot_v1()
+    var commands = current.commands
+    val row = commands[0]
+    commands[0] = CliSurfaceCommandRowV1(
+        name: row.name,
+        in_dispatch: true,
+        in_help: false,
+        in_table: row.in_table,
+        app_path: row.app_path,
+        dispatch_form: row.dispatch_form,
+        help_line: "",
+        notes: "dispatch-only: injected negative control",
+    )
+    CliSurfaceSnapshotV1(
+        commands: commands,
+        log_flags: current.log_flags,
+        internal_flags: current.internal_flags,
+    )
+
+describe "CLI help surface V1 report":
+    it "reports that no table-only provider drift remains":
+        val snapshot = cli_surface_snapshot_v1()
+        val report = cli_surface_migration_report_markdown_v1(
+            snapshot, "2026-08-19")
+        expect(report).to_contain("Date: 2026-08-19")
+        expect(report).to_contain("## Table-only (0)")
+        expect(report).to_contain("Root dispatch commands: 123")
+
+    it "renders executable core commands and reuses extension help verbatim":
+        val snapshot = cli_surface_snapshot_v1()
+        val extension_help = "extension namespaces:\n  --xsample-<key>[=<value>]  provider: sample\n"
+        val generated = cli_surface_generated_help_text_v1(
+            snapshot, extension_help)
+        expect(generated).to_contain("simple compile")
+        expect(generated).to_contain(extension_help)
+        expect(generated).to_contain("simple provider")
+
+    it "completes only executable commands and canonical root flags":
+        val snapshot = cli_surface_snapshot_v1()
+        expect(cli_surface_completion_candidates_v1(snapshot, "bu")).to_equal(
+            ["bug-add", "bug-gen", "bug-resolve", "build"])
+        expect(cli_surface_completion_candidates_v1(snapshot, "provider")).to_equal(
+            ["provider"])
+        expect(cli_surface_completion_candidates_v1(snapshot, "--log")).to_equal(
+            ["--log-mode"])
+
+    it "merges extension completion candidates without replacing provider":
+        val snapshot = cli_surface_snapshot_v1()
+        expect(cli_surface_completion_candidates_with_extensions_v1(
+            snapshot, "--x", ["--xsample-"])).to_equal(["--xsample-"])
+        expect(cli_surface_completion_candidates_with_extensions_v1(
+            snapshot, "provider", ["--xsample-"])).to_equal(["provider"])
+
+    it "NEGATIVE control: hash drift fails core closed and retains extensions":
+        val snapshot = cli_surface_snapshot_v1()
+        val extension_help = "extension namespaces:\n  --xsample-<key>[=<value>]  provider: sample\n"
+        val generated = cli_surface_generated_help_text_checked_v1(
+            snapshot, extension_help, false)
+        expect(generated).to_contain("generated CLI surface is stale")
+        expect(generated).to_contain(extension_help)
+        expect(generated.contains("simple provider")).to_equal(false)
+        expect(cli_surface_completion_candidates_checked_v1(
+            snapshot, "", ["--xsample-"], false)).to_equal(["--xsample-"])
+
+    it "NEGATIVE control: dispatch-help drift fails core closed":
+        val drift = snapshot_with_help_drift()
+        val extension_help = "extension namespaces:\n  --xsample-\n"
+        val generated = cli_surface_generated_help_text_checked_v1(
+            drift, extension_help, true)
+        expect(generated).to_contain("generated CLI surface is stale")
+        expect(generated).to_contain(extension_help)
+        expect(generated.contains("simple provider")).to_equal(false)
+        expect(cli_surface_completion_candidates_checked_v1(
+            drift, "provider", ["--xsample-"], true)).to_equal([])

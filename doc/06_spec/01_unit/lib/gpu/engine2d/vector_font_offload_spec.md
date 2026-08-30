@@ -1,6 +1,29 @@
 # Vector Font Offload Specification
 
-> Tests covering Engine2D vector font offload evidence.
+> <details>
+
+<!-- sdn-diagram:id=vector_font_offload_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=vector_font_offload_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+vector_font_offload_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=vector_font_offload_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,11 +40,7 @@
 
 #### marks CUDA vector font evidence production ready only after GPU glyph pixels return
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- marks CUDA vector font evidence production ready only after GPU glyph pixels return
+- accel
    - Expected: evidence.generated_ready is true
    - Expected: evidence.generated.generated_operation equals `copy`
    - Expected: evidence.cpu_preprocess_required is true
@@ -34,12 +53,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("marks CUDA vector font evidence production ready only after GPU glyph pixels return")
 val evidence = vector_font_offload_evidence(
     "cuda", 48, 24, true, true, 4096,
     accel(1, 1, 0, 0, 1, 128, "cuda-vector-font-glyph-pixels-returned")
@@ -59,7 +76,7 @@ expect(evidence.diagnostic_text()).to_contain("family=vector_font")
 
 #### keeps generated-ready OpenCL evidence separate from missing glyph readback
 
-- keeps generated-ready OpenCL evidence separate from missing glyph readback
+- accel
    - Expected: evidence.generated_ready is true
    - Expected: evidence.gpu_glyph_returned is false
    - Expected: evidence.production_ready is false
@@ -71,12 +88,10 @@ expect(evidence.diagnostic_text()).to_contain("family=vector_font")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps generated-ready OpenCL evidence separate from missing glyph readback")
 val evidence = vector_font_offload_evidence(
     "opencl", 48, 24, true, true, 8192,
     accel(1, 0, 1, 1, 0, 0, "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return")
@@ -94,7 +109,7 @@ expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
 
 #### fails closed when the generated backend runtime is unavailable
 
-- fails closed when the generated backend runtime is unavailable
+- accel
    - Expected: evidence.generated_ready is false
    - Expected: evidence.production_ready is false
    - Expected: evidence.status_code equals `cuda-runtime-unavailable`
@@ -104,12 +119,10 @@ expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("fails closed when the generated backend runtime is unavailable")
 val evidence = vector_font_offload_evidence(
     "cuda", 48, 24, false, false, 4096,
     accel(1, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
@@ -125,7 +138,7 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 
 #### reports CPU fallback as an incomplete vector font offload state
 
-- reports CPU fallback as an incomplete vector font offload state
+- accel
    - Expected: evidence.generated_ready is true
    - Expected: evidence.gpu_glyph_returned is false
    - Expected: evidence.production_ready is false
@@ -136,12 +149,10 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("reports CPU fallback as an incomplete vector font offload state")
 val evidence = vector_font_offload_evidence(
     "cuda", 48, 24, true, true, 4096,
     accel(1, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
@@ -158,7 +169,8 @@ expect(evidence.reason).to_equal("production-gpu-dispatch-not-wired")
 
 #### uses the Engine2D font offload order before producing vector evidence
 
-- uses the Engine2D font offload order before producing vector evidence
+- accel
+- accel
    - Expected: evidence.backend_name equals `rocm`
    - Expected: evidence.generated.backend_name equals `rocm`
    - Expected: evidence.generated_ready is true
@@ -171,12 +183,10 @@ expect(evidence.reason).to_equal("production-gpu-dispatch-not-wired")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("uses the Engine2D font offload order before producing vector evidence")
 val evidence = vector_font_preferred_offload_evidence(
     ["vulkan", "amd-hip", "cpu"],
     48, 24, true, true, 4096,
@@ -200,7 +210,7 @@ expect(fallback.reason).to_equal("no-preferred-font-backend-candidate")
 
 #### marks vector font glyph readback ready only when returned pixels match checksum
 
-- marks vector font glyph readback ready only when returned pixels match checksum
+- accel
    - Expected: evidence.execution.expected_checksum equals `checksum`
    - Expected: evidence.execution.actual_checksum equals `checksum`
    - Expected: evidence.gpu_glyph_returned is true
@@ -212,12 +222,10 @@ expect(fallback.reason).to_equal("no-preferred-font-backend-candidate")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("marks vector font glyph readback ready only when returned pixels match checksum")
 val pixels = [0u8, 24u8, 255u8, 6u8]
 val checksum = vector_font_glyph_pixels_checksum(pixels)
 val evidence = vector_font_glyph_readback_evidence(
@@ -240,7 +248,8 @@ expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
 
 #### uses the Engine2D font offload order before vector glyph readback proof
 
-- uses the Engine2D font offload order before vector glyph readback proof
+- accel
+- accel
    - Expected: evidence.backend_name equals `rocm`
    - Expected: evidence.submit.request.plan.compute_target equals `hip`
    - Expected: evidence.execution.device_executed is true
@@ -257,12 +266,10 @@ expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("uses the Engine2D font offload order before vector glyph readback proof")
 val pixels = [0u8, 24u8, 255u8, 6u8]
 val checksum = vector_font_glyph_pixels_checksum(pixels)
 val evidence = vector_font_preferred_glyph_readback_evidence(
@@ -295,7 +302,7 @@ expect(fallback.reason).to_equal("no-preferred-font-backend-candidate")
 
 #### keeps vector font glyph readback incomplete without GPU returned glyph evidence
 
-- keeps vector font glyph readback incomplete without GPU returned glyph evidence
+- accel
    - Expected: evidence.execution.device_executed is true
    - Expected: evidence.gpu_glyph_returned is false
    - Expected: evidence.gpu_glyph_readback_matched is false
@@ -307,12 +314,10 @@ expect(fallback.reason).to_equal("no-preferred-font-backend-candidate")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps vector font glyph readback incomplete without GPU returned glyph evidence")
 val pixels = [0u8, 24u8, 255u8, 6u8]
 val checksum = vector_font_glyph_pixels_checksum(pixels)
 val evidence = vector_font_glyph_readback_evidence(
@@ -338,12 +343,12 @@ expect(evidence.reason).to_equal("vector-font-gpu-glyph-return-missing")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Engine2D vector font offload evidence.
+Tests covering:
 - Engine2D vector font offload evidence
 
 ## Scenario Summary
@@ -358,45 +363,3 @@ Tests covering Engine2D vector font offload evidence.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `cd7c1843e74e60112a2a284caeb300e2a0f54bb207ee8595d655b0f13a49f840`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `cd7c1843e74e60112a2a284caeb300e2a0f54bb207ee8595d655b0f13a49f840`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `cd7c1843e74e60112a2a284caeb300e2a0f54bb207ee8595d655b0f13a49f840`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
-
-SSpec documentization score: 95/100
-source: test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.spl
-mirror: doc/06_spec/01_unit/lib/gpu/engine2d/vector_font_offload_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/gpu/engine2d/vector_font_offload_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/gpu/engine2d/vector_font_offload_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-<!-- sspec-maintain:scorecard:end -->

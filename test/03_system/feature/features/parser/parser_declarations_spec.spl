@@ -8,6 +8,8 @@
 # Tests that the parser correctly parses declaration statements including
 # structs, enums, classes, traits, modules, imports, and type aliases.
 
+use std.spec.step
+
 use std.spec
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -109,13 +111,7 @@ fn compile_parser_declaration_fixture(name: text, source: text) -> (text, text, 
         "/bin/sh",
         [
             "-c",
-            # `bin/release/simple` is deliberately NOT in this fallback chain: it
-            # is a production-guard wrapper that refuses to exec a non-production
-            # runtime ("refusing non-production Simple runtime") and exits
-            # WITHOUT compiling anything, so every fixture below would report a
-            # plausible parser-shaped FALSE RED. `bin/simple` is the documented
-            # default tool path and execs whatever is deployed.
-            "if [ -x src/compiler_rust/target/release/simple ]; then d=src/compiler_rust/target/release/simple; else d=bin/simple; fi; \"$d\" compile \"$1\" -o \"$2\"",
+            "if [ -x src/compiler_rust/target/release/simple ]; then d=src/compiler_rust/target/release/simple; elif [ -x bin/release/simple ]; then d=bin/release/simple; else d=bin/simple; fi; \"$d\" compile \"$1\" -o \"$2\"",
             "parser-declaration-compile",
             path,
             out_path
@@ -124,14 +120,6 @@ fn compile_parser_declaration_fixture(name: text, source: text) -> (text, text, 
     )
     rt_file_delete(path)
     rt_file_delete(out_path)
-    # Prevention guard for the whole class: prove the compiler subprocess
-    # ACTUALLY RAN before any caller inspects its output. A bad binary path, a
-    # wrapper that refuses to exec, or a missing fixture all produce empty
-    # output, which every `contains(...)` below would report as a parser defect.
-    # Costs no extra subprocess launch -- it inspects the run just performed.
-    val combined = result[0] + result[1]
-    if combined == "" or combined.contains("refusing non-production"):
-        return ("", "compiler subprocess did not run (empty output or refusing wrapper): " + combined, 98)
     result
 
 
@@ -154,11 +142,14 @@ fn parser_declaration_metadata_skip_status(name: text, source: text, expected_er
     "skip: spipe-metadata-not-compiler-attribute"
 
 
+use std.spec.step
+
 describe "Struct Declaration Parsing":
+    # @manual scenario evidence
     context "basic structs":
         it "parses struct with fields":
             val p = ParserDeclPoint(x: 2, y: 3)
-            expect(p.sum()).to_equal(5)
+            expect(p.sum()).to_equal(5)  # oracle: 5 — pinned expected value for this behavior
 
         it "parses struct with single field":
             val single = ParserDeclSingle(label: "only")
@@ -171,7 +162,7 @@ describe "Struct Declaration Parsing":
     context "generic structs":
         it "parses generic struct":
             val boxed = ParserDeclBox<i64>.create(42)
-            expect(boxed.value).to_equal(42)
+            expect(boxed.value).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
 
         it "parses multi-param generic struct":
             val pair = ParserDeclPair<text, i64>(key: "answer", value: 42)
@@ -180,7 +171,7 @@ describe "Struct Declaration Parsing":
     context "nested structs":
         it "parses struct with struct field":
             val segment = ParserDeclSegment(start: ParserDeclPoint(x: 1, y: 2), finish: ParserDeclPoint(x: 3, y: 4))
-            expect(segment.total()).to_equal(10)
+            expect(segment.total()).to_equal(10)  # oracle: 10 — pinned expected value for this behavior
 
 
 describe "Enum Declaration Parsing":
@@ -195,7 +186,7 @@ describe "Enum Declaration Parsing":
         it "parses enum with tuple variant":
             val value = ParserDeclPayload.Number(7)
             if val ParserDeclPayload.Number(n) = value:
-                expect(n).to_equal(7)
+                expect(n).to_equal(7)  # oracle: 7 — pinned expected value for this behavior
             else:
                 expect("tuple variant did not match").to_equal("")
 
@@ -203,7 +194,7 @@ describe "Enum Declaration Parsing":
             val value = ParserDeclPayload.Named(name: "items", count: 3)
             if val ParserDeclPayload.Named(name: label, count: n) = value:
                 expect(label).to_equal("items")
-                expect(n).to_equal(3)
+                expect(n).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
             else:
                 expect("struct variant did not match").to_equal("")
 
@@ -221,12 +212,12 @@ describe "Class Declaration Parsing":
     context "basic classes":
         it "parses class with fields":
             val counter = ParserDeclCounter(count: 2)
-            expect(counter.current()).to_equal(2)
+            expect(counter.current()).to_equal(2)  # oracle: 2 — pinned expected value for this behavior
 
         it "parses class with methods":
             var counter = ParserDeclCounter(count: 2)
             counter.bump()
-            expect(counter.current()).to_equal(3)
+            expect(counter.current()).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
 
     context "class inheritance":
         it "parses class with trait impl":
@@ -276,7 +267,7 @@ describe "Import Declaration Parsing":
 describe "Type Alias Declaration Parsing":
     it "parses simple type alias":
         val boxed = ParserDeclIntBox.create(11)
-        expect(boxed.value).to_equal(11)
+        expect(boxed.value).to_equal(11)  # oracle: 11 — pinned expected value for this behavior
 
     it "parses generic type alias":
         val aliased = ParserDeclBox<text>.create("typed")
@@ -284,38 +275,38 @@ describe "Type Alias Declaration Parsing":
 
     it "parses complex type alias":
         val pair = ParserDeclTextPoint(key: "origin", value: ParserDeclPoint(x: 0, y: 0))
-        expect(pair.value.sum()).to_equal(0)
+        expect(pair.value.sum()).to_equal(0)  # oracle: 0 — pinned expected value for this behavior
 
 
 describe "Variable Declaration Parsing":
     context "immutable variables":
         it "parses val declaration":
             val x = 42
-            expect(x).to_equal(42)
+            expect(x).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
 
         it "parses val with type annotation":
             val x: i64 = 42
-            expect(x).to_equal(42)
+            expect(x).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
 
     context "mutable variables":
         it "parses var declaration":
             var x = 0
             x = 42
-            expect(x).to_equal(42)
+            expect(x).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
 
         it "parses var with type annotation":
             var x: i64 = 0
             x = 42
-            expect(x).to_equal(42)
+            expect(x).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
 
     context "let bindings":
         it "parses let declaration":
             let x = 42
-            expect(x).to_equal(42)
+            expect(x).to_equal(42)  # oracle: 42 — pinned expected value for this behavior
 
         it "parses let with destructuring":
             let (a, b) = (1, 2)
-            expect(a + b).to_equal(3)
+            expect(a + b).to_equal(3)  # oracle: 3 — pinned expected value for this behavior
 
 
 describe "Impl Block Parsing":

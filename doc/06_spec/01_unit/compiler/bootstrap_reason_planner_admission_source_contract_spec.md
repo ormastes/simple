@@ -1,6 +1,6 @@
-# bootstrap_reason_planner_admission_source_contract_spec
+# Contract spec: test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl
 
-> Static source contract for fail-closed bootstrap planner authorization v2.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +9,9 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# bootstrap_reason_planner_admission_source_contract_spec
+# Contract spec: test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl
 
-Static source contract for fail-closed bootstrap planner authorization v2.
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 ## At a Glance
 
@@ -20,10 +20,36 @@ Static source contract for fail-closed bootstrap planner authorization v2.
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Static source contract for fail-closed bootstrap planner authorization v2.
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -32,25 +58,18 @@ Static source contract for fail-closed bootstrap planner authorization v2.
 #### admits only the Stage 3 and Stage 4 targets
 
 - admits only the Stage 3 and Stage 4 targets
-   - Expected: source contains `target == "//bootstrap:stage3"`
-   - Expected: source contains `target == "//bootstrap:stage4"`
-   - Expected: source does not contain `starts_with("//bootstrap:")`
-   - Expected: source does not contain `starts_with("//release:")`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("admits only the Stage 3 and Stage 4 targets")
-expect(source.contains("target == \"//bootstrap:stage3\"")).to_equal(true)
-expect(source.contains("target == \"//bootstrap:stage4\"")).to_equal(true)
-expect(source.contains("starts_with(\"//bootstrap:\")")).to_equal(false)
-expect(source.contains("starts_with(\"//release:\")")).to_equal(false)
+expect(source).to_contain("target == \"//bootstrap:stage3\"")        expect(source).to_contain("target == \"//bootstrap:stage4\"")        expect(source).to_not_contain("starts_with(\"//bootstrap:\")")        expect(source).to_not_contain("starts_with(\"//release:\")")
 ```
 
 </details>
@@ -58,27 +77,18 @@ expect(source.contains("starts_with(\"//release:\")")).to_equal(false)
 #### requires all four binding hashes
 
 - requires all four binding hashes
-   - Expected: source contains `--parent-compiler-sha256=`
-   - Expected: source contains `--runtime-snapshot-sha256=`
-   - Expected: source contains `--planner-source-closure-sha256=`
-   - Expected: source contains `--planner-sha256=`
-   - Expected: source contains `simple-bootstrap-authorization-v2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("requires all four binding hashes")
-expect(source.contains("--parent-compiler-sha256=")).to_equal(true)
-expect(source.contains("--runtime-snapshot-sha256=")).to_equal(true)
-expect(source.contains("--planner-source-closure-sha256=")).to_equal(true)
-expect(source.contains("--planner-sha256=")).to_equal(true)
-expect(source.contains("simple-bootstrap-authorization-v2")).to_equal(true)
+expect(source).to_contain("--parent-compiler-sha256=")        expect(source).to_contain("--runtime-snapshot-sha256=")        expect(source).to_contain("--planner-source-closure-sha256=")        expect(source).to_contain("--planner-sha256=")        expect(source).to_contain("simple-bootstrap-authorization-v2")
 ```
 
 </details>
@@ -101,50 +111,39 @@ expect(source.contains("simple-bootstrap-authorization-v2")).to_equal(true)
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `35c54a0a6af88be6d439155721be2b89c62e5c6ef11739c55de1a37da946d44b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `362f737f57f79e5e374b19bd3b7b0851d73b36f5408ff00166604c905fbc65f4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `35c54a0a6af88be6d439155721be2b89c62e5c6ef11739c55de1a37da946d44b`.
+Source SHA-256: `362f737f57f79e5e374b19bd3b7b0851d73b36f5408ff00166604c905fbc65f4`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `35c54a0a6af88be6d439155721be2b89c62e5c6ef11739c55de1a37da946d44b`  
+Source SHA-256: `362f737f57f79e5e374b19bd3b7b0851d73b36f5408ff00166604c905fbc65f4`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **78/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 95/100
 source: test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl
 mirror: doc/06_spec/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.md (current)
-findings: 6 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=80 coverage=100 maintainability=70
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=80
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=78; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: evidence
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits only the Stage 3 and Stage 4 targets' has no retained capture or evidence
+test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits only the Stage 3 and Stage 4 targets' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires all four binding hashes' has no retained capture or evidence
+test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires all four binding hashes' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

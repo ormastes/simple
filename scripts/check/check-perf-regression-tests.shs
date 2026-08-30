@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=141
+ROW_FLOOR=147
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -185,13 +185,13 @@ must_contain     "linkperf runtime object cache dir helper" \
 # the old single-line condition in two. The consult itself is unchanged: the
 # probe result still gates the cp-from-cache that sets cache_hit.
 must_contain     "linkperf cache consulted in compile loop" \
-    "$RTCOMP" "cache_obj_exists = rt_file_exists(cache_obj)"
+    "$RTCOMP" "cache_obj_exists = file_exists(cache_obj)"
 must_contain     "linkperf clang skipped on cache hit" \
     "$RTCOMP" "if not cache_hit:"
 must_contain     "linkperf cache published atomically" \
     "$RTCOMP" "val stage = cache_obj + \".tmp.\" + \"{compile_pid}\""
 must_contain     "linkperf cache key covers runtime sources" \
-    "$RTCOMP" "-printf '%p %s %T@"
+    "$RTCOMP" "xargs -r sha256sum"
 must_contain     "linkperf mechanism check script exists" \
     "$ROOT/scripts/check/check-runtime-object-cache.shs" "warm build ran"
 
@@ -615,6 +615,24 @@ must_contain     "SHARDCLAMP spec pins per-phase asymmetry"        "$ROOT/test/0
 # spec provably would not, and did not.
 must_contain     "NBLIVENESS end-to-end gate exists"               "$ROOT/scripts/check/check-native-build-not-crashing.shs" "native-build"
 must_contain     "NBLIVENESS treats a signal death as a crash"     "$ROOT/scripts/check/check-native-build-not-crashing.shs" "_rc\" -ge 128"
+
+# --- loader/lexer constant-factor fixes (2026-08-28) ------------------------
+# $SCRATCHPAD/perf_loader_REPORT.md (perf agent, release/2026-08-27 lane).
+# char_code() used to allocate a [u8] array per call via rt_text_to_bytes and
+# the lexer calls it 2-4x per SOURCE CHARACTER; env_value_nul_free sliced one
+# heap string per byte of every parsed file; core_token_text_matches sliced one
+# per token character; make_token scanned every token for NUL even with the
+# env mirror off; driver_native_sources_fingerprint re-extracted the interface
+# text of every symlink alias (1012 rows for 717 files).
+STRCORE="$ROOT/src/lib/common/string_core.spl"
+LEXSTRUCT="$ROOT/src/compiler/10.frontend/core/lexer_struct.spl"
+AOTOUT="$ROOT/src/compiler/80.driver/driver_aot_native_output.spl"
+must_contain     "LOADER28 char_code_inline reads byte_at(0)"      "$STRCORE" "val code = c.byte_at(0) as i64"
+must_not_contain "LOADER28 char_code_inline must not allocate"     "$STRCORE" "val bytes = rt_text_to_bytes(c)"
+must_contain     "LOADER28 env_value_nul_free scans bytes"         "$LEXSTRUCT" "if (value.byte_at(i) as i64) == 0:"
+must_not_contain "LOADER28 env_value_nul_free must not slice"      "$LEXSTRUCT" "if char_code(value[i:i + 1]) == 0:"
+must_not_contain "LOADER28 token match must not slice per char"    "$LEXSTRUCT" "if chars[i] != value[i - start:i - start + 1]:"
+must_contain     "LOADER28 fingerprint memo per (len, path)"       "$AOTOUT" "var iface_memo: Dict<text, text> = {}"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Static guard: an interrupted 8K GUI profile must end with a machine-readable
+# failure receipt rather than a header-only Markdown file.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+SCRIPT="$ROOT_DIR/tools/gui_perf_bench/run_all_benchmarks.shs"
+
+require() {
+    local needle="$1"
+    if ! grep -Fq "$needle" "$SCRIPT"; then
+        echo "gui_perf_bench_terminal_receipt_contract=fail missing=$needle" >&2
+        exit 1
+    fi
+}
+
+require 'trap '\''harness_exit_code=$?; stop_harness_supervisor; write_harness_terminal_receipt "$harness_exit_code"'\'' EXIT'
+require 'gui_perf_benchmark_harness_status=failed'
+require 'gui_perf_benchmark_harness_reason=terminated_before_terminal_receipt'
+require 'gui_perf_benchmark_harness_status=completed'
+require 'setsid bash -c'
+require 'gui_perf_benchmark_harness_reason=harness_deadline_exceeded'
+require 'gui_perf_benchmark_harness_receipt_owner=detached_supervisor'
+require '. "$PROJECT_DIR/scripts/lib/simple-compiler-select.shs"'
+require 'simple_compiler_select --root "$PROJECT_DIR" --quiet'
+require 'self_hosted_compiler_capability_probe_failed'
+if grep -Fq 'select_simple_bin()' "$SCRIPT"; then
+    echo "gui_perf_bench_terminal_receipt_contract=fail legacy_fail_open_compiler_selector" >&2
+    exit 1
+fi
+
+# Exercise the failure that the old EXIT trap could not observe: kill the
+# benchmark's own session, then verify its detached supervisor writes exactly
+# one failure receipt.  The probe emits no backend/performance row.
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+normal_report="$work_dir/normal-report.md"
+BUILD_DIR="$work_dir/normal-build" \
+REPORT_PATH="$normal_report" \
+SKIP_PROFILE_REPORT_CONTRACT=1 \
+GUI_PERF_BENCH_HARNESS_TIMEOUT_SECONDS=5 \
+GUI_PERF_BENCH_SUPERVISOR_PROBE_SLEEP_SECONDS=0 \
+"$SCRIPT" >"$work_dir/normal.stdout" 2>"$work_dir/normal.stderr"
+grep -Fqx 'gui_perf_benchmark_harness_status=completed' "$normal_report"
+grep -Fqx 'gui_perf_benchmark_harness_exit_code=0' "$normal_report"
+if grep -Fq 'gui_perf_benchmark_harness_status=failed' "$normal_report"; then
+    echo "gui_perf_bench_terminal_receipt_contract=fail normal_probe_failed" >&2
+    exit 1
+fi
+
+report="$work_dir/report.md"
+BUILD_DIR="$work_dir/build" \
+REPORT_PATH="$report" \
+SKIP_PROFILE_REPORT_CONTRACT=1 \
+GUI_PERF_BENCH_HARNESS_TIMEOUT_SECONDS=1 \
+GUI_PERF_BENCH_SUPERVISOR_PROBE_SLEEP_SECONDS=20 \
+setsid "$SCRIPT" >"$work_dir/probe.stdout" 2>"$work_dir/probe.stderr" &
+probe_pid=$!
+sleep 1
+kill -KILL -- "-$probe_pid" 2>/dev/null || {
+    echo "gui_perf_bench_terminal_receipt_contract=fail could_not_kill_probe_group" >&2
+    exit 1
+}
+wait "$probe_pid" 2>/dev/null || true
+sleep 2
+
+if [[ ! -f "$report" ]]; then
+    echo "gui_perf_bench_terminal_receipt_contract=fail missing_report" >&2
+    exit 1
+fi
+if [[ "$(grep -Fc 'gui_perf_benchmark_harness_status=failed' "$report")" != "1" ]]; then
+    echo "gui_perf_bench_terminal_receipt_contract=fail expected_one_failed_receipt" >&2
+    exit 1
+fi
+grep -Fqx 'gui_perf_benchmark_harness_exit_code=124' "$report"
+grep -Fqx 'gui_perf_benchmark_harness_reason=harness_deadline_exceeded' "$report"
+grep -Fqx 'gui_perf_benchmark_harness_receipt_owner=detached_supervisor' "$report"
+if grep -Fq 'gui_perf_benchmark_harness_status=completed' "$report"; then
+    echo "gui_perf_bench_terminal_receipt_contract=fail unexpected_completed_receipt" >&2
+    exit 1
+fi
+
+echo "gui_perf_bench_terminal_receipt_contract=pass"

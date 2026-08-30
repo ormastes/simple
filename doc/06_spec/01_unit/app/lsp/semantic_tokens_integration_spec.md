@@ -1,6 +1,29 @@
 # Semantic Tokens Integration Specification
 
-> Tests covering Semantic Tokens Integration.
+> 1. check
+
+<!-- sdn-diagram:id=semantic_tokens_integration_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=semantic_tokens_integration_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+semantic_tokens_integration_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=semantic_tokens_integration_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,16 @@
 
 #### tokenizes Simple source code
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- tokenizes Simple source code
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tokenizes Simple source code")
 val tokenizer = MockTokenizer.new()
 val source = "val x = 42"
 val token_count = tokenizer.tokenize(source)
@@ -43,18 +60,16 @@ check(token_count >= 0)
 
 #### handles multiline constructs
 
-- handles multiline constructs
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles multiline constructs")
 val tokenizer = MockTokenizer.new()
 val source = "class Point:\n    x: i64\n    y: i64"
 val token_count = tokenizer.tokenize(source)
@@ -65,18 +80,16 @@ check(token_count >= 0)
 
 #### handles incremental updates
 
-- handles incremental updates
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles incremental updates")
 val tokenizer = MockTokenizer.new()
 val old_code = "val x = 10"
 val new_code = "val x = 10\nval y = 20"
@@ -89,18 +102,16 @@ check(new_count >= old_count)
 
 #### integrates with Tree-sitter
 
-- integrates with Tree-sitter
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("integrates with Tree-sitter")
 val tokenizer = MockTokenizer.new()
 val source = "fn add(x: i64, y: i64) -> i64:\n    x + y"
 val tokens = tokenizer.tokenize(source)
@@ -111,18 +122,19 @@ check(tokens > 0)
 
 #### filters private symbols from visible symbol lists
 
-- filters private symbols from visible symbol lists
+1. check
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("filters private symbols from visible symbol lists")
 val symbols = ["Router", "route_debug", "_private_helper"]
 val filtered = filter_visible_symbols(symbols, "boundary")
 check(filtered.len() == 2)
@@ -140,12 +152,12 @@ check(not filtered.contains("_private_helper"))
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/semantic_tokens_integration_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Semantic Tokens Integration.
+Tests covering:
 - Semantic Tokens Integration
 
 ## Scenario Summary
@@ -160,51 +172,3 @@ Tests covering Semantic Tokens Integration.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c7cf7a86b08be4faed58011dcb7bcdc9d2be973d4bee60d8193846f2eeab432e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c7cf7a86b08be4faed58011dcb7bcdc9d2be973d4bee60d8193846f2eeab432e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c7cf7a86b08be4faed58011dcb7bcdc9d2be973d4bee60d8193846f2eeab432e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/lsp/semantic_tokens_integration_spec.spl
-mirror: doc/06_spec/01_unit/app/lsp/semantic_tokens_integration_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/lsp/semantic_tokens_integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/lsp/semantic_tokens_integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/lsp/semantic_tokens_integration_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes Simple source code' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/semantic_tokens_integration_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles multiline constructs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/semantic_tokens_integration_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles incremental updates' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

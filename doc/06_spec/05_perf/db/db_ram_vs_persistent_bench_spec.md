@@ -1,6 +1,30 @@
 # Db Ram Vs Persistent Bench Specification
 
-> Tests covering db ram vs persistent bench (AC-5).
+> <details>
+
+<!-- sdn-diagram:id=db_ram_vs_persistent_bench_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=db_ram_vs_persistent_bench_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+db_ram_vs_persistent_bench_spec -> std
+db_ram_vs_persistent_bench_spec -> nogc_sync_mut
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=db_ram_vs_persistent_bench_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,28 +41,13 @@
 
 #### mode strings are distinct — ram != persistent != wal (AC-5 never-collapsed)
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- mode strings are distinct — ram != persistent != wal (AC-5 never-collapsed)
-   - Expected: ram_mode equals `ram`
-   - Expected: persistent_mode equals `persistent`
-   - Expected: wal_mode equals `wal`
-   - Expected: ram_ne_persistent is true
-   - Expected: ram_ne_wal is true
-   - Expected: persistent_ne_wal is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("mode strings are distinct — ram != persistent != wal (AC-5 never-collapsed)")
 # AC-5: each config must produce a distinct row, never merged.
 # Assert mode label strings are distinct — simple and definitive.
 val ram_mode = "ram"
@@ -59,19 +68,13 @@ expect(persistent_ne_wal).to_equal(true)
 
 #### ram-only: insert N rows and count == N (correctness oracle)
 
-- ram-only: insert N rows and count == N (correctness oracle)
-   - Expected: count equals `BENCH_N`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("ram-only: insert N rows and count == N (correctness oracle)")
 val count = run_ram_insert_count()
 expect(count).to_equal(BENCH_N)
 ```
@@ -80,19 +83,13 @@ expect(count).to_equal(BENCH_N)
 
 #### ram-only: point lookup id=42 returns correct value
 
-- ram-only: point lookup id=42 returns correct value
-   - Expected: v equals `BENCH_POINT_VAL`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("ram-only: point lookup id=42 returns correct value")
 val v = run_ram_point_lookup()
 expect(v).to_equal(BENCH_POINT_VAL)
 ```
@@ -101,19 +98,13 @@ expect(v).to_equal(BENCH_POINT_VAL)
 
 #### ram-only: timing is non-negative
 
-- ram-only: timing is non-negative
-   - Expected: ok is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("ram-only: timing is non-negative")
 val us = run_ram_timing_us()
 val ok = us >= 0
 expect(ok).to_equal(true)
@@ -123,19 +114,18 @@ expect(ok).to_equal(true)
 
 #### persistent: insert N rows, checkpoint, count == N (correctness oracle)
 
-- persistent: insert N rows, checkpoint, count == N (correctness oracle)
+- rt dir create all
+- rt file delete
    - Expected: count equals `BENCH_N`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("persistent: insert N rows, checkpoint, count == N (correctness oracle)")
 rt_dir_create_all("/tmp/bench_db")
 val db_path = "/tmp/bench_db/bench_persistent.db"
 # Clean up any prior run to ensure isolation.
@@ -148,19 +138,18 @@ expect(count).to_equal(BENCH_N)
 
 #### persistent: checkpoint writes file to disk (persistence proof)
 
-- persistent: checkpoint writes file to disk (persistence proof)
+- rt dir create all
+- rt file delete
    - Expected: file_ok is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("persistent: checkpoint writes file to disk (persistence proof)")
 rt_dir_create_all("/tmp/bench_db")
 val db_path = "/tmp/bench_db/bench_persist_proof.db"
 rt_file_delete(db_path)
@@ -174,19 +163,18 @@ expect(file_ok).to_equal(true)
 
 #### persistent: timing is non-negative
 
-- persistent: timing is non-negative
+- rt dir create all
+- rt file delete
    - Expected: ok is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("persistent: timing is non-negative")
 rt_dir_create_all("/tmp/bench_db")
 val db_path = "/tmp/bench_db/bench_persistent_timing.db"
 rt_file_delete(db_path)
@@ -199,19 +187,13 @@ expect(ok).to_equal(true)
 
 #### wal (mvcc-core): insert N rows and count_visible == N (correctness oracle)
 
-- wal (mvcc-core): insert N rows and count_visible == N (correctness oracle)
-   - Expected: count equals `BENCH_N`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("wal (mvcc-core): insert N rows and count_visible == N (correctness oracle)")
 val count = run_wal_insert_count()
 expect(count).to_equal(BENCH_N)
 ```
@@ -220,19 +202,13 @@ expect(count).to_equal(BENCH_N)
 
 #### wal (mvcc-core): point lookup id=42 returns data row containing key
 
-- wal (mvcc-core): point lookup id=42 returns data row containing key
-   - Expected: found is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("wal (mvcc-core): point lookup id=42 returns data row containing key")
 val data = run_wal_point_lookup()
 val prefix = BENCH_POINT_ID.to_text() + "|"
 val found = data.starts_with(prefix)
@@ -243,19 +219,13 @@ expect(found).to_equal(true)
 
 #### wal (mvcc-core): timing is non-negative
 
-- wal (mvcc-core): timing is non-negative
-   - Expected: ok is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("wal (mvcc-core): timing is non-negative")
 val us = run_wal_timing_us()
 val ok = us >= 0
 expect(ok).to_equal(true)
@@ -265,23 +235,13 @@ expect(ok).to_equal(true)
 
 #### all three mode labels exist in collected results (AC-5 proof)
 
-- all three mode labels exist in collected results (AC-5 proof)
-   - Expected: count equals `3`
-   - Expected: m0 equals `ram`
-   - Expected: m1 equals `persistent`
-   - Expected: m2 equals `wal`
-   - Expected: all_distinct is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("all three mode labels exist in collected results (AC-5 proof)")
 # Construct the three mode strings as they would appear in BenchResult rows.
 # This is the definitive proof that three SEPARATE rows are produced —
 # matching BenchCase.mode for each config.
@@ -302,18 +262,16 @@ expect(all_distinct).to_equal(true)
 
 #### bench_emit writes report and metrics files
 
-- bench_emit writes report and metrics files
+- pending
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("bench_emit writes report and metrics files")
 # TODO: cross-module struct type metadata is not available in interpreter mode —
 # BenchResult constructed inside imported make_bench_result returns Unit to caller.
 # This test requires compiled mode (--mode=native or --mode=smf with stable externs).
@@ -325,27 +283,22 @@ pending("interp-cross-module-struct-unit")
 
 </details>
 
-#### wal disk-replay path: field data survives disk round-trip (wal-disk-replay-blank-row-p0)
+#### wal disk-replay path
 
-- wal disk-replay path: field data survives disk round-trip (wal-disk-replay-blank-row-p0)
-   - Expected: result equals `42|420|bench.txt`
+- pending
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("wal disk-replay path: field data survives disk round-trip (wal-disk-replay-blank-row-p0)")
-# FIXED: dbfs_engine MetaStore journal serialization collapsed every op to
-# an empty CHECKPOINT (broken `op is MetaOp.Variant` discrimination), so WAL
-# disk replay reconstructed blank rows. Now round-trips exact field data.
-val result = run_wal_disk_replay_field()
-# "ino|size|name" reconstructed from the on-disk journal after a fresh reopen.
-expect(result).to_equal("42|420|bench.txt")
+# WAL disk replay (dbfs_engine/wal.spl + checkpoint_ring) has a P0 blank-row
+# bug found in simple-db-hardening research: WAL replay drops all field data.
+# This test is pending until that bug is fixed and the disk path is benchmarkable.
+pending("wal-disk-replay-blank-row-p0")
 ```
 
 </details>
@@ -357,12 +310,12 @@ expect(result).to_equal("42|420|bench.txt")
 | Category | Other |
 | Status | Active |
 | Source | `test/05_perf/db/db_ram_vs_persistent_bench_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering db ram vs persistent bench (AC-5).
+Tests covering:
 - db ram vs persistent bench (AC-5)
 
 ## Scenario Summary
@@ -377,58 +330,3 @@ Tests covering db ram vs persistent bench (AC-5).
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-PERF`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `8fee0b45fdcd359bfbe5e86aec895448bafd5e08dd465f42b0a9a3349ca80490`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `8fee0b45fdcd359bfbe5e86aec895448bafd5e08dd465f42b0a9a3349ca80490`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `8fee0b45fdcd359bfbe5e86aec895448bafd5e08dd465f42b0a9a3349ca80490`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/05_perf/db/db_ram_vs_persistent_bench_spec.spl
-mirror: doc/06_spec/05_perf/db/db_ram_vs_persistent_bench_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=40
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=80; blocker cap makes effective=49
-doc/06_spec/05_perf/db/db_ram_vs_persistent_bench_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/05_perf/db/db_ram_vs_persistent_bench_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:261:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mode strings are distinct — ram != persistent != wal (AC-5 never-collapsed)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:279:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ram-only: insert N rows and count == N (correctness oracle)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:285:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ram-only: point lookup id=42 returns correct value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,39 @@
+use app.io.mod (process_run)
+
+# SCV-IMPL-D-08 — merge corpus gate.
+#
+# The full corpus scan drives ~7 scv CLI invocations per case and is far too slow
+# for a spec; `sh scripts/check/check-scv-merge-corpus.shs` owns that measurement.
+# What this spec pins is everything that can silently rot underneath it:
+#   * the gate's fatal selftest still proves the MISSED and silent-mis-merge
+#     detectors can actually fire (poisoned-truth fixtures),
+#   * the committed corpus is structurally well formed and non-vacuous,
+#   * the gate refuses an empty corpus with ERROR/exit 2 rather than a vacuous pass.
+fn _sh(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    val combined = "{out}{err}\nexit={code}\n"
+    # A `to_contain` on empty output fails the same way whether the tool
+    # misbehaved or nothing ran at all. Fail loudly on "did not run".
+    assert_false(out == "" and err == "")
+    assert_false(combined.contains("refusing non-production Simple runtime"))
+    combined
+
+describe "scv merge corpus gate":
+    it "passes its fatal selftest including the poisoned-truth fixtures":
+        val out = _sh("cd \"$(pwd)\" && sh scripts/check/check-scv-merge-corpus.shs --selftest 2>&1 | tail -5")
+        expect(out).to_contain("selftest: 4 fixture(s) OK")
+        expect(out).to_contain("PASS — selftest only")
+        expect(out).to_contain("exit=0")
+
+    it "reports ERROR exit 2 on an empty corpus instead of a vacuous pass":
+        val script = "set -eu\nTMP=$(mktemp -d /tmp/scv-corpus-empty.XXXXXX)\nmkdir -p \"$TMP/corpus\"\nset +e\nOUT=$(sh scripts/check/check-scv-merge-corpus.shs --no-selftest --corpus-root \"$TMP/corpus\" 2>&1)\nCODE=$?\nset -e\nprintf '%s\\ngate_code=%s\\n' \"$OUT\" \"$CODE\"\nrm -rf \"$TMP\"\n"
+        val out = _sh(script)
+        expect(out).to_contain("ERROR — nothing was checked")
+        expect(out).to_contain("gate_code=2")
+        expect(out).to_contain("exit=0")
+
+    it "ships a structurally well formed corpus of at least 20 and at most 200 cases":
+        val script = "set -eu\nC=test/fixtures/scv_merge_corpus\nN=$(find \"$C\" -mindepth 1 -maxdepth 1 -type d | wc -l)\nBAD=0\nfor d in \"$C\"/*/; do\n  for sub in base left right; do [ -d \"$d$sub\" ] || BAD=$((BAD+1)); done\n  [ -f \"$d/truth.sdn\" ] || BAD=$((BAD+1))\n  K=$(sed -n 's/^expect:[[:space:]]*//p' \"$d/truth.sdn\" | head -1)\n  case \"$K\" in conflict|clean-contains) ;; clean-exact) [ -d \"$d/expected\" ] || BAD=$((BAD+1)) ;; *) BAD=$((BAD+1)) ;; esac\ndone\nCONF=$(grep -l '^expect: conflict' \"$C\"/*/truth.sdn | wc -l)\nCLEAN=$(grep -l '^expect: clean' \"$C\"/*/truth.sdn | wc -l)\nPP=$(ls -d \"$C\"/*cpp* | wc -l)\nprintf 'cases=%s\\nbad=%s\\nconflict_cases=%s\\nclean_cases=%s\\npreprocessor_cases=%s\\n' \"$N\" \"$BAD\" \"$CONF\" \"$CLEAN\" \"$PP\"\ntest \"$N\" -ge 20\ntest \"$N\" -le 200\ntest \"$BAD\" -eq 0\ntest \"$CONF\" -ge 5\ntest \"$CLEAN\" -ge 5\ntest \"$PP\" -ge 3\n"
+        val out = _sh(script)
+        expect(out).to_contain("bad=0")
+        expect(out).to_contain("exit=0")

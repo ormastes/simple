@@ -24,6 +24,18 @@ var ft_vals: [i64] = []
 var ft_buckets: [i64] = []
 var ft_nexts: [i64] = []
 
+# Caller-aware function ownership.  The historical flat table remains for
+# compatibility, but cannot distinguish two modules which define the same
+# bare name.  Keep the authoritative owner and selective-import routes in
+# parallel arrays; these tables are small during interpretation and lookup is
+# off the parser hot path.
+var fto_owners: [text] = []
+var fto_names: [text] = []
+var fto_vals: [i64] = []
+var fib_callers: [text] = []
+var fib_names: [text] = []
+var fib_owners: [text] = []
+
 # ===== Function Return Types (Hash Map) =====
 var frt_keys: [text] = []
 var frt_vals: [i64] = []
@@ -141,6 +153,10 @@ fn func_table_reset():
     ft_vals = []
     ft_buckets = hm_make_global_buckets()
     ft_nexts = []
+    fto_owners = []
+    fto_names = []
+    fto_vals = []
+    func_import_binding_reset()
     frt_keys = []
     frt_vals = []
     frt_buckets = hm_make_global_buckets()
@@ -274,6 +290,60 @@ fn func_table_lookup(name: text) -> i64:
         if ft_keys[idx] == name:
             return ft_vals[idx]
         idx = ft_nexts[idx]
+    -1
+
+fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    var i = 0
+    while i < fto_names.len():
+        if fto_owners[i] == owner and fto_names[i] == name:
+            fto_vals[i] = decl_id
+            return
+        i = i + 1
+    fto_owners.push(owner)
+    fto_names.push(name)
+    fto_vals.push(decl_id)
+
+fn func_table_lookup_owned(owner: text, name: text) -> i64:
+    var i = fto_names.len()
+    while i > 0:
+        i = i - 1
+        if fto_owners[i] == owner and fto_names[i] == name:
+            return fto_vals[i]
+    -1
+
+fn func_import_binding_reset():
+    fib_callers = []
+    fib_names = []
+    fib_owners = []
+
+fn func_import_binding_register(caller: text, name: text, owner: text):
+    var i = 0
+    while i < fib_names.len():
+        if fib_callers[i] == caller and fib_names[i] == name:
+            fib_owners[i] = owner
+            return
+        i = i + 1
+    fib_callers.push(caller)
+    fib_names.push(name)
+    fib_owners.push(owner)
+
+fn func_import_binding_lookup(caller: text, name: text) -> text:
+    var i = fib_names.len()
+    while i > 0:
+        i = i - 1
+        if fib_callers[i] == caller and fib_names[i] == name:
+            return fib_owners[i]
+    ""
+
+fn func_resolve_for_caller(caller: text, name: text) -> i64:
+    val own = func_table_lookup_owned(caller, name)
+    if own >= 0:
+        return own
+    val imported_owner = func_import_binding_lookup(caller, name)
+    if imported_owner != "":
+        return func_table_lookup_owned(imported_owner, name)
+    # No caller route is safer than silently selecting an unrelated module's
+    # last-write-wins entry.  The call evaluator may apply its legacy fallback.
     -1
 
 fn func_table_remove(name: text) -> bool:
@@ -422,23 +492,33 @@ class MustUseSourceScanState:
         while trim_start < line.len() and (line[trim_start] == " " or line[trim_start] == "\t"):
             trim_start = trim_start + 1
         val trimmed = line[trim_start:]
+        # Annotation lines may add one pending action while preserving another
+        # (for example, @must_use followed by @cfg).  Keep annotation
+        # consumption separate from the generic intervening-code cancellation
+        # below so a non-comment annotation never cancels itself.
+        var annotation_consumed: bool = false
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
+            annotation_consumed = true
             must_use_critical_mode = true
         # Check for @tailrec annotation — marks function for tail-call optimization
         if trimmed.starts_with("# @tailrec"):
+            annotation_consumed = true
             self.pending_init = false  # @tailrec isn't @init
             self.pending_teardown = false
             # Simply note the next fn as tailrec-annotated for warning purposes
 
         # Check for @init annotation
         if trimmed.starts_with("# @init"):
+            annotation_consumed = true
             self.pending_init = true
         # Check for @teardown annotation
         if trimmed.starts_with("# @teardown"):
+            annotation_consumed = true
             self.pending_teardown = true
         # Check for @when(condition) conditional compilation (comment form: backward compat)
         if trimmed.starts_with("# @when("):
+            annotation_consumed = true
             # Extract condition: "# @when(condition)"
             var when_cond_chars: [text] = []
             var wci: i64 = 8
@@ -452,6 +532,7 @@ class MustUseSourceScanState:
             self.pending_when = when_cond
         # Check for @cfg(condition) — new proper syntax (no # prefix)
         if trimmed.starts_with("@cfg("):
+            annotation_consumed = true
             var cfg_chars: [text] = []
             var cci: i64 = 5
             var cfg_depth: i64 = 1
@@ -481,6 +562,7 @@ class MustUseSourceScanState:
             self.pending_when = cfg_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
+            annotation_consumed = true
             self.pending_must_use = true
             # Extract reason from @must_use("reason")
             self.pending_reason = ""
@@ -522,7 +604,7 @@ class MustUseSourceScanState:
                     must_use_register(fname, self.pending_reason)
                 self.pending_must_use = false
                 self.pending_reason = ""
-            elif trimmed.starts_with("# ") == false and trimmed != "":
+            elif annotation_consumed == false and trimmed.starts_with("# ") == false and trimmed != "":
                 # Non-comment, non-empty line without fn => cancel pending
                 self.pending_must_use = false
                 self.pending_reason = ""
@@ -553,7 +635,7 @@ class MustUseSourceScanState:
                 self.pending_init = false
                 self.pending_teardown = false
                 self.pending_when = ""
-            elif trimmed.starts_with("# ") == false and trimmed != "":
+            elif annotation_consumed == false and trimmed.starts_with("# ") == false and trimmed != "":
                 self.pending_init = false
                 self.pending_teardown = false
                 self.pending_when = ""

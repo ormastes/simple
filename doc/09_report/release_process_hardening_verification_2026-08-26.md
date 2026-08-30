@@ -1,29 +1,7 @@
 # Release Process Hardening Verification
 
 **Status:** FAIL — implementation substantially complete; release-grade evidence incomplete
-**Evidence refreshed:** 2026-08-27 against `origin/main`
-`db412eb6ec2a8ebc1f6458e82357be9258a490e5`
-
-## Current provider and integration audit
-
-- Compiler PR #29 is merged as
-  `c163a1e06a00644bae73d5321a1e71eb1299287a`; Stage-3 module-name PR #31 is
-  merged as `c01c44d7af3f756bee019f72bad413518312dc86`; release-process PR #28 is
-  merged as `b76f796235031ed116a175527df50ae1e1bab1c1`. They are no longer open
-  integration prerequisites.
-- No remote `release/1.0` or `candidate/*` ref exists, and no release at or
-  above 1.0.0 is published. These absences prove that no current beta candidate
-  or promotion receipt may be inferred from the merged source.
-- GitHub registers `.github/workflows/candidate.yml` under its path rather than
-  its declared name. Runs through `33036284382` fail on pushes with zero jobs.
-  The source contained a 25,058-character inline `run` template; the repair
-  splits it below the provider boundary and adds a local regression gate. Live
-  workflow acceptance remains unproved until the repair reaches the default
-  branch and a subsequent push no longer creates the path-named zero-job run.
-- The scheduled/operator convergence checkpoint is a fresh-runner-safe Git-only
-  source observation. Its JSON states that no deployed runtime was used and
-  that the result is ineligible for release admission. It does not choose,
-  cherry-pick, merge, or push a fix and cannot replace protected receipts.
+**Branch:** `work/release/local-20260826-001-release-process-hardening`
 
 ## Implemented evidence
 
@@ -39,9 +17,7 @@
 - Candidate CI emits one schema family for candidate, qualification, and
   admission evidence, binds build graph, creator, support, convergence,
   qualification, artifact, and provenance identities, and admits candidate-built
-  MCP/LSP npm tarballs. It reserves the create-once attempt only after the
-  receipt-free Stage 2 trust root, planner-receipted Stage 3/4, runtime-backed
-  preflight, and reviewed convergence qualification pass.
+  MCP/LSP npm tarballs.
 - Promotion CI is promote-only and retry-idempotent: an existing tag must match
   signature, commit, and admission digest; draft and published assets must have
   exactly the admitted names and bytes. It contains no build/fallback path.
@@ -101,9 +77,7 @@
    `compiler.semantics.const_fold` (E1034). A bounded fetch/check of
    `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf` found no fix. The
    defect and six related snapshot regressions were repaired in isolated lanes.
-   The detailed failure chain below is retained as historical provenance; its
-   PR-state statements are superseded by the current provider/integration audit
-   above. Fragmented PRs #25/#26 were superseded by PR #29. Its exact
+   Fragmented PRs #25/#26 are superseded by current-main PR #29. Its exact
    seven-fix closure admitted Stage 2 with provenance/sanity receipts and
    artifact SHA-256
    `a9c1b931648146c0ccf4f289dd2ab6176e1fd90b0db605338c84bacb406238b1`.
@@ -119,18 +93,14 @@
    and produced a verified Stage-3 planner receipt. Stage 3 then failed
    deterministically because the Stage-2-native module-name helper mapped
    `src/app/cli/bootstrap_main.spl` and `src/compiler/driver/driver.spl` to
-   the empty name. The trunk correction was Simple PR #31; its exact reviewed
-   admission-probe commit was copied into PR #28. PRs #29 and #31 are now
-   integrated on `main`, but no fresh admitted Stage 3/4 lineage or whole-suite
-   receipt has been produced from that integrated head. Their merge therefore
-   closes only the source-integration prerequisite, not the release evidence
-   gap. Neither result updates a protected release ref directly.
+   the empty name. The trunk correction is Simple PR #31; its exact reviewed
+   admission-probe commit was copied into PR #28. PR #31 and the
+   protected integration of PR #29 remain prerequisites to a fresh release
+   lineage. Neither result updates a protected ref directly.
 2. The GitHub policy configuration row is now PASS, but configuration is not a
-   beta release receipt. Candidate workflow provider acceptance is also FAIL
-   because the current default-branch file produces path-named zero-job runs.
-   Exact signed beta promotion, immutable publication of its admitted assets,
-   artifact attestations, and byte-identical npm registry publication remain
-   unexecuted and FAIL.
+   beta release receipt. Exact signed beta promotion, immutable publication of
+   its admitted assets, artifact attestations, and byte-identical npm registry
+   publication remain unexecuted and FAIL.
 
 ## Acceptance disposition
 
@@ -144,15 +114,12 @@
 
 ## Required next evidence
 
-1. Integrate the candidate-workflow source repair and verify the next
-   default-branch push creates no path-named zero-job candidate failure; verify
-   manual dispatch is registered under the declared workflow name.
-2. Create the actual protected `release/1.0` line and run the read-only
-   convergence checkpoint. Backport only operator-selected exact reviewed fixes
-   through isolated sessions with stable patch-ID and divergence receipts.
-3. Start a fresh immutable lineage in a new bounded verification session.
-   Produce admitted Stage 3 and Stage 4 artifacts and run the required lint plus
-   one clean `bin/simple test test --whole --mode=interpreter` confirmation.
-4. Exercise one create-once beta candidate and promote its exact assets through
-   signing, immutable GitHub publication, and byte-identical npm publication
-   receipts.
+1. Integrate trunk PRs #29 and #31 through protected review, create the actual
+   protected `release/1.0` line, and backport the selected exact integrated
+   revisions through isolated reviewed sessions with divergence receipts. Then start a fresh immutable
+   Stage 2 lineage in a new bounded verification session. Produce admitted
+   Stage 3 and Stage 4 artifacts and run the required lint plus one clean
+   `bin/simple test test --whole --mode=interpreter` confirmation.
+2. Using the verified live policy baseline, exercise one create-once beta
+   candidate and promote its exact assets through signing, immutable GitHub
+   publication, and byte-identical npm publication receipts.

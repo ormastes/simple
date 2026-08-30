@@ -1,6 +1,29 @@
 # Markdown Utils Specification
 
-> Tests covering Markdown Utilities, Headers, Text Formatting, Links, Lists, Code Blocks, Blockquotes, Horizontal Rules, Tables, Task Lists, Definitions, Footnotes, Document Structure, Helpers, Common Patterns.
+> <details>
+
+<!-- sdn-diagram:id=markdown_utils_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=markdown_utils_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+markdown_utils_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=markdown_utils_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### creates h1
 
-- creates h1
+- expect h1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates h1")
 expect h1("Title") == "# Title"
 ```
 
@@ -38,18 +59,16 @@ expect h1("Title") == "# Title"
 
 #### creates h2
 
-- creates h2
+- expect h2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates h2")
 expect h2("Section") == "## Section"
 ```
 
@@ -57,18 +76,16 @@ expect h2("Section") == "## Section"
 
 #### creates h3
 
-- creates h3
+- expect h3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates h3")
 expect h3("Subsection") == "### Subsection"
 ```
 
@@ -76,18 +93,16 @@ expect h3("Subsection") == "### Subsection"
 
 #### creates heading with level
 
-- creates heading with level
+- expect heading
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates heading with level")
 expect heading("Test", 4) == "#### Test"
 ```
 
@@ -97,18 +112,16 @@ expect heading("Test", 4) == "#### Test"
 
 #### creates bold
 
-- creates bold
+- expect bold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates bold")
 expect bold("text") == "**text**"
 ```
 
@@ -116,18 +129,16 @@ expect bold("text") == "**text**"
 
 #### creates italic
 
-- creates italic
+- expect italic
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates italic")
 expect italic("text") == "*text*"
 ```
 
@@ -135,18 +146,16 @@ expect italic("text") == "*text*"
 
 #### creates bold italic
 
-- creates bold italic
+- expect bold italic
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates bold italic")
 expect bold_italic("text") == "***text***"
 ```
 
@@ -154,18 +163,16 @@ expect bold_italic("text") == "***text***"
 
 #### creates inline code
 
-- creates inline code
+- expect code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates inline code")
 expect code("variable") == "`variable`"
 ```
 
@@ -173,18 +180,16 @@ expect code("variable") == "`variable`"
 
 #### creates strikethrough
 
-- creates strikethrough
+- expect strikethrough
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates strikethrough")
 expect strikethrough("old") == "~~old~~"
 ```
 
@@ -194,18 +199,16 @@ expect strikethrough("old") == "~~old~~"
 
 #### creates link
 
-- creates link
+- expect result == "[Google]
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates link")
 val result = link(txt="Google", url="https://google.com")
 expect result == "[Google](https://google.com)"
 ```
@@ -214,18 +217,16 @@ expect result == "[Google](https://google.com)"
 
 #### creates image
 
-- creates image
+- expect result == "![Alt text]
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates image")
 val result = image(alt="Alt text", url="/path/to/image.png")
 expect result == "![Alt text](/path/to/image.png)"
 ```
@@ -234,28 +235,8 @@ expect result == "![Alt text](/path/to/image.png)"
 
 #### creates link with title
 
-- creates link with title
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("creates link with title")
-val result = link_with_title(txt="Link", url="https://example.com", title_txt="Example")
-expect result.contains("[Link]")
-expect result.contains("Example")
-```
-
-</details>
-
-#### creates reference link
-
-- creates reference link
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -265,8 +246,25 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates reference link")
+val result = link_with_title(txt="Link", url="https://example.com", title_txt="Example")
+expect result.contains("[Link]")
+expect result.contains("Example")
+```
+
+</details>
+
+#### creates reference link
+
+- expect reference link
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect reference_link(txt="Text", ref="ref1") == "[Text][ref1]"
 ```
 
@@ -276,18 +274,18 @@ expect reference_link(txt="Text", ref="ref1") == "[Text][ref1]"
 
 #### creates unordered list
 
-- creates unordered list
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates unordered list")
 val result = unordered_list(["Apple", "Banana", "Cherry"])
 expect result.contains("- Apple")
 expect result.contains("- Banana")
@@ -298,18 +296,18 @@ expect result.contains("- Cherry")
 
 #### creates ordered list
 
-- creates ordered list
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates ordered list")
 val result = ordered_list(["First", "Second", "Third"])
 expect result.contains("1. First")
 expect result.contains("2. Second")
@@ -320,18 +318,17 @@ expect result.contains("3. Third")
 
 #### creates checklist items
 
-- creates checklist items
+- expect checked contains
+- expect unchecked contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates checklist items")
 val checked = checklist_item("Done task", true)
 expect checked.contains("[x]")
 
@@ -345,18 +342,18 @@ expect unchecked.contains("[ ]")
 
 #### creates code block with language
 
-- creates code block with language
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates code block with language")
 val result = code_block(code_text="fn main():\n    pass", lang="simple")
 expect result.contains("```simple")
 expect result.contains("fn main()")
@@ -367,18 +364,17 @@ expect result.contains("```")
 
 #### creates plain code block
 
-- creates plain code block
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates plain code block")
 val result = code_block_plain("some code")
 expect result.contains("```")
 expect result.contains("some code")
@@ -390,7 +386,25 @@ expect result.contains("some code")
 
 #### creates blockquote
 
-- creates blockquote
+- expect blockquote
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect blockquote("Quote") == "> Quote"
+```
+
+</details>
+
+#### creates multi-line blockquote
+
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -400,27 +414,6 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates blockquote")
-expect blockquote("Quote") == "> Quote"
-```
-
-</details>
-
-#### creates multi-line blockquote
-
-- creates multi-line blockquote
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("creates multi-line blockquote")
 val result = blockquote_multi(["Line 1", "Line 2"])
 expect result.contains("> Line 1")
 expect result.contains("> Line 2")
@@ -432,18 +425,16 @@ expect result.contains("> Line 2")
 
 #### creates horizontal rule
 
-- creates horizontal rule
+- expect horizontal rule
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates horizontal rule")
 expect horizontal_rule() == "---"
 ```
 
@@ -451,18 +442,16 @@ expect horizontal_rule() == "---"
 
 #### creates hr alias
 
-- creates hr alias
+- expect hr
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates hr alias")
 expect hr() == "---"
 ```
 
@@ -472,18 +461,20 @@ expect hr() == "---"
 
 #### creates table
 
-- creates table
+- expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates table")
 val headers = ["Name", "Age"]
 val rows = [
     ["Alice", "30"],
@@ -501,18 +492,18 @@ expect result.contains("|")
 
 #### creates table with alignment
 
-- creates table with alignment
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates table with alignment")
 val headers = ["Left", "Center", "Right"]
 val rows = [["A", "B", "C"]]
 val alignments = [TableAlign.Left, TableAlign.Center, TableAlign.Right]
@@ -528,18 +519,19 @@ expect result.contains("---:")
 
 #### creates task list
 
-- creates task list
+-
+-
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates task list")
 val tasks = [
     ("Complete task", true),
     ("Pending task", false)
@@ -555,18 +547,17 @@ expect result.contains("[ ] Pending task")
 
 #### creates definition
 
-- creates definition
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates definition")
 val result = definition(term="Term", desc="Definition text")
 expect result.contains("Term")
 expect result.contains(": Definition text")
@@ -578,7 +569,25 @@ expect result.contains(": Definition text")
 
 #### creates footnote reference
 
-- creates footnote reference
+- expect footnote ref
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect footnote_ref("1") == "[^1]"
+```
+
+</details>
+
+#### creates footnote definition
+
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -588,27 +597,6 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates footnote reference")
-expect footnote_ref("1") == "[^1]"
-```
-
-</details>
-
-#### creates footnote definition
-
-- creates footnote definition
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("creates footnote definition")
 val result = footnote_def(id="1", content="Footnote text")
 expect result.contains("[^1]:")
 expect result.contains("Footnote text")
@@ -620,28 +608,8 @@ expect result.contains("Footnote text")
 
 #### creates front matter
 
-- creates front matter
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("creates front matter")
-val result = front_matter("title: Test\nauthor: Me")
-expect result.contains("---")
-expect result.contains("title: Test")
-```
-
-</details>
-
-#### creates TOC placeholder
-
-- creates TOC placeholder
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -651,8 +619,25 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates TOC placeholder")
+val result = front_matter("title: Test\nauthor: Me")
+expect result.contains("---")
+expect result.contains("title: Test")
+```
+
+</details>
+
+#### creates TOC placeholder
+
+- expect toc
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect toc() == "<!-- TOC -->"
 ```
 
@@ -662,18 +647,17 @@ expect toc() == "<!-- TOC -->"
 
 #### escapes markdown characters
 
-- escapes markdown characters
+- expect escaped contains
+- expect escaped contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("escapes markdown characters")
 val escaped = escape_markdown("*test* #heading")
 expect escaped.contains("\\*")
 expect escaped.contains("\\#")
@@ -683,18 +667,20 @@ expect escaped.contains("\\#")
 
 #### creates document from sections
 
-- creates document from sections
+- MarkdownSection
+- MarkdownSection
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates document from sections")
 val sections = [
     MarkdownSection(heading: "Intro", level: 1, content: "Welcome"),
     MarkdownSection(heading: "Details", level: 2, content: "More info")
@@ -711,18 +697,18 @@ expect result.contains("Welcome")
 
 #### creates README template
 
-- creates README template
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates README template")
 val result = readme_template(
     name="My Project",
     description="A cool project",
@@ -738,18 +724,18 @@ expect result.contains("## Usage")
 
 #### creates badge
 
-- creates badge
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates badge")
 val result = badge(label="build", value="passing", color="green")
 expect result.contains("build")
 expect result.contains("passing")
@@ -760,18 +746,17 @@ expect result.contains("green")
 
 #### creates note
 
-- creates note
+- expect result contains
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates note")
 val result = note("Important information")
 expect result.contains("NOTE")
 expect result.contains("Important information")
@@ -781,18 +766,16 @@ expect result.contains("Important information")
 
 #### creates warning
 
-- creates warning
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates warning")
 val result = warning("Be careful")
 expect result.contains("WARNING")
 ```
@@ -801,18 +784,16 @@ expect result.contains("WARNING")
 
 #### creates important
 
-- creates important
+- expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates important")
 val result = important("Critical")
 expect result.contains("IMPORTANT")
 ```
@@ -826,12 +807,12 @@ expect result.contains("IMPORTANT")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/markdown_utils_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Markdown Utilities, Headers, Text Formatting, Links, Lists, Code Blocks, Blockquotes, Horizontal Rules, Tables, Task Lists, Definitions, Footnotes, Document Structure, Helpers, Common Patterns.
+Tests covering:
 - Markdown Utilities
 - Headers
 - Text Formatting
@@ -860,51 +841,3 @@ Tests covering Markdown Utilities, Headers, Text Formatting, Links, Lists, Code 
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `28d1af621b42d153c6c69af4bb3d1f525d6aaf8d9875992fe3606cc72bfa5c12`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `28d1af621b42d153c6c69af4bb3d1f525d6aaf8d9875992fe3606cc72bfa5c12`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `28d1af621b42d153c6c69af4bb3d1f525d6aaf8d9875992fe3606cc72bfa5c12`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/markdown_utils_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/markdown_utils_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/markdown_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/markdown_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/markdown_utils_spec.spl:185:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates h1' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/markdown_utils_spec.spl:190:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates h2' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/markdown_utils_spec.spl:195:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates h3' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

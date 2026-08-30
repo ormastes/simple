@@ -2,6 +2,29 @@
 
 > Tests for the Result type representing success or error outcomes, including constructors, pattern matching, and safe unwrapping mechanisms.
 
+<!-- sdn-diagram:id=result_type_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=result_type_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+result_type_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=result_type_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 16 | 16 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for the Result type representing success or error outcomes, including cons
 | Category | Language \| Types |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/result_type_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -32,8 +55,6 @@ including constructors, pattern matching, and safe unwrapping mechanisms.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 val success: Result<i32, text> = Ok(42)
 val failure: Result<i32, text> = Err("error")
 
@@ -54,18 +75,16 @@ val propagated = fallible_operation()?       # Early return on Err
 
 #### creates Ok with value
 
-- creates Ok with value
+1. expect res unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates Ok with value")
 val res = Ok(42)
 expect res.unwrap() == 42
 ```
@@ -74,18 +93,13 @@ expect res.unwrap() == 42
 
 #### checks Ok is ok
 
-- checks Ok is ok
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks Ok is ok")
 val res = Ok(10)
 expect res.ok.?
 ```
@@ -94,18 +108,13 @@ expect res.ok.?
 
 #### checks Ok is not err
 
-- checks Ok is not err
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks Ok is not err")
 val res = Ok(5)
 expect not res.err.?
 ```
@@ -116,18 +125,13 @@ expect not res.err.?
 
 #### creates Err with error
 
-- creates Err with error
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates Err with error")
 val res = Err("error message")
 expect res.err.?
 ```
@@ -136,18 +140,13 @@ expect res.err.?
 
 #### checks Err is not ok
 
-- checks Err is not ok
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("checks Err is not ok")
 val res = Err("oops")
 expect not res.ok.?
 ```
@@ -156,18 +155,16 @@ expect not res.ok.?
 
 #### uses unwrap_or for Err
 
-- uses unwrap_or for Err
+1. expect res unwrap or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses unwrap_or for Err")
 val res = Err("error")
 expect res.unwrap_or(99) == 99
 ```
@@ -178,18 +175,17 @@ expect res.unwrap_or(99) == 99
 
 #### returns Ok from function
 
-- returns Ok from function
+1. fn safe divide
+2. expect r unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns Ok from function")
 fn safe_divide(a, b):
     if b == 0:
         return Err("division by zero")
@@ -203,18 +199,17 @@ expect r.unwrap() == 5
 
 #### returns Err from function
 
-- returns Err from function
+1. fn safe divide
+2. expect r unwrap or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns Err from function")
 fn safe_divide(a, b):
     if b == 0:
         return Err("division by zero")
@@ -228,18 +223,18 @@ expect r.unwrap_or(-1) == -1
 
 #### chains Result operations
 
-- chains Result operations
+1. fn step1
+2. fn step2
+3. expect r2 unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains Result operations")
 fn step1(x):
     if x < 0:
         return Err("negative")
@@ -261,18 +256,18 @@ expect r2.unwrap() == 30  # (5 + 10) * 2
 
 #### propagates Ok value
 
-- propagates Ok value
+1. fn may fail
+2. fn caller
+3. expect res unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("propagates Ok value")
 fn may_fail(x) -> Result<i64, text>:
     if x < 0:
         return Err("negative")
@@ -290,18 +285,18 @@ expect res.unwrap() == 11  # 5 * 2 + 1
 
 #### propagates Err to caller
 
-- propagates Err to caller
+1. fn may fail
+2. fn caller
+3. expect res unwrap or
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("propagates Err to caller")
 fn may_fail(x) -> Result<i64, text>:
     if x < 0:
         return Err("negative")
@@ -319,18 +314,19 @@ expect res.unwrap_or(-99) == -99
 
 #### chains multiple ? operators
 
-- chains multiple ? operators
+1. fn step1
+2. fn step2
+3. fn pipeline
+4. expect res unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains multiple ? operators")
 fn step1(x):
     if x < 0:
         return Err("step1 failed")
@@ -356,18 +352,13 @@ expect res.unwrap() == 30  # (5 + 10) * 2
 
 #### matches Ok variant
 
-- matches Ok variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches Ok variant")
 val res = Ok(100)
 var output = 0
 match res:
@@ -382,18 +373,13 @@ expect output == 100
 
 #### matches Err variant
 
-- matches Err variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches Err variant")
 val res = Err("failure")
 var output = 0
 match res:
@@ -408,18 +394,13 @@ expect output == -1
 
 #### uses if let with Ok
 
-- uses if let with Ok
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses if let with Ok")
 val res = Ok(100)
 var output = 0
 if let Ok(value) = res:
@@ -431,18 +412,13 @@ expect output == 100
 
 #### uses if let with Err else
 
-- uses if let with Err else
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses if let with Err else")
 val res: Result<i64, text> = Err("error")
 var output = 0
 if let Ok(value) = res:
@@ -466,51 +442,3 @@ expect output == -1
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e4e463b16aa7fdd92206fd7bdbb77b13adb462d8cab2b8718be9293fea9fa19e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e4e463b16aa7fdd92206fd7bdbb77b13adb462d8cab2b8718be9293fea9fa19e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e4e463b16aa7fdd92206fd7bdbb77b13adb462d8cab2b8718be9293fea9fa19e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/result_type_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/result_type_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/result_type_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/result_type_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/result_type_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates Ok with value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/result_type_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'checks Ok is ok' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/result_type_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'checks Ok is not err' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,6 +1,6 @@
-# X25519mlkem768 Gpu Measurement Qualification Specification
+# x25519mlkem768_gpu_measurement_qualification_spec
 
-> Tests covering X25519MLKEM768 fail-closed GPU measurement qualification.
+> Verifies the x25519mlkem768 gpu measurement qualification behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,29 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# X25519mlkem768 Gpu Measurement Qualification Specification
+# x25519mlkem768_gpu_measurement_qualification_spec
+
+Verifies the x25519mlkem768 gpu measurement qualification behaviour end to end so maintainers of this
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/crypto/x25519mlkem768_gpu_measurement_qualification_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Verifies the x25519mlkem768 gpu measurement qualification behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 

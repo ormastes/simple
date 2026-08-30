@@ -1,6 +1,29 @@
 # Di Extensions System Specification
 
-> Tests covering DI System: Extensions + Lock integration.
+> <details>
+
+<!-- sdn-diagram:id=di_extensions_system_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=di_extensions_system_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+di_extensions_system_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=di_extensions_system_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,24 +40,13 @@
 
 #### CompileContext extensions starts empty and unlocked
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- CompileContext extensions starts empty and unlocked
-   - Expected: extensions.has("AnyPlugin") is false
-   - Expected: extensions.is_locked() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("CompileContext extensions starts empty and unlocked")
 # Simulates the extensions field created by CompileContext.create
 val extensions = make_extensions()
 expect(extensions.has("AnyPlugin")).to_equal(false)
@@ -45,7 +57,9 @@ expect(extensions.is_locked()).to_equal(false)
 
 #### register plugins before lock (setup phase)
 
-- register plugins before lock (setup phase)
+1. extensions bind instance
+2. extensions bind instance
+3. extensions bind instance
    - Expected: extensions.has("Profiler") is true
    - Expected: extensions.has("Formatter") is true
    - Expected: extensions.has("Linter") is true
@@ -54,12 +68,10 @@ expect(extensions.is_locked()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("register plugins before lock (setup phase)")
 val extensions = make_extensions()
 extensions.bind_instance("Profiler", "profiler-impl")
 extensions.bind_instance("Formatter", "fmt-impl")
@@ -73,19 +85,18 @@ expect(extensions.has("Linter")).to_equal(true)
 
 #### lock the container after setup
 
-- lock the container after setup
+1. extensions bind instance
+2. extensions lock
    - Expected: extensions.is_locked() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lock the container after setup")
 val extensions = make_extensions()
 extensions.bind_instance("Plugin", "plugin-v1")
 extensions.lock()
@@ -96,7 +107,9 @@ expect(extensions.is_locked()).to_equal(true)
 
 #### resolve plugins during compilation (locked)
 
-- resolve plugins during compilation (locked)
+1. extensions bind instance
+2. extensions bind instance
+3. extensions lock
    - Expected: profiler equals `profiler-impl`
    - Expected: formatter equals `fmt-impl`
 
@@ -104,12 +117,10 @@ expect(extensions.is_locked()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolve plugins during compilation (locked)")
 val extensions = make_extensions()
 extensions.bind_instance("Profiler", "profiler-impl")
 extensions.bind_instance("Formatter", "fmt-impl")
@@ -124,19 +135,19 @@ expect(formatter).to_equal("fmt-impl")
 
 #### locked extensions rejects new plugin registration
 
-- locked extensions rejects new plugin registration
+1. extensions bind instance
+2. extensions lock
+3. extensions bind instance
    - Expected: extensions.has("NewPlugin") is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("locked extensions rejects new plugin registration")
 val extensions = make_extensions()
 extensions.bind_instance("Plugin", "plugin-v1")
 extensions.lock()
@@ -148,18 +159,13 @@ expect(extensions.has("NewPlugin")).to_equal(false)
 
 #### extensions is separate from typed backend
 
-- extensions is separate from typed backend
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extensions is separate from typed backend")
 # The typed backend is in CompileContext.backend (BackendPort)
 # Extensions only holds plugins explicitly registered
 val extensions = make_extensions()
@@ -171,19 +177,18 @@ expect(backend_result).to_be_nil()
 
 #### factory-bound plugin resolves correctly when locked
 
-- factory-bound plugin resolves correctly when locked
+1. extensions bind
+2. extensions lock
    - Expected: result equals `analysis-result`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("factory-bound plugin resolves correctly when locked")
 val extensions = make_extensions()
 extensions.bind("AnalysisPlugin", fn(): "analysis-result")
 extensions.lock()
@@ -195,25 +200,29 @@ expect(result).to_equal("analysis-result")
 
 #### full compilation plugin lifecycle
 
-- full compilation plugin lifecycle
+1. extensions bind instance
+2. extensions bind instance
+3. extensions bind
+4. extensions lock
    - Expected: extensions.is_locked() is true
    - Expected: checker equals `type-checker-v2`
    - Expected: optimizer equals `optimizer-v1`
    - Expected: codegen equals `codegen-impl`
+5. extensions bind instance
    - Expected: extensions.has("RuntimePlugin") is false
+6. extensions unlock
    - Expected: extensions.is_locked() is false
+7. extensions bind instance
    - Expected: extensions.has("PostPlugin") is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("full compilation plugin lifecycle")
 # Full lifecycle: setup -> lock -> use -> unlock -> teardown
 val extensions = make_extensions()
 
@@ -251,19 +260,18 @@ expect(extensions.has("PostPlugin")).to_equal(true)
 
 #### di_is_system_test_locked returns false in non-system-test env
 
-- di_is_system_test_locked returns false in non-system-test env
+1. rt env set
+2. rt env set
    - Expected: result is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("di_is_system_test_locked returns false in non-system-test env")
 rt_env_set("SIMPLE_SYSTEM_TEST", "0")
 rt_env_set("SIMPLE_DI_TEST", "0")
 val result = di_is_system_test_locked()
@@ -274,19 +282,17 @@ expect(result).to_equal(false)
 
 #### multiple independent extension containers do not interfere
 
-- multiple independent extension containers do not interfere
+1. ext1 bind instance
    - Expected: ext1_result equals `from-ext1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiple independent extension containers do not interfere")
 val ext1 = make_extensions()
 val ext2 = make_extensions()
 ext1.bind_instance("Plugin", "from-ext1")
@@ -305,12 +311,12 @@ expect(ext1_result).to_equal("from-ext1")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/features/di_extensions_system_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering DI System: Extensions + Lock integration.
+Tests covering:
 - DI System: Extensions + Lock integration
 
 ## Scenario Summary
@@ -325,51 +331,3 @@ Tests covering DI System: Extensions + Lock integration.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e15c03218fd135043a28f58f8e806bfe9c6192f49f18dc032cfe65c72b2ed78f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e15c03218fd135043a28f58f8e806bfe9c6192f49f18dc032cfe65c72b2ed78f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e15c03218fd135043a28f58f8e806bfe9c6192f49f18dc032cfe65c72b2ed78f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/features/di_extensions_system_spec.spl
-mirror: doc/06_spec/03_system/feature/features/di_extensions_system_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/features/di_extensions_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/features/di_extensions_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/features/di_extensions_system_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'CompileContext extensions starts empty and unlocked' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/di_extensions_system_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'register plugins before lock (setup phase)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/di_extensions_system_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lock the container after setup' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

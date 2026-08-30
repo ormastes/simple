@@ -1,12 +1,7 @@
-@unsafe(reason: "status/out Steam provider loader ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
-@unsafe(reason: "status/out Steam provider symbol ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
-@unsafe(reason: "typed C-boolean Steam health-call ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_wffi_call_bool0_checked(fptr: i64, out_value: *mut bool) -> i64
-@unsafe(reason: "raw environment read; empty text conflates absence with provider failure", capabilities: [ffi])
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn rt_env_get(name: text) -> text
-@unsafe(reason: "raw file predicate; false conflates absence with provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 
 use os.game.steam.support_api.{
@@ -78,17 +73,11 @@ pub fn steam_sffi_find_bridge_path_from_candidates(env_path: text, existing_cand
     ""
 
 pub fn steam_sffi_find_bridge_path() -> text:
-    val env_path = unsafe(capabilities: [ffi]):
-        rt_env_get(steam_sffi_bridge_env_var())
-    if env_path != "":
-        val env_exists = unsafe(capabilities: [ffi]):
-            rt_file_exists(env_path)
-        if env_exists:
-            return env_path
+    val env_path = rt_env_get(steam_sffi_bridge_env_var())
+    if env_path != "" and rt_file_exists(env_path):
+        return env_path
     for candidate in steam_sffi_bridge_candidates():
-        val candidate_exists = unsafe(capabilities: [ffi]):
-            rt_file_exists(candidate)
-        if candidate_exists:
+        if rt_file_exists(candidate):
             return candidate
     ""
 
@@ -103,34 +92,23 @@ fn _steam_sffi_symbols_from_handle(handle: i64) -> [text]:
     if handle == 0:
         return symbols
     for symbol in steam_api_backend_required_symbols():
-        var fptr: i64 = 0
-        val status = unsafe(capabilities: [ffi, raw_ptr]):
-            spl_dlsym_checked(handle, symbol, &mut fptr)
-        if status == 0 and fptr > 0:
+        if spl_dlsym(handle, symbol) != 0:
             symbols.push(symbol)
     symbols
 
-fn _steam_sffi_call0_bool(handle: i64, symbol: text) -> Result<bool, text>:
+fn _steam_sffi_call0_bool(handle: i64, symbol: text) -> bool:
     if handle == 0:
-        return Err("E-SFFI-001: cannot call {symbol} through a null Steam provider")
-    var fptr: i64 = 0
-    val status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_checked(handle, symbol, &mut fptr)
-    if status != 0 or fptr <= 0:
-        return Err("E-SFFI-001: unresolved Steam health symbol {symbol}")
-    var value = false
-    val call_status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_wffi_call_bool0_checked(fptr, &mut value)
-    if call_status != 0:
-        return Err("E-SFFI-014: typed Steam health bridge status {call_status} for {symbol}")
-    Ok(value)
+        return false
+    val fptr = spl_dlsym(handle, symbol)
+    if fptr == 0:
+        return false
+    var args: [i64] = []
+    spl_wffi_call_i64(fptr, args, 0) != 0
 
-pub fn steam_sffi_probe_from_evidence_with_health(path: text, handle: i64, client_present: bool, available_symbols: [text], available_os_capabilities: [text], mock_bridge: bool, real_backend_ready: bool, health_error: text = "") -> SteamSffiBackendStatus:
+pub fn steam_sffi_probe_from_evidence_with_health(path: text, handle: i64, client_present: bool, available_symbols: [text], available_os_capabilities: [text], mock_bridge: bool, real_backend_ready: bool) -> SteamSffiBackendStatus:
     val probe = steam_api_probe_backend(client_present, available_symbols, available_os_capabilities)
     var blocker = probe.blocker
-    if health_error != "":
-        blocker = health_error
-    else if path == "":
+    if path == "":
         blocker = "missing Steam SFFI bridge path"
     else if handle == 0:
         blocker = "failed to load Steam SFFI bridge"
@@ -156,24 +134,14 @@ pub fn steam_sffi_probe_from_evidence(path: text, handle: i64, client_present: b
     steam_sffi_probe_from_evidence_with_health(path, handle, client_present, available_symbols, available_os_capabilities, false, true)
 
 pub fn steam_sffi_probe_handle(path: text, handle: i64, client_present: bool, available_os_capabilities: [text]) -> SteamSffiBackendStatus:
-    val mock_bridge = match _steam_sffi_call0_bool(handle, "simple_steam_bridge_is_mock"):
-        case Ok(value): value
-        case Err(error):
-            return steam_sffi_probe_from_evidence_with_health(path, handle, client_present, [], available_os_capabilities, false, false, error)
-    val real_backend_ready = match _steam_sffi_call0_bool(handle, "simple_steam_bridge_real_backend_ready"):
-        case Ok(value): value
-        case Err(error):
-            return steam_sffi_probe_from_evidence_with_health(path, handle, client_present, [], available_os_capabilities, mock_bridge, false, error)
+    val mock_bridge = _steam_sffi_call0_bool(handle, "simple_steam_bridge_is_mock")
+    val real_backend_ready = _steam_sffi_call0_bool(handle, "simple_steam_bridge_real_backend_ready")
     steam_sffi_probe_from_evidence_with_health(path, handle, client_present, _steam_sffi_symbols_from_handle(handle), available_os_capabilities, mock_bridge, real_backend_ready)
 
 pub fn steam_sffi_probe_bridge(path: text, client_present: bool, available_os_capabilities: [text]) -> SteamSffiBackendStatus:
     if path == "":
         return steam_sffi_probe_from_evidence("", 0, client_present, [], available_os_capabilities)
-    var handle: i64 = 0
-    val status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlopen_checked(path, &mut handle)
-    if status != 0 or handle <= 0:
-        return steam_sffi_probe_from_evidence(path, 0, client_present, [], available_os_capabilities)
+    val handle = spl_dlopen(path)
     steam_sffi_probe_handle(path, handle, client_present, available_os_capabilities)
 
 pub fn steam_sffi_probe_configured_bridge(client_present: bool, available_os_capabilities: [text]) -> SteamSffiBackendStatus:

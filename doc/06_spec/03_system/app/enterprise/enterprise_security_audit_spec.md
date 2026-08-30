@@ -27,6 +27,12 @@ Lane `.spipe/simple_enterprise_suite` W9-D. This is an ATTACK spec, not a featur
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Purpose and audience
+## Operator workflow
+## Compatibility and limitations
+
+# Enterprise Suite — Adversarial Security Audit (executable attack specs)
+
 ## Overview
 
 Lane `.spipe/simple_enterprise_suite` W9-D. This is an ATTACK spec, not a
@@ -104,7 +110,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 - cannot MUTATE tenant-A records from a tenant-B session
 - ATTACK: tenant-B places an order against tenant-A's SKU
-   - Expected: http_status_code(order.status) equals `404`
+   - Expected: http_status_code(order.status) equals `404)  # oracle: pinned constant asserted by this scenario`
 - The order did not appear in tenant-A's stream either
    - Expected: sale_order_status(store, "tenant-a", "ORD-X") equals ``
 - ATTACK: tenant-B receives against tenant-A's purchase order
@@ -129,7 +135,7 @@ val sb = session_for(admin_b, tb)
 step("ATTACK: tenant-B places an order against tenant-A's SKU")
 val order = store_app_handle(store, sb, tb, admin_b, "POST", "/store/order", plain_headers(),
     "order=ORD-X&sku=SKU-A-SECRET&qty=1&idem=k-x")
-expect(http_status_code(order.status)).to_equal(404)
+expect(http_status_code(order.status)).to_equal(404)  # oracle: pinned constant asserted by this scenario
 
 step("The order did not appear in tenant-A's stream either")
 expect(sale_order_status(store, "tenant-a", "ORD-X")).to_equal("")
@@ -154,23 +160,23 @@ store_close(store)
 
 - gets 403 on every back-office read and write it can name
 - ATTACK: the sales clerk reads the admin dashboard
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/admin/dashboard", plain_headers(), "").status) equals `403`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/admin/dashboard", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the sales clerk reads the HCM roster and payroll export
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/employees", plain_headers(), "").status) equals `403`
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/payroll/export", plain_headers(), "").status) equals `403`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/employees", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/payroll/export", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the sales clerk reads procurement POs and the reconciliation
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/pos", plain_headers(), "").status) equals `403`
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/reconcile", plain_headers(), "").status) equals `403`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/pos", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/reconcile", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the sales clerk reads every finance report
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/trial-balance", plain_headers(), "").status) equals `403`
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ar", plain_headers(), "").status) equals `403`
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ap", plain_headers(), "").status) equals `403`
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/period/status", plain_headers(), "").status) equals `403`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/trial-balance", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ar", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ap", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/period/status", plain_headers(), "").status) equals `403)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the sales clerk decides a leave request and closes a period
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/hcm/leave/decide", plain_headers(), "leave=LV-1&approve=1&idem=k1").status) equals `403`
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/fin/period/close", plain_headers(), "end=1000&now=1001&idem=k2").status) equals `403`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/hcm/leave/decide", plain_headers(), "leave=LV-1&approve=1&idem=k1").status) equals `403)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/fin/period/close", plain_headers(), "end=1000&now=1001&idem=k2").status) equals `403)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the sales clerk seeds itself an admin credential via the proc route family
-   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/proc/po", plain_headers(), "po=PO-EVIL&req=REQ-A-SECRET&supplier=SUP-A-SECRET&cost=1&idem=k3").status) equals `403`
+   - Expected: http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/proc/po", plain_headers(), "po=PO-EVIL&req=REQ-A-SECRET&supplier=SUP-A-SECRET&cost=1&idem=k3").status) equals `403)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -189,28 +195,28 @@ val clerk = sales_actor()
 val sc = session_for(clerk, t)
 
 step("ATTACK: the sales clerk reads the admin dashboard")
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/admin/dashboard", plain_headers(), "").status)).to_equal(403)
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/admin/dashboard", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: the sales clerk reads the HCM roster and payroll export")
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/employees", plain_headers(), "").status)).to_equal(403)
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/payroll/export", plain_headers(), "").status)).to_equal(403)
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/employees", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/payroll/export", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: the sales clerk reads procurement POs and the reconciliation")
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/pos", plain_headers(), "").status)).to_equal(403)
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/reconcile", plain_headers(), "").status)).to_equal(403)
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/pos", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/reconcile", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: the sales clerk reads every finance report")
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/trial-balance", plain_headers(), "").status)).to_equal(403)
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ar", plain_headers(), "").status)).to_equal(403)
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ap", plain_headers(), "").status)).to_equal(403)
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/period/status", plain_headers(), "").status)).to_equal(403)
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/trial-balance", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ar", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ap", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/period/status", plain_headers(), "").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: the sales clerk decides a leave request and closes a period")
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/hcm/leave/decide", plain_headers(), "leave=LV-1&approve=1&idem=k1").status)).to_equal(403)
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/fin/period/close", plain_headers(), "end=1000&now=1001&idem=k2").status)).to_equal(403)
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/hcm/leave/decide", plain_headers(), "leave=LV-1&approve=1&idem=k1").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/fin/period/close", plain_headers(), "end=1000&now=1001&idem=k2").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: the sales clerk seeds itself an admin credential via the proc route family")
-expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/proc/po", plain_headers(), "po=PO-EVIL&req=REQ-A-SECRET&supplier=SUP-A-SECRET&cost=1&idem=k3").status)).to_equal(403)
+expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/proc/po", plain_headers(), "po=PO-EVIL&req=REQ-A-SECRET&supplier=SUP-A-SECRET&cost=1&idem=k3").status)).to_equal(403)  # oracle: pinned constant asserted by this scenario
 store_close(store)
 ```
 
@@ -222,15 +228,15 @@ store_close(store)
 
 - refuses a revoked, an expired, and a cross-tenant bearer token
 - Log in legitimately
-   - Expected: http_status_code(login.status) equals `200`
+   - Expected: http_status_code(login.status) equals `200)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the same token against tenant-B
-   - Expected: http_status_code(cross.status) equals `401`
+   - Expected: http_status_code(cross.status) equals `401)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: the token after expiry
-   - Expected: http_status_code(expired.status) equals `401`
+   - Expected: http_status_code(expired.status) equals `401)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: a revoked token, on a write route and on a read route
-   - Expected: http_status_code(store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(tok2), "", 1310, "e").status) equals `401`
-   - Expected: http_status_code(store_app_handle_bearer(store, t, "POST", "/store/order", bearer_headers(tok2), "order=O1&sku=S&qty=1&idem=i", 1311, "e").status) equals `401`
-   - Expected: http_status_code(store_app_handle_bearer(store, t, "POST", "/auth/logout", bearer_headers(tok2), "", 1312, "e").status) equals `401`
+   - Expected: http_status_code(store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(tok2), "", 1310, "e").status) equals `401)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle_bearer(store, t, "POST", "/store/order", bearer_headers(tok2), "order=O1&sku=S&qty=1&idem=i", 1311, "e").status) equals `401)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle_bearer(store, t, "POST", "/auth/logout", bearer_headers(tok2), "", 1312, "e").status) equals `401)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -250,26 +256,26 @@ credential_seed(store, session_for(admin, t), t, admin, "clerk-1", "sales", "sal
 step("Log in legitimately")
 val login = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
     "user=clerk-1&secret=s3cret&ttl=100", 1000, "server-entropy-aaaa")
-expect(http_status_code(login.status)).to_equal(200)
+expect(http_status_code(login.status)).to_equal(200)  # oracle: pinned constant asserted by this scenario
 val token = login.body.replace("token=", "")
 expect(token.len() > 0).to_be(true)
 
 step("ATTACK: the same token against tenant-B")
 val cross = store_app_handle_bearer(store, tenant_b(), "GET", "/store/catalog", bearer_headers(token), "", 1010, "e")
-expect(http_status_code(cross.status)).to_equal(401)
+expect(http_status_code(cross.status)).to_equal(401)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: the token after expiry")
 val expired = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 1200, "e")
-expect(http_status_code(expired.status)).to_equal(401)
+expect(http_status_code(expired.status)).to_equal(401)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: a revoked token, on a write route and on a read route")
 val login2 = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
     "user=clerk-1&secret=s3cret&ttl=1000", 1300, "server-entropy-bbbb")
 val tok2 = login2.body.replace("token=", "")
 session_revoke(store, "tenant-a", tok2)
-expect(http_status_code(store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(tok2), "", 1310, "e").status)).to_equal(401)
-expect(http_status_code(store_app_handle_bearer(store, t, "POST", "/store/order", bearer_headers(tok2), "order=O1&sku=S&qty=1&idem=i", 1311, "e").status)).to_equal(401)
-expect(http_status_code(store_app_handle_bearer(store, t, "POST", "/auth/logout", bearer_headers(tok2), "", 1312, "e").status)).to_equal(401)
+expect(http_status_code(store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(tok2), "", 1310, "e").status)).to_equal(401)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle_bearer(store, t, "POST", "/store/order", bearer_headers(tok2), "order=O1&sku=S&qty=1&idem=i", 1311, "e").status)).to_equal(401)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle_bearer(store, t, "POST", "/auth/logout", bearer_headers(tok2), "", 1312, "e").status)).to_equal(401)  # oracle: pinned constant asserted by this scenario
 store_close(store)
 ```
 
@@ -369,7 +375,7 @@ store_close(store)
 - ATTACK: SQL injection through a form value into a prepared bind
    - Expected: "sqli-not-500=" + "{http_status_code(ord.status) != 500}" equals `sqli-not-500=true`
 - The products table still answers reads after the payload
-   - Expected: http_status_code(cat.status) equals `200`
+   - Expected: http_status_code(cat.status) equals `200)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: XSS through the SUPPLIER name
    - Expected: "supplier-raw=" + "{pos.body.contains(\"<script>\")}" equals `supplier-raw=false`
    - Expected: "supplier-esc=" + "{pos.body.contains(\"&lt;script&gt;\")}" equals `supplier-esc=true`
@@ -384,15 +390,15 @@ store_close(store)
    - Expected: "resource-listed=" + "{res.body.contains(\"RES-X\")}" equals `resource-listed=true`
    - Expected: "resource-esc=" + "{res.body.contains(\"&lt;script&gt;\")}" equals `resource-esc=true`
 - ATTACK: XSS reflected through a DENIAL detail (restaurant table id)
-   - Expected: http_status_code(tbl.status) equals `404`
+   - Expected: http_status_code(tbl.status) equals `404)  # oracle: pinned constant asserted by this scenario`
    - Expected: "table-raw=" + "{tbl.body.contains(\"<script>\")}" equals `table-raw=false`
 - ATTACK: XSS reflected through the receipt route's not-found detail
-   - Expected: http_status_code(rcpt.status) equals `404`
+   - Expected: http_status_code(rcpt.status) equals `404)  # oracle: pinned constant asserted by this scenario`
    - Expected: "receipt-raw=" + "{rcpt.body.contains(\"<script>\")}" equals `receipt-raw=false`
 - ATTACK: path traversal via a route parameter, raw and percent-encoded
-   - Expected: http_status_code(store_app_handle(store, sa, t, admin, "GET", "/store/order/../../etc/passwd/receipt", plain_headers(), "").status) equals `400`
-   - Expected: http_status_code(store_app_handle(store, sa, t, admin, "GET", "/booking/..%2f..%2fetc%2fpasswd/status", plain_headers(), "").status) equals `400`
-   - Expected: http_status_code(store_app_handle(store, sa, t, admin, "GET", "/hcm/employees%00.png", plain_headers(), "").status) equals `400`
+   - Expected: http_status_code(store_app_handle(store, sa, t, admin, "GET", "/store/order/../../etc/passwd/receipt", plain_headers(), "").status) equals `400)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sa, t, admin, "GET", "/booking/..%2f..%2fetc%2fpasswd/status", plain_headers(), "").status) equals `400)  # oracle: pinned constant asserted by this scenario`
+   - Expected: http_status_code(store_app_handle(store, sa, t, admin, "GET", "/hcm/employees%00.png", plain_headers(), "").status) equals `400)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -417,7 +423,7 @@ val ord = store_app_handle(store, sa, t, admin, "POST", "/store/order", plain_he
 expect("sqli-not-500=" + "{http_status_code(ord.status) != 500}").to_equal("sqli-not-500=true")
 step("The products table still answers reads after the payload")
 val cat = store_app_handle(store, sa, t, admin, "GET", "/store/catalog", plain_headers(), "")
-expect(http_status_code(cat.status)).to_equal(200)
+expect(http_status_code(cat.status)).to_equal(200)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: XSS through the SUPPLIER name")
 sale_add_product(store, sa, t, admin, "SKU-X", "Plain", Money(amount_cents: 100, currency: "USD"))
@@ -446,18 +452,18 @@ expect("resource-esc=" + "{res.body.contains(\"&lt;script&gt;\")}").to_equal("re
 
 step("ATTACK: XSS reflected through a DENIAL detail (restaurant table id)")
 val tbl = store_app_handle(store, sa, t, admin, "GET", "/restaurant/session/" + xss + "/view", plain_headers(), "")
-expect(http_status_code(tbl.status)).to_equal(404)
+expect(http_status_code(tbl.status)).to_equal(404)  # oracle: pinned constant asserted by this scenario
 expect("table-raw=" + "{tbl.body.contains(\"<script>\")}").to_equal("table-raw=false")
 
 step("ATTACK: XSS reflected through the receipt route's not-found detail")
 val rcpt = store_app_handle(store, sa, t, admin, "GET", "/store/order/" + xss + "/receipt", plain_headers(), "")
-expect(http_status_code(rcpt.status)).to_equal(404)
+expect(http_status_code(rcpt.status)).to_equal(404)  # oracle: pinned constant asserted by this scenario
 expect("receipt-raw=" + "{rcpt.body.contains(\"<script>\")}").to_equal("receipt-raw=false")
 
 step("ATTACK: path traversal via a route parameter, raw and percent-encoded")
-expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/store/order/../../etc/passwd/receipt", plain_headers(), "").status)).to_equal(400)
-expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/booking/..%2f..%2fetc%2fpasswd/status", plain_headers(), "").status)).to_equal(400)
-expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/hcm/employees%00.png", plain_headers(), "").status)).to_equal(400)
+expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/store/order/../../etc/passwd/receipt", plain_headers(), "").status)).to_equal(400)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/booking/..%2f..%2fetc%2fpasswd/status", plain_headers(), "").status)).to_equal(400)  # oracle: pinned constant asserted by this scenario
+expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/hcm/employees%00.png", plain_headers(), "").status)).to_equal(400)  # oracle: pinned constant asserted by this scenario
 store_close(store)
 ```
 
@@ -556,11 +562,11 @@ store_close(store)
 
 - applies the request-limit and throttle rungs to the unauthenticated auth routes
 - ATTACK: a 20 MB unauthenticated login body
-   - Expected: http_status_code(big.status) equals `413`
+   - Expected: http_status_code(big.status) equals `413)  # oracle: pinned constant asserted by this scenario`
 - ATTACK: a smuggling-shaped unauthenticated login (chunked + content-length)
 - ATTACK: credential-stuffing flood — rotate the user so the per-user lockout never fires
 - The tenant-wide unauthenticated window eventually rejects with 429
-   - Expected: codes[codes.len() - 1] equals `429`
+   - Expected: codes[codes.len() - 1] equals `429)  # oracle: pinned constant asserted by this scenario`
 - A genuine login is still refused generically while the window is saturated
 
 
@@ -581,7 +587,7 @@ credential_seed(store, session_for(admin, t), t, admin, "clerk-1", "sales", "sal
 step("ATTACK: a 20 MB unauthenticated login body")
 val huge = [("Host", "store.example"), ("Content-Length", "20000000")]
 val big = store_app_handle_bearer(store, t, "POST", "/auth/login", huge, "user=clerk-1&secret=s3cret", 100, "ent-1")
-expect(http_status_code(big.status)).to_equal(413)
+expect(http_status_code(big.status)).to_equal(413)  # oracle: pinned constant asserted by this scenario
 
 step("ATTACK: a smuggling-shaped unauthenticated login (chunked + content-length)")
 val smuggle = [("Host", "store.example"), ("Content-Length", "10"), ("Transfer-Encoding", "chunked")]
@@ -597,7 +603,7 @@ while i < 40:
     codes.push(http_status_code(r.status))
     i = i + 1
 step("The tenant-wide unauthenticated window eventually rejects with 429")
-expect(codes[codes.len() - 1]).to_equal(429)
+expect(codes[codes.len() - 1]).to_equal(429)  # oracle: pinned constant asserted by this scenario
 
 step("A genuine login is still refused generically while the window is saturated")
 val gen = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),

@@ -1,0 +1,267 @@
+"""
+# Enterprise Quality Vertical — QC inspection plans, measurements, and NCRs
+
+## Overview
+
+A quality actor sets an inspection plan with a sampling size, records pass/fail
+measurements against it, and works the resulting nonconformance report through
+its lifecycle. Every write runs the frozen guarded sequence (session -> rbac ->
+validation -> idempotency -> effects in one UoW) and chains a sha256 audit
+record. State is never stored: `ncr_state` is a pure fold over an append-only
+event log.
+
+## Central rules proven here
+
+| Rule | Scenario |
+|------|----------|
+| a `fail` verdict AUTO-RAISES an NCR in the same UoW | inspection fails -> `ncr_state` is `open` |
+| a `pass` verdict raises nothing | inspection passes -> `ncr_state` is `none` |
+| close-out requires a disposition | `ncr_close` on an `open` NCR -> `invalid-transition` |
+| close-out records the sign-off | `ncr_closed_by` returns the closing actor |
+| rbac | a `sales` actor cannot record an inspection -> `forbidden` |
+| idempotency | replaying a plan set returns `duplicate-key`, no second effect |
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W23-FAN, quality).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{audit_verify_chain, outbox_pending}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope,
+    reason_allowed
+}
+use std.nogc_sync_mut.enterprise_quality.quality.{
+    quality_setup, quality_role_allows, ncr_id_for,
+    quality_verdict_valid, quality_disposition_valid,
+    qc_plan_set, qc_plan_sample_size,
+    qc_inspect_record, qc_inspection_verdict, qc_inspection_count,
+    ncr_state, ncr_disposition, ncr_closed_by,
+    ncr_disposition_set, ncr_close
+}
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/quality_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Works")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Works")
+
+fn qa_a() -> ActorContext:
+    ActorContext(actor_id: "qa-1", role: "quality")
+
+fn clerk_a() -> ActorContext:
+    ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    quality_setup(store)
+    store
+
+describe "quality vertical — inspection plan with a sampling size":
+    it "quality sets a plan and the latest sampling size wins":
+        step("Open a clean store")
+        val store = fresh_store("plan")
+        val t = tenant_a()
+        val qa = qa_a()
+        val s = session_for(qa, t)
+
+        step("No plan yet — sample size is -1")
+        expect(qc_plan_sample_size(store, "tenant-a", "plan-1")).to_equal(-1)
+
+        step("Set plan-1 with a sampling size of 8")
+        val set = qc_plan_set(store, s, t, qa, envelope("p-1", "qc.plan.set"), "plan-1", 8)
+        expect(set.reason).to_equal("accepted")
+        expect(reason_allowed(set.reason)).to_be(true)
+        expect(qc_plan_sample_size(store, "tenant-a", "plan-1")).to_equal(8)
+
+        step("A re-plan appends and the latest sampling size (20) wins")
+        qc_plan_set(store, s, t, qa, envelope("p-2", "qc.plan.set"), "plan-1", 20)
+        expect(qc_plan_sample_size(store, "tenant-a", "plan-1")).to_equal(20)
+
+        step("A zero sampling size is rejected")
+        val bad = qc_plan_set(store, s, t, qa, envelope("p-3", "qc.plan.set"), "plan-1", 0)
+        expect(bad.ok).to_be(false)
+        expect(bad.reason).to_equal("invalid-record")
+
+        step("The audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "quality vertical — a passing measurement raises nothing":
+    it "a pass verdict is recorded and no NCR exists":
+        val store = fresh_store("pass")
+        val t = tenant_a()
+        val qa = qa_a()
+        val s = session_for(qa, t)
+        qc_plan_set(store, s, t, qa, envelope("p-ok", "qc.plan.set"), "plan-1", 8)
+
+        step("Record a passing inspection")
+        val r = qc_inspect_record(store, s, t, qa, envelope("i-ok", "qc.inspect.record"), "insp-1", "plan-1", "lot-9", 42, "pass")
+        expect(r.reason).to_equal("accepted")
+        expect(qc_inspection_verdict(store, "tenant-a", "insp-1")).to_equal("pass")
+        expect(qc_inspection_count(store, "tenant-a", "plan-1")).to_equal(1)
+
+        step("No nonconformance report was raised")
+        expect(ncr_state(store, "tenant-a", ncr_id_for("insp-1"))).to_equal("none")
+        store_close(store)
+
+describe "quality vertical — a failing measurement auto-raises an NCR":
+    it "reproduce: a fail verdict opens NCR-insp-2 in the same unit of work":
+        val store = fresh_store("fail")
+        val t = tenant_a()
+        val qa = qa_a()
+        val s = session_for(qa, t)
+        qc_plan_set(store, s, t, qa, envelope("p-f", "qc.plan.set"), "plan-1", 8)
+
+        step("Record a failing inspection")
+        val r = qc_inspect_record(store, s, t, qa, envelope("i-f", "qc.inspect.record"), "insp-2", "plan-1", "lot-3", 7, "fail")
+        expect(r.reason).to_equal("accepted")
+        expect(qc_inspection_verdict(store, "tenant-a", "insp-2")).to_equal("fail")
+
+        step("The derived NCR is open with no disposition yet")
+        expect(ncr_id_for("insp-2")).to_equal("NCR-insp-2")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-2")).to_equal("open")
+        expect(ncr_disposition(store, "tenant-a", "NCR-insp-2")).to_equal("")
+
+        step("An inspection against an unknown plan is rejected")
+        val nop = qc_inspect_record(store, s, t, qa, envelope("i-nop", "qc.inspect.record"), "insp-3", "plan-missing", "lot-3", 7, "fail")
+        expect(nop.ok).to_be(false)
+        expect(nop.reason).to_equal("not-found")
+
+        step("An unrecognised verdict is rejected")
+        val badv = qc_inspect_record(store, s, t, qa, envelope("i-bad", "qc.inspect.record"), "insp-4", "plan-1", "lot-3", 7, "maybe")
+        expect(badv.reason).to_equal("invalid-record")
+        expect(quality_verdict_valid("maybe")).to_be(false)
+        expect(quality_verdict_valid("fail")).to_be(true)
+        store_close(store)
+
+describe "quality vertical — disposition then close-out with sign-off":
+    it "rework disposition then close records the signing actor":
+        val store = fresh_store("closeout")
+        val t = tenant_a()
+        val qa = qa_a()
+        val s = session_for(qa, t)
+        qc_plan_set(store, s, t, qa, envelope("p-c", "qc.plan.set"), "plan-1", 8)
+        qc_inspect_record(store, s, t, qa, envelope("i-c", "qc.inspect.record"), "insp-5", "plan-1", "lot-1", 3, "fail")
+
+        step("Disposition the NCR as rework")
+        val d = ncr_disposition_set(store, s, t, qa, envelope("d-c", "ncr.disposition.set"), "NCR-insp-5", "rework")
+        expect(d.reason).to_equal("accepted")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-5")).to_equal("dispositioned")
+        expect(ncr_disposition(store, "tenant-a", "NCR-insp-5")).to_equal("rework")
+
+        step("An unrecognised disposition is rejected")
+        expect(quality_disposition_valid("ignore-it")).to_be(false)
+        expect(quality_disposition_valid("scrap")).to_be(true)
+
+        step("Close out with sign-off")
+        val c = ncr_close(store, s, t, qa, envelope("c-c", "ncr.close"), "NCR-insp-5")
+        expect(c.ok).to_be(true)
+        expect(c.reason).to_equal("accepted")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-5")).to_equal("closed")
+        expect(ncr_closed_by(store, "tenant-a", "NCR-insp-5")).to_equal("qa-1")
+
+        step("A closed NCR cannot be closed or re-dispositioned again")
+        expect(ncr_close(store, s, t, qa, envelope("c-c2", "ncr.close"), "NCR-insp-5").reason).to_equal("invalid-transition")
+        expect(ncr_disposition_set(store, s, t, qa, envelope("d-c2", "ncr.disposition.set"), "NCR-insp-5", "scrap").reason).to_equal("invalid-transition")
+
+        step("The audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "quality vertical — closing an NCR with no disposition is rejected":
+    it "reproduce: ncr_close on an open NCR is denied invalid-transition and leaves it open":
+        val store = fresh_store("nodisp")
+        val t = tenant_a()
+        val qa = qa_a()
+        val s = session_for(qa, t)
+        qc_plan_set(store, s, t, qa, envelope("p-n", "qc.plan.set"), "plan-1", 8)
+        qc_inspect_record(store, s, t, qa, envelope("i-n", "qc.inspect.record"), "insp-6", "plan-1", "lot-2", 1, "fail")
+
+        step("The NCR is open with no disposition")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-6")).to_equal("open")
+
+        step("Closing it is denied")
+        val c = ncr_close(store, s, t, qa, envelope("c-n", "ncr.close"), "NCR-insp-6")
+        expect(c.ok).to_be(false)
+        expect(c.reason).to_equal("invalid-transition")
+        expect(reason_allowed(c.reason)).to_be(true)
+
+        step("It is still open — the denial had no effect")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-6")).to_equal("open")
+        expect(ncr_closed_by(store, "tenant-a", "NCR-insp-6")).to_equal("")
+
+        step("Closing an NCR that was never raised is not-found")
+        expect(ncr_close(store, s, t, qa, envelope("c-u", "ncr.close"), "NCR-nope").reason).to_equal("not-found")
+        store_close(store)
+
+describe "quality vertical — rbac denies an unauthorized actor":
+    it "reproduce: a sales actor cannot record an inspection (forbidden)":
+        val store = fresh_store("rbac")
+        val t = tenant_a()
+        val qa = qa_a()
+        val clerk = clerk_a()
+        qc_plan_set(store, session_for(qa, t), t, qa, envelope("p-r", "qc.plan.set"), "plan-1", 8)
+
+        step("Attempt qc_inspect_record as a sales role")
+        val r = qc_inspect_record(store, session_for(clerk, t), t, clerk, envelope("i-r", "qc.inspect.record"), "insp-7", "plan-1", "lot-1", 5, "fail")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        expect(reason_allowed(r.reason)).to_be(true)
+
+        step("Nothing was recorded and no NCR was raised")
+        expect(qc_inspection_verdict(store, "tenant-a", "insp-7")).to_equal("")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-7")).to_equal("none")
+
+        step("The local gate: quality passes, admin passes, sales does not")
+        expect(quality_role_allows("quality", "ncr.close")).to_be(true)
+        expect(quality_role_allows("admin", "qc.plan.set")).to_be(true)
+        expect(quality_role_allows("sales", "qc.inspect.record")).to_be(false)
+        store_close(store)
+
+describe "quality vertical — tenant isolation and idempotent replay":
+    it "tenant B sees only its own plans, and a replayed key produces one effect":
+        val store = fresh_store("isolation")
+        val ta = tenant_a()
+        val qa = qa_a()
+        val sa = session_for(qa, ta)
+        val tb = tenant_b()
+        val qb = ActorContext(actor_id: "qa-b", role: "quality")
+        val sb = session_for(qb, tb)
+
+        step("Both tenants set plan-1 with different sampling sizes")
+        qc_plan_set(store, sa, ta, qa, envelope("p-a", "qc.plan.set"), "plan-1", 8)
+        qc_plan_set(store, sb, tb, qb, envelope("p-b", "qc.plan.set"), "plan-1", 25)
+        expect(qc_plan_sample_size(store, "tenant-a", "plan-1")).to_equal(8)
+        expect(qc_plan_sample_size(store, "tenant-b", "plan-1")).to_equal(25)
+
+        step("Tenant A fails an inspection; tenant B sees no such NCR")
+        qc_inspect_record(store, sa, ta, qa, envelope("i-a", "qc.inspect.record"), "insp-8", "plan-1", "lot-1", 2, "fail")
+        expect(ncr_state(store, "tenant-a", "NCR-insp-8")).to_equal("open")
+        expect(ncr_state(store, "tenant-b", "NCR-insp-8")).to_equal("none")
+
+        step("Replay the SAME key with a different sampling size — no second effect")
+        val outbox_before = outbox_pending(store, "tenant-a").len()
+        val replay = qc_plan_set(store, sa, ta, qa, envelope("p-a", "qc.plan.set"), "plan-1", 99)
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(qc_plan_sample_size(store, "tenant-a", "plan-1")).to_equal(8)
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_before)
+        store_close(store)

@@ -1,0 +1,138 @@
+#!/bin/sh
+# Fail-closed cross-engine MC/DC semantic-vector gate.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${MCDC_XENGINE_OUT:-"$root/build/mcdc-cross-engine-vectors"}
+fixture="$root/test/03_system/compiler/fixtures/mcdc_cross_engine_vector_fixture.spl"
+manifest="$root/test/03_system/compiler/fixtures/mcdc_cross_engine_vectors.sdn"
+compiler=${MCDC_XENGINE_COMPILER:-}
+admission=${MCDC_XENGINE_COMPILER_STAGE_RECEIPT:-}
+mkdir -p "$out/lanes"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+write_resume() {
+    reason=$1
+    {
+        echo '#!/bin/sh'
+        echo 'set -eu'
+        printf 'MCDC_XENGINE_COMPILER='; shell_quote "$compiler"; printf ' '
+        printf 'MCDC_XENGINE_COMPILER_STAGE_RECEIPT='; shell_quote "$admission"; printf ' '
+        printf 'MCDC_XENGINE_OUT='; shell_quote "$out"; printf ' '
+        printf 'MCDC_XENGINE_NATIVE_STATIC_OFF_BIN='; shell_quote "${MCDC_XENGINE_NATIVE_STATIC_OFF_BIN:-}"; printf ' '
+        printf 'MCDC_XENGINE_NATIVE_DIRECT_BIN='; shell_quote "${MCDC_XENGINE_NATIVE_DIRECT_BIN:-}"; printf ' '
+        printf 'MCDC_XENGINE_NATIVE_DYNAMIC_BIN='; shell_quote "${MCDC_XENGINE_NATIVE_DYNAMIC_BIN:-}"; printf ' '
+        printf 'sh '; shell_quote "$root/scripts/check/check-mcdc-cross-engine-vectors.shs"; echo
+    } >"$out/resume.sh"
+    chmod +x "$out/resume.sh"
+    {
+        echo 'schema=mcdc-cross-engine-gate-status-v1'
+        echo 'status=BLOCKED'
+        echo "reason=$reason"
+        echo "resume=$out/resume.sh"
+        echo "artifacts=$out"
+    } >"$out/status.sdn"
+    echo "mcdc-cross-engine-vectors: BLOCKED reason=$reason resume=$out/resume.sh artifacts=$out" >&2
+    exit 2
+}
+
+[ -n "$compiler" ] || write_resume compiler-not-set
+[ -x "$compiler" ] || write_resume compiler-not-executable
+[ -n "$admission" ] || write_resume admission-receipt-not-set
+[ -f "$admission" ] || write_resume admission-receipt-missing
+
+compiler_hash=$(sha256_file "$compiler") || write_resume compiler-hash-failed
+fixture_hash=$(sha256_file "$fixture") || write_resume fixture-hash-failed
+manifest_hash=$(sha256_file "$manifest") || write_resume manifest-hash-failed
+grep -qx 'status=ADMITTED' "$admission" || write_resume compiler-not-admitted
+grep -qx "compiler_sha256=$compiler_hash" "$admission" || write_resume admission-compiler-identity-mismatch
+
+{
+    echo 'schema=mcdc-cross-engine-identity-v1'
+    echo "compiler_path=$compiler"
+    echo "compiler_sha256=$compiler_hash"
+    echo "admission_receipt=$admission"
+    echo "admission_receipt_sha256=$(sha256_file "$admission")"
+    echo "fixture_sha256=$fixture_hash"
+    echo "manifest_sha256=$manifest_hash"
+    echo 'no_stub_fallback=1'
+} >"$out/identity.sdn"
+
+run_lane() {
+    engine=$1
+    policy=$2
+    case "$policy" in
+        static-off) compiler_policy=off ;;
+        direct) compiler_policy=static ;;
+        dynamic) compiler_policy=dynamic ;;
+        *) write_resume "unknown-policy-$policy" ;;
+    esac
+    lane="$engine-$policy"
+    stdout="$out/lanes/$lane.stdout"
+    stderr="$out/lanes/$lane.stderr"
+    meta="$out/lanes/$lane.identity.sdn"
+    rc=0
+    binary_hash=$compiler_hash
+    execution_artifact=$compiler
+    case "$engine" in
+        interpreter)
+            SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_EXECUTION_MODE=interpreter SIMPLE_MCDC_MODE="$compiler_policy" \
+                "$compiler" run "$fixture" >"$stdout" 2>"$stderr" || rc=$?
+            ;;
+        jit)
+            SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_EXECUTION_MODE=jit SIMPLE_MCDC_MODE="$compiler_policy" \
+                "$compiler" run "$fixture" >"$stdout" 2>"$stderr" || rc=$?
+            ;;
+        native)
+            env_name=$(printf 'MCDC_XENGINE_NATIVE_%s_BIN' "$(printf '%s' "$policy" | tr '[:lower:]-' '[:upper:]_')")
+            eval "binary=\${$env_name:-}"
+            [ -n "$binary" ] || write_resume "native-$policy-binary-not-set"
+            [ -x "$binary" ] || write_resume "native-$policy-binary-not-executable"
+            provenance="$binary.compiler.sha256"
+            [ -f "$provenance" ] || write_resume "native-$policy-provenance-missing"
+            [ "$(tr -d '[:space:]' <"$provenance")" = "$compiler_hash" ] || write_resume "native-$policy-compiler-identity-mismatch"
+            binary_hash=$(sha256_file "$binary") || write_resume "native-$policy-binary-hash-failed"
+            execution_artifact=$binary
+            SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_MCDC_MODE="$compiler_policy" "$binary" >"$stdout" 2>"$stderr" || rc=$?
+            ;;
+        *) write_resume "unknown-engine-$engine" ;;
+    esac
+    {
+        echo 'schema=mcdc-cross-engine-lane-identity-v1'
+        echo "engine=$engine"
+        echo "policy=$policy"
+        echo "compiler_policy=$compiler_policy"
+        echo "compiler_sha256=$compiler_hash"
+        echo "execution_artifact=$execution_artifact"
+        echo "binary_sha256=$binary_hash"
+        echo "fixture_sha256=$fixture_hash"
+        echo "manifest_sha256=$manifest_hash"
+        echo 'no_stub_fallback=1'
+        echo "exit_code=$rc"
+    } >"$meta"
+    [ "$rc" -eq 0 ] || write_resume "$lane-execution-failed-$rc"
+    cmp -s "$manifest" "$stdout" || write_resume "$lane-vector-mismatch"
+}
+
+for policy in static-off direct dynamic; do
+    run_lane interpreter "$policy"
+    run_lane jit "$policy"
+    run_lane native "$policy"
+done
+
+{
+    echo 'schema=mcdc-cross-engine-gate-status-v1'
+    echo 'status=PASS'
+    echo 'lane_count=9'
+    echo "compiler_sha256=$compiler_hash"
+    echo "fixture_sha256=$fixture_hash"
+    echo "manifest_sha256=$manifest_hash"
+} >"$out/status.sdn"
+echo "mcdc-cross-engine-vectors: PASS lanes=9 compiler_sha256=$compiler_hash manifest_sha256=$manifest_hash artifacts=$out"

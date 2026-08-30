@@ -1,4 +1,5 @@
 #include "cosmos_nvme_dispatch.h"
+#include "cosmos_nvme_media_policy.h"
 #include "cosmos_pcie_regs.h"
 
 int cosmos_nvme_dispatch_init(
@@ -6,9 +7,14 @@ int cosmos_nvme_dispatch_init(
     struct cosmos_nvme_pcie_bridge *bridge,
     struct cosmos_nvme_service *io_service,
     struct cosmos_nvme_admin_service *admin_service) {
-    if (dispatch == 0 || bridge == 0 || io_service == 0 ||
-        admin_service == 0 || io_service->adapter.fetch_command != 0 ||
-        admin_service->adapter.fetch_command != 0) {
+    if (!cosmos_nvme_media_policy_dispatch_init_valid(
+            dispatch != 0 ? 1U : 0U, bridge != 0 ? 1U : 0U,
+            io_service != 0 ? 1U : 0U,
+            admin_service != 0 ? 1U : 0U,
+            io_service != 0 && io_service->adapter.fetch_command != 0
+                ? 1U : 0U,
+            admin_service != 0 && admin_service->adapter.fetch_command != 0
+                ? 1U : 0U)) {
         return COSMOS_INVALID;
     }
     dispatch->bridge = bridge;
@@ -59,20 +65,28 @@ int cosmos_nvme_dispatch_poll(struct cosmos_nvme_dispatch *dispatch) {
 
         if (raw.queue_id > dispatch->admin_service->negotiated_queue_count ||
             raw.queue_id > COSMOS_NVME_ADMIN_MAX_IO_QUEUES) {
+            status = cosmos_nvme_media_policy_dispatch_queue_status(
+                raw.queue_id,
+                dispatch->admin_service->negotiated_queue_count,
+                0U, 0U, 0U);
             dispatch->faulted = 1U;
-            return COSMOS_HW_ERROR;
+            return status;
         }
         index = raw.queue_id - 1U;
         completion_queue_id =
             dispatch->admin_service->submission_queues[index].
                 completion_queue_id;
-        if (dispatch->admin_service->submission_queues[index].valid == 0U ||
-            completion_queue_id == 0U ||
-            completion_queue_id > COSMOS_NVME_ADMIN_MAX_IO_QUEUES ||
-            dispatch->admin_service->completion_queues[
-                completion_queue_id - 1U].valid == 0U) {
+        status = cosmos_nvme_media_policy_dispatch_queue_status(
+            raw.queue_id, dispatch->admin_service->negotiated_queue_count,
+            dispatch->admin_service->submission_queues[index].valid,
+            completion_queue_id,
+            completion_queue_id != 0U &&
+                completion_queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES
+                ? dispatch->admin_service->completion_queues[
+                    completion_queue_id - 1U].valid : 0U);
+        if (status != COSMOS_OK) {
             dispatch->faulted = 1U;
-            return COSMOS_HW_ERROR;
+            return status;
         }
         status = cosmos_nvme_pcie_decode_io(dispatch->bridge, &raw, &command);
         if (status != COSMOS_OK) {

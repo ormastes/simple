@@ -15,7 +15,7 @@ extern fn simpleos_virtio_net_tx_dma_len() -> u64
 extern fn simpleos_virtio_blk_swap_selftest() -> u64
 
 use std.memory_leveling.{simple_memory_iso_cpu_cold, simple_memory_placement_config_from_intent, memory_leveling_policy_from_intent}
-use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_manager.{MemoryLevelingOperation, memory_leveling_manager_new, simpleos_memory_leveling_config_default}
 use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
 use os.kernel.memory.memory_leveling_capabilities.{memory_leveling_qemu_capabilities}
 use os.kernel.memory.memory_swap.{memory_swap_checksum, memory_swap_store_new}
@@ -36,8 +36,49 @@ fn _memory_leveling_qemu_bytes_equal(left: [u8], right: [u8]) -> bool:
         i = i + 1
     true
 
+fn _memory_leveling_qemu_virtio_gpu_index() -> i64:
+    val count = rt_pci_device_count()
+    var i: i64 = 0
+    while i < count:
+        val vendor = rt_pci_get_field(i, 5)
+        val device = rt_pci_get_field(i, 6)
+        if vendor == 0x1AF4 and device == 0x1050:
+            return i
+        i = i + 1
+    -1
+
+fn _memory_leveling_qemu_gpu_grant(index: i64) -> DeviceGrant:
+    DeviceGrant(
+        pci_vendor: rt_pci_get_field(index, 5).to_u16(),
+        pci_device: rt_pci_get_field(index, 6).to_u16(),
+        pci_bus: rt_pci_get_field(index, 0).to_u8(),
+        pci_dev: rt_pci_get_field(index, 1).to_u8(),
+        pci_func: rt_pci_get_field(index, 2).to_u8(),
+        pci_class: rt_pci_get_field(index, 3).to_u8(),
+        pci_subclass: rt_pci_get_field(index, 4).to_u8(),
+        bar0_phys: rt_pci_read_bar0(index) as u64,
+        bar0_size: 4096,
+        bar0_cap: 0,
+        irq_vector: rt_pci_get_field(index, 7).to_u32(),
+        irq_notification_id: 0, irq_notification_bit: 0, irq_cap: 0,
+        dma_device_addr: 0, dma_host_addr: 0, dma_size: 0, dma_cap: 0,
+        iommu_domain_id: 0, iommu_cap: 0
+    )
+
 fn _start():
     serial_println("[memory-leveling] qemu-start")
+    mmio_disable_test_mode()
+    if not pmm_init_identity_range(256 * 1024 * 1024, 1024 * 1024, 248 * 1024 * 1024):
+        _memory_leveling_qemu_fail("pmm-init")
+        return
+    val gpu_pages = pmm_alloc_pages(1)
+    val nic_pages = pmm_alloc_pages(1)
+    if not gpu_pages.? or not nic_pages.?:
+        _memory_leveling_qemu_fail("dma-contiguous-allocation")
+        return
+    val gpu_phys = gpu_pages.unwrap().addr
+    val nic_phys = nic_pages.unwrap().addr
+    serial_println("[memory-leveling] dma-contiguous-allocation=pass")
 
     val intent = simple_memory_iso_cpu_cold()
     val placement = simple_memory_placement_config_from_intent(intent)
@@ -50,7 +91,7 @@ fn _start():
 
     val manager = memory_leveling_manager_new(os_config)
     val policy = memory_leveling_policy_from_intent(intent)
-    val allocation = manager.request(placement, policy, 4, 1, 41)
+    val allocation: MemoryLevelingOperation = manager.request(placement, policy, 4, 1, 41)
     if not allocation.ok:
         _memory_leveling_qemu_fail("cpu-allocation")
         return
@@ -145,6 +186,21 @@ fn _start():
     serial_println("[memory-leveling] nic-dma-lifecycle=pass backend=virtio-net rx-bytes=" + rx_len.to_text() + " tx-bytes=" + tx_len.to_text())
 
     val capabilities = memory_leveling_qemu_capabilities()
+    val gpu_index = _memory_leveling_qemu_virtio_gpu_index()
+    if gpu_index < 0:
+        _memory_leveling_qemu_fail("virtio-gpu-pci")
+        return
+    serial_println("[memory-leveling] virtio-gpu-pci=pass")
+    var hardware_gpu = VirtioGpuDriver.new()
+    val gpu_grant: DeviceGrant = _memory_leveling_qemu_gpu_grant(gpu_index)
+    if val Err(gpu_error) = hardware_gpu.init_from_grant(gpu_grant):
+        serial_println("[memory-leveling] virtio-gpu-error=" + gpu_error)
+        _memory_leveling_qemu_fail("virtio-gpu-command")
+        return
+    if not hardware_gpu.flush():
+        _memory_leveling_qemu_fail("virtio-gpu-flush")
+        return
+    serial_println("[memory-leveling] virtio-gpu-command=pass")
     if not capabilities.virtio_gpu_backing or not capabilities.virtio_nic_buffers or capabilities.gpu_physical_migration or capabilities.nic_physical_migration:
         _memory_leveling_qemu_fail("capability-report")
         return

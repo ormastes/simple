@@ -1,16 +1,9 @@
 # Text slicing at a mid-codepoint boundary: THREE divergent policies, one of them invalid UTF-8
 
-Status: RESOLVED 2026-08-21 for the ENGINE DIVERGENCE — the three policies are
-now one. `.slice()`/`.substring()` in the interpreter preserve RAW BYTES, the
-same as bracket `s[i:j]` on every engine and the same as `rt_slice` on
-JIT/native, so the spelling of the slice no longer changes the answer and the
-engines no longer disagree. See "Resolution (2026-08-21)" at the end.
-Stage 1 (counting mode) LANDED `2ca6b4da3a9`; stage 2 (blast-radius
-measurement) MEASURED, see "Stage 2". Stage 4 (flip a mid-codepoint slice to a
-hard ERROR) remains **deferred** and is a SEPARATE question from the divergence
-— the ~891 byte-stepping scanner call sites that justify deferring it are
-unchanged by this fix. Sections below describing the pre-fix three-way split are
-kept as the historical record; read them as "before 2026-08-21".
+Status: OPEN — stage 1 (counting mode) LANDED `2ca6b4da3a9`; stage 2
+(blast-radius measurement) MEASURED, see "Stage 2". Stage 3 (fix the sites) and
+stage 4 (flip to a hard error) are NOT done: the flip is **deferred**, with the
+number that justifies deferring recorded below.
 Measured: 2026-08-01
 
 **Re-verified 2026-08-07, unchanged.** Ran the "Reproduce" probe below (`s =

@@ -19,7 +19,7 @@ evidence separate from artifact admission and makes no hot-path change.
 
 Each lane works in a separate worktree, commits only owned files, does not
 push, and returns a failing blocker rather than a fabricated PASS. A1 starts
-the executable developing SSpec before any implementation promotion.
+the executable `@tag("developing")` SSpec before any implementation promotion.
 
 ## A3 identity/admission blocker (2026-08-27)
 

@@ -1,6 +1,29 @@
 # Test Categorization Specification
 
-> Tests covering TestCategory Auto-Detection, Explicit Category Annotation, Speed Annotation Parsing, Speed Resolution, Speed Filter Matching, Manifest V3 Entry Serialization, CLI Flag Parsing, Decorator Annotation Parsing.
+> <details>
+
+<!-- sdn-diagram:id=test_categorization_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=test_categorization_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+test_categorization_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=test_categorization_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,13 @@
 
 #### detects platform from baremetal path
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- detects platform from baremetal path
-   - Expected: cat equals `platform`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects platform from baremetal path")
 val path = "test/feature/baremetal/boot_spec.spl"
 var cat = "other"
 if path.contains("/baremetal/") or path.contains("/qemu/") or path.contains("/cuda/") or path.contains("/gpu/"):
@@ -45,19 +58,13 @@ expect(cat).to_equal("platform")
 
 #### detects platform from cuda path
 
-- detects platform from cuda path
-   - Expected: cat equals `platform`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects platform from cuda path")
 val path = "test/unit/lib/gc_async_mut/cuda/gc_cuda_spec.spl"
 var cat = "other"
 if path.contains("/cuda/"):
@@ -69,19 +76,13 @@ expect(cat).to_equal("platform")
 
 #### detects platform from gpu path
 
-- detects platform from gpu path
-   - Expected: cat equals `platform`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects platform from gpu path")
 val path = "test/unit/lib/gc_async_mut/gpu/driver_spec.spl"
 var cat = "other"
 if path.contains("/gpu/"):
@@ -93,19 +94,13 @@ expect(cat).to_equal("platform")
 
 #### detects platform from qemu path
 
-- detects platform from qemu path
-   - Expected: cat equals `platform`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects platform from qemu path")
 val path = "test/feature/baremetal/riscv32/collections_qemu_spec.spl"
 var cat = "other"
 if path.contains("/qemu/") or path.contains("/baremetal/"):
@@ -117,19 +112,13 @@ expect(cat).to_equal("platform")
 
 #### detects platform from non-all platform tag
 
-- detects platform from non-all platform tag
-   - Expected: cat equals `platform`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects platform from non-all platform tag")
 val content = "# @platform: baremetal(riscv32)\ndescribe \"boot\":"
 val lines = content.split("\n")
 var cat = "other"
@@ -146,19 +135,13 @@ expect(cat).to_equal("platform")
 
 #### does not detect platform from all platform tag
 
-- does not detect platform from all platform tag
-   - Expected: cat equals `not_platform`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not detect platform from all platform tag")
 val content = "# @platform: all\ndescribe \"shared\":"
 val lines = content.split("\n")
 var cat = "not_platform"
@@ -175,19 +158,13 @@ expect(cat).to_equal("not_platform")
 
 #### treats shared path as canonical unit-level cross-platform tier
 
-- treats shared path as canonical unit-level cross-platform tier
-   - Expected: level equals `unit`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("treats shared path as canonical unit-level cross-platform tier")
 val path = "test/shared/core/primitives_spec.spl"
 var level = "other"
 if path.contains("/unit/") or path.contains("/shared/"):
@@ -203,19 +180,13 @@ expect(level).to_equal("unit")
 
 #### detects standalone when no use statements
 
-- detects standalone when no use statements
-   - Expected: cat equals `standalone`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects standalone when no use statements")
 val content = "describe \"basics\":\n    it \"works\":\n        expect(1).to_equal(1)"
 val lines = content.split("\n")
 var has_use = false
@@ -232,19 +203,13 @@ expect(cat).to_equal("standalone")
 
 #### detects standalone when only spec import
 
-- detects standalone when only spec import
-   - Expected: cat equals `standalone`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects standalone when only spec import")
 val content = "use std.spec\ndescribe \"x\":\n    it \"y\":\n        pass"
 val lines = content.split("\n")
 var has_use = false
@@ -267,19 +232,13 @@ expect(cat).to_equal("standalone")
 
 #### detects lib when has non-spec imports
 
-- detects lib when has non-spec imports
-   - Expected: cat equals `lib`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects lib when has non-spec imports")
 val content = "use std.spec\nuse app.io.file_ops\ndescribe \"x\":"
 val lines = content.split("\n")
 var has_use = false
@@ -304,19 +263,17 @@ expect(cat).to_equal("lib")
 
 #### extracts category from annotation
 
-- extracts category from annotation
+1. cat = trimmed[12:] trim
    - Expected: cat equals `standalone`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts category from annotation")
 val content = "# @category: standalone\ndescribe \"core\":"
 val lines = content.split("\n")
 var cat = ""
@@ -331,19 +288,17 @@ expect(cat).to_equal("standalone")
 
 #### extracts platform category
 
-- extracts platform category
+1. cat = trimmed[12:] trim
    - Expected: cat equals `platform`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts platform category")
 val content = "# @category: platform\n# @platform: baremetal"
 val lines = content.split("\n")
 var cat = ""
@@ -358,19 +313,17 @@ expect(cat).to_equal("platform")
 
 #### explicit category overrides auto-detection
 
-- explicit category overrides auto-detection
+1. explicit cat = trimmed[12:] trim
    - Expected: final_cat equals `lib`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("explicit category overrides auto-detection")
 val content = "# @category: lib\ndescribe \"x\":"
 val path = "test/feature/baremetal/boot_spec.spl"
 val lines = content.split("\n")
@@ -394,19 +347,17 @@ expect(final_cat).to_equal("lib")
 
 #### extracts default speed
 
-- extracts default speed
+1. speed = trimmed[9:] trim
    - Expected: speed equals `long`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts default speed")
 val content = "# @speed: long\ndescribe \"x\":"
 val lines = content.split("\n")
 var speed = ""
@@ -421,25 +372,13 @@ expect(speed).to_equal("long")
 
 #### extracts contextual speed
 
-- extracts contextual speed
-   - Expected: line1.starts_with("# @speed(") is true
-   - Expected: rest1 contains `)`
-   - Expected: ctx1 equals `baremetal`
-   - Expected: after1.starts_with(":") is true
-   - Expected: spd1 equals `short`
-   - Expected: ctx2 equals `native`
-   - Expected: spd2 equals `medium`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts contextual speed")
 val line1 = "# @speed(baremetal): short"
 expect(line1.starts_with("# @speed(")).to_equal(true)
 val rest1 = line1[9:]
@@ -463,7 +402,7 @@ expect(spd2).to_equal("medium")
 
 #### does not confuse contextual speed with default speed
 
-- does not confuse contextual speed with default speed
+1. default speed = trimmed[9:] trim
    - Expected: default_speed equals `long`
    - Expected: contextual_count equals `1`
 
@@ -471,12 +410,10 @@ expect(spd2).to_equal("medium")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not confuse contextual speed with default speed")
 val content = "# @speed: long\n# @speed(baremetal): short"
 val lines = content.split("\n")
 var default_speed = ""
@@ -497,19 +434,13 @@ expect(contextual_count).to_equal(1)
 
 #### resolves contextual speed when context matches
 
-- resolves contextual speed when context matches
-   - Expected: resolved equals `short`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("resolves contextual speed when context matches")
 val speed_contexts = "baremetal=short,native=medium"
 val context = "baremetal"
 var resolved = ""
@@ -528,19 +459,17 @@ expect(resolved).to_equal("short")
 
 #### falls back to default speed when no context match
 
-- falls back to default speed when no context match
+1. resolved = kv[1] trim
    - Expected: resolved equals `long`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("falls back to default speed when no context match")
 val speed_contexts = "baremetal=short"
 val speed_default = "long"
 val context = "native"
@@ -560,19 +489,13 @@ expect(resolved).to_equal("long")
 
 #### falls back to long when has_slow and no annotations
 
-- falls back to long when has_slow and no annotations
-   - Expected: resolved equals `long`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("falls back to long when has_slow and no annotations")
 val speed_contexts = ""
 val speed_default = ""
 val has_slow = true
@@ -588,19 +511,13 @@ expect(resolved).to_equal("long")
 
 #### resolves to unknown when no info
 
-- resolves to unknown when no info
-   - Expected: resolved equals `unknown`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("resolves to unknown when no info")
 val speed_default = ""
 val has_slow = false
 var resolved = ""
@@ -619,44 +536,30 @@ expect(resolved).to_equal("unknown")
 
 #### only-short allows only short
 
-- only-short allows only short
-   - Expected: "short" == "short" is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("only-short allows only short")
 val only_short = true
 expect("short" == "short").to_equal(true)
-expect("medium").to_not_equal("short")
-expect("long").to_not_equal("short")
+expect("medium" == "short").to_equal(false)
+expect("long" == "short").to_equal(false)
 ```
 
 </details>
 
 #### speed=medium allows short and medium
 
-- speed=medium allows short and medium
-   - Expected: short_ok is true
-   - Expected: medium_ok is true
-   - Expected: long_ok is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("speed=medium allows short and medium")
 val filter = "medium"
 var short_ok = false
 var medium_ok = false
@@ -673,19 +576,13 @@ expect(long_ok).to_equal(false)
 
 #### speed=long allows everything
 
-- speed=long allows everything
-   - Expected: all_pass is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("speed=long allows everything")
 val filter = "long"
 var all_pass = false
 if filter == "long":
@@ -697,19 +594,13 @@ expect(all_pass).to_equal(true)
 
 #### empty filter allows everything
 
-- empty filter allows everything
-   - Expected: all_pass is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("empty filter allows everything")
 val filter = ""
 var all_pass = true
 if filter != "":
@@ -723,22 +614,13 @@ expect(all_pass).to_equal(true)
 
 #### includes category speed_default speed_contexts in pipe format
 
-- includes category speed_default speed_contexts in pipe format
-   - Expected: parts.len() equals `18`
-   - Expected: parts[15] equals `platform`
-   - Expected: parts[16] equals `long`
-   - Expected: parts[17] equals `baremetal=short,native=medium`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("includes category speed_default speed_contexts in pipe format")
 val path = "test/feature/baremetal/boot_spec.spl"
 val category = "platform"
 val speed_default = "long"
@@ -755,22 +637,13 @@ expect(parts[17]).to_equal("baremetal=short,native=medium")
 
 #### handles empty new fields for backward compat
 
-- handles empty new fields for backward compat
-   - Expected: parts.len() equals `15`
-   - Expected: category equals ``
-   - Expected: speed_default equals ``
-   - Expected: speed_contexts equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles empty new fields for backward compat")
 val line = "test/unit/x_spec.spl|500|100|1|0|0|0|tag1|linux|0|0|0|0|0|interp"
 val parts = line.split("|")
 expect(parts.len()).to_equal(15)
@@ -794,19 +667,13 @@ expect(speed_contexts).to_equal("")
 
 #### category flag name
 
-- category flag name
-   - Expected: flag equals `--category`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("category flag name")
 val flag = "--category"
 expect(flag).to_equal("--category")
 ```
@@ -815,19 +682,13 @@ expect(flag).to_equal("--category")
 
 #### context flag name
 
-- context flag name
-   - Expected: flag equals `--context`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("context flag name")
 val flag = "--context"
 expect(flag).to_equal("--context")
 ```
@@ -836,19 +697,13 @@ expect(flag).to_equal("--context")
 
 #### only-short flag name
 
-- only-short flag name
-   - Expected: flag equals `--only-short`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("only-short flag name")
 val flag = "--only-short"
 expect(flag).to_equal("--only-short")
 ```
@@ -857,19 +712,13 @@ expect(flag).to_equal("--only-short")
 
 #### speed flag name
 
-- speed flag name
-   - Expected: flag equals `--speed`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("speed flag name")
 val flag = "--speed"
 expect(flag).to_equal("--speed")
 ```
@@ -878,19 +727,13 @@ expect(flag).to_equal("--speed")
 
 #### parses --category=standalone from equals format
 
-- parses --category=standalone from equals format
-   - Expected: category equals `standalone`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses --category=standalone from equals format")
 val arg = "--category=standalone"
 var category = ""
 if arg.starts_with("--category="):
@@ -902,19 +745,13 @@ expect(category).to_equal("standalone")
 
 #### parses --context=baremetal from equals format
 
-- parses --context=baremetal from equals format
-   - Expected: context equals `baremetal`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses --context=baremetal from equals format")
 val arg = "--context=baremetal"
 var context = ""
 if arg.starts_with("--context="):
@@ -926,19 +763,13 @@ expect(context).to_equal("baremetal")
 
 #### parses --speed=medium from equals format
 
-- parses --speed=medium from equals format
-   - Expected: speed equals `medium`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses --speed=medium from equals format")
 val arg = "--speed=medium"
 var speed = ""
 if arg.starts_with("--speed="):
@@ -952,19 +783,13 @@ expect(speed).to_equal("medium")
 
 #### detects @short_test decorator
 
-- detects @short_test decorator
-   - Expected: line.starts_with("@short_test") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects @short_test decorator")
 val line = "@short_test(baremetal)"
 expect(line.starts_with("@short_test")).to_equal(true)
 ```
@@ -973,19 +798,13 @@ expect(line.starts_with("@short_test")).to_equal(true)
 
 #### extracts context from @short_test(baremetal)
 
-- extracts context from @short_test(baremetal)
-   - Expected: ctx equals `baremetal`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts context from @short_test(baremetal)")
 val trimmed = "@short_test(baremetal)"
 var ctx = ""
 if trimmed.contains("(") and trimmed.contains(")"):
@@ -1000,19 +819,17 @@ expect(ctx).to_equal("baremetal")
 
 #### handles @long_test without context
 
-- handles @long_test without context
+1. ctx = after paren[1] split
    - Expected: ctx equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("handles @long_test without context")
 val trimmed = "@long_test"
 var ctx = ""
 if trimmed.contains("(") and trimmed.contains(")"):
@@ -1026,20 +843,17 @@ expect(ctx).to_equal("")
 
 #### detects @medium_test decorator
 
-- detects @medium_test decorator
-   - Expected: line.starts_with("@medium_test") is true
+1. ctx = after paren[1] split
    - Expected: ctx equals `native`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects @medium_test decorator")
 val line = "@medium_test(native)"
 expect(line.starts_with("@medium_test")).to_equal(true)
 var ctx = ""
@@ -1059,12 +873,12 @@ expect(ctx).to_equal("native")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/test_runner_new/test_categorization_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering TestCategory Auto-Detection, Explicit Category Annotation, Speed Annotation Parsing, Speed Resolution, Speed Filter Matching, Manifest V3 Entry Serialization, CLI Flag Parsing, Decorator Annotation Parsing.
+Tests covering:
 - TestCategory Auto-Detection
 - Explicit Category Annotation
 - Speed Annotation Parsing
@@ -1086,54 +900,3 @@ Tests covering TestCategory Auto-Detection, Explicit Category Annotation, Speed 
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7d7f67dafa09390a6c234668029582cbd45ed3e0ab360c601b2bf11b9788ee98`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7d7f67dafa09390a6c234668029582cbd45ed3e0ab360c601b2bf11b9788ee98`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7d7f67dafa09390a6c234668029582cbd45ed3e0ab360c601b2bf11b9788ee98`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/test_runner_new/test_categorization_spec.spl
-mirror: doc/06_spec/01_unit/app/test_runner_new/test_categorization_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/test_runner_new/test_categorization_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/test_runner_new/test_categorization_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/test_runner_new/test_categorization_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/test_runner_new/test_categorization_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects platform from baremetal path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/test_runner_new/test_categorization_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects platform from cuda path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/test_runner_new/test_categorization_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects platform from gpu path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

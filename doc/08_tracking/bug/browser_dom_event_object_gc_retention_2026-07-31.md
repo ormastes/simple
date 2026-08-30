@@ -1,7 +1,6 @@
 # Browser DOM event object GC retention
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: **RED — reachability reclamation is not implemented**
 
 ## Scope
 

@@ -1,7 +1,6 @@
 # Flat AST Bridge: type-expr index goes stale across an interleaved `ast_reset()`
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** FIX IMPLEMENTED; STAGE-4 ADMISSION PENDING 2026-07-17 — the original
 type bounds check remains, and native Stage-4 statement/expression stores now
 ignore stale bootstrap environment mirrors.
 **Severity:** Blocking — the authorized Stage-4 build of `src/app/cli/main.spl`

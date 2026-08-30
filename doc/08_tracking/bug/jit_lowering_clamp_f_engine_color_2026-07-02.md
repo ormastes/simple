@@ -1,8 +1,7 @@
 # JIT lowering: nested fn inside impl method unresolvable ("Unknown variable: clamp_f")
 
 Date: 2026-07-02
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: open (workaround in place)
 Severity: P3 (silent fallback to interpreter — large perf cliff)
 Related: doc/03_plan/ui/production_readiness_master_plan_2026-07-02.md (W5)
 

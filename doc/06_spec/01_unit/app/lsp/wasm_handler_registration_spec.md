@@ -1,6 +1,29 @@
 # Wasm Handler Registration Specification
 
-> Tests covering WASM Handler Registration.
+> <details>
+
+<!-- sdn-diagram:id=wasm_handler_registration_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=wasm_handler_registration_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+wasm_handler_registration_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=wasm_handler_registration_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +42,13 @@
 
 #### core parser is WASM mode
 
-- core parser is WASM mode
-   - Expected: adapter.is_wasm_mode() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("core parser is WASM mode")
 val adapter = ParserAdapter.create_core()
 expect(adapter.is_wasm_mode()).to_equal(true)
 ```
@@ -40,19 +57,13 @@ expect(adapter.is_wasm_mode()).to_equal(true)
 
 #### treesitter is not WASM mode
 
-- treesitter is not WASM mode
-   - Expected: adapter.is_wasm_mode() is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("treesitter is not WASM mode")
 val adapter = ParserAdapter.create_treesitter()
 expect(adapter.is_wasm_mode()).to_equal(false)
 ```
@@ -61,19 +72,13 @@ expect(adapter.is_wasm_mode()).to_equal(false)
 
 #### core parser backend enum value
 
-- core parser backend enum value
-   - Expected: adapter.backend equals `ParserBackend.CoreParser`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("core parser backend enum value")
 val adapter = ParserAdapter.create_core()
 expect(adapter.backend).to_equal(ParserBackend.CoreParser)
 ```
@@ -82,19 +87,13 @@ expect(adapter.backend).to_equal(ParserBackend.CoreParser)
 
 #### treesitter backend enum value
 
-- treesitter backend enum value
-   - Expected: adapter.backend equals `ParserBackend.TreeSitter`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("treesitter backend enum value")
 val adapter = ParserAdapter.create_treesitter()
 expect(adapter.backend).to_equal(ParserBackend.TreeSitter)
 ```
@@ -105,19 +104,13 @@ expect(adapter.backend).to_equal(ParserBackend.TreeSitter)
 
 #### core parser handles function definitions
 
-- core parser handles function definitions
-   - Expected: result.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("core parser handles function definitions")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("fn hello():\n    print \"hi\"")
 expect(result.success).to_equal(true)
@@ -127,19 +120,13 @@ expect(result.success).to_equal(true)
 
 #### core parser handles class definitions
 
-- core parser handles class definitions
-   - Expected: result.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("core parser handles class definitions")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("class Foo:\n    x: i64")
 expect(result.success).to_equal(true)
@@ -149,19 +136,13 @@ expect(result.success).to_equal(true)
 
 #### core parser handles struct definitions
 
-- core parser handles struct definitions
-   - Expected: result.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("core parser handles struct definitions")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("struct Point:\n    x: i64\n    y: i64")
 expect(result.success).to_equal(true)
@@ -171,19 +152,13 @@ expect(result.success).to_equal(true)
 
 #### core parser handles import statements
 
-- core parser handles import statements
-   - Expected: result.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("core parser handles import statements")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("use std.text.\n")
 expect(result.success).to_equal(true)
@@ -195,19 +170,13 @@ expect(result.success).to_equal(true)
 
 #### detects extra closing paren
 
-- detects extra closing paren
-   - Expected: result.success is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects extra closing paren")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("fn foo(x)): pass")
 expect(result.success).to_equal(false)
@@ -217,19 +186,13 @@ expect(result.success).to_equal(false)
 
 #### detects extra closing bracket
 
-- detects extra closing bracket
-   - Expected: result.success is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects extra closing bracket")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("val arr = [1, 2]]")
 expect(result.success).to_equal(false)
@@ -239,19 +202,13 @@ expect(result.success).to_equal(false)
 
 #### does not report errors on valid code
 
-- does not report errors on valid code
-   - Expected: result.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not report errors on valid code")
 val adapter = ParserAdapter.create_core()
 val result = adapter.parse("val x = [1, 2, 3]")
 expect(result.success).to_equal(true)
@@ -263,20 +220,13 @@ expect(result.success).to_equal(true)
 
 #### treesitter parse returns success for any input
 
-- treesitter parse returns success for any input
-   - Expected: result.success is true
-   - Expected: result.diagnostics.len() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("treesitter parse returns success for any input")
 val adapter = ParserAdapter.create_treesitter()
 # TreeSitter path returns default success (actual parsing done elsewhere)
 val result = adapter.parse("val x = 1")
@@ -293,12 +243,12 @@ expect(result.diagnostics.len()).to_equal(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/wasm_handler_registration_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering WASM Handler Registration.
+Tests covering:
 - WASM Handler Registration
 
 ## Scenario Summary
@@ -313,54 +263,3 @@ Tests covering WASM Handler Registration.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `314beae6be24a4cd0e6764caa9b1738db0fb9da7a372ac18a18b8fac8a796299`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `314beae6be24a4cd0e6764caa9b1738db0fb9da7a372ac18a18b8fac8a796299`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `314beae6be24a4cd0e6764caa9b1738db0fb9da7a372ac18a18b8fac8a796299`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/app/lsp/wasm_handler_registration_spec.spl
-mirror: doc/06_spec/01_unit/app/lsp/wasm_handler_registration_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/lsp/wasm_handler_registration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/lsp/wasm_handler_registration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/lsp/wasm_handler_registration_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/lsp/wasm_handler_registration_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'core parser is WASM mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/wasm_handler_registration_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'treesitter is not WASM mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/wasm_handler_registration_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'core parser backend enum value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

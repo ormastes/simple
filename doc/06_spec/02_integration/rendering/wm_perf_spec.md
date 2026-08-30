@@ -2,6 +2,29 @@
 
 > WM Performance Spec — dirty-rect tracking, frame pacing, perf counters
 
+<!-- sdn-diagram:id=wm_perf_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=wm_perf_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+wm_perf_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=wm_perf_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 39 | 39 | 0 | 0 |
@@ -26,7 +49,7 @@ WM Performance Spec — dirty-rect tracking, frame pacing, perf counters
 | Design | doc/05_design/graphics_backend_acceleration.md |
 | Research | N/A |
 | Source | `test/02_integration/rendering/wm_perf_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 WM Performance Spec — dirty-rect tracking, frame pacing, perf counters
@@ -37,22 +60,18 @@ WM Performance Spec — dirty-rect tracking, frame pacing, perf counters
 
 #### starts empty
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- starts empty
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("starts empty")
 val dr = DirtyRegion.new()
 check(dr.is_empty())
 check(not dr.is_dirty())
@@ -63,18 +82,19 @@ check(dr.count() == 0)
 
 #### is dirty after add_rect
 
-- is dirty after add_rect
+1. dr add rect
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("is dirty after add_rect")
 val dr = DirtyRegion.new()
 dr.add_rect(10, 20, 100, 80)
 check(dr.is_dirty())
@@ -86,18 +106,18 @@ check(dr.count() == 1)
 
 #### ignores zero-size rects
 
-- ignores zero-size rects
+1. dr add rect
+2. dr add rect
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("ignores zero-size rects")
 val dr = DirtyRegion.new()
 dr.add_rect(0, 0, 0, 50)
 dr.add_rect(0, 0, 50, 0)
@@ -108,18 +128,20 @@ check(dr.is_empty())
 
 #### bounding_box of single rect equals the rect
 
-- bounding_box of single rect equals the rect
+1. dr add rect
+2. check
+3. check
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("bounding_box of single rect equals the rect")
 val dr = DirtyRegion.new()
 dr.add_rect(10, 20, 100, 80)
 val bb = dr.bounding_box()
@@ -133,18 +155,21 @@ check(bb.h == 80)
 
 #### bounding_box merges two non-overlapping rects
 
-- bounding_box merges two non-overlapping rects
+1. dr add rect
+2. dr add rect
+3. check
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("bounding_box merges two non-overlapping rects")
 val dr = DirtyRegion.new()
 dr.add_rect(0, 0, 50, 50)
 dr.add_rect(100, 100, 50, 50)
@@ -160,18 +185,21 @@ check(bb.h == 150)
 
 #### bounding_box merges overlapping rects
 
-- bounding_box merges overlapping rects
+1. dr add rect
+2. dr add rect
+3. check
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("bounding_box merges overlapping rects")
 val dr = DirtyRegion.new()
 dr.add_rect(10, 10, 100, 100)
 dr.add_rect(50, 50, 100, 100)
@@ -186,18 +214,16 @@ check(bb.h == 140)
 
 #### bounding_box is empty when no rects added
 
-- bounding_box is empty when no rects added
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("bounding_box is empty when no rects added")
 val dr = DirtyRegion.new()
 val bb = dr.bounding_box()
 check(irect_is_empty(bb))
@@ -207,18 +233,20 @@ check(irect_is_empty(bb))
 
 #### clear resets dirty state
 
-- clear resets dirty state
+1. dr add rect
+2. check
+3. dr clear
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("clear resets dirty state")
 val dr = DirtyRegion.new()
 dr.add_rect(0, 0, 100, 100)
 check(dr.is_dirty())
@@ -231,18 +259,20 @@ check(dr.count() == 0)
 
 #### add_full_screen marks entire screen dirty
 
-- add_full_screen marks entire screen dirty
+1. dr add full screen
+2. check
+3. check
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("add_full_screen marks entire screen dirty")
 val dr = DirtyRegion.new()
 dr.add_full_screen(1920, 1080)
 val bb = dr.bounding_box()
@@ -256,18 +286,19 @@ check(bb.h == 1080)
 
 #### accumulates multiple rects
 
-- accumulates multiple rects
+1. dr add rect
+2. dr add rect
+3. dr add rect
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("accumulates multiple rects")
 val dr = DirtyRegion.new()
 dr.add_rect(0, 0, 10, 10)
 dr.add_rect(20, 20, 10, 10)
@@ -281,18 +312,18 @@ check(dr.count() == 3)
 
 #### union of adjacent rects spans both
 
-- union of adjacent rects spans both
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("union of adjacent rects spans both")
 val a = irect_new(0, 0, 50, 50)
 val b = irect_new(50, 0, 50, 50)
 val u = irect_union(a, b)
@@ -305,18 +336,16 @@ check(u.h == 50)
 
 #### intersection of non-overlapping rects is empty
 
-- intersection of non-overlapping rects is empty
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("intersection of non-overlapping rects is empty")
 val a = irect_new(0, 0, 10, 10)
 val b = irect_new(20, 20, 10, 10)
 val inter = irect_intersection(a, b)
@@ -327,18 +356,19 @@ check(irect_is_empty(inter))
 
 #### intersection of overlapping rects is correct
 
-- intersection of overlapping rects is correct
+1. check
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("intersection of overlapping rects is correct")
 val a = irect_new(0, 0, 20, 20)
 val b = irect_new(10, 10, 20, 20)
 val inter = irect_intersection(a, b)
@@ -352,18 +382,16 @@ check(inter.h == 10)
 
 #### area of 10x10 rect is 100
 
-- area of 10x10 rect is 100
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("area of 10x10 rect is 100")
 val r = irect_new(0, 0, 10, 10)
 check(irect_area(r) == 100)
 ```
@@ -372,18 +400,16 @@ check(irect_area(r) == 100)
 
 #### area of empty rect is 0
 
-- area of empty rect is 0
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("area of empty rect is 0")
 val r = irect_new(0, 0, 0, 10)
 check(irect_area(r) == 0)
 ```
@@ -392,18 +418,16 @@ check(irect_area(r) == 0)
 
 #### intersects returns false for non-overlapping
 
-- intersects returns false for non-overlapping
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("intersects returns false for non-overlapping")
 val a = irect_new(0, 0, 5, 5)
 val b = irect_new(10, 10, 5, 5)
 check(not irect_intersects(a, b))
@@ -413,18 +437,16 @@ check(not irect_intersects(a, b))
 
 #### intersects returns true for overlapping
 
-- intersects returns true for overlapping
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("intersects returns true for overlapping")
 val a = irect_new(0, 0, 20, 20)
 val b = irect_new(10, 10, 20, 20)
 check(irect_intersects(a, b))
@@ -436,18 +458,16 @@ check(irect_intersects(a, b))
 
 #### for_60hz has 16ms budget
 
-- for_60hz has 16ms budget
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("for_60hz has 16ms budget")
 val pacer = FramePacer.for_60hz()
 check(pacer.frame_budget_ms == 16)
 ```
@@ -456,18 +476,16 @@ check(pacer.frame_budget_ms == 16)
 
 #### for_30hz has 33ms budget
 
-- for_30hz has 33ms budget
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("for_30hz has 33ms budget")
 val pacer = FramePacer.for_30hz()
 check(pacer.frame_budget_ms == 33)
 ```
@@ -476,18 +494,16 @@ check(pacer.frame_budget_ms == 33)
 
 #### for_fps(24) has 41ms budget
 
-- for_fps(24) has 41ms budget
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("for_fps(24) has 41ms budget")
 val pacer = FramePacer.for_fps(24)
 check(pacer.frame_budget_ms == 41)
 ```
@@ -496,7 +512,27 @@ check(pacer.frame_budget_ms == 41)
 
 #### starts with zero frame count
 
-- starts with zero frame count
+1. check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val pacer = FramePacer.for_60hz()
+check(pacer.total_frames() == 0)
+```
+
+</details>
+
+#### mark_frame_end increments frame count
+
+1. pacer mark frame start
+2. pacer mark frame end
+3. check
 
 
 <details>
@@ -506,28 +542,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("starts with zero frame count")
-val pacer = FramePacer.for_60hz()
-check(pacer.total_frames() == 0)
-```
-
-</details>
-
-#### mark_frame_end increments frame count
-
-- mark_frame_end increments frame count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-INTEGRATION
-step("mark_frame_end increments frame count")
 val pacer = FramePacer.for_60hz()
 pacer.mark_frame_start()
 pacer.mark_frame_end()
@@ -538,18 +552,18 @@ check(pacer.total_frames() == 1)
 
 #### should_present is false immediately after frame_start
 
-- should_present is false immediately after frame_start
+1. pacer mark frame start
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("should_present is false immediately after frame_start")
 # Right after mark_frame_start, 0ms have elapsed → no present needed.
 val pacer = FramePacer.for_60hz()
 pacer.mark_frame_start()
@@ -567,18 +581,17 @@ val _ = result
 
 #### remaining_budget_ms returns a non-negative value
 
-- remaining_budget_ms returns a non-negative value
+1. pacer mark frame start
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("remaining_budget_ms returns a non-negative value")
 val pacer = FramePacer.for_60hz()
 pacer.mark_frame_start()
 val rem = pacer.remaining_budget_ms()
@@ -589,18 +602,17 @@ check(rem >= 0)
 
 #### elapsed_ms returns a non-negative value
 
-- elapsed_ms returns a non-negative value
+1. pacer mark frame start
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("elapsed_ms returns a non-negative value")
 val pacer = FramePacer.for_60hz()
 pacer.mark_frame_start()
 val el = pacer.elapsed_ms()
@@ -611,18 +623,18 @@ check(el >= 0)
 
 #### sleep_remaining does not crash
 
-- sleep_remaining does not crash
+1. pacer mark frame start
+2. pacer sleep remaining
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("sleep_remaining does not crash")
 val pacer = FramePacer.for_60hz()
 pacer.mark_frame_start()
 # Should complete without error (may sleep 0ms if budget already elapsed).
@@ -636,7 +648,27 @@ check(true)
 
 #### starts with zero frames
 
-- starts with zero frames
+1. check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val counters = WmPerfCounters.new()
+check(counters.total_frames() == 0)
+```
+
+</details>
+
+#### mark_frame increments frame count
+
+1. counters mark frame
+2. counters mark frame
+3. check
 
 
 <details>
@@ -646,28 +678,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("starts with zero frames")
-val counters = WmPerfCounters.new()
-check(counters.total_frames() == 0)
-```
-
-</details>
-
-#### mark_frame increments frame count
-
-- mark_frame increments frame count
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-INTEGRATION
-step("mark_frame increments frame count")
 val counters = WmPerfCounters.new()
 counters.mark_frame()
 counters.mark_frame()
@@ -678,18 +688,18 @@ check(counters.total_frames() == 2)
 
 #### start_phase and end_phase do not crash for known phase
 
-- start_phase and end_phase do not crash for known phase
+1. counters start phase
+2. counters end phase
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("start_phase and end_phase do not crash for known phase")
 val counters = WmPerfCounters.new()
 counters.start_phase("paint")
 counters.end_phase("paint")
@@ -700,18 +710,18 @@ check(true)
 
 #### start_phase and end_phase ignore unknown phase names
 
-- start_phase and end_phase ignore unknown phase names
+1. counters start phase
+2. counters end phase
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("start_phase and end_phase ignore unknown phase names")
 val counters = WmPerfCounters.new()
 # unknown phase names are silently ignored (no crash)
 # verified by calling a known phase to ensure the API works
@@ -724,18 +734,16 @@ check(true)
 
 #### mean_ms returns 0 for phase with no samples
 
-- mean_ms returns 0 for phase with no samples
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("mean_ms returns 0 for phase with no samples")
 val counters = WmPerfCounters.new()
 check(counters.mean_ms("paint") == 0)
 ```
@@ -744,18 +752,16 @@ check(counters.mean_ms("paint") == 0)
 
 #### p50_ms returns 0 for phase with no samples
 
-- p50_ms returns 0 for phase with no samples
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("p50_ms returns 0 for phase with no samples")
 val counters = WmPerfCounters.new()
 check(counters.p50_ms("layout") == 0)
 ```
@@ -764,18 +770,16 @@ check(counters.p50_ms("layout") == 0)
 
 #### p95_ms returns 0 for phase with no samples
 
-- p95_ms returns 0 for phase with no samples
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("p95_ms returns 0 for phase with no samples")
 val counters = WmPerfCounters.new()
 check(counters.p95_ms("present") == 0)
 ```
@@ -784,18 +788,23 @@ check(counters.p95_ms("present") == 0)
 
 #### records samples for all six known phases
 
-- records samples for all six known phases
+1. counters start phase
+2. counters end phase
+3. check
+4. check
+5. check
+6. check
+7. check
+8. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("records samples for all six known phases")
 val counters = WmPerfCounters.new()
 val phases = ["event_wait", "input", "layout", "paint", "present", "idle"]
 var i = 0
@@ -816,18 +825,20 @@ check(counters.mean_ms("idle") >= 0)
 
 #### report does not crash
 
-- report does not crash
+1. counters start phase
+2. counters end phase
+3. counters mark frame
+4. counters report
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("report does not crash")
 val counters = WmPerfCounters.new()
 counters.start_phase("paint")
 counters.end_phase("paint")
@@ -840,18 +851,16 @@ check(true)
 
 #### mean_ms returns unknown phase as 0
 
-- mean_ms returns unknown phase as 0
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("mean_ms returns unknown phase as 0")
 val counters = WmPerfCounters.new()
 # mean_ms for a known phase with no samples returns 0
 check(counters.mean_ms("paint") == 0)
@@ -863,18 +872,24 @@ check(counters.mean_ms("paint") == 0)
 
 #### single frame: add dirty rect, check present gate, clear
 
-- single frame: add dirty rect, check present gate, clear
+1. pacer mark frame start
+2. dirty add rect
+3. check
+4. check
+5. check
+6. dirty clear
+7. pacer mark frame end
+8. check
+9. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("single frame: add dirty rect, check present gate, clear")
 val dirty = DirtyRegion.new()
 val pacer = FramePacer.for_60hz()
 
@@ -899,18 +914,18 @@ check(pacer.total_frames() == 1)
 
 #### skips present when region is clean
 
-- skips present when region is clean
+1. pacer mark frame start
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("skips present when region is clean")
 val dirty = DirtyRegion.new()
 val pacer = FramePacer.for_60hz()
 
@@ -925,18 +940,37 @@ check(pacer.total_frames() == 0)
 
 #### counters track a full frame pipeline
 
-- counters track a full frame pipeline
+1. pacer mark frame start
+2. counters start phase
+3. counters end phase
+4. counters start phase
+5. dirty add rect
+6. counters end phase
+7. counters start phase
+8. counters end phase
+9. counters start phase
+10. check
+11. counters end phase
+12. counters start phase
+13. dirty clear
+14. counters end phase
+15. pacer mark frame end
+16. counters mark frame
+17. counters start phase
+18. pacer sleep remaining
+19. counters end phase
+20. check
+21. check
+22. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("counters track a full frame pipeline")
 val counters = WmPerfCounters.new()
 val dirty = DirtyRegion.new()
 val pacer = FramePacer.for_60hz()
@@ -989,55 +1023,7 @@ check(pacer.total_frames() == 1)
 
 ## Related Documentation
 
-- **Design:** `doc/05_design/graphics_backend_acceleration.md`
+- **Design:** [doc/05_design/graphics_backend_acceleration.md](doc/05_design/graphics_backend_acceleration.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `37ce29dd8ecce2d682ab9b9c3b4b561c9ec108aa539b0748af93a2a0887a3d9e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `37ce29dd8ecce2d682ab9b9c3b4b561c9ec108aa539b0748af93a2a0887a3d9e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `37ce29dd8ecce2d682ab9b9c3b4b561c9ec108aa539b0748af93a2a0887a3d9e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/rendering/wm_perf_spec.spl
-mirror: doc/06_spec/02_integration/rendering/wm_perf_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/rendering/wm_perf_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/rendering/wm_perf_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/rendering/wm_perf_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts empty' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/wm_perf_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is dirty after add_rect' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/rendering/wm_perf_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ignores zero-size rects' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

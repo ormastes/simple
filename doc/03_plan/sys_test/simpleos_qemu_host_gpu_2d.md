@@ -43,40 +43,6 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 
 ## Evidence Rules
 
-The Phase-2 bootstrap diagnostic opt-in is a troubleshooting lane, not an
-attestation lane. It is ARM64-only, must use a distinct diagnostic build tree,
-and emits `diagnostic-phase2-non-attested` even when its build and QEMU probes
-succeed. Release or production evidence must continue through the default
-full-CLI `simple_binary_is_valid` admission path.
-
-### ARM64 Phase-2 diagnostic state (2026-08-05)
-
-The final bounded diagnostic reached the guest linker after the host daemon
-built successfully, then failed on the missing ARM64 freestanding owner
-`rt_native_cmp`; no QEMU process or serial/RAMFB receipt was produced. Evidence
-is retained in
-`build/arm64-host-gpu-phase2-diagnostic-cycle3/aarch64-build.log`. Resume only
-with a fresh authorized diagnostic cycle using:
-
-```sh
-SIMPLE_BIN=/private/tmp/simple-module-init-cycle1/build/module-init-cycle3/stage2/aarch64-apple-darwin/simple \
-SIMPLEOS_HOST_GPU_ALLOW_BOOTSTRAP_COMPILER_DIAGNOSTIC=1 \
-SIMPLEOS_HOST_GPU_RUNTIME_PATH=/private/tmp/simple-module-init-cycle1/build/module-init-cycle3/stage3/aarch64-apple-darwin/stage2-runtime-authority \
-SIMPLEOS_HOST_GPU_GUEST_ISAS=aarch64 \
-SIMPLEOS_HOST_GPU_BUILD_DIR=build/arm64-host-gpu-phase2-diagnostic-resume \
-sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
-```
-
-The next fresh diagnostic cleared `rt_native_cmp`: daemon, ARM64 probe guest,
-and ARM64 production guest all linked, and QEMU 10.2.2 launched with HVF,
-`-cpu host`, 512 MiB file-backed RAM, and the RAM tail shared-memory transport.
-The first runtime failure was the host daemon's unresolved
-`Array.data_ptr` dispatch before negotiation; serial consequently recorded a
-Metal hello timeout and no RAMFB production run occurred. The Metal SFFI owner
-now calls the existing typed `rt_array_data_ptr_u8` runtime facade instead of
-the unsupported array method. Evidence is retained in
-`build/arm64-host-gpu-phase2-diagnostic-runtimecmp-cycle1/`.
-
 The wrapper must boot the target guest, capture guest negotiation/submission,
 capture the host daemon device receipt, and correlate IDs and checksums. A row
 cannot pass from QEMU flags, QMP screenshots, VirtIO-GPU scanout, synthetic

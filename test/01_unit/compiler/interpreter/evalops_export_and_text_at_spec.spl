@@ -1,3 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 extern fn rt_file_read_text(path: text) -> text
 
 # Pure-Simple interpreter: _EvalOps export completeness + text `.at` dispatch.
@@ -58,7 +66,14 @@ fn arm_body(source: text, start_marker: text, end_marker: text) -> text:
 # Names defined as `fn NAME(` at the start of a line in `src` that are NOT named
 # on any line of `init_src`. Token-anchored on both sides, so an export of
 # `eval_dict_literal` does not satisfy a definition of `eval_dict_lit`.
-fn unexported_fns(src: text, init_src: text) -> text:
+fn surface_lists_name(surface_src: text, name: text) -> bool:
+    # eval_ops.spl owns the documented public groups as parenthesized,
+    # comma-separated symbol lists. Match complete list tokens: a substring
+    # such as `eval_dict_lit` must not be promoted merely because prose names
+    # `eval_dict_literal`.
+    surface_src.contains("(" + name + ",") or surface_src.contains(", " + name + ",") or surface_src.contains(", " + name + ")") or surface_src.contains("(" + name + ")")
+
+fn unexported_public_fns(src: text, surface_src: text, init_src: text) -> text:
     var missing = ""
     var rest = "\n" + src
     while true:
@@ -70,7 +85,7 @@ fn unexported_fns(src: text, init_src: text) -> text:
         if paren < 0:
             break
         val name = rest.substring(0, paren)
-        if name.contains(" ") == false and name.contains("\n") == false:
+        if name.contains(" ") == false and name.contains("\n") == false and surface_lists_name(surface_src, name):
             val by_comma = init_src.contains(" " + name + ",")
             val by_eol = init_src.contains(" " + name + "\n")
             if by_comma == false and by_eol == false:
@@ -78,8 +93,11 @@ fn unexported_fns(src: text, init_src: text) -> text:
     missing
 
 describe "interpreter _EvalOps exports and text.at":
+    # @manual scenario evidence
 
     it "exports every _EvalOps function from the package __init__":
+        # @req REQ-SSPEC-UNIT
+        step("exports every _EvalOps function from the package __init__")
         # THE ITEM-3 PIN, and the reason items 1 and 2 stayed hidden for so long.
         #
         # eval_ops.spl re-exports the package with
@@ -95,6 +113,8 @@ describe "interpreter _EvalOps exports and text.at":
         # _EvalOps without exporting it turns this red and NAMES the function.
         val init_src = read_src(INIT_PATH)
         expect(init_src.len()).to_be_greater_than(0)
+        val surface_src = read_src(EVAL_OPS_PATH)
+        expect(surface_src.len()).to_be_greater_than(0)
         val call_src = read_src(CALL_METHOD_PATH)
         expect(call_src.len()).to_be_greater_than(0)
         val access_src = read_src(ACCESS_PATH)
@@ -104,13 +124,15 @@ describe "interpreter _EvalOps exports and text.at":
         # this, a scanner that silently matched nothing would report "no gaps"
         # and be vacuously green -- the false-green shape this campaign keeps
         # hitting.
-        expect(unexported_fns(call_src, "")).to_contain("eval_int_method")
-        expect(unexported_fns(access_src, "")).to_contain("eval_text_method")
+        expect(unexported_public_fns(call_src, surface_src, "")).to_contain("parse_float_text")
+        expect(unexported_public_fns(access_src, surface_src, "")).to_contain("eval_text_method")
 
-        expect(unexported_fns(call_src, init_src)).to_equal("")
-        expect(unexported_fns(access_src, init_src)).to_equal("")
+        expect(unexported_public_fns(call_src, surface_src, init_src)).to_equal("")
+        expect(unexported_public_fns(access_src, surface_src, init_src)).to_equal("")
 
     it "keeps eval_int_method reachable from the package export list":
+        # @req REQ-SSPEC-UNIT
+        step("keeps eval_int_method reachable from the package export list")
         # THE ITEM-1 PIN, stated as the specific symbol rather than relying on
         # the generic scan above, because this one has a live call site:
         # _EvalOps/call_method_eval.spl dispatches VAL_INT receivers to it. An
@@ -124,6 +146,8 @@ describe "interpreter _EvalOps exports and text.at":
         expect(init_src).to_contain("export eval_int_method")
 
     it "routes each receiver kind to a dispatcher the package exports":
+        # @req REQ-SSPEC-UNIT
+        step("routes each receiver kind to a dispatcher the package exports")
         # Generalises the block above: every `eval_*_method` the per-kind
         # dispatch calls must be exported, not just the one that bit us.
         val init_src = read_src(INIT_PATH)
@@ -132,6 +156,8 @@ describe "interpreter _EvalOps exports and text.at":
         expect(init_src).to_contain(" eval_int_method")
 
     it "gives text an at arm in the LIVE dispatch table":
+        # @req REQ-SSPEC-UNIT
+        step("gives text an at arm in the LIVE dispatch table")
         # THE ITEM-2 PIN. `at` was absent from the live text table AND from the
         # eval_methods.spl copy deleted on 2026-08-01, so it is a genuine gap
         # rather than a regression from that deletion. Arrays already had `at`.
@@ -153,6 +179,8 @@ describe "interpreter _EvalOps exports and text.at":
         expect(body).to_contain("at_idx >= 0 and at_idx < s.len()")
 
     it "returns flat None from text .at out of range, matching array .at":
+        # @req REQ-SSPEC-UNIT
+        step("returns flat None from text .at out of range, matching array .at")
         # `.at` is this codebase's bounds-checked Option accessor. Array `.at`
         # returns flat-None (nil) past the end -- the element itself is its own
         # `Some`, per the FLAT Option encoding; there is no VAL_ENUM in this
@@ -173,6 +201,8 @@ describe "interpreter _EvalOps exports and text.at":
         expect(array_at).to_contain("return val_make_nil()")
 
     it "fails LOUDLY when text .at is called with no index":
+        # @req REQ-SSPEC-UNIT
+        step("fails LOUDLY when text .at is called with no index")
         # A missing argument is a caller bug, not an empty string. char_at's
         # older no-arg behaviour (return "") is exactly the silent-default shape
         # this campaign keeps having to undo, so `at` must not copy it.
@@ -182,6 +212,8 @@ describe "interpreter _EvalOps exports and text.at":
         expect(body).to_contain("return -1")
 
     it "documents text .at as a deliberate divergence from the seed":
+        # @req REQ-SSPEC-UNIT
+        step("documents text .at as a deliberate divergence from the seed")
         # DO NOT "fix" this toward the seed. The seed
         # (src/compiler_rust/compiler/src/interpreter_method/string.rs, where
         # `"char_at" | "at"` share one arm) is CHARACTER-indexed and returns ""

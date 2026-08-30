@@ -74,6 +74,8 @@ Rules:
   `mci-fault-injection-domain-arena-evidence-v1` plus
   `fault-injection.unsigned.template`. The admission capsule owns their distinct
   scenario maps and parses each signed conversion as a separate required row.
+  V1 validates a finite 16 MiB profile quota before constructing either of its
+  two backing banks; oversized sealed profiles fail closed without a bank.
 - Policy belongs to the admission owner, not to adapters or evidence producers.
 - Backend-specific execution remains beside its backend because its invariants and
   hot paths differ. Only its stable provenance/readback receipt moves upward.
@@ -434,7 +436,7 @@ publication channel.
 | REQ-MCI-003/004, NFR-MCI-008 | `CertifiedPlatformManifestV1` and SimpleOS platform capsule |
 | REQ-MCI-005/006, NFR-MCI-006 | Packed DrawIR-v3 arena, Engine2D provenance/readback receipts |
 | REQ-MCI-007/008, NFR-MCI-004/005 | `RelaxedAllocationProfileV1`, per-domain arena receipts, fault injection |
-| REQ-MCI-009 | `nogc_sync_mut.mission_critical.bounded_process_policy`: generation-bound slot reservations; opaque owner leases binding run/execution/start identity, PID, PGID, and slot token; sequenced termination/reap states; checked incremental capture receipts. Unit controls reject stale races, replay, PID reuse, forged groups, last-slot competition, and chunk overflow. The native owned-process provider now supplies a mutex-synchronized fixed-slot registry, PID/start-identity binding, bounded capture, and `fork`/process-group/pidfd signal/registered-reap integration through the canonical facade ABI. **BLOCKED release evidence:** the Simple facade is synchronous and exposes no public cancel/terminate operation, the interpreter deliberately fails closed, and no admitted exact-current native Simple receipt yet proves the source-matched deployed ABI. |
+| REQ-MCI-009 | `nogc_sync_mut.mission_critical.bounded_process_policy`: generation-bound slot reservations and bounded synchronous capture are implemented. `process_run_owned_bounded` publishes a 19-field receipt, but no usable public async owner-token lifecycle exists; a synchronous receipt is stale after return. Raw PID fallback and interpreter paths fail closed. Async cancellation and source-matched native Simple admission remain release blockers. |
 | REQ-MCI-011 | Matrix requirement rows, executable SSpec evidence, operator flow |
 | NFR-MCI-007 | Profile-specific CLI/MCP/LSP performance receipts |
 
@@ -489,6 +491,28 @@ is the merge owner. Sidecar-generated broad findings or evidence require review
 by a normal/highest-capability reviewer; that reviewer identity is part of the
 matrix. Architectural or profile changes that widen a claim require the same
 review and fresh evidence.
+
+## References
+
+## AC-6 formal-evidence capsule
+
+AC-6 is an ordered formal-evidence capsule, not a single Lean-build result.
+The common contracts are owned by `src/compiler/00.common/assurance/`; canonical
+typed obligations originate in `src/compiler/50.mir/`; proof/tool receipts are
+collected in `src/compiler/90.tools/verify/`; and V2 release materialization is
+owned by `src/app/verify/`.  No sibling may bypass these owners with a private
+status or receipt format.
+
+| Evidence row | Executable owner | Claim boundary |
+|---|---|---|
+| Lean model, concurrency, memory, storage, boundary, compiler/language, UI | `scripts/check/check-simpleos-formal-coverage.shs` and its listed sub-gates | `model_proven` until canonical woven Simple/VIR refinement and artifact receipt exist. |
+| RISC-V dual track and RTL/SBY | `scripts/check/check-riscv-formal-dual-track.shs`, `scripts/rtl/check-rvfi-formal-readiness.shs`, `scripts/check/check-riscv-rtl-sby-proof.shs` | HOLD until generated RTL is non-placeholder, RVFI derives from HWIR retirement, SBY evidence and HWIR-to-RTL receipt bind exact hashes. |
+| Independent replay | `scripts/check/run-fv2-simpleos-independent-replay.shs` and `src/app/verify/independent_replay_adapter.spl` | HOLD for roots rejected by closed nanoda; fresh Lean replay alone is not independent replay. |
+| Native/codegen, CPU/SIMD, Vulkan/RenderDoc, QEMU/FPGA correspondence | current MCI/SimpleOS host gates | HOLD unless target-host artifact, board/host identity, evidence hashes, and declared correspondence relation are present. |
+
+The aggregate is monotone: a missing tool, unavailable host, placeholder RTL,
+blocked nanoda root, or failed monitor remains `blocked`/`unsupported` and
+prevents `artifact_verified`; it is never converted to a skipped/model-only pass.
 
 ## References
 

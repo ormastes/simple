@@ -1,16 +1,5 @@
 # Tensor Bridge Batch Conversion
 
-> Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor arrays. Validates flattening Vec3 lists to float arrays, unflattening arrays back to Vec3 lists, round-trip consistency, and equivalent operations for double-precision Vec3d types.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Tensor Bridge Batch Conversion
-
 Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor arrays. Validates flattening Vec3 lists to float arrays, unflattening arrays back to Vec3 lists, round-trip consistency, and equivalent operations for double-precision Vec3d types.
 
 ## At a Glance
@@ -20,165 +9,9 @@ Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor a
 | Feature IDs | #ML-001 |
 | Category | Runtime |
 | Status | Active |
-| Source | `test/feature/usage/tensor_bridge_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor
-arrays. Validates flattening Vec3 lists to float arrays, unflattening arrays
-back to Vec3 lists, round-trip consistency, and equivalent operations for
-double-precision Vec3d types.
-
-## Syntax
-
-```simple
-use std.spec.step
-
-val vecs = [math.Vec3(1.0, 2.0, 3.0), math.Vec3(4.0, 5.0, 6.0)]
-val arr = math.vecs_to_tensor(vecs)
-val restored = math.tensor_to_vecs(arr)
-```
-
-## Scenarios
-
-### Tensor Bridge Batch Conversion
-
-#### arrtens Vec3 list to array
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- arrtens Vec3 list to array
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("arrtens Vec3 list to array")
-val vecs = [
-    math.Vec3(1.0, 2.0, 3.0),
-    math.Vec3(4.0, 5.0, 6.0)
-]
-val arr = math.vecs_to_tensor(vecs)
-expect arr.len() == 6
-expect arr[0] == 1.0
-expect arr[1] == 2.0
-expect arr[2] == 3.0
-expect arr[3] == 4.0
-expect arr[4] == 5.0
-expect arr[5] == 6.0
-```
-
-</details>
-
-#### unarrtens array to Vec3 list
-
-- unarrtens array to Vec3 list
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("unarrtens array to Vec3 list")
-val arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-val vecs = math.tensor_to_vecs(arr)
-expect vecs.len() == 2
-expect vecs[0].x == 1.0
-expect vecs[0].y == 2.0
-expect vecs[0].z == 3.0
-expect vecs[1].x == 4.0
-```
-
-</details>
-
-#### round-trips Vec3 list
-
-- round-trips Vec3 list
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("round-trips Vec3 list")
-val original = [
-    math.Vec3(10.0, 20.0, 30.0),
-    math.Vec3(40.0, 50.0, 60.0)
-]
-val arr = math.vecs_to_tensor(original)
-val restored = math.tensor_to_vecs(arr)
-expect restored.len() == 2
-expect restored[0].x == 10.0
-expect restored[1].z == 60.0
-```
-
-</details>
-
-### Tensor Bridge Vec3d Batch Conversion
-
-#### arrtens Vec3d list to f64 array
-
-- arrtens Vec3d list to f64 array
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("arrtens Vec3d list to f64 array")
-val vecs = [
-    math.Vec3d(1.0, 2.0, 3.0),
-    math.Vec3d(4.0, 5.0, 6.0)
-]
-val arr = math.vecs3d_to_tensor(vecs)
-expect arr.len() == 6
-expect arr[0] == 1.0
-```
-
-</details>
-
-#### unarrtens f64 array to Vec3d list
-
-- unarrtens f64 array to Vec3d list
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("unarrtens f64 array to Vec3d list")
-val arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-val vecs = math.tensor_to_vecs3d(arr)
-expect vecs.len() == 2
-expect vecs[0].x == 1.0
-```
-
-</details>
+| Source | `test/03_system/feature/usage/tensor_bridge_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -190,53 +23,37 @@ expect vecs[0].x == 1.0
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+## Overview
 
-</details>
+Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor
+arrays. Validates flattening Vec3 lists to float arrays, unflattening arrays
+back to Vec3 lists, round-trip consistency, and equivalent operations for
+double-precision Vec3d types.
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
+## Syntax
 
-Requirements covered by the scenarios in this manual:
+```simple
+val vecs = [math.Vec3(1.0, 2.0, 3.0), math.Vec3(4.0, 5.0, 6.0)]
+val arr = math.vecs_to_tensor(vecs)
+val restored = math.tensor_to_vecs(arr)
+```
 
-- `REQ-SSPEC-FEATURE`
-<!-- sspec-maintain:traceability:end -->
+## Evidence
 
-<!-- sspec-maintain:provenance:start -->
-## Generation history
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- Canonical SPipe generation for source `61bedb1e3aadc3c4733ba7f8fc2f7550bd568c0631e8951e484223fe2ea106c9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+### Artifacts
 
-Source SHA-256: `61bedb1e3aadc3c4733ba7f8fc2f7550bd568c0631e8951e484223fe2ea106c9`.
-<!-- sspec-maintain:provenance:end -->
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/tensor_bridge/result.json` |
 
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
+## Scenarios
 
-Source SHA-256: `61bedb1e3aadc3c4733ba7f8fc2f7550bd568c0631e8951e484223fe2ea106c9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/feature/usage/tensor_bridge_spec.spl
-mirror: doc/06_spec/feature/usage/tensor_bridge_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/feature/usage/tensor_bridge_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/feature/usage/tensor_bridge_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/feature/usage/tensor_bridge_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'arrtens Vec3 list to array' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/tensor_bridge_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unarrtens array to Vec3 list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/tensor_bridge_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips Vec3 list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+- arrtens Vec3 list to array
+- unarrtens array to Vec3 list
+- round-trips Vec3 list
+- arrtens Vec3d list to f64 array
+- unarrtens f64 array to Vec3d list

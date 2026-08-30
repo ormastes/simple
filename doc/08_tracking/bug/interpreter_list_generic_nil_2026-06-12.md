@@ -2,8 +2,7 @@
 
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** Source fixed in Rust-seed and pure-Simple interpreters;
 direct-constructor execution pending
 
 ## Symptom
@@ -37,32 +36,6 @@ or bare local `List` values.
   (`.claude/skills/lib/spipe_ui.md`).
 - Any compositor unit spec running in interpreter mode has the same ceiling.
 
-## Resolution
-
-Generic-call parsing now preserves `List<i64>()` as a call to `List`, and the
-Rust class-instantiation path honors the object returned by an implicit
-zero-argument `new`. The pure-Simple core interpreter now mirrors that rule:
-an uppercase declared type called with no source arguments dispatches an
-existing static `Type__new`, while the field-bearing call inside `new` still
-falls through to ordinary construction. `List.new()` therefore returns
-`List(items: [])` instead of a value whose `items` field is nil.
-
-The pure-Simple fix also registers methods nested in parser-generated
-`DECL_IMPL` blocks for both the current module and lazily loaded modules. A
-small active-constructor stack prevents `Type.new()` implementations that
-return `Type()` from recursively invoking themselves; it does not suppress a
-different type's constructor.
-
-`test/01_unit/lib/core/list_constructor_hardening_spec.spl` now exercises the
-original spelling directly, pushes one item, and reads it back. This replaces
-the earlier source scan that merely banned the crashing spelling. The focused
-core CI lane now executes this exact spec in interpreter mode and the bootstrap
-portability audit pins both its workflow triggers and command. First CI
-execution is pending. The core-interpreter integration program also contains a
-local generic `Bucket<T>()` sentinel and CI requires its `Fail: 0` / `ALL TESTS
-PASSED` summary, covering the pure-Simple evaluator rather than only the Rust
-seed's class-instantiation implementation.
-
 ## Notes
 
 - `dict`/array-backed modules are unaffected (audio_bus_spec 30/0,
@@ -73,4 +46,7 @@ seed's class-instantiation implementation.
 - Fix belongs in the interpreter generic-class instantiation path; pure-Simple
   first if the constructor lowering lives in `src/compiler`, seed otherwise.
 - 2026-06-22: owned `src/` uses of the crashing direct constructor spelling
-  `List<T>()` were rewritten to `List<T>.new()` as a temporary workaround.
+  `List<T>()` were rewritten to the working `List<T>.new()` form, covering the
+  compositor modules called out above. Guarded by
+  `test/01_unit/lib/core/list_constructor_hardening_spec.spl`. Root interpreter
+  constructor lowering remains open.

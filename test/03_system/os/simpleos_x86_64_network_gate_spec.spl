@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -6,9 +12,11 @@ fn x86_64_ssh_qemu_live_enabled() -> bool:
     (rt_env_get("SIMPLEOS_X64_SSH_QEMU") ?? "") == "1"
 
 describe "SimpleOS x86_64 network readiness gate":
+    # @manual scenario evidence
     it "keeps the x86_64 baremetal runtime on real virtio packet IO":
+        # @req REQ-SSPEC-SYSTEM
+        step("keeps the x86_64 baremetal runtime on real virtio packet IO")
         val runtime = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
-        val owners = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_64/boot/runtime_service_owners.c")
 
         # virtio-net PCI device bring-up (MMIO via port I/O, RX/TX rings)
         expect(runtime).to_contain("static int _virtio_net_init(void)")
@@ -21,8 +29,8 @@ describe "SimpleOS x86_64 network readiness gate":
         expect(runtime).to_contain("_vnet_handle_icmp")
 
         # device-level TX/RX probes (x86_64 parity with the riscv freestanding runtime)
-        expect(owners).to_contain("int64_t rt_net_tx_test(void)")
-        expect(owners).to_contain("int64_t rt_net_rx_ready(void)")
+        expect(runtime).to_contain("int64_t rt_net_tx_test(void)")
+        expect(runtime).to_contain("int64_t rt_net_rx_ready(void)")
         expect(runtime).to_contain("static void _x86_net_probe_txrx(void)")
         expect(runtime).to_contain("_vnet_send_arp_request(_vnet.gateway_ip)")
 
@@ -31,6 +39,8 @@ describe "SimpleOS x86_64 network readiness gate":
         expect(runtime).to_contain("rt_net_bind(socket_fd, 22)")
 
     it "arms TX before RX and probes are not just device-present checks":
+        # @req REQ-SSPEC-SYSTEM
+        step("arms TX before RX and probes are not just device-present checks")
         val runtime = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
 
         # tx probe must observe a real TX completion, not just _vnet.initialized
@@ -43,22 +53,23 @@ describe "SimpleOS x86_64 network readiness gate":
         expect(arp).to_be_greater_than(-1)
 
     it "requires packet TX and RX readiness before reporting network ready":
+        # @req REQ-SSPEC-SYSTEM
+        step("requires packet TX and RX readiness before reporting network ready")
         val services = rt_file_read_text("src/os/kernel/boot/x86_64_services.spl")
 
         expect(services).to_contain("extern fn rt_net_tx_test() -> i64")
         expect(services).to_contain("extern fn rt_net_rx_ready() -> i64")
-        expect(services).to_contain("val count = if raw_count >= 0 and raw_count <= X86_64_PCI_DEVICE_LIMIT")
-        expect(services).to_contain("val device_id = _x86_64_pci_get_field(i, 6)")
+        expect(services).to_contain("val device_id = rt_pci_get_field(i, 6)")
         expect(services).to_contain("device_id == 0x1000 or device_id == 0x1041")
-        expect(services).to_contain("val tx_rc = _x86_64_net_tx_test()")
-        expect(services).to_contain("val rx_rc = _x86_64_net_rx_ready()")
+        expect(services).to_contain("val tx_rc = rt_net_tx_test()")
+        expect(services).to_contain("val rx_rc = rt_net_rx_ready()")
         expect(services).to_contain("[net-x86] Network packet TX unavailable rc=")
         expect(services).to_contain("[net-x86] Network packet TX ready")
         expect(services).to_contain("[net-x86] Network packet RX unavailable rc=")
         expect(services).to_contain("network_ok = 1")
 
-        val tx_probe = services.find("val tx_rc = _x86_64_net_tx_test()")
-        val rx_probe = services.find("val rx_rc = _x86_64_net_rx_ready()")
+        val tx_probe = services.find("val tx_rc = rt_net_tx_test()")
+        val rx_probe = services.find("val rx_rc = rt_net_rx_ready()")
         val ready_set = services.find("network_ok = 1")
         expect(tx_probe).to_be_greater_than(-1)
         expect(rx_probe).to_be_greater_than(-1)
@@ -66,6 +77,8 @@ describe "SimpleOS x86_64 network readiness gate":
         expect(ready_set).to_be_greater_than(rx_probe)
 
     it "makes sshd autostart reusable from the boot/init path, not only the gated entry":
+        # @req REQ-SSPEC-SYSTEM
+        step("makes sshd autostart reusable from the boot/init path, not only the gated entry")
         val autostart = rt_file_read_text("src/os/apps/sshd/x86_64_sshd_autostart.spl")
 
         expect(autostart).to_contain("os.kernel.boot.x86_64_services")
@@ -76,15 +89,19 @@ describe "SimpleOS x86_64 network readiness gate":
         expect(autostart).to_contain("daemon.start()")
 
     it "routes the gated ssh_live entry through the shared network service init":
+        # @req REQ-SSPEC-SYSTEM
+        step("routes the gated ssh_live entry through the shared network service init")
         val live = rt_file_read_text("examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl")
 
         expect(live).to_contain("os.kernel.boot.x86_64_services")
         expect(live).to_contain("val net_ok = init_x86_64_network_service()")
         expect(live).to_contain("SshDaemon.new(22)")
         # the ad-hoc single-call init must be gone (readiness now goes through the service)
-        expect(live.index_of("val net_init = rt_net_init()")).to_equal(-1)
+        expect(live.index_of("val net_init = rt_net_init()") ?? -1).to_equal(-1)
 
     it "keeps a virtio-net device attached in the x86_64 q35 QEMU lanes":
+        # @req REQ-SSPEC-SYSTEM
+        step("keeps a virtio-net device attached in the x86_64 q35 QEMU lanes")
         val smoke = rt_file_read_text("scripts/os/run_simpleos_q35_smoke.shs")
         val scenarios = rt_file_read_text("src/os/_QemuRunner/scenario_disks.spl")
 
@@ -93,6 +110,8 @@ describe "SimpleOS x86_64 network readiness gate":
         expect(scenarios).to_contain("virtio-net-pci,netdev=n0,disable-modern=on,disable-legacy=off")
 
     it "runs the live x86_64 SSH network bring-up QEMU gate when explicitly enabled":
+        # @req REQ-SSPEC-SYSTEM
+        step("runs the live x86_64 SSH network bring-up QEMU gate when explicitly enabled")
         if x86_64_ssh_qemu_live_enabled():
             val result = rt_process_run_timeout(
                 "sh",

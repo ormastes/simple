@@ -1,153 +1,79 @@
-# Simpleos Font Asset Staging Specification
+# SimpleOS Font Asset Staging Specification
 
-> Tests covering SimpleOS pinned font asset staging.
+> Static integration contract for packaging the selected SimpleOS font/legal
+> bundle through every image builder and loading exact font bytes under
+> canonical identities.
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
+|-------|--------|---------|---------|
 | 2 | 2 | 0 | 0 |
 
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Simpleos Font Asset Staging Specification
-
-## Scenarios
+## Scenario
 
 ### SimpleOS pinned font asset staging
 
-#### should use the pinned Noto Sans Mono path length and hash
+The selected SimpleOS candidate is Noto Sans Mono at the canonical repository
+path, exactly 1,708,408 bytes, with SHA-256
+`2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+One OS-owned projection maps exactly 53 files: all 50 pinned Google Fonts files
+(16 TTFs, 16 `METADATA.pb`, 16 adjacent licenses, Roboto Slab copyright, and
+`CORPUS.sdn`), the CLDR license, root `LICENSE`, and
+`THIRD_PARTY_NOTICES.md`. The six CLDR XML/source/ranking inputs remain
+build-time-only. Installer, initramfs, and legacy pure-Simple FAT32 construction
+iterate this projection. The 16 TTFs retain their readable registry-owned VFAT
+long names and unique 8.3 compatibility aliases; companions use collision-free
+8.3 siblings in `/SYS/FONTS`. The guest uses TTF paths only as byte sources and
+registers them under canonical identities. Pure-Simple and live C FAT32 readers
+use a bounded 32 MiB ceiling, leaving 8,428,920 bytes above the largest pinned
+25,125,512-byte candidate.
+The pure-Simple disk writer emits checksummed ASCII VFAT slots, collision-safe
+short aliases, and multi-cluster directory chains; the shared reader resolves
+the long path first and preserves the raw short-name reader as boot fallback.
+One shared desktop bootstrap enables registered-only font resolution, reads the
+default face from its registry-owned long VFS path and then its 8.3 alias, and
+registers the exact bytes under the canonical identity. The shared VFS reader
+attempts the pure NVMe/FAT32 boot path before requiring a mounted VFS, so early
+desktop font bootstrap can read validated media without weakening later mounted
+filesystem checks. The
+x86_64 and AArch64 canonical entries call it before creating Engine2D; neither
+owns a private font loader or post-frame text draw. AArch64 first resets and
+mounts the existing VirtIO-BLK FAT32 initializer. Its canonical desktop QEMU
+targets attach the existing ARM filesystem image arguments, and the scenario
+media gate builds that image before launch. Existing ARM images are accepted
+only when `mtype` plus `sha256sum`/`shasum` prove `/SYS/FONTS/NOTOSANS` is
+exactly 1,708,408 bytes with the pinned SHA-256; hosts without those tools fail
+closed instead of trusting image manifest text. Successful registration
+selects the VFS face; only failed mount or validation selects bitmap fallback.
+The ARM initializer clears VFS state both before probing and after a failed
+post-mount executable probe, so a rejected image cannot remain marked ready.
+RV64 is intentionally unchanged: its current driver path is ARM-only and its
+64 KiB runtime heap cannot support this vector-font bootstrap, so the existing
+bitmap lane makes no vector-font claim.
+The Simple Browser independently iterates the same 16-candidate registry, reads
+each readable long path with its short alias as the only fallback, registers
+bytes under the canonical repository identity, and refuses to render when the
+registered count differs from the selected catalog count.
 
+Every Simple builder validates the exact returned byte array before staging.
+The still-live C compatibility wrapper mirrors the same 53 files: its shell
+preflight validates all 16 TTF hashes and a 35-entry companion checksum
+manifest through `sha256sum` or `shasum`; root notices remain nonempty
+transport-owned inputs. Its `/SYS/FONTS` directory uses 91 of 128 available
+entries, including TTF LFN slots. `SIMPLEOS_FONT_ASSET` may relocate only the
+exact hash-validated Noto Sans Mono TTF bytes; metadata and license reads remain
+anchored to the canonical pinned repository directory, so altered override
+siblings cannot enter the image. The shell rejects stale pinned bytes and the C
+writer rejects missing or empty required inputs.
 
-- should use the pinned Noto Sans Mono path length and hash
-- Inspect the default SimpleOS font identity
-   - Expected: font.local_path equals `assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`
-   - Expected: font.byte_len equals `1708408`
-   - Expected: font.sha256 equals `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`
+Each architecture's live bridge grows one static path-read buffer from 4 MiB to
+32 MiB: a 28 MiB `.bss` increase in the selected kernel image, not 28 MiB per
+font and not both architectures in one image. This fits the normal 512 MiB x86
+guest budget and leaves the maximum face below the buffer cap; retained x86/ARM
+guest boot evidence remains pending. The canonical catalog and guest mapping
+remain owned by pure Simple. These are source and packaging assertions, not
+retained QEMU pixel evidence.
 
+## Executable source
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-INTEGRATION
-step("should use the pinned Noto Sans Mono path length and hash")
-step("Inspect the default SimpleOS font identity")
-val font = simpleos_default_font_asset_candidate()
-expect(font.local_path).to_equal("assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf")
-expect(font.byte_len).to_equal(1708408)
-expect(font.sha256).to_equal("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
-```
-
-</details>
-
-#### should stage the selected catalog through every Simple image tree builder
-
-- should stage the selected catalog through every Simple image tree builder
-- Inspect the shared 53-file SimpleOS font/legal projection
-- Preserve every existing guest font registry path
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-INTEGRATION
-step("should stage the selected catalog through every Simple image tree builder")
-step("Inspect the shared 53-file SimpleOS font/legal projection")
-expect_simpleos_font_asset()
-step("Preserve every existing guest font registry path")
-expect_simpleos_font_guest_paths()
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/02_integration/os/port/simpleos_font_asset_staging_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering SimpleOS pinned font asset staging.
-- SimpleOS pinned font asset staging
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7a4dcf7ed1eef265de02a152afc697a41b269af23c242e7f34aa5070e298df8e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7a4dcf7ed1eef265de02a152afc697a41b269af23c242e7f34aa5070e298df8e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7a4dcf7ed1eef265de02a152afc697a41b269af23c242e7f34aa5070e298df8e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
-mirror: doc/06_spec/02_integration/os/port/simpleos_font_asset_staging_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=90 oracle=90
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/os/port/simpleos_font_asset_staging_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/os/port/simpleos_font_asset_staging_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/os/port/simpleos_font_asset_staging_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/os/port/simpleos_font_asset_staging_spec.spl:209:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should use the pinned Noto Sans Mono path length and hash' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/os/port/simpleos_font_asset_staging_spec.spl:209:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should use the pinned Noto Sans Mono path length and hash' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/os/port/simpleos_font_asset_staging_spec.spl:218:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should stage the selected catalog through every Simple image tree builder' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/02_integration/os/port/simpleos_font_asset_staging_spec.spl:218:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should stage the selected catalog through every Simple image tree builder' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+`test/02_integration/os/port/simpleos_font_asset_staging_spec.spl`

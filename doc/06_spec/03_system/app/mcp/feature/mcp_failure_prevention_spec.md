@@ -1,6 +1,6 @@
 # MCP Failure Prevention
 
-> Release-blocking regression matrix for operators maintaining Simple MCP and
+> Verifies the mcp failure prevention behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # MCP Failure Prevention
 
-Release-blocking regression matrix for operators maintaining Simple MCP and
+Verifies the mcp failure prevention behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -24,29 +24,14 @@ Release-blocking regression matrix for operators maintaining Simple MCP and
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
-
-Release-blocking regression matrix for operators maintaining Simple MCP and
-Simple LSP MCP. It joins the existing source-loader, wrapper-admission, live
-protocol/tool, cache-invalidation, and warm performance gates without replacing
-their detailed diagnostics.
-
-## Preconditions
-
-The normal `bin/simple` must be a freshly admitted pure-Simple compiler. The
-production MCP and LSP wrappers must select executable, SHA-256-bound native
-artifacts. Rust-seed or source fallback is failure evidence.
-
+Verifies the mcp failure prevention behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
 ## Operator workflow
-
-Run this spec after compiler source-loading, runtime-symbol, MCP/LSP, wrapper,
-or packaging changes. Read the first failing step and then run the named
-canonical checker directly for its retained diagnostics.
-
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
 ## Compatibility and limitations
-
-The source contract is supporting evidence only. Endpoint acceptance comes from
-the native smoke and NFR sessions, which launch both production wrappers and
-make correlated tool calls.
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 ## Scenarios
 
@@ -217,7 +202,7 @@ check_marker(result, "mcp_lsp_nfr_status=pass")
 
 - should fail closed when the NFR sample count is invalid
 - Reject an invalid performance evidence configuration
-   - Expected: result.exit_code equals `2`
+   - Expected: result.exit_code equals `2)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -234,7 +219,7 @@ val result = run_mcp_gate("env", [
     "MCP_LSP_NFR_SAMPLES=0",
     "sh", "scripts/check/check-mcp-lsp-nfr-evidence.shs"
 ], 10000)
-expect(result.exit_code).to_equal(2)
+expect(result.exit_code).to_equal(2)  # oracle: pinned constant asserted by this scenario
 expect(result.stdout).to_contain("error=invalid_sample_count:0")
 ```
 

@@ -521,10 +521,10 @@ pub fn rt_io_tcp_socket_create_interp(args: &[Value]) -> Result<Value, CompileEr
     use socket2::{Domain, Protocol, Type};
     // family: 0 = IPv4, 1 = IPv6. Unknown values are contract failures and
     // must not silently select a provider family.
-    let family = args
-        .first()
-        .and_then(|value| value.as_int().ok())
-        .ok_or_else(|| crate::error::factory::argument_must_be(0, "i64"))?;
+    let family = match args.first() {
+        Some(Value::Int(family)) => *family,
+        _ => return Err(crate::error::factory::argument_must_be(0, "i64")),
+    };
     if family != 0 && family != 1 {
         return Ok(Value::Int(-1));
     }

@@ -1,5 +1,7 @@
-# Feature Group: network_tests,_qemu_scenarios,_and_smoke_scripts
+# network_tests,_qemu_scenarios,_and_smoke_scripts
 
-| ID | Status | Device | Component | Priority | Title | Pipeline Evidence |
-|----|--------|--------|-----------|----------|-------|-------------------|
-| FR-NET-0007 | current | network_tests,_qemu_scenarios,_and_smoke_scripts | network tests, QEMU scenarios, and smoke scripts | P1 | Add network performance and timeout verification harness | design |
+## Features
+
+| ID | Feature | Description | Modes | Platforms | Spec |
+|----|---------|-------------|-------|-----------|------|
+| <a id="feature-FR-NET-0007"></a>FR-NET-0007 | Add network performance and timeout verification harness | Create bounded network performance checks that measure connection setup, request latency, throughput, RSS, and timeout behavior for the portable stack and each accelerated backend. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | - |

@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
 # MirToWat translation-layer specification.
 #
 # The pre-existing wasm_codegen_spec.spl files claim in their header to
@@ -13,6 +19,8 @@
 #
 # Every `it` block here fails against the pre-fix code.
 
+use std.spec.step
+
 use compiler.backend.{WatBuilder}
 use compiler.backend.wasm.wat_codegen.{MirToWat}
 use compiler.mir.mir_data.*
@@ -22,6 +30,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_instruction_kinds.{MirInst, MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirBlock, MirFunction, MirModule}
+
 
 fn translator() -> MirToWat:
     MirToWat.create("spec_mod")
@@ -102,11 +111,15 @@ fn float_fn_module() -> MirModule:
     MirModule(name: "float_mod", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "MirToWat translation layer":
+    # @manual scenario evidence
 
     describe "coverage evidence probes":
         it "fails closed when a DecisionProbe reaches WAT translation":
             val inst = MirInst(kind: MirInstKind.DecisionProbe(
-                7, "decision:sha256", op_const(
+                7, "decision:sha256", 99, 1,
+                op_const(MirConstValue.Int(1), ty(MirTypeKind.I64)),
+                op_const(MirConstValue.Int(1), ty(MirTypeKind.I64)),
+                op_const(
                     MirConstValue.Bool(true), ty(MirTypeKind.Bool)
                 ), "src/example.spl", 12, 0
             ), span: nil)
@@ -130,6 +143,8 @@ describe "MirToWat translation layer":
 
     describe "translate_const":
         it "writes the destination local for a scalar Zero constant":
+            # @req REQ-SSPEC-UNIT
+            step("writes the destination local for a scalar Zero constant")
             # REGRESSION: `Zero` is the real MirConstValue variant, but
             # translate_const only had dead `Unit`/`Nil` arms, so Zero fell to
             # `case _:` which emitted a comment and NO local.set -- leaving the
@@ -142,6 +157,8 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("local.set $_l0")
 
         it "zero-initializes at the destination width, not always i64":
+            # @req REQ-SSPEC-UNIT
+            step("zero-initializes at the destination width, not always i64")
             val b = builder()
             translator().translate_const(b, local(1), MirConstValue.Zero, ty(MirTypeKind.I32))
             val wat = b.build()
@@ -150,6 +167,8 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("local.set $_l1")
 
         it "emits an integer constant and stores it":
+            # @req REQ-SSPEC-UNIT
+            step("emits an integer constant and stores it")
             val b = builder()
             translator().translate_const(b, local(2), MirConstValue.Int(42), ty(MirTypeKind.I64))
             val wat = b.build()
@@ -158,6 +177,8 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("local.set $_l2")
 
         it "traps on an aggregate constant instead of emitting malformed WAT":
+            # @req REQ-SSPEC-UNIT
+            step("traps on an aggregate constant instead of emitting malformed WAT")
             # The old Array arm emitted `i64.const {elem}` -- interpolating a
             # MirConstValue into a numeric operand. Unsupported must fail
             # explicitly, never produce a plausible-looking instruction.
@@ -171,6 +192,8 @@ describe "MirToWat translation layer":
 
     describe "emit_operand":
         it "pushes a local for a Copy operand":
+            # @req REQ-SSPEC-UNIT
+            step("pushes a local for a Copy operand")
             # REGRESSION: emit_operand matched the MirOperand STRUCT instead of
             # `.kind`, so every operand fell to a comment-only default and
             # pushed NOTHING onto the value stack.
@@ -179,22 +202,30 @@ describe "MirToWat translation layer":
             expect(b.build()).to_contain("local.get $_l4")
 
         it "pushes a local for a Move operand":
+            # @req REQ-SSPEC-UNIT
+            step("pushes a local for a Move operand")
             val b = builder()
             translator().emit_operand(b, MirOperand(kind: MirOperandKind.Move(local(5))))
             expect(b.build()).to_contain("local.get $_l5")
 
         it "pushes a real constant, not a comment, for a Const operand":
+            # @req REQ-SSPEC-UNIT
+            step("pushes a real constant, not a comment, for a Const operand")
             val b = builder()
             translator().emit_operand(b, op_const(MirConstValue.Int(7), ty(MirTypeKind.I64)))
             expect(b.build()).to_contain("i64.const 7")
 
         it "pushes a bool constant as i32":
+            # @req REQ-SSPEC-UNIT
+            step("pushes a bool constant as i32")
             val b = builder()
             translator().emit_operand(b, op_const(MirConstValue.Bool(true), ty(MirTypeKind.Bool)))
             expect(b.build()).to_contain("i32.const 1")
 
     describe "translate_call":
         it "emits the call instruction for a symbol callee":
+            # @req REQ-SSPEC-UNIT
+            step("emits the call instruction for a symbol callee")
             # REGRESSION: translate_call matched the struct against
             # `Constant`/`Use` with no `case _:`, so it emitted the argument
             # pushes and then NO call at all -- the following local.set
@@ -209,6 +240,8 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("call $my_func")
 
         it "emits call_indirect for a computed callee":
+            # @req REQ-SSPEC-UNIT
+            step("emits call_indirect for a computed callee")
             val b = builder()
             val callee = MirOperand(kind: MirOperandKind.Move(local(7)))
             translator().translate_call(b, local(8), callee, [])
@@ -227,28 +260,44 @@ describe "MirToWat translation layer":
         # every one of them emitted `i32.and`.
 
         it "emits i64.and for BitAnd instead of the swallowed i32.and":
+            # @req REQ-SSPEC-UNIT
+            step("emits i64.and for BitAnd instead of the swallowed i32.and")
             expect(binop_wat(MirBinOp.BitAnd)).to_contain("i64.and")
 
         it "emits i64.or for BitOr":
+            # @req REQ-SSPEC-UNIT
+            step("emits i64.or for BitOr")
             expect(binop_wat(MirBinOp.BitOr)).to_contain("i64.or")
 
         it "emits i64.xor for BitXor":
+            # @req REQ-SSPEC-UNIT
+            step("emits i64.xor for BitXor")
             expect(binop_wat(MirBinOp.BitXor)).to_contain("i64.xor")
 
         it "emits i64.shl for Shl":
+            # @req REQ-SSPEC-UNIT
+            step("emits i64.shl for Shl")
             expect(binop_wat(MirBinOp.Shl)).to_contain("i64.shl")
 
         it "emits an arithmetic right shift for Shr":
+            # @req REQ-SSPEC-UNIT
+            step("emits an arithmetic right shift for Shr")
             expect(binop_wat(MirBinOp.Shr)).to_contain("i64.shr_s")
 
         it "keeps the already-reachable arms working":
+            # @req REQ-SSPEC-UNIT
+            step("keeps the already-reachable arms working")
             expect(binop_wat(MirBinOp.Add)).to_contain("i64.add")
             expect(binop_wat(MirBinOp.Ge)).to_contain("i64.ge_s")
 
         it "lowers Offset as unscaled pointer arithmetic":
+            # @req REQ-SSPEC-UNIT
+            step("lowers Offset as unscaled pointer arithmetic")
             expect(binop_wat(MirBinOp.Offset)).to_contain("i64.add")
 
         it "traps on Pow rather than emitting a comment and no result":
+            # @req REQ-SSPEC-UNIT
+            step("traps on Pow rather than emitting a comment and no result")
             # The old Pow arm re-pushed both operands (already on the stack),
             # converted them, then emitted only a comment -- four values left
             # on the value stack and no result produced.
@@ -257,11 +306,15 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("unreachable")
 
         it "traps on MatMul":
+            # @req REQ-SSPEC-UNIT
+            step("traps on MatMul")
             val wat = binop_wat(MirBinOp.MatMul)
             expect(wat).to_contain("UNSUPPORTED")
             expect(wat).to_contain("unreachable")
 
         it "traps on every Broadcast op instead of emitting a bitwise and":
+            # @req REQ-SSPEC-UNIT
+            step("traps on every Broadcast op instead of emitting a bitwise and")
             for op in [MirBinOp.BroadcastAdd, MirBinOp.BroadcastSub,
                        MirBinOp.BroadcastMul, MirBinOp.BroadcastDiv,
                        MirBinOp.BroadcastPow]:
@@ -270,6 +323,8 @@ describe "MirToWat translation layer":
                 expect(wat).to_contain("unreachable")
 
         it "picks the operand type from a Const operand without any registration":
+            # @req REQ-SSPEC-UNIT
+            step("picks the operand type from a Const operand without any registration")
             # MirOperandKind.Const carries its own MirType, so a constant
             # operand is self-describing -- no local registration needed.
             val b = builder()
@@ -293,21 +348,29 @@ describe "MirToWat translation layer":
         # deleting the fiction is what exposed the real gap.
 
         it "emits f64.add, not i64.add, for a float Add":
+            # @req REQ-SSPEC-UNIT
+            step("emits f64.add, not i64.add, for a float Add")
             val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Add)
             expect(wat).to_contain("f64.add")
             assert_false(wat.contains("i64.add"))
 
         it "emits f64.sub for a float Sub":
+            # @req REQ-SSPEC-UNIT
+            step("emits f64.sub for a float Sub")
             val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Sub)
             expect(wat).to_contain("f64.sub")
             assert_false(wat.contains("i64.sub"))
 
         it "emits f64.mul for a float Mul":
+            # @req REQ-SSPEC-UNIT
+            step("emits f64.mul for a float Mul")
             val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Mul)
             expect(wat).to_contain("f64.mul")
             assert_false(wat.contains("i64.mul"))
 
         it "emits f64.div with no signedness suffix":
+            # @req REQ-SSPEC-UNIT
+            step("emits f64.div with no signedness suffix")
             # Float division is `f64.div`; there is no `f64.div_s`. Reusing the
             # integer arm would have produced `i64.div_s`, which is both the
             # wrong domain and a suffix that does not exist for floats.
@@ -316,6 +379,8 @@ describe "MirToWat translation layer":
             assert_false(wat.contains("div_s"))
 
         it "emits unsuffixed float comparisons":
+            # @req REQ-SSPEC-UNIT
+            step("emits unsuffixed float comparisons")
             expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Eq)).to_contain("f64.eq")
             expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Ne)).to_contain("f64.ne")
             expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Lt)).to_contain("f64.lt")
@@ -324,23 +389,31 @@ describe "MirToWat translation layer":
             expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Ge)).to_contain("f64.ge")
 
         it "never emits a signed integer compare for a float compare":
+            # @req REQ-SSPEC-UNIT
+            step("never emits a signed integer compare for a float compare")
             for op in [MirBinOp.Lt, MirBinOp.Le, MirBinOp.Gt, MirBinOp.Ge]:
                 val wat = binop_wat_ty(MirTypeKind.F64, op)
                 assert_false(wat.contains("_s"))
                 assert_false(wat.contains("i64."))
 
         it "lowers f32 at its own width, not widened to f64":
+            # @req REQ-SSPEC-UNIT
+            step("lowers f32 at its own width, not widened to f64")
             val wat = binop_wat_ty(MirTypeKind.F32, MirBinOp.Mul)
             expect(wat).to_contain("f32.mul")
             assert_false(wat.contains("f64."))
 
         it "traps on float Rem -- wasm has no float remainder instruction":
+            # @req REQ-SSPEC-UNIT
+            step("traps on float Rem -- wasm has no float remainder instruction")
             val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Rem)
             expect(wat).to_contain("UNSUPPORTED")
             expect(wat).to_contain("unreachable")
             assert_false(wat.contains("rem_s"))
 
         it "traps on bitwise and shift ops applied to float operands":
+            # @req REQ-SSPEC-UNIT
+            step("traps on bitwise and shift ops applied to float operands")
             for op in [MirBinOp.BitAnd, MirBinOp.BitOr, MirBinOp.BitXor,
                        MirBinOp.Shl, MirBinOp.Shr]:
                 val wat = binop_wat_ty(MirTypeKind.F64, op)
@@ -348,6 +421,8 @@ describe "MirToWat translation layer":
                 expect(wat).to_contain("unreachable")
 
         it "lowers integer ops at i32 width when the operands are i32":
+            # @req REQ-SSPEC-UNIT
+            step("lowers integer ops at i32 width when the operands are i32")
             # The same missing-type defect: i32 operands were pushed as
             # `i32.const` and then combined with `i64.add`.
             val wat = binop_wat_ty(MirTypeKind.I32, MirBinOp.Add)
@@ -356,6 +431,8 @@ describe "MirToWat translation layer":
 
     describe "translate_binop unknown operand type":
         it "traps instead of guessing an integer op when no type is known":
+            # @req REQ-SSPEC-UNIT
+            step("traps instead of guessing an integer op when no type is known")
             # THE core requirement. An unregistered local has no type. Emitting
             # `i64.add` here -- a plausible-looking instruction for a type we
             # never established -- is exactly the failure mode being fixed.
@@ -369,6 +446,8 @@ describe "MirToWat translation layer":
             assert_false(wat.contains("f64.add"))
 
         it "traps for a type with no scalar WAT arithmetic form":
+            # @req REQ-SSPEC-UNIT
+            step("traps for a type with no scalar WAT arithmetic form")
             # Unit/aggregates/SIMD have no arithmetic lowering here. The
             # classifier must NOT reuse mir_type_to_wasm_type, whose `case _:`
             # silently answers i32 for anything unrecognised.
@@ -383,6 +462,8 @@ describe "MirToWat translation layer":
             assert_false(wat.contains("i32.add"))
 
         it "traps on mismatched operand types rather than reinterpreting one":
+            # @req REQ-SSPEC-UNIT
+            step("traps on mismatched operand types rather than reinterpreting one")
             val b = builder()
             val t = MirToWat.create("spec_mod")
             t.register_local_types([mk_local(0, MirTypeKind.F64), mk_local(1, MirTypeKind.I64)])
@@ -393,6 +474,8 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("unreachable")
 
         it "does not leak one function's local types into the next":
+            # @req REQ-SSPEC-UNIT
+            step("does not leak one function's local types into the next")
             val t = MirToWat.create("spec_mod")
             t.register_local_types([mk_local(0, MirTypeKind.F64), mk_local(1, MirTypeKind.F64)])
             t.register_local_types([mk_local(0, MirTypeKind.I64), mk_local(1, MirTypeKind.I64)])
@@ -405,6 +488,8 @@ describe "MirToWat translation layer":
     describe "translate_binop":
 
         it "never emits i32.and for an op that is not a bitwise and":
+            # @req REQ-SSPEC-UNIT
+            step("never emits i32.and for an op that is not a bitwise and")
             # The single sharpest pin on the defect: i32.and was the swallowing
             # arm's instruction and is not the correct lowering for ANY
             # MirBinOp variant, so it must not appear at all.
@@ -419,22 +504,30 @@ describe "MirToWat translation layer":
         # BitNot and Transpose arms and both emitted `f64.neg`.
 
         it "emits a bitwise complement for BitNot, not f64.neg":
+            # @req REQ-SSPEC-UNIT
+            step("emits a bitwise complement for BitNot, not f64.neg")
             val wat = unaryop_wat(MirUnaryOp.BitNot)
             expect(wat).to_contain("i64.const -1")
             expect(wat).to_contain("i64.xor")
             assert_false(wat.contains("f64.neg"))
 
         it "traps on Transpose instead of negating a float":
+            # @req REQ-SSPEC-UNIT
+            step("traps on Transpose instead of negating a float")
             val wat = unaryop_wat(MirUnaryOp.Transpose)
             expect(wat).to_contain("UNSUPPORTED")
             expect(wat).to_contain("unreachable")
             assert_false(wat.contains("f64.neg"))
 
         it "keeps Neg and Not working":
+            # @req REQ-SSPEC-UNIT
+            step("keeps Neg and Not working")
             expect(unaryop_wat(MirUnaryOp.Neg)).to_contain("i64.sub")
             expect(unaryop_wat_ty(MirTypeKind.Bool, MirUnaryOp.Not)).to_contain("i32.eqz")
 
         it "emits f64.neg for a float Neg instead of an integer subtract":
+            # @req REQ-SSPEC-UNIT
+            step("emits f64.neg for a float Neg instead of an integer subtract")
             # MirUnaryOp carries no operand type either, so Neg had the same
             # defect: `i64.const 0; <x>; i64.sub` on an f64 operand.
             val wat = unaryop_wat_ty(MirTypeKind.F64, MirUnaryOp.Neg)
@@ -443,15 +536,21 @@ describe "MirToWat translation layer":
             assert_false(wat.contains("i64.const 0"))
 
         it "emits f32.neg at f32 width":
+            # @req REQ-SSPEC-UNIT
+            step("emits f32.neg at f32 width")
             expect(unaryop_wat_ty(MirTypeKind.F32, MirUnaryOp.Neg)).to_contain("f32.neg")
 
         it "traps on a bitwise not applied to a float operand":
+            # @req REQ-SSPEC-UNIT
+            step("traps on a bitwise not applied to a float operand")
             val wat = unaryop_wat_ty(MirTypeKind.F64, MirUnaryOp.BitNot)
             expect(wat).to_contain("UNSUPPORTED")
             expect(wat).to_contain("unreachable")
             assert_false(wat.contains("i64.xor"))
 
         it "traps when the unaryop operand type is unknown":
+            # @req REQ-SSPEC-UNIT
+            step("traps when the unaryop operand type is unknown")
             val b = builder()
             translator().translate_unaryop(b, local(21), MirUnaryOp.Neg, op_local(0))
             val wat = b.build()
@@ -471,10 +570,14 @@ describe "MirToWat translation layer":
         # missing operand type in translate_binop went unnoticed for so long.
 
         it "translates a whole float function without aborting":
+            # @req REQ-SSPEC-UNIT
+            step("translates a whole float function without aborting")
             val wat = MirToWat.create("float_mod").translate_module(float_fn_module())
             expect(wat).to_contain("(func $fmul")
 
         it "declares float params and result at f64, named to match the body":
+            # @req REQ-SSPEC-UNIT
+            step("declares float params and result at f64, named to match the body")
             val wat = MirToWat.create("float_mod").translate_module(float_fn_module())
             # Params must be named $_lN: every instruction lowering references
             # locals as `_l{id}`, so naming params from MirLocal.name produced
@@ -485,6 +588,8 @@ describe "MirToWat translation layer":
             expect(wat).to_contain("(local $_l2 f64)")
 
         it "emits f64.mul in the function body, not i64.mul":
+            # @req REQ-SSPEC-UNIT
+            step("emits f64.mul in the function body, not i64.mul")
             val wat = MirToWat.create("float_mod").translate_module(float_fn_module())
             expect(wat).to_contain("f64.mul")
             assert_false(wat.contains("i64.mul"))

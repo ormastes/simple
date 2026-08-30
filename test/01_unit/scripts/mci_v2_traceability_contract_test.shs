@@ -22,15 +22,31 @@ sync_manual_hash() {
 }
 write_docgen_receipt() {
     root=$1
+    mkdir -p "$root/build/docgen-fixture"
+    printf '#!/bin/sh\nexit 0\n' > "$root/build/docgen-fixture/simple"
+    chmod 700 "$root/build/docgen-fixture/simple"
+    binary_path=$(CDPATH= cd -P -- "$root/build/docgen-fixture" && pwd -P)/simple
+    binary_hash=$(sha256sum "$binary_path" | awk '{print $1}')
     spec_hash=$(sha256sum "$root/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl" | awk '{print $1}')
     manual_hash=$(sha256sum "$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md" | awk '{print $1}')
     receipt="$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env"
     {
-        echo schema=mci-spipe-docgen-provenance-v1
+        echo schema=mci-spipe-docgen-provenance-v2
         echo tool_version=contract-docgen-1
-        echo 'command=bin/simple spipe-docgen test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl --output doc/06_spec --no-index'
+        # Synthetic, hash-bound fixture only; this is never release evidence.
+        echo 'command=simple spipe-docgen test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl --output doc/06_spec --no-index'
+        echo "binary_path=$binary_path"
+        echo "binary_sha256=$binary_hash"
+        echo spec_path=test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl
         echo "spec_sha256=$spec_hash"
+        echo manual_path=doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md
         echo "manual_sha256=$manual_hash"
+        echo run_id=123-1
+        echo generated_at_unix_micros=1
+        echo exit_code=0
+        echo stub_count=0
+        echo manual_quality=pass
+        echo result=PASS
     } > "$receipt"
 }
 
@@ -41,8 +57,8 @@ if MCI_TEST_NO_DOCGEN=1 run_gate "$good" >/dev/null 2>&1; then echo "missing rea
 test ! -e "$good/evidence/artifacts/traceability-v1.env"
 test ! -e "$good/evidence/receipts/traceability.unsigned.template"
 
-# A real, hash-bound docgen receipt permits only the focused DOC-003 lane.
-# The output is canonical receipt-shaped but still requires external signing.
+# A synthetic, hash-bound docgen fixture permits only the focused DOC-003 lane.
+# It is canonical receipt-shaped for contract testing, not release evidence.
 write_docgen_receipt "$good"
 run_gate "$good" >/dev/null
 template=$good/evidence/receipts/traceability.unsigned.template
@@ -81,6 +97,11 @@ sed -i 's/^manual_sha256=.*/manual_sha256=dddddddddddddddddddddddddddddddddddddd
 if run_gate "$mutated" >/dev/null 2>&1; then echo 'mutated docgen provenance accepted' >&2; exit 1; fi
 test ! -e "$mutated/evidence/artifacts/traceability-v1.env"
 
+binary_mutated=$tmp/docgen-binary-mutated; mkdir -p "$binary_mutated"; copy_tree "$binary_mutated"; write_docgen_receipt "$binary_mutated"
+printf '# changed after receipt\n' >> "$binary_mutated/build/docgen-fixture/simple"
+if run_gate "$binary_mutated" >/dev/null 2>&1; then echo 'mutated docgen binary accepted' >&2; exit 1; fi
+test ! -e "$binary_mutated/evidence/artifacts/traceability-v1.env"
+
 docgen_link=$tmp/docgen-link; mkdir -p "$docgen_link"; copy_tree "$docgen_link"; write_docgen_receipt "$docgen_link"
 mv "$docgen_link/$docgen_rel" "$docgen_link/docgen-real.env"
 ln -s ../../../../docgen-real.env "$docgen_link/$docgen_rel"
@@ -112,9 +133,16 @@ grep -q '^BLOCKED: evidence-contract classification mismatch$' "$tmp/class-drift
 
 missing_reason=$tmp/missing-reason; mkdir -p "$missing_reason"; copy_tree "$missing_reason"
 sed -i '0,/ reason=[A-Za-z0-9._-][A-Za-z0-9._-]*/s///' "$missing_reason/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl"
+if sed -n '/^# @scenario MCI-AGG-001 /p' "$missing_reason/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl" | grep -q ' reason='; then echo 'missing-reason fixture was not mutated' >&2; exit 1; fi
 sync_manual_hash "$missing_reason"
 if run_gate "$missing_reason" >"$tmp/missing-reason.log" 2>&1; then echo "scenario without reason accepted" >&2; exit 1; fi
 grep -q '^BLOCKED: malformed scenario classification$' "$tmp/missing-reason.log"
+
+punctuation_reason=$tmp/punctuation-reason; mkdir -p "$punctuation_reason"; copy_tree "$punctuation_reason"
+sed -i '0,/ reason=[A-Za-z0-9._-][A-Za-z0-9._-]*/s// reason=-/' "$punctuation_reason/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl"
+sync_manual_hash "$punctuation_reason"
+if run_gate "$punctuation_reason" >"$tmp/punctuation-reason.log" 2>&1; then echo "punctuation-only scenario reason accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: malformed scenario classification$' "$tmp/punctuation-reason.log"
 
 manual_class=$tmp/manual-class; mkdir -p "$manual_class"; copy_tree "$manual_class"
 sed -i 's/| MCI-NFR-017 | evidence-contract |/| MCI-NFR-017 | blocked |/' "$manual_class/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"

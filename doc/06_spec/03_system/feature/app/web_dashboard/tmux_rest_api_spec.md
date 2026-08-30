@@ -2,6 +2,30 @@
 
 > Tests the tmux REST API endpoints mounted under `/api/tmux/*` in the web dashboard server. The API provides HTTP access to tmux session, window, and pane management, enabling the browser-based terminal panel.
 
+<!-- sdn-diagram:id=tmux_rest_api_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=tmux_rest_api_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+tmux_rest_api_spec -> std
+tmux_rest_api_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=tmux_rest_api_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -26,7 +50,7 @@ Tests the tmux REST API endpoints mounted under `/api/tmux/*` in the web dashboa
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/feature/app/web_dashboard/tmux_rest_api_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -88,8 +112,6 @@ the underlying `std.tmux` library functions.
 
 ```simple
 # GET /api/tmux → status
-use std.spec.step
-
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux", "")
 # body: {"available": true, "server_running": true, "session_count": 3}
 
@@ -110,18 +132,13 @@ val (s2, c2, b2) = handle_tmux_api("POST", "/api/tmux/send-command", body)
 
 #### extracts a simple field
 
-- extracts a simple field
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts a simple field")
 val json = "{\"name\": \"test\"}"
 val value = _extract_json_field(json, "name")
 expect value to_equal "test"
@@ -131,18 +148,18 @@ expect value to_equal "test"
 
 #### extracts from multiple fields
 
-- extracts from multiple fields
+1. expect  extract json field
+2. expect  extract json field
+3. expect  extract json field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts from multiple fields")
 val json = "{\"session\": \"main\", \"window\": \"2\", \"pane\": \"0\"}"
 expect _extract_json_field(json, "session") to_equal "main"
 expect _extract_json_field(json, "window") to_equal "2"
@@ -153,18 +170,13 @@ expect _extract_json_field(json, "pane") to_equal "0"
 
 #### returns empty string for missing field
 
-- returns empty string for missing field
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty string for missing field")
 val json = "{\"name\": \"test\"}"
 val value = _extract_json_field(json, "missing")
 expect value to_equal ""
@@ -174,18 +186,13 @@ expect value to_equal ""
 
 #### returns empty string for empty json
 
-- returns empty string for empty json
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty string for empty json")
 val value = _extract_json_field("", "name")
 expect value to_equal ""
 ```
@@ -194,18 +201,13 @@ expect value to_equal ""
 
 #### handles escaped characters
 
-- handles escaped characters
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles escaped characters")
 val json = "{\"path\": \"a\\\\b\"}"
 val value = _extract_json_field(json, "path")
 expect value to_contain "b"
@@ -217,18 +219,13 @@ expect value to_contain "b"
 
 #### converts single key-value pair
 
-- converts single key-value pair
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts single key-value pair")
 val json = _query_to_json("session=main")
 expect json to_contain "session"
 expect json to_contain "main"
@@ -238,18 +235,18 @@ expect json to_contain "main"
 
 #### converts multiple pairs
 
-- converts multiple pairs
+1. expect  extract json field
+2. expect  extract json field
+3. expect  extract json field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts multiple pairs")
 val json = _query_to_json("session=main&window=0&pane=1")
 expect _extract_json_field(json, "session") to_equal "main"
 expect _extract_json_field(json, "window") to_equal "0"
@@ -260,18 +257,16 @@ expect _extract_json_field(json, "pane") to_equal "1"
 
 #### handles empty value
 
-- handles empty value
+1. expect  extract json field
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty value")
 val json = _query_to_json("key=")
 expect _extract_json_field(json, "key") to_equal ""
 ```
@@ -284,18 +279,16 @@ expect _extract_json_field(json, "key") to_equal ""
 
 #### returns JSON with available field
 
-- returns JSON with available field
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns JSON with available field")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux", "")
 # Either 200 (tmux available) or 503 (not installed)
 expect (status == 200 or status == 503) to_equal true
@@ -308,18 +301,16 @@ expect ctype to_equal "application/json"
 
 #### returns JSON array
 
-- returns JSON array
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns JSON array")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/sessions", "")
 expect (status == 200 or status == 503) to_equal true
 expect ctype to_equal "application/json"
@@ -331,18 +322,16 @@ expect ctype to_equal "application/json"
 
 #### rejects GET on send endpoint
 
-- rejects GET on send endpoint
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects GET on send endpoint")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/send", "")
 # Either 405 (method not allowed) or 503 (tmux not installed)
 expect (status == 405 or status == 503) to_equal true
@@ -352,18 +341,16 @@ expect (status == 405 or status == 503) to_equal true
 
 #### rejects GET on send-command endpoint
 
-- rejects GET on send-command endpoint
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects GET on send-command endpoint")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/send-command", "")
 expect (status == 405 or status == 503) to_equal true
 ```
@@ -372,18 +359,16 @@ expect (status == 405 or status == 503) to_equal true
 
 #### rejects GET on resize endpoint
 
-- rejects GET on resize endpoint
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects GET on resize endpoint")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/resize", "")
 expect (status == 405 or status == 503) to_equal true
 ```
@@ -394,18 +379,16 @@ expect (status == 405 or status == 503) to_equal true
 
 #### returns 400 when session missing from panes
 
-- returns 400 when session missing from panes
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 400 when session missing from panes")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/panes", "")
 # 400 (missing session) or 503 (no tmux)
 expect (status == 400 or status == 503) to_equal true
@@ -415,18 +398,16 @@ expect (status == 400 or status == 503) to_equal true
 
 #### returns 400 when session missing from windows
 
-- returns 400 when session missing from windows
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 400 when session missing from windows")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/windows", "")
 expect (status == 400 or status == 503) to_equal true
 ```
@@ -437,18 +418,16 @@ expect (status == 400 or status == 503) to_equal true
 
 #### returns 404 for unknown path
 
-- returns 404 for unknown path
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 404 for unknown path")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/nonexistent", "")
 # 404 or 503 (no tmux)
 expect (status == 404 or status == 503) to_equal true
@@ -460,18 +439,16 @@ expect (status == 404 or status == 503) to_equal true
 
 #### handles capture with query params
 
-- handles capture with query params
+1. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles capture with query params")
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux/capture?session=test&window=0&pane=0", "")
 # 200 (capture attempted) or 503 (no tmux)
 expect (status == 200 or status == 503) to_equal true
@@ -492,51 +469,3 @@ expect ctype to_equal "application/json"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e92f4b07c32a6416fcf094e3ac6f1ba1b37a863f343edf25143d2e779961d15f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e92f4b07c32a6416fcf094e3ac6f1ba1b37a863f343edf25143d2e779961d15f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e92f4b07c32a6416fcf094e3ac6f1ba1b37a863f343edf25143d2e779961d15f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/app/web_dashboard/tmux_rest_api_spec.spl
-mirror: doc/06_spec/03_system/feature/app/web_dashboard/tmux_rest_api_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/app/web_dashboard/tmux_rest_api_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/app/web_dashboard/tmux_rest_api_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/app/web_dashboard/tmux_rest_api_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts a simple field' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/web_dashboard/tmux_rest_api_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts from multiple fields' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/web_dashboard/tmux_rest_api_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns empty string for missing field' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

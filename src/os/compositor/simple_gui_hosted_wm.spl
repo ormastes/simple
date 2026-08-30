@@ -3,12 +3,10 @@
 # The release/acceptance hosted WM path is src/os/hosted/hosted_entry.spl,
 # which routes through HostCompositor and Simple Web/WebRenderer pixels.
 
-use std.common.window_protocol.geometry.{Size}
-use os.compositor.display_backend_core.{CompositorBackend}
+use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
 use os.compositor.simple_gui_window_renderer.{render_simple_gui_app_content}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
-use std.common.encoding.utf8.{text_truncate_bytes}
 
 class SimpleGuiHostedWindow:
     id: i64
@@ -80,8 +78,7 @@ class SimpleGuiHostedWm:
         )
 
     me render_frame():
-        # Use active WM chrome palette so hosted smoke rendering follows installed themes.
-        self.backend.clear(wm_chrome_theme().desktop_bg)
+        self.backend.clear(0xFF0F172Au32)
         var i = 0
         while i < self.windows.len():
             val win = self.windows[i]
@@ -93,19 +90,16 @@ class SimpleGuiHostedWm:
                 if grp != nil and grp.active_tab_id != win.id:
                     i = i + 1
                     continue
-            val theme = wm_chrome_theme()
-            # title_focused/title_unfocused paired with text_primary ink
-            # (accent is reserved for stripes/underlines, never paired with text on top).
-            val title_color = if win.focused: theme.title_focused else: theme.title_unfocused
+            val title_color = if win.focused: 0xFF2563EBu32 else: 0xFF334155u32
             val tab_bar_h = if win.tab_group_id > 0: 20 else: 0
-            self.backend.fill_rect(win.x + 5, win.y + 6, win.w, win.h + tab_bar_h, theme.window_shadow)
-            self.backend.fill_rect(win.x, win.y, win.w, win.h + tab_bar_h, theme.host_window_body)
+            self.backend.fill_rect(win.x + 5, win.y + 6, win.w, win.h + tab_bar_h, 0x66000000u32)
+            self.backend.fill_rect(win.x, win.y, win.w, win.h + tab_bar_h, 0xFF1E293Bu32)
             if win.tab_group_id > 0:
                 self.render_tab_bar(win)
             self.backend.fill_rect(win.x, win.y + tab_bar_h, win.w, 24, title_color)
-            self.backend.draw_text(win.x + 8, win.y + tab_bar_h + 4, win.title, theme.text_primary, title_color)
-            self.backend.fill_rect(win.x + win.w - 24, win.y + tab_bar_h, 24, 24, theme.close_button)
-            self.backend.draw_text(win.x + win.w - 17, win.y + tab_bar_h + 4, "X", theme.text_primary, theme.close_button)
+            self.backend.draw_text(win.x + 8, win.y + tab_bar_h + 4, win.title, 0xFFFFFFFFu32, title_color)
+            self.backend.fill_rect(win.x + win.w - 24, win.y + tab_bar_h, 24, 24, 0xFFCC3333u32)
+            self.backend.draw_text(win.x + win.w - 17, win.y + tab_bar_h + 4, "X", 0xFFFFFFFFu32, 0xFFCC3333u32)
             render_simple_gui_app_content(self.backend, win.title, win.x + 4, win.y + tab_bar_h + 28, win.w - 8, win.h - 32, win.content)
             i = i + 1
         self.backend.present()
@@ -260,9 +254,6 @@ class SimpleGuiHostedWm:
         val focused = self.focused_window_id()
         if focused == 0:
             return
-        if self.drag_window_id == focused:
-            self.dragging = false
-            self.drag_window_id = 0
         var next_windows: [SimpleGuiHostedWindow] = []
         var i = 0
         while i < self.windows.len():
@@ -270,58 +261,8 @@ class SimpleGuiHostedWm:
                 next_windows.push(self.windows[i])
             i = i + 1
         self.windows = next_windows
-
-        # Retire the closed id from tab ownership before choosing fallback
-        # focus.  Leaving a closed active_tab_id behind makes every surviving
-        # member fail render_frame's active-tab gate, effectively hiding the
-        # entire group after its active tab closes.
-        var next_groups: [TabGroup] = []
-        var g = 0
-        while g < self.tab_groups.len():
-            val group = self.tab_groups[g]
-            var remaining_ids: [i64] = []
-            var removed = false
-            var t = 0
-            while t < group.tab_ids.len():
-                if group.tab_ids[t] == focused:
-                    removed = true
-                else:
-                    remaining_ids.push(group.tab_ids[t])
-                t = t + 1
-            if not removed:
-                next_groups.push(group)
-            elif remaining_ids.len() > 1:
-                val active_id = if group.active_tab_id == focused:
-                    remaining_ids[0]
-                else:
-                    group.active_tab_id
-                next_groups.push(TabGroup(
-                    id: group.id,
-                    active_tab_id: active_id,
-                    tab_ids: remaining_ids
-                ))
-            elif remaining_ids.len() == 1:
-                i = 0
-                while i < self.windows.len():
-                    if self.windows[i].id == remaining_ids[0]:
-                        self.windows[i].tab_group_id = 0
-                    i = i + 1
-            g = g + 1
-        self.tab_groups = next_groups
-
-        # Establish exactly one usable fallback owner.  A minimized window or
-        # an inactive member of a retained tab group cannot accept focus.
-        var selected = false
-        i = self.windows.len() - 1
-        while i >= 0:
-            self.windows[i].focused = false
-            if not selected and not self.windows[i].minimized:
-                val gid = self.windows[i].tab_group_id
-                val group = if gid > 0: self.find_tab_group(gid) else: nil
-                if group == nil or group.active_tab_id == self.windows[i].id:
-                    self.windows[i].focused = true
-                    selected = true
-            i = i - 1
+        if self.windows.len() > 0:
+            self.windows[self.windows.len() - 1].focused = true
 
     me minimize_focused():
         val focused = self.focused_window_id()
@@ -443,14 +384,13 @@ class SimpleGuiHostedWm:
         val grp = self.find_tab_group(win.tab_group_id)
         if grp == nil:
             return
-        val theme = wm_chrome_theme()
         val tab_w = win.w / grp.tab_ids.len()
         var tx = win.x
         var t = 0
         while t < grp.tab_ids.len():
             val tid = grp.tab_ids[t]
             val active = tid == grp.active_tab_id
-            val bg = if active: theme.host_window_body else: theme.title_unfocused
+            val bg = if active: 0xFF1E293Bu32 else: 0xFF0F172Au32
             self.backend.fill_rect(tx, win.y, tab_w, 20, bg)
             var label = ""
             var j = 0
@@ -459,7 +399,7 @@ class SimpleGuiHostedWm:
                     label = self.windows[j].title
                 j = j + 1
             if label.len() > 12:
-                label = text_truncate_bytes(label, 12)
-            self.backend.draw_text(tx + 4, win.y + 2, label, theme.text_primary, bg)
+                label = label.substring(0, 12)
+            self.backend.draw_text(tx + 4, win.y + 2, label, 0xFFE2E8F0u32, bg)
             tx = tx + tab_w
             t = t + 1

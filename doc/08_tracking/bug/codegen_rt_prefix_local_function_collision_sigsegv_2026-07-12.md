@@ -1,7 +1,6 @@
 ---
 id: codegen_rt_prefix_local_function_collision_sigsegv_2026-07-12
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+status: SOURCE-FIXED-EXECUTION-PENDING
 severity: blocking
 discovered: 2026-07-12
 discovered_by: native-build redeploy verification (agent session), follow-up to

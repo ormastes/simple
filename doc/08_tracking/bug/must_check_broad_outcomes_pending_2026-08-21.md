@@ -19,7 +19,7 @@ runner must preserve them until the evidence below exists and passes.
 | `riscv32-riscv64-shared` | RV32/RV64 template ownership has not been audited | RISC-V owner: path inventory proving shared template ownership and justified architecture-only leaves |
 | `simple-generated-vhdl-linux` | No generator provenance plus Linux boot/`ls` receipt | Hardware owner: Simple generator input/output hashes, synthesis/simulation evidence, boot log and `ls` output |
 | `binary-size-go-parity` | No comparable retained Simple-vs-Go size measurement | Performance owner: equivalent programs, tool versions, strip settings, artifact hashes and byte counts |
-| `interpreter-startup-parity` | Deterministic unsigned producer and semantic validator implemented; no independently reviewed live passing bundle yet | Run the producer on a controlled host with canonical Stage 4, commit the exact v3 attachments, and obtain an independent trusted signature |
+| `interpreter-startup-parity` | No controlled Python/Bun/Go startup comparison | Performance owner: cold/warm methodology, raw samples, environment identity and threshold verdict |
 | `rust-go-benchmark-parity` | No representative Rust/Go benchmark comparison | Performance owner: semantic-equivalence oracle, raw samples, statistics and threshold verdict |
 
 ## Guard location

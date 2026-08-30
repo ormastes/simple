@@ -1,8 +1,33 @@
 # DAP Unified Adapter Design
 
+<!-- codex-design -->
+
 **Date:** 2026-03-07
-**Status:** Implemented
+**Status:** Implemented DAP-internal adapter refactor; superseded as the
+cross-client ownership architecture by
+[`simple_unified_debugging_evidence.md`](../../simple_unified_debugging_evidence.md).
 **Location:** `src/lib/nogc_sync_mut/dap/adapter/`
+
+## 0. 2026-08-14 reconciliation
+
+This document remains the historical and operational reference for the
+`DebugAdapter` trait inside `DapServer`. It does **not** establish a second
+debug service. The authoritative architecture has one centrally owned,
+versioned `DebugServiceV1`; DAP is an outward protocol client and carries a
+`DebugSessionId` rather than owning mutable adapters.
+
+Current implementation has the frozen V1 contracts and central in-process
+registry in `src/lib/common/debug/`, plus one migration bridge for legacy
+`DebugBackend`. `DebugAdapter` and existing DAP sessions have not yet been
+fully migrated into that registry. Consequently the seven adapters documented
+below are real DAP implementations, but their existence alone does not prove a
+live `DebugCapabilityV1` row. Doctor output must come from reachability and
+live verification.
+
+Remaining migration work is to add a single `DebugAdapter` service bridge,
+route DAP handlers through `DebugServiceV1`, preserve DAP semantics, bind every
+operation to policy and `DebugReceiptV1`, isolate external adapters behind
+`DebugWireV1`, and retire direct DAP ownership only after parity tests pass.
 
 ## 1. Overview
 
@@ -286,7 +311,8 @@ The `DebugAdapter` trait is the same for both environments. The difference is in
 
 ## 7. Relationship to DebugBackend Trait
 
-There are two debug abstraction layers in the codebase:
+This historical implementation has two DAP-era abstraction layers; the V1
+service adds the authoritative ownership boundary above both:
 
 | Trait | Location | Purpose | Method count |
 |-------|----------|---------|:------------:|
@@ -297,7 +323,13 @@ There are two debug abstraction layers in the codebase:
 
 `DebugAdapter` is the newer, richer trait used by `DapServer`. It covers all operations needed by the DAP protocol, including memory/register access, rich breakpoints, nested variable expansion, and capability reporting.
 
-The two traits overlap substantially. `DebugBackend` has `run()` (not in `DebugAdapter`); `DebugAdapter` has memory, register, watchpoint, context management, and capability methods (not in `DebugBackend`). A future unification would merge them into a single trait, likely adopting `DebugAdapter`'s superset API and having the coordinator use it directly.
+The two traits overlap substantially. `DebugBackend` has `run()` (not in
+`DebugAdapter`); `DebugAdapter` has memory, register, watchpoint, context
+management, and capability methods (not in `DebugBackend`). They are no longer
+planned to merge into a third all-purpose trait. Each is adapted once into
+`DebugServiceV1`; clients use service operations and session IDs. The legacy
+`DebugBackend` bridge exists, while the `DebugAdapter` bridge and DAP handler
+migration remain open.
 
 ## 8. Known Semantic Mismatch: variables_reference==2
 

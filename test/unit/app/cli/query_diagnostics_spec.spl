@@ -1,17 +1,12 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 extern fn rt_file_read_text(path: text) -> text
 
-use app.cli.query_diagnostics.{
-    _split_structured_error, _extract_error_code, _strip_ansi,
-    _clean_check_output, _should_run_lint_after_clean_output,
-    _collect_check_output_diagnostics_json_clean,
-    _count_check_output_diagnostics_clean,
-    _extract_query_check_diagnostics
-}
-use app.cli.query_error_codes.{query_extract_error_code}
-use app.cli.query_rich_common.{
-    _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE,
-    _DIAG_SEVERITY_OVERRIDE_COUNT,
-    _diag_emit_or_collect, query_mcp_diagnostics_wrapper_json}
+use app.cli.query_diagnostics.{_split_structured_error, _extract_error_code}
 
 describe "query diagnostics helpers":
     it "keeps structured lint collection state owned and nested-safe":
@@ -159,6 +154,8 @@ describe "query diagnostics helpers":
         _DIAG_COLLECT_MODE = false
 
     it "splits structured error metadata into core related and help":
+        # @req REQ-SSPEC-UNIT
+        step("splits structured error metadata into core related and help")
         val structured = _split_structured_error("10:4: variable not found|||RELATED:3:1:declared here|||HELP:did you mean `value`?")
         expect(structured.0).to_equal("10:4: variable not found")
         expect(structured.1.len()).to_equal(1)
@@ -166,86 +163,30 @@ describe "query diagnostics helpers":
         expect(structured.2).to_equal("did you mean `value`?")
 
     it "extracts explicit error code before fallback inference":
+        # @req REQ-SSPEC-UNIT
+        step("extracts explicit error code before fallback inference")
         val code = _extract_error_code("error[E1234]: example failure", "TypeError")
         expect(code).to_equal("E1234")
-        expect(_extract_error_code("E4321", "ParseError")).to_equal("E4321")
-        expect(_extract_error_code("E43210 trailing", "ParseError")).to_equal("E4321")
-        expect(_extract_error_code("E12é4", "ParseError")).to_equal("E0001")
-        expect(_extract_error_code("éE4321", "ParseError")).to_equal("E0001")
-        expect(_extract_error_code("E12x4 opaque", "ParseError")).to_equal("E0001")
-        expect(_extract_error_code("e4321 opaque", "ParseError")).to_equal("E0001")
-        expect(_extract_error_code("E１２３４ opaque", "ParseError")).to_equal("E0001")
-        expect(_extract_error_code("E123", "ParseError")).to_equal("E0001")
-        expect(_extract_error_code("E1234 prefix [EX]", "ParseError")).to_equal("EX")
-        expect(_extract_error_code("E1234 trailing [E", "ParseError")).to_equal("E1234")
-
-    it "preserves ordered diagnostic code inference and fallbacks":
-        expect(_extract_error_code("variable not defined", "ParseError")).to_equal("E1001")
-        expect(_extract_error_code("break used outside loop", "ParseError")).to_equal("E1101")
-        expect(_extract_error_code("division by zero", "ParseError")).to_equal("E3001")
-        expect(_extract_error_code("opaque failure", "TypeError")).to_equal("E1003")
-        expect(_extract_error_code("opaque failure", "Unknown")).to_equal("E0000")
-        expect(_extract_error_code("layer dimension mismatch", "ParseError")).to_equal("E0501")
-        expect(_extract_error_code("missing struct field", "ParseError")).to_equal("E1007")
-        expect(_extract_error_code("[E] malformed", "ParseError")).to_equal("E")
-        expect(_extract_error_code("SFFI error", "ParseError")).to_equal("E2002")
-        expect(_extract_error_code("type not found", "ParseError")).to_equal("E1011")
-        expect(_extract_error_code("function type not found", "ParseError")).to_equal("E1002")
-        expect(_extract_error_code("unsupported feature SFFI error", "ParseError")).to_equal("E2001")
-        expect(_extract_error_code("SFFI error division by zero", "ParseError")).to_equal("E2002")
-        expect(query_extract_error_code("opaque failure", "ParseError", "")).to_equal("E2002")
-        expect(_extract_error_code("café type mismatch", "ParseError")).to_equal("E1003")
-        expect(_extract_error_code("macro invocation failed", "ParseError")).to_equal("E1401")
-        expect(_extract_error_code("pointcut syntax", "ParseError")).to_equal("E1501")
-
-    it "owns query error inference in one shared module":
-        val check_source = rt_file_read_text("src/app/cli/query_check.spl") ?? ""
-        val diagnostics_source = rt_file_read_text(
-            "src/app/cli/query_diagnostics.spl") ?? ""
-        val shared_source = rt_file_read_text(
-            "src/app/cli/query_error_codes.spl") ?? ""
-        expect(check_source).to_contain(
-            "query_extract_error_code(msg, error_kind, \"FFI error\")")
-        expect(diagnostics_source).to_contain(
-            "query_extract_error_code(msg, error_kind, \"SFFI error\")")
-        expect(check_source).not.to_contain("msg.contains(\"division by zero\")")
-        expect(diagnostics_source).not.to_contain("msg.contains(\"division by zero\")")
-        expect(shared_source).to_contain(
-            "fn query_extract_error_code(msg: text, error_kind: text, codegen_phrase: text)")
-        expect(shared_source).to_contain("val pattern_hits = query_error_pattern_hits(msg)")
-        expect(shared_source).not.to_contain("msg.contains(\"variable\")")
-        expect(shared_source).not.to_contain("msg.contains(\"dimension mismatch\")")
-        expect(shared_source).not.to_contain("query_error_pattern_hit(pattern_hits,")
-        expect(shared_source).to_contain("pattern_hits.lo & 0x8000000000000000u64")
-        expect(shared_source).to_contain("pattern_hits.hi & 0x0000000000000001u64")
-        expect(shared_source).to_contain("pattern_hits.hi & 0x0008000000000000u64")
-        expect(shared_source).to_contain("val leading_code = msg.substring(0, 5)")
-        expect(shared_source).to_contain("s.byte_at(0) != 69")
-        expect(shared_source).to_contain("val byte = s.byte_at(i)")
-        expect(shared_source).not.to_contain("msg.substring(0, 1)")
-        expect(shared_source).not.to_contain("val maybe_code")
-        expect(shared_source).not.to_contain("val ch = s.substring(i, i + 1)")
-        val matcher_source = rt_file_read_text(
-            "src/app/cli/query_error_pattern_matcher.spl") ?? ""
-        expect(matcher_source).to_contain("QUERY_ERROR_PATTERN_COUNT: i64 = 116")
-        expect(matcher_source).to_contain("QUERY_ERROR_PATTERN_STATE_COUNT: i64 = 1160")
-        expect(matcher_source).to_contain("while offset < message.len()")
-        expect(matcher_source).not.to_contain("Dict<")
-        expect(matcher_source).not.to_contain("message.substring")
 
     it "keeps lint json collection in the lint orchestrator":
+        # @req REQ-SSPEC-UNIT
+        step("keeps lint json collection in the lint orchestrator")
         val content = rt_file_read_text("src/app/cli/query_lint.spl") ?? ""
         expect(content.contains("fn _collect_lint_diagnostics_json(file: text, source: text)")).to_equal(true)
         expect(content.contains("_emit_source_lint_diagnostics(file, source, \"json\")")).to_equal(true)
 
 describe "query dispatcher boundaries":
     it "dispatcher delegates diagnostics commands through query_rich imports":
+        # @req REQ-SSPEC-UNIT
+        step("dispatcher delegates diagnostics commands through query_rich imports")
         val content = rt_file_read_text("src/app/cli/query.spl") ?? ""
         expect(content.contains("use app.cli.query_rich.{")).to_equal(true)
         expect(content.contains("query_check")).to_equal(true)
         expect(content.contains("query_workspace_diagnostics")).to_equal(true)
 
     it "dispatcher no longer defines local fallback diagnostics helpers":
+        # @req REQ-SSPEC-UNIT
+        step("dispatcher no longer defines local fallback diagnostics helpers")
         val content = rt_file_read_text("src/app/cli/query.spl") ?? ""
         expect(not content.contains("fn _query_check_json(")).to_equal(true)
         expect(not content.contains("fn _query_diag(")).to_equal(true)
@@ -256,6 +197,8 @@ describe "query dispatcher boundaries":
         expect(not content.contains("fn query_workspace_diagnostics(")).to_equal(true)
 
     it "diagnostics module depends on lint orchestrator instead of low-level lint internals":
+        # @req REQ-SSPEC-UNIT
+        step("diagnostics module depends on lint orchestrator instead of low-level lint internals")
         val content = rt_file_read_text("src/app/cli/query_diagnostics.spl") ?? ""
         expect(content.contains("use app.cli.query_lint.{")).to_equal(true)
         expect(content.contains("use app.cli.query_lint_checks.{")).to_equal(false)

@@ -11,6 +11,7 @@ Create executable specs and exact mirrored manuals for:
 5. `runtime/rt_hal_provider_differential_spec.spl` — REQ-008/009/014.
 6. `runtime/rt_hal_environment_receipt_spec.spl` — REQ-010/011.
 7. `runtime/rt_criticality_hardening_spec.spl` — REQ-012/013/015.
+8. `runtime/rt_hal_external_provider_protocol_spec.spl` — supporting REQ-008/009/010/014 typed C/Rust tool-admission and provider-identity protocol coverage.
 
 Each REQ has happy, boundary, and failure scenarios. Built-in matchers inspect
 concrete production records; unfinished oracles call `fail(...)`. Setup is hidden
@@ -31,7 +32,10 @@ Each acceptance criterion is run at most once per session.
 
 ## Current implementation mapping (unverified)
 
-The seven planned system specs and their mirrored Markdown manuals now exist.
+The seven primary system specs and their mirrored Markdown manuals now exist.
+The external-provider protocol suite is supporting evidence and must also retain
+its mirrored Markdown manual. It validates typed admission and identity pinning;
+the differential suite remains the owner of result/effect parity behavior.
 Additional focused unit specs cover compile options, HIR/MIR control lowering,
 probe protocol and dynamic lifecycle, masking analysis, runner transport/gate,
 reasoned omissions, environment-plan validation, exact RT/HAL process arena,
@@ -51,7 +55,9 @@ The acceptance run must execute each still-red criterion once using an admitted
 self-hosted runtime. It must attach static-off MIR/native inventory; static-on
 and dormant/enabled timing, peak RSS, and allocation evidence from the same
 fixture; analyzer scaling; deterministic output; optimizer receipts; runner
-exit status; and exact RT/HAL/env receipts. It must also exercise supported
+exit status; and exact RT/HAL/env receipts. V3 is compiler-staged and
+identity-sealed; public V2 and direct V3 installation must reject before
+partial host setup. It must also exercise supported
 unwind targets and confirm stable rejection on C, LLVM-library, RV32, Mach-O,
 and other unsupported targets. Current status: **UNVERIFIED** because Stage 3/4
 has not produced an admitted executable.
@@ -69,10 +75,13 @@ collision, cold drain, mismatch/timeout/cancel, and finalization with undrained
 data. Hot-path evidence must show no allocation, hashing, process work,
 formatting, or waiting; process/RSS evidence belongs to the cold drain.
 
-Exercise hardware-probe registration success, duplicate, 64-adapter cap, sealed
+Exercise all 24 environment instruction kinds. For physical operations,
+exercise hardware-probe registration success, duplicate, 64-adapter cap, sealed
 registry, undeclared ID, schema mismatch, narrower adapter bounds, unavailable
-platform, truncation, and typed resume data. Confirm the adapter interface has
-no process-execution capability.
+platform, truncation, and typed resume data. For socket/device/MMIO/IRQ/DMA
+rows, retain a physical-or-blocked receipt with the same plan identity and exact
+resume command. Confirm the adapter interface has no process-execution
+capability.
 
 Build and run both real external comparators only through the typed pinned plan,
 verify output hashes before admission, compare the same Pure receipts, and

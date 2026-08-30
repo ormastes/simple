@@ -1,4 +1,4 @@
-# Engine2D CPU SIMD — genuine AVX2/NEON row kernels
+# Engine2D CPU SIMD — genuine NEON on aarch64
 
 The CPU ("software") engine2d backend's hot pixel-row kernels are backed by
 real SIMD instructions, not scalar loops that merely *report* `has_neon`. On
@@ -41,28 +41,22 @@ scalar-pretending-to-be-NEON false-greens:
    the built driver.
 2. **Bit-identical output** — the native kernel result is compared, byte-for-
    byte, against an independent scalar reference computed in Simple.
-3. **Execution counter** — the historical `simd_engine2d_neon_hits()` counter
-   now advances for native row chunks on both aarch64 NEON and x86 SSE2. The
-   CPU-SIMD evidence gate fails on x86/aarch64 if the counter does not advance
-   (`native_simd_executed`), closing the old false-green where the path reported
-   a SIMD feature without running vector code.
+3. **Execution counter** — `simd_engine2d_neon_hits()` only advances on the
+   NEON chunk path. The CPU-SIMD evidence gate now *fails* on aarch64 if the
+   counter did not advance (`native_simd_executed`), closing the old false-green
+   where the path reported `has_neon` without running NEON.
 
 The gate (`scripts/check/check-cpu-simd-engine2d-evidence.shs`) reports
 `native_simd_executed`, `native_simd_bit_exact`, and `native_simd_hits`.
-Current Linux x86_64 evidence:
-`doc/09_report/cpu_simd_engine2d_evidence_2026-07-08.md` reports
-`feature=avx2`, `native_simd_executed=true`, `bit_exact=true`, `hits=2`, and zero mismatch
-counts for fill, copy, alpha, scroll, and the 192-pixel diagram. Prior Apple
-aarch64 evidence remains in `doc/09_report/cpu_simd_engine2d_evidence_2026-06-09.md`.
+Verified result on Apple aarch64: `executed=true bit_exact=true hits=2`.
 
 ## Interpreter vs AOT
 
 The live CPU-SIMD session (`cpu_simd_session.fill_span` → `simd_fill_row`, and
 `alpha_blend_span` → `simd_blend_row`) routes solid fills and src-over blends
-through native row kernels on x86/aarch64, so the path literally named "CPU SIMD"
-genuinely executes vector code (verified: `fill_span` advances the native row
-hit counter and stays bit-identical; the blend gate reports
-`alpha_mismatch_count=0`). The exact
+through the C NEON kernels on aarch64, so the path literally named "CPU SIMD"
+genuinely executes NEON (verified: `fill_span` advances the NEON hit counter and
+stays bit-identical; the blend gate reports `alpha_mismatch_count=0`). The exact
 `/255` floor is reproduced (NEON multiply-accumulate + scalar divide), so the
 blend is byte-for-byte identical to the scalar reference — no quality loss.
 `blit`/`scroll` stay pure-Simple scalar: they are in-place sub-range copies that
@@ -70,8 +64,8 @@ a return-style row kernel can't express without extra marshalling, and they were
 never Rust-backed.
 
 Under the tree-walking interpreter a `[u32]` array is a boxed `Vec<Value>`, so
-the fill kernel builds a packed native row in the runtime and then copies it into
-the framebuffer element-by-element. The vector instructions genuinely execute over
+the fill kernel builds a packed NEON row in the runtime and then copies it into
+the framebuffer element-by-element. The NEON instructions genuinely execute over
 the packed buffer (that is what the disassembly and counter prove); the per-row
 copy is an interpreter artifact, not a speedup, and it disappears under AOT
 compilation where the framebuffer is already a packed buffer the kernel fills in
@@ -89,12 +83,9 @@ provides.
   `(sa,s,d)` blend combos). This is the only gate that exercises the **C** path
   directly; the others run in the interpreter (Rust seed shim).
 - `scripts/check/check-cpu-simd-engine2d-evidence.shs` — interpreter evidence
-  (x86/NEON executed + bit-exact on capable hosts). Its skip-guard checks the
+  (NEON executed + bit-exact). Its skip-guard checks the
   `engine2d_simd_fill_row_u32_api` facade so a binary without the new externs
   skips cleanly rather than crashing.
-- `scripts/check/check-llvm-simd-row-native-arch.shs` — strict hosted LLVM
-  x86_64, AArch64, and RVV binary gate. RVV is an explicit opt-in through
-  `SIMPLE_RUNTIME_RISCV64_VECTOR=1` and must run only on an RVV-capable CPU.
 
 ## Deployment
 
@@ -106,10 +97,13 @@ verification.
 
 ### Open follow-ups
 
-- **Imported array syntax.** Hosted LLVM exact-output probes currently use
-  `rt_array_len` / `rt_array_get` because imported `[u32]` `.len()` and indexing
-  still lower incorrectly. See
-  `doc/08_tracking/bug/llvm_imported_array_len_index_runtime_handle_2026-07-10.md`.
+- **Native end-to-end unverified.** `runtime_simd_dispatch.c` is wired into the
+  core-c runtime archive (`tools.rs`) and `.spl` calls the C-backed externs, but
+  this was only verified in interpreter mode + by the standalone C gate; a native
+  engine2d build that actually links and runs the C kernels has not been run here
+  (that build path is separately problematic). Confirm the native lane links the
+  `engine2d_simd_*_row_u32_api` facades from the C archive before claiming
+  production parity.
 - **Dead legacy handlers.** The old `rt_simd_fill_row_u32` / `rt_simd_copy_row_u32`
   interpreter handlers (engine2d_simd_ops Rust backing) are no longer referenced
   by `.spl`; delete-unused cleanup is deferred to avoid an extra seed rebuild.

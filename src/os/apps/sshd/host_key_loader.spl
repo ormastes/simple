@@ -8,36 +8,17 @@
 
 use std.io_runtime.{ file_exists }
 
-# File I/O externs.  File read is nullable on provider failure; byte-to-text
-# remains raw because provider lanes do not yet agree on invalid input.
-@unsafe(reason: "raw filesystem path and optional owned byte-array ABI", capabilities: [ffi])
-extern fn rt_file_read_bytes(path: text) -> [u8]?
-@unsafe(reason: "raw byte-array to text lift; caller rejects empty conversion of non-empty input", capabilities: [ffi])
-extern fn rt_bytes_to_text(data: [u8]) -> text?
+# File I/O externs (same pattern as disk_image_bake.spl / ffi/io.spl)
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn _file_bytes_or_error(path: text) -> Result<[u8], text>:
-    if not file_exists(path):
+    if not rt_file_exists(path):
         return Err("host key file not found: {path}")
-    val read_result = unsafe(capabilities: [ffi]):
-        rt_file_read_bytes(path)
-    val raw = match read_result:
-        Some(value): value
-        nil: return Err("failed to read host key file: {path}")
+    val raw: [u8] = rt_file_read_bytes(path) ?? []
     if raw.len() == 0:
         return Err("host key file is empty: {path}")
     Ok(raw)
-
-fn _bytes_to_text_or_error(data: [u8], context: text) -> Result<text, text>:
-    if data.len() == 0:
-        return Err("empty byte input for {context}")
-    val converted = unsafe(capabilities: [ffi]):
-        rt_bytes_to_text(data)
-    match converted:
-        Some(value):
-            if value.len() == 0:
-                return Err("failed to decode non-empty bytes for {context}")
-            Ok(value)
-        nil: Err("failed to decode bytes for {context}")
 
 # ============================================================================
 # Base64 decode (inline, baremetal-safe — no std import needed)
@@ -131,7 +112,7 @@ pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
     # when the hosted runtime refuses to decode them as UTF-8 text.
     val raw = _file_bytes_or_error(path)?
 
-    val text_content = _bytes_to_text_or_error(raw, path)?
+    val text_content = rt_bytes_to_text(raw)
     val trimmed_content = text_content.trim()
 
     if trimmed_content.starts_with("-----BEGIN"):
@@ -171,7 +152,7 @@ fn _ssh_blob_algorithm(blob: [u8]) -> Result<text, text>:
     val name_len = _read_u32_be(blob, 0)?
     if 4 + name_len > blob.len():
         return Err("truncated SSH public blob")
-    _bytes_to_text_or_error(_copy_range(blob, 4, name_len), "SSH blob algorithm")
+    Ok(rt_bytes_to_text(_copy_range(blob, 4, name_len)))
 
 pub fn load_ssh_public_blob_from_file(path: text) -> Result<[u8], text>:
     """Load an OpenSSH public key or certificate line from disk.
@@ -182,7 +163,7 @@ pub fn load_ssh_public_blob_from_file(path: text) -> Result<[u8], text>:
     Returns the decoded raw SSH wire blob after a shallow algorithm/header check.
     """
     val raw = _file_bytes_or_error(path)?
-    val content = _bytes_to_text_or_error(raw, path)?.trim()
+    val content = rt_bytes_to_text(raw).trim()
     val parts = content.split_whitespace()
     if parts.len() < 2:
         return Err("malformed SSH public key line: {path}")

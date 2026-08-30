@@ -2,6 +2,30 @@
 
 > <details>
 
+<!-- sdn-diagram:id=riscv64_trap_model_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=riscv64_trap_model_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+riscv64_trap_model_spec -> std
+riscv64_trap_model_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=riscv64_trap_model_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -18,9 +42,9 @@
 #### builds kernel contexts that return to supervisor mode
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -31,8 +55,6 @@ expect(ctx.sepc).to_equal(0x80200000)
 expect(ctx.sp).to_equal(0x80400000)
 expect(ctx.a0).to_equal(7)
 expect(ctx.sstatus & RV64_SSTATUS_SPP).to_equal(RV64_SSTATUS_SPP)
-expect(ctx.sstatus & RV64_SSTATUS_FS_MASK).to_equal(RV64_SSTATUS_FS_INITIAL)
-expect(RV64_CONTEXT_BYTES).to_equal(544)
 ```
 
 </details>
@@ -40,9 +62,9 @@ expect(RV64_CONTEXT_BYTES).to_equal(544)
 #### builds user contexts that return to user mode
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,7 +75,6 @@ expect(ctx.sepc).to_equal(0x400000)
 expect(ctx.sp).to_equal(0x410000)
 expect(ctx.a0).to_equal(0)
 expect(ctx.sstatus & RV64_SSTATUS_SPP).to_equal(0)
-expect(ctx.sstatus & RV64_SSTATUS_FS_MASK).to_equal(RV64_SSTATUS_FS_INITIAL)
 ```
 
 </details>
@@ -61,7 +82,7 @@ expect(ctx.sstatus & RV64_SSTATUS_FS_MASK).to_equal(RV64_SSTATUS_FS_INITIAL)
 #### classifies user ecalls
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -76,7 +97,7 @@ expect(kind).to_equal(Rv64TrapKind.UserEcall)
 #### classifies supervisor timer interrupts
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,20 +111,10 @@ expect(kind).to_equal(Rv64TrapKind.TimerInterrupt)
 
 #### marshals syscall registers from rv64 user context
 
-- fp state: ExtendedCtxRv
-   - Expected: args.id equals `60`
-   - Expected: args.arg0 equals `10`
-   - Expected: args.arg1 equals `11`
-   - Expected: args.arg2 equals `12`
-   - Expected: args.arg3 equals `13`
-   - Expected: args.arg4 equals `14`
-   - Expected: args.arg5 equals `15`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -116,9 +127,7 @@ val ctx = Riscv64Context(
     t3: 0, t4: 0, t5: 0, t6: 0,
     sepc: 0x1000,
     sstatus: 0,
-    scause: 0,
-    fp_state: ExtendedCtxRv(bytes: [0; 264]),
-    fp_pad: 0
+    scause: 0
 )
 val args = rv64_syscall_args_from_context(ctx)
 expect(args.id).to_equal(60)
@@ -135,7 +144,7 @@ expect(args.arg5).to_equal(15)
 #### applies syscall results back into rv64 user context
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -157,7 +166,7 @@ expect(updated.sp).to_equal(0x410000)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/arch/riscv64_trap_model_spec.spl` |
-| Updated | 2026-07-19 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

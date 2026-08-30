@@ -12,7 +12,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, is_valid_asm_symbol_name, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
@@ -468,6 +468,10 @@ impl HirLowering:
         var fa: FunctionAttr = parse_function_attrs(fn_.attributes)
         if fa.rt_hal_error != "":
             self.error_fatal(fa.rt_hal_error, Some(fn_.span))
+        if fa.placement_error != "":
+            self.error_fatal(fa.placement_error, Some(fn_.span))
+        if fa.is_global and not is_valid_asm_symbol_name(fn_.name):
+            self.error_fatal("E-GLOBAL-MANGLE: `{fn_.name}` is not a valid assembler symbol name for @global", Some(fn_.span))
         if fn_.is_kernel:
             fa.is_gpu_kernel = true
         # Parse export attributes (@export("C"))
@@ -567,18 +571,28 @@ impl HirLowering:
         for tp in struct_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
-        # Phase A gate (#158): a generic struct (`struct Box<T>: v: T`) is NOT
-        # monomorphized on the native build path. Its `T`-typed field never gets
-        # a concrete layout -- at MIR the field degrades to an opaque
-        # pointer-width slot, so a fat value (e.g. `text`) stored in it is
-        # truncated and read back as a garbage integer (silent wrong answer, no
-        # diagnostic). Mirrors lower_function's gate (see :198) and
-        # trait_impl_lowering's generic-method gate: loud-fail at declaration
-        # until real monomorphization lands (#158 Phase B). The bare-generic-fn
-        # and generic-method tiers were already gated; this closes the residual
-        # plain-generic-struct hole.
-        if struct_type_params.len() > 0:
-            self.error("generic structs are not supported on the native build path yet: struct '{struct_name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", struct_span)
+        # #158 Phase C (extended to structs 2026-08-23): a generic struct is a
+        # non-emittable TEMPLATE, not an error at its declaration site
+        # (hardening plan 9.3 step 12) -- exactly the rule already applied to a
+        # generic CLASS in class_declaration_lowering.spl and to a generic
+        # IMPL in trait_impl_lowering. It is recorded as `is_generic_template`
+        # below and never emitted.
+        #
+        # The old Phase A fatal's reasoning (a `T`-typed field degrades to an
+        # opaque pointer-width slot at MIR, truncating a fat value) is about
+        # EMITTING an unmonomorphized template. That risk is unchanged and is
+        # still fenced -- but at the USE site, where it belongs: a reachable
+        # instantiation fails loudly as an unrewritten generic call in 40.mono
+        # (E-MONO-030/032, then E-MONO-033 refuses MIR lowering) and as
+        # HWIR-E-GENERIC in strict MIR. Declaring a template nobody
+        # instantiates is not a defect; emitting one is.
+        #
+        # Enumerated, not assumed (the 43ead88be55 precedent): `grep -rn
+        # '^struct <Name><'` over src/compiler, src/runtime and src/app/cli
+        # returns ZERO generic structs, and none of the 28 that exist under
+        # src/lib (ecs, ndarray, db, storage, tooling/ds_utils, async,
+        # common/search) is imported by anything in the stage1 closure. So no
+        # stage1 instantiation exists to be silently mislowered by this change.
 
         var fields: [HirField] = []
         for f in struct_fields:
@@ -634,6 +648,9 @@ impl HirLowering:
         val fld: ParserField = f
         val fld_type: Type = fld.type_
         val type_ = self.lower_type(fld_type)
+        self.lower_field_with_type(fld, type_)
+
+    me lower_field_with_type(fld: ParserField, type_: HirType) -> HirField:
         val symbol = self.symbols.define(fld.name, SymbolKind.Field, Some(type_), fld.span, fld.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues.
@@ -673,9 +690,9 @@ impl HirLowering:
         )
 
     me lower_enum(enum_: ParserEnum, owner_module: text) -> HirEnum:
-        self.lower_enum_with_symbol(enum_, owner_module, enum_.name)
+        self.lower_enum_with_symbol(enum_, owner_module, enum_.name, false)
 
-    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text) -> HirEnum:
+    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text, project_imported_payloads: bool) -> HirEnum:
         # Field access, NOT a positional `case ParserEnum(...)` destructure: that
         # arm was written for an 8-field ParserEnum and stopped matching once
         # `attributes` (and later fields) were appended, so every enum lowered
@@ -692,8 +709,12 @@ impl HirLowering:
         for tp in type_params:
             hir_type_params = hir_type_params.push(self.lower_type_param(tp))
         var hir_variants: [HirVariant] = []
+        # Imported enum payload dependencies are registered in the declaring
+        # owner's qualified type index. Resolving their raw parser spellings in
+        # the consumer can either miss (`Effect`) or bind a distinct same-named
+        # type, so only imported variants project through that owner.
         for v in variants:
-            hir_variants = hir_variants.push(self.lower_variant(v))
+            hir_variants = hir_variants.push(self.lower_variant(v, owner_module, project_imported_payloads))
         var hir_attrs: [HirAttribute] = []
         for raw_attr in enum_.attributes:
             hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))
@@ -726,7 +747,7 @@ impl HirLowering:
             dyn_open: enum_.dyn_open
         )
 
-    me lower_variant(v: Variant) -> HirVariant:
+    me lower_variant(v: Variant, owner_module: text, project_imported_payloads: bool) -> HirVariant:
         val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
 
         # QUALIFIED patterns in a statement match, not `val kind = match` over
@@ -741,12 +762,21 @@ impl HirLowering:
             case VariantKind.Tuple(types):
                 var hir_types: [HirType] = []
                 for t in types:
-                    hir_types = hir_types.push(self.lower_type(t))
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(t, owner_module)
+                    else:
+                        self.lower_type(t)
+                    hir_types = hir_types.push(lowered_type)
                 kind = HirVariantKind.Tuple(hir_types)
             case VariantKind.Struct(fields):
                 var hir_fields: [HirField] = []
                 for f in fields:
-                    hir_fields = hir_fields.push(self.lower_field(f))
+                    val fld: ParserField = f
+                    val lowered_type = if project_imported_payloads:
+                        self.imported_surface_type(fld.type_, owner_module)
+                    else:
+                        self.lower_type(fld.type_)
+                    hir_fields = hir_fields.push(self.lower_field_with_type(fld, lowered_type))
                 kind = HirVariantKind.Struct(hir_fields)
 
         var discriminant = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: v.span)

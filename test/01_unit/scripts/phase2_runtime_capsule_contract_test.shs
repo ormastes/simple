@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tool="$root/scripts/bootstrap/phase2-runtime-capsule.shs"
+tmp=$(mktemp -d)
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+make_authority() {
+  dir=$1
+  mkdir -p "$dir/deps"
+  printf native >"$dir/libsimple_native_all.a"
+  printf hosted >"$dir/deps/libspl_hosted_runtime-fixture.rlib"
+  hosted_sha=$(sha256sum "$dir/deps/libspl_hosted_runtime-fixture.rlib" | awk '{print $1}')
+  native_sha=$(sha256sum "$dir/libsimple_native_all.a" | awk '{print $1}')
+  {
+    echo schema=simple-bootstrap-hosted-runtime-authority-v1
+    echo status=frozen
+    echo relative_path=deps/libspl_hosted_runtime-fixture.rlib
+    echo sha256="$hosted_sha"
+  } >"$dir/hosted-runtime.env"
+  {
+    echo schema=simple-bootstrap-seed-artifact-stamp-v2
+    echo inputs_fingerprint=fixture
+    echo seed_sha256=fixture
+    echo native_all_sha256="$native_sha"
+    echo backfill_status=absent
+    echo backfill_sha256=absent
+  } >"$dir/simple.inputs.sha256"
+}
+
+printf '#!/bin/sh\nexit 0\n' >"$tmp/compiler"
+chmod 755 "$tmp/compiler"
+make_authority "$tmp/authority"
+capsule=$($tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output")
+$tool verify "$capsule"
+[ "$(stat -c '%a' "$capsule")" = 500 ] || fail 'capsule is writable'
+[ -f "$capsule/libsimple_native_all.a" ] || fail 'native_all missing'
+
+if $tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output" >/dev/null 2>&1; then
+  fail 'overwrite was accepted'
+fi
+chmod -R u+w "$capsule"
+rm "$capsule/libsimple_native_all.a"
+if $tool verify "$capsule" >/dev/null 2>&1; then fail 'missing native_all accepted'; fi
+
+make_authority "$tmp/stale"
+printf tamper >>"$tmp/stale/libsimple_native_all.a"
+if $tool publish "$tmp/compiler" "$tmp/stale" "$tmp/stale-output" >/dev/null 2>&1; then
+  fail 'stale native_all stamp accepted'
+fi
+
+make_authority "$tmp/wrong"
+sed 's/^sha256=.*/sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$tmp/wrong/hosted-runtime.env" >"$tmp/wrong/hosted-runtime.env.new"
+mv "$tmp/wrong/hosted-runtime.env.new" "$tmp/wrong/hosted-runtime.env"
+if $tool publish "$tmp/compiler" "$tmp/wrong" "$tmp/wrong-output" >/dev/null 2>&1; then
+  fail 'wrong hosted artifact hash accepted'
+fi
+
+for field in schema status; do
+  make_authority "$tmp/wrong-$field"
+  case "$field" in
+    schema) replacement='schema=wrong-schema' ;;
+    status) replacement='status=mutable' ;;
+  esac
+  sed "s/^$field=.*/$replacement/" "$tmp/wrong-$field/hosted-runtime.env" >"$tmp/wrong-$field/new"
+  mv "$tmp/wrong-$field/new" "$tmp/wrong-$field/hosted-runtime.env"
+  if $tool publish "$tmp/compiler" "$tmp/wrong-$field" "$tmp/wrong-$field-output" >/dev/null 2>&1; then
+    fail "wrong hosted $field accepted"
+  fi
+done
+
+make_authority "$tmp/duplicate-key"
+printf 'native_all_sha256=%064d\n' 0 >>"$tmp/duplicate-key/simple.inputs.sha256"
+if $tool publish "$tmp/compiler" "$tmp/duplicate-key" "$tmp/duplicate-key-output" >/dev/null 2>&1; then
+  fail 'duplicate identity key accepted'
+fi
+
+fresh_capsule() {
+  name=$1
+  $tool publish "$tmp/compiler" "$tmp/authority" "$tmp/$name-output"
+}
+
+tampered=$(fresh_capsule tampered)
+chmod u+w "$tampered/simple"; printf x >>"$tampered/simple"
+if $tool verify "$tampered" >/dev/null 2>&1; then fail 'tampered compiler accepted'; fi
+
+tampered_receipt=$(fresh_capsule tampered-receipt)
+chmod u+w "$tampered_receipt" "$tampered_receipt/phase2-runtime-capsule.env"
+sed 's/^native_all_sha256=.*/native_all_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+  "$tampered_receipt/phase2-runtime-capsule.env" >"$tmp/receipt.new"
+mv "$tmp/receipt.new" "$tampered_receipt/phase2-runtime-capsule.env"
+if $tool verify "$tampered_receipt" >/dev/null 2>&1; then fail 'tampered receipt accepted'; fi
+
+tampered_stamp=$(fresh_capsule tampered-stamp)
+chmod u+w "$tampered_stamp/simple.inputs.sha256"; printf x >>"$tampered_stamp/simple.inputs.sha256"
+if $tool verify "$tampered_stamp" >/dev/null 2>&1; then fail 'tampered authority stamp accepted'; fi
+
+renamed=$(fresh_capsule renamed)
+renamed_path="$(dirname "$renamed")/not-the-compiler-sha"
+mv "$renamed" "$renamed_path"
+if $tool verify "$renamed_path" >/dev/null 2>&1; then fail 'renamed capsule accepted'; fi
+
+writable=$(fresh_capsule writable)
+chmod u+w "$writable/libsimple_native_all.a"
+if $tool verify "$writable" >/dev/null 2>&1; then fail 'writable leaf accepted'; fi
+
+writable_dir=$(fresh_capsule writable-dir)
+chmod u+w "$writable_dir"
+if $tool verify "$writable_dir" >/dev/null 2>&1; then fail 'writable directory accepted'; fi
+
+symlinked=$(fresh_capsule symlinked)
+chmod u+w "$symlinked"; mv "$symlinked/deps" "$symlinked/deps.real"; ln -s deps.real "$symlinked/deps"
+if $tool verify "$symlinked" >/dev/null 2>&1; then fail 'symlink deps accepted'; fi
+
+duplicate=$(fresh_capsule duplicate)
+chmod u+w "$duplicate/deps"; cp "$duplicate/deps/libspl_hosted_runtime-fixture.rlib" "$duplicate/deps/libspl_hosted_runtime-duplicate.rlib"
+if $tool verify "$duplicate" >/dev/null 2>&1; then fail 'duplicate hosted runtime accepted'; fi
+
+mkdir -p "$tmp/concurrent"
+set +e
+$tool publish "$tmp/compiler" "$tmp/authority" "$tmp/concurrent" >"$tmp/c1" 2>/dev/null & p1=$!
+$tool publish "$tmp/compiler" "$tmp/authority" "$tmp/concurrent" >"$tmp/c2" 2>/dev/null & p2=$!
+wait "$p1"; r1=$?; wait "$p2"; r2=$?
+set -e
+if ! { [ "$r1" -eq 0 ] && [ "$r2" -ne 0 ]; } &&
+   ! { [ "$r2" -eq 0 ] && [ "$r1" -ne 0 ]; }; then
+  fail 'concurrent publication did not admit exactly one publisher'
+fi
+
+echo 'PASS: Phase2 runtime capsule is atomic, SHA-bound, complete, and fail-closed'

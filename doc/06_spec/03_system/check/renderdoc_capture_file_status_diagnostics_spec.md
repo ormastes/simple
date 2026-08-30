@@ -2,6 +2,29 @@
 
 > Validates that RenderDoc capture gates emit explicit file-existence status for Chrome/external-host and Electron `.rdc` artifacts. The GUI/web/2D Vulkan goal can already distinguish ARGB bitmap parity from native RenderDoc capture proof; this contract makes the missing native `.rdc` path explicit so Linux, macOS, and Windows platform runs can diagnose the blocker without inferring from empty magic strings.
 
+<!-- sdn-diagram:id=renderdoc_capture_file_status_diagnostics_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=renderdoc_capture_file_status_diagnostics_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+renderdoc_capture_file_status_diagnostics_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=renderdoc_capture_file_status_diagnostics_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -24,7 +47,7 @@ Validates that RenderDoc capture gates emit explicit file-existence status for C
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | doc/09_report/renderdoc_external_host_capture_2026-06-26.md |
 | Source | `test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -73,8 +96,8 @@ the report can distinguish a missing raw `.rdc` path from a nested gate failure.
   Electron gate capture file status.
 - Missing or symlinked native `.rdc` artifacts are represented by typed status
   values, not by absent keys.
-- Browser producers reject multiple regular `.rdc` candidates instead of
-  selecting whichever path `find` returns first.
+- Browser producers reject multiple regular `.rdc` candidates rather than
+  selecting an order-dependent first match.
 
 ## Examples
 
@@ -143,11 +166,6 @@ invariant here is that the key exists and is machine-readable.
 
 #### emits Electron gate capture file status for controlled RDOC evidence
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- emits Electron gate capture file status for controlled RDOC evidence
 - Create controlled Electron RDOC evidence
    - Expected: code equals `0`
 - Assert Electron gate exposes file status beside magic
@@ -156,12 +174,10 @@ invariant here is that the key exists and is machine-readable.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("emits Electron gate capture file status for controlled RDOC evidence")
 step("Create controlled Electron RDOC evidence")
 val command = "rm -rf build/test-renderdoc-capture-file-status-diagnostics/electron-pass && mkdir -p build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source && " +
     "printf 'RDOCsynthetic electron capture\\n' > build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/electron.rdc && " +
@@ -181,7 +197,6 @@ expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=RDOC")
 
 #### emits external Chrome host capture file status without capture
 
-- emits external Chrome host capture file status without capture
 - Run the external host wrapper in no-capture mode
    - Expected: code equals `0`
 - Assert external host evidence exposes capture file status
@@ -190,12 +205,10 @@ expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=RDOC")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("emits external Chrome host capture file status without capture")
 step("Run the external host wrapper in no-capture mode")
 val command = "rm -rf build/test-renderdoc-capture-file-status-diagnostics/external && BUILD_DIR=build/test-renderdoc-capture-file-status-diagnostics/external/out REPORT_PATH=build/test-renderdoc-capture-file-status-diagnostics/external/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -211,12 +224,16 @@ expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=missing
 
 #### rejects ambiguous browser capture sets before selecting bytes
 
-- rejects ambiguous browser capture sets before selecting bytes
-- Create two otherwise valid regular RDOC candidates
+The executable scenario creates two valid-looking regular `.rdc` files and
+calls the shared selector. It requires `multiple-rdc-candidates`, candidate
+count `2`, and blank selected path/SHA-256 fields. Runnable source:
+`test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.spl`.
+
+#### rejects symlinked external Chrome RDOC artifacts
+
+- Create controlled external-host evidence with a symlinked RDOC artifact
    - Expected: code equals `0`
-- Require typed ambiguity without trusting either path or hash
-   - Expected: _value_of(evidence, "rdoc_capture_file") equals ``
-   - Expected: _value_of(evidence, "rdoc_capture_sha256") equals ``
+- Assert the wrapper classifies the symlink without reading through it
 
 
 <details>
@@ -226,42 +243,6 @@ Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects ambiguous browser capture sets before selecting bytes")
-step("Create two otherwise valid regular RDOC candidates")
-val root = "build/test-renderdoc-capture-file-status-diagnostics/multiple-rdc"
-val command = "rm -rf " + root + " && mkdir -p " + root + "/captures && printf 'RDOCfirst\\n' > " + root + "/captures/first.rdc && printf 'RDOCsecond\\n' > " + root + "/captures/second.rdc && . scripts/lib/renderdoc-evidence-common.shs && rdoc_validate_single_rdc " + root + "/captures " + root + "/evidence.env || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-step("Require typed ambiguity without trusting either path or hash")
-val evidence = file_read(root + "/evidence.env")
-expect(evidence).to_contain("rdoc_capture_status=fail")
-expect(evidence).to_contain("rdoc_capture_reason=multiple-rdc-candidates")
-expect(evidence).to_contain("rdoc_capture_candidate_count=2")
-expect(_value_of(evidence, "rdoc_capture_file")).to_equal("")
-expect(_value_of(evidence, "rdoc_capture_sha256")).to_equal("")
-```
-
-</details>
-
-#### rejects symlinked external Chrome RDOC artifacts
-
-- rejects symlinked external Chrome RDOC artifacts
-- Create controlled external-host evidence with a symlinked RDOC artifact
-   - Expected: code equals `0`
-- Assert the wrapper classifies the symlink without reading through it
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects symlinked external Chrome RDOC artifacts")
 step("Create controlled external-host evidence with a symlinked RDOC artifact")
 val root = "build/test-renderdoc-capture-file-status-diagnostics/external-symlink"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
@@ -283,7 +264,6 @@ expect(evidence).to_contain("rdoc_external_host_gate_reason=rdc-file-symlink")
 
 #### emits top-level Chrome and Electron capture file status diagnostics
 
-- emits top-level Chrome and Electron capture file status diagnostics
 - Run one top-level GUI RenderDoc aggregate pass
    - Expected: code equals `0`
 - Assert aggregate exposes typed capture file statuses
@@ -292,12 +272,10 @@ expect(evidence).to_contain("rdoc_external_host_gate_reason=rdc-file-symlink")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("emits top-level Chrome and Electron capture file status diagnostics")
 step("Run one top-level GUI RenderDoc aggregate pass")
 val command = "rm -rf build/test-renderdoc-capture-file-status-diagnostics/aggregate && BUILD_DIR=build/test-renderdoc-capture-file-status-diagnostics/aggregate/out REPORT_PATH=build/test-renderdoc-capture-file-status-diagnostics/aggregate/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -334,51 +312,9 @@ expect(["pass", "missing", "unavailable", "symlink"].contains(electron_gate)).to
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
-- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
-- **Research:** `doc/09_report/renderdoc_external_host_capture_2026-06-26.md`
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+- **Research:** [doc/09_report/renderdoc_external_host_capture_2026-06-26.md](doc/09_report/renderdoc_external_host_capture_2026-06-26.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c5e3d920c5b191e69963e4b9b0af424b480ead64631a213c90822eafaee3a675`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c5e3d920c5b191e69963e4b9b0af424b480ead64631a213c90822eafaee3a675`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c5e3d920c5b191e69963e4b9b0af424b480ead64631a213c90822eafaee3a675`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.spl
-mirror: doc/06_spec/03_system/check/renderdoc_capture_file_status_diagnostics_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/check/renderdoc_capture_file_status_diagnostics_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/check/renderdoc_capture_file_status_diagnostics_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-<!-- sspec-maintain:scorecard:end -->

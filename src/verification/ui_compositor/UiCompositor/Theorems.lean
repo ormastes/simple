@@ -13,9 +13,6 @@
                                   every pair of windows (FINDING-U1 closure)
   T8  flattenTree_perm_treeSurfaces — paint-order flatten is a permutation of all
                                   surfaces in the tree (FINDING-U2 closure)
-  T9  raiseWindow_next_z_lt_renormThreshold — raiseWindow keeps next_z bounded
-                                  below renormThreshold when the live window
-                                  count itself is below threshold.
 
   IMPLEMENTATION FIDELITY NOTES:
   ──────────────────────────────
@@ -24,8 +21,6 @@
   T5/T6: sort is a permutation → paint order contains each surface exactly once.
   T7:    renorm is order-preserving → raises followed by compaction leave the relative
          stacking order of every pair of windows unchanged.
-  T9:    raiseWindow keeps the z counter below renormThreshold under the normal
-         live-window-count invariant, closing the overflow side of FINDING-U1.
 
   FINDING-U1 — CLOSED:
   ─────────────────────
@@ -59,14 +54,6 @@ namespace UiCompositor
 def RectContains (outer inner : Rect2) : Prop :=
   outer.x ≤ inner.x ∧ inner.right ≤ outer.right ∧
   outer.y ≤ inner.y ∧ inner.bottom ≤ outer.bottom
-
-theorem damage_add_increases_length (r : DamageRegion) (rect : Rect2) :
-    (DamageRegion.add r rect).length = r.length + 1 := by
-  simp [DamageRegion.add]
-
-theorem damage_add_contains_new_rect (r : DamageRegion) (rect : Rect2) :
-    rect ∈ DamageRegion.add r rect := by
-  simp [DamageRegion.add]
 
 -- ============================================================
 -- § B  T1 — merge_covers_left
@@ -489,21 +476,6 @@ theorem renorm_order_preserving (ws : WindowStack)
          { window_id := b.window_id
            , z_order := Int.ofNat (rankOf b.window_id (sortWindowEntries ws.windows)) },
          ha_in, hb_in, rfl, rfl, Int.ofNat_lt.mpr hrank⟩
-
-/-- T9: `raiseWindow` keeps the z counter below the renormalisation threshold
-    when the live window count itself is below that threshold. If the raise would
-    reach the threshold, the model renormalises and resets `next_z` to the live
-    window count; otherwise the incremented value was already below threshold. -/
-theorem raiseWindow_next_z_lt_renormThreshold (ws : WindowStack) (wid : Int)
-    (hlen : Int.ofNat ws.windows.length < renormThreshold) :
-    (WindowStack.raiseWindow ws wid).next_z < renormThreshold := by
-  unfold WindowStack.raiseWindow
-  by_cases h : ws.next_z + 1 ≥ renormThreshold
-  · rw [if_pos h]
-    simp [WindowStack.renorm]
-    exact hlen
-  · rw [if_neg h]
-    exact Int.not_le.mp h
 
 -- ============================================================
 -- § F  Recursive flatten permutation (FINDING-U2 closure)

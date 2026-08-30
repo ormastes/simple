@@ -1,0 +1,138 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.host_evaluator.{prepare_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan,
+    riscv_scalar_semantic_opcode}
+
+describe "declarative scalar ISA plan HWIR decoder":
+    it "keeps permanent semantic opcode assignments across provider families":
+        expect(riscv_scalar_semantic_opcode("add")).to_equal(1)
+        expect(riscv_scalar_semantic_opcode("branch_equal")).to_equal(4)
+        expect(riscv_scalar_semantic_opcode("csr_read_write")).to_equal(14)
+        expect(riscv_scalar_semantic_opcode("environment_call")).to_equal(19)
+        expect(riscv_scalar_semantic_opcode("fence")).to_equal(20)
+        expect(riscv_scalar_semantic_opcode("load_word_signed")).to_equal(29)
+        expect(riscv_scalar_semantic_opcode("multiply_low")).to_equal(35)
+        expect(riscv_scalar_semantic_opcode("unknown")).to_equal(0)
+
+    it "generates one deterministic fixed-RV32 graph from every planned row":
+        val plan = riscv_scalar_decoder_plan("rv32i")
+        expect(plan.is_ok()).to_be(true)
+        if plan.is_ok():
+            val first = strict_riscv_scalar_decoder_hwir(
+                "scalar_decoder_rv32", CoreConfig.rv32(), plan.ok().unwrap())
+            val second = strict_riscv_scalar_decoder_hwir(
+                "scalar_decoder_rv32", CoreConfig.rv32(), plan.ok().unwrap())
+            expect(first.is_ok()).to_be(true)
+            expect(second.is_ok()).to_be(true)
+            if first.is_ok() and second.is_ok():
+                val module = first.ok().unwrap()
+                expect(module.shape_diagnostic()).to_equal("")
+                expect(module.structural_sha256()).to_equal(
+                    second.ok().unwrap().structural_sha256())
+                val decoder_plan = plan.ok().unwrap()
+                expect(module.origins.len()).to_equal(decoder_plan.entries.len() + 1)
+                expect(module.origins[0].node_id.value).to_equal(
+                    "scalar_decoder_rv32:decoder.plan")
+                var origin_ids: [text] = []
+                for origin in module.origins:
+                    expect(origin_ids.contains(origin.node_id.value)).to_be(false)
+                    origin_ids.push(origin.node_id.value)
+                for entry in decoder_plan.entries:
+                    expect(origin_ids.contains(
+                        "scalar_decoder_rv32:decoder.row." + entry.id)).to_be(true)
+                expect(module.summary.register_count).to_equal(0)
+                expect(module.summary.memory_count).to_equal(0)
+                expect(module.ports.any(_.name == "decoded_row_index" and
+                    _.bit_width == 6)).to_be(true)
+
+    it "decodes declared instructions and normalizes illegal inputs to zero":
+        val module = strict_riscv_scalar_decoder_hwir("scalar_decoder_eval",
+            CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).unwrap()
+        val legal = evaluate_strict_comb_hwir(module,
+            [HwHostInput.bits("instruction", 0x00B50533)]).unwrap()
+        val illegal = evaluate_strict_comb_hwir(module,
+            [HwHostInput.bits("instruction", 0)]).unwrap()
+        expect(legal.value_of("decoded_valid").unwrap()).to_equal(1)
+        expect(legal.value_of("decoded_row_index").unwrap()).to_be_greater_than(0)
+        expect(legal.value_of("canonical_instruction").unwrap()).to_equal(0x00B50533)
+        expect(legal.value_of("decoded_execution_class").unwrap()).to_equal(1)
+        expect(legal.value_of("decoded_memory_effect").unwrap()).to_equal(0)
+        expect(legal.value_of("decoded_semantic_opcode").unwrap()).to_equal(1)
+        expect(legal.value_of("decoded_operand_width_32").unwrap()).to_equal(0)
+        expect(legal.value_of("instruction_rd_field").unwrap()).to_equal(10)
+        expect(legal.value_of("instruction_rs1_field").unwrap()).to_equal(10)
+        expect(legal.value_of("instruction_rs2_field").unwrap()).to_equal(11)
+        val high_mask = evaluate_strict_comb_hwir(module,
+            [HwHostInput.bits("instruction", 0x40B50533)]).unwrap()
+        expect(high_mask.value_of("decoded_valid").unwrap()).to_equal(1)
+        expect(high_mask.value_of("canonical_instruction").unwrap()).to_equal(0x40B50533)
+        expect(illegal.value_of("decoded_valid").unwrap()).to_equal(0)
+        expect(illegal.value_of("decoded_row_index").unwrap()).to_equal(0)
+        expect(illegal.value_of("canonical_instruction").unwrap()).to_equal(0)
+        expect(illegal.value_of("decoded_execution_class").unwrap()).to_equal(0)
+        expect(illegal.value_of("decoded_memory_effect").unwrap()).to_equal(0)
+        expect(illegal.value_of("decoded_semantic_opcode").unwrap()).to_equal(0)
+        expect(illegal.value_of("decoded_operand_width_32").unwrap()).to_equal(0)
+        expect(illegal.value_of("instruction_rd_field").unwrap()).to_equal(0)
+
+    it "selects every exact declarative row in both concrete decoder products":
+        for item in [("rv32i", CoreConfig.rv32()),
+                ("rv64i_zicsr_zifencei", CoreConfig.rv64_zicsr_zifencei())]:
+            val plan = riscv_scalar_decoder_plan(item[0]).unwrap()
+            val module = strict_riscv_scalar_decoder_hwir(
+                "scalar_decoder_all_rows_" + item[0], item[1], plan).unwrap()
+            val prepared = prepare_strict_comb_hwir(module).unwrap()
+            var index = 0
+            for entry in plan.entries:
+                val result = prepared.evaluate([HwHostInput.bits(
+                    "instruction", entry.encoding_value as i64)]).unwrap()
+                expect(result.value_of("decoded_valid").unwrap()).to_equal(1)
+                expect(result.value_of("decoded_row_index").unwrap()).to_equal(index + 1)
+                expect(result.value_of("canonical_instruction").unwrap()).to_equal(
+                    entry.encoding_value as i64)
+                expect(result.value_of("decoded_semantic_opcode").unwrap()).to_be_greater_than(0)
+                expect(result.value_of("decoded_semantic_opcode").unwrap()).to_equal(
+                    riscv_scalar_semantic_opcode(entry.semantic_operation))
+                expect(result.value_of("decoded_operand_width_32").unwrap()).to_equal(
+                    if entry.operand_width_bits == 32: 1 else: 0)
+                index = index + 1
+
+    it "rejects cross-XLEN and profile-forged decoder plans":
+        val rv64_plan = riscv_scalar_decoder_plan("rv64i").unwrap()
+        val wrong_xlen = strict_riscv_scalar_decoder_hwir(
+            "bad_decoder", CoreConfig.rv32(), rv64_plan)
+        expect(wrong_xlen.is_err()).to_be(true)
+        expect(wrong_xlen.unwrap_err()).to_contain("DECODER-CONFIG")
+        var forged = riscv_scalar_decoder_plan("rv32i").unwrap()
+        forged.entries = rv64_plan.entries
+        val forged_result = strict_riscv_scalar_decoder_hwir(
+            "forged_decoder", CoreConfig.rv32(), forged)
+        expect(forged_result.is_err()).to_be(true)
+        expect(forged_result.unwrap_err()).to_contain("RISCV-DECODER-E-ENTRIES")
+
+    it "emits a closed decoder without runtime XLEN or textual ISA dispatch":
+        val module = strict_riscv_scalar_decoder_hwir("scalar_decoder_vhdl",
+            CoreConfig.rv64_zicsr_zifencei(),
+            riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()).unwrap()
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_be(true)
+        if emitted.is_success():
+            expect(emitted.vhdl).to_contain("entity scalar_decoder_vhdl is")
+            expect(emitted.vhdl).to_contain("decoded_valid : out std_logic")
+            expect(emitted.vhdl).to_contain("canonical_instruction : out std_logic_vector(31 downto 0)")
+            expect(emitted.vhdl).to_contain("masked_0 <= instruction and mask_0")
+            expect(module.ports.map(_.name)).to_equal(
+                ["instruction", "decoded_valid", "decoded_row_index",
+                    "canonical_instruction", "decoded_execution_class",
+                    "decoded_memory_effect", "decoded_semantic_opcode",
+                    "decoded_operand_width_32", "instruction_rd_field",
+                    "instruction_rs1_field", "instruction_rs2_field"])
+            expect(module.ports.all(\port: port.name != "xlen" and
+                port.name != "isa_profile" and port.name != "extension")).to_be(true)
+            expect(emitted.vhdl.contains("generic(")).to_be(false)
+            expect(emitted.vhdl).to_contain(
+                "\"11111110000000000111000001111111\"")

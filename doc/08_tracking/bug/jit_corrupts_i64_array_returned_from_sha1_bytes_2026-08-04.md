@@ -1,7 +1,6 @@
 # JIT returns a tag-corrupted `[i64]` from `sha1_bytes` — floats, `nil` and heap tags inside an i64 list
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** OPEN
 **Found:** 2026-08-04
 
 ## Symptom

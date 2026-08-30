@@ -428,6 +428,16 @@ fn ssh_parse_kexinit(data: [u8]) -> Result<SshKexInit, text>:
     if off != data.len():
         return Err("KEXINIT: trailing bytes after reserved")
 
+    if not ssh_algorithm_name_list_is_well_formed(kex_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(host_key_algorithms) or
+        not ssh_algorithm_name_list_is_well_formed(enc_c2s) or
+        not ssh_algorithm_name_list_is_well_formed(enc_s2c) or
+        not ssh_algorithm_name_list_is_well_formed(mac_c2s) or
+        not ssh_algorithm_name_list_is_well_formed(mac_s2c) or
+        not ssh_algorithm_name_list_is_well_formed(comp_c2s) or
+        not ssh_algorithm_name_list_is_well_formed(comp_s2c):
+        return Err("KEXINIT: malformed algorithm name-list")
+
     Ok(SshKexInit(
         cookie: cookie,
         kex_algorithms: kex_algorithms,
@@ -453,6 +463,24 @@ fn _list_contains(list: text, candidate: text) -> bool:
         if item == candidate:
             return true
     false
+
+pub fn ssh_algorithm_name_list_is_well_formed(list: text) -> bool:
+    """Accept only non-empty, comma-separated SSH algorithm names.
+
+    KEXINIT algorithm fields are name-lists, not optional strings.  Reject an
+    empty member (including leading, trailing, or doubled commas) before
+    selection so a malformed peer proposal cannot be normalized into a
+    different, apparently valid algorithm set.
+    """
+    if list == "":
+        return false
+    for raw in list.split(","):
+        # Whitespace is not part of an SSH algorithm name.  Do not preserve
+        # the old selection helper's convenience trimming at this trust
+        # boundary, because it could turn a malformed peer offer into a match.
+        if raw == "" or raw != raw.trim():
+            return false
+    true
 
 fn _first_match(client_list: text, server_list: text) -> text:
     """Find the first algorithm in client_list that also appears in server_list."""
@@ -504,10 +532,8 @@ fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<Ss
     Returns the first matching algorithm for each category, following
     client preference order per RFC 4253 section 7.1.
     """
-    var kex = ""
-    if _list_contains(client.kex_algorithms, "curve25519-sha256") and _list_contains(server.kex_algorithms, "curve25519-sha256"):
-        kex = "curve25519-sha256"
-    if kex == "":
+    val kex = _first_match(client.kex_algorithms, server.kex_algorithms)
+    if kex != "curve25519-sha256":
         return Err("no matching kex algorithm")
 
     val host_key = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
@@ -651,13 +677,5 @@ fn ssh_build_disconnect(reason: u32, description: text) -> [u8]:
     buf = ssh_put_u32(buf, 0)     # language tag
     buf
 
-fn ssh_build_unimplemented(rejected_sequence: u32) -> [u8]:
-    """Build RFC 4253 SSH_MSG_UNIMPLEMENTED for one rejected packet."""
-    var buf: [u8] = []
-    buf.push(SSH_MSG_UNIMPLEMENTED)
-    buf = ssh_put_u32(buf, rejected_sequence)
-    buf
-
-export SSH_VERSION_STRING, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_UNIMPLEMENTED, SSH_MSG_DEBUG, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_EXT_INFO
+export SSH_VERSION_STRING, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_EXT_INFO
 export SSH_DISCONNECT_PROTOCOL_ERROR
-export ssh_build_unimplemented

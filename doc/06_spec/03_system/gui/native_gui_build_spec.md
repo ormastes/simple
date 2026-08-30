@@ -2,6 +2,32 @@
 
 > Verifies that GUI apps can be built into standalone native binaries for the current platform and that those binaries actually serve a real GUI (web mode) with correct HTML content.
 
+<!-- sdn-diagram:id=native_gui_build_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=native_gui_build_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+native_gui_build_spec -> std
+native_gui_build_spec -> app
+native_gui_build_spec -> nogc_sync_mut
+native_gui_build_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=native_gui_build_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 16 | 16 | 0 | 0 |
@@ -26,7 +52,7 @@ Verifies that GUI apps can be built into standalone native binaries for the curr
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/native_gui_build_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -63,19 +89,13 @@ and makes HTTP requests to verify real rendering.
 
 #### detects the current platform as a known value _(slow)_
 
-- detects the current platform as a known value
-   - Expected: known is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects the current platform as a known value")
 val platform = detect_platform()
 val known = (platform == "macos" or platform == "linux" or platform == "windows")
 expect(known).to_equal(true)
@@ -91,19 +111,13 @@ expect(known).to_equal(true)
 
 #### returns 3 supported platforms _(slow)_
 
-- returns 3 supported platforms
-   - Expected: platforms.len() equals `3`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 3 supported platforms")
 val platforms = supported_platforms()
 expect(platforms.len()).to_equal(3)
 ```
@@ -118,21 +132,13 @@ expect(platforms.len()).to_equal(3)
 
 #### includes macos, linux, windows in supported list _(slow)_
 
-- includes macos, linux, windows in supported list
-   - Expected: has_macos is true
-   - Expected: has_linux is true
-   - Expected: has_windows is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes macos, linux, windows in supported list")
 val platforms = supported_platforms()
 var has_macos = false
 var has_linux = false
@@ -159,21 +165,13 @@ expect(has_windows).to_equal(true)
 
 #### maps platform names to display names _(slow)_
 
-- maps platform names to display names
-   - Expected: platform_display_name("macos") equals `macOS`
-   - Expected: platform_display_name("linux") equals `Linux`
-   - Expected: platform_display_name("windows") equals `Windows`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maps platform names to display names")
 expect(platform_display_name("macos")).to_equal("macOS")
 expect(platform_display_name("linux")).to_equal("Linux")
 expect(platform_display_name("windows")).to_equal("Windows")
@@ -191,18 +189,13 @@ expect(platform_display_name("windows")).to_equal("Windows")
 
 #### generates web backend entry with port _(slow)_
 
-- generates web backend entry with port
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates web backend entry with port")
 val src = generate_gui_entry("examples/06_io/ui/minimal.ui.sdn", "web", 4567)
 expect(src).to_contain("run_web")
 expect(src).to_contain("examples/06_io/ui/minimal.ui.sdn")
@@ -220,18 +213,13 @@ expect(src).to_contain("fn main()")
 
 #### generates tui backend entry _(slow)_
 
-- generates tui backend entry
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates tui backend entry")
 val src = generate_gui_entry("examples/06_io/ui/minimal.ui.sdn", "tui", 0)
 expect(src).to_contain("run_tui")
 expect(src).to_contain("examples/06_io/ui/minimal.ui.sdn")
@@ -248,18 +236,13 @@ expect(src).to_contain("fn main()")
 
 #### generates headless backend entry _(slow)_
 
-- generates headless backend entry
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates headless backend entry")
 val src = generate_gui_entry("examples/06_io/ui/minimal.ui.sdn", "headless", 0)
 expect(src).to_contain("run_headless")
 expect(src).to_contain("fn main()")
@@ -275,18 +258,13 @@ expect(src).to_contain("fn main()")
 
 #### generates auto-detect entry for unknown backend _(slow)_
 
-- generates auto-detect entry for unknown backend
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates auto-detect entry for unknown backend")
 val src = generate_gui_entry("examples/06_io/ui/minimal.ui.sdn", "auto", 3000)
 expect(src).to_contain("detect_gui_backend")
 expect(src).to_contain("run_detected_backend")
@@ -304,19 +282,13 @@ expect(src).to_contain("run_detected_backend")
 
 #### fails gracefully for nonexistent ui file _(slow)_
 
-- fails gracefully for nonexistent ui file
-   - Expected: result.success is false
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fails gracefully for nonexistent ui file")
 val result = build_gui_binary("nonexistent/file.ui.sdn", "build/gui_test/bad", "web", 3000)
 expect(result.success).to_equal(false)
 expect(result.error).to_contain("not found")
@@ -332,27 +304,21 @@ expect(result.error).to_contain("not found")
 
 #### builds a web-mode binary from minimal.ui.sdn _(slow)_
 
-- builds a web-mode binary from minimal.ui.sdn
+1. rt dir create all
    - Expected: result.success is true
    - Expected: result.platform equals `detect_platform()`
    - Expected: result.backend equals `web`
-   - Expected: file_exists("build/gui_test/minimal_web") is true
+   - Expected: rt_file_exists("build/gui_test/minimal_web") is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds a web-mode binary from minimal.ui.sdn")
-"""
-This test compiles examples/06_io/ui/minimal.ui.sdn into a native binary
-with the web backend. The binary should exist after compilation.
-"""
-dir_create_all("build/gui_test")
+rt_dir_create_all("build/gui_test")
 val result = build_gui_binary(
     "examples/06_io/ui/minimal.ui.sdn",
     "build/gui_test/minimal_web",
@@ -365,7 +331,7 @@ if not result.success:
 expect(result.success).to_equal(true)
 expect(result.platform).to_equal(detect_platform())
 expect(result.backend).to_equal("web")
-expect(file_exists("build/gui_test/minimal_web")).to_equal(true)
+expect(rt_file_exists("build/gui_test/minimal_web")).to_equal(true)
 ```
 
 </details>
@@ -378,21 +344,19 @@ expect(file_exists("build/gui_test/minimal_web")).to_equal(true)
 
 #### builds a headless binary from minimal.ui.sdn _(slow)_
 
-- builds a headless binary from minimal.ui.sdn
+1. rt dir create all
    - Expected: result.success is true
    - Expected: result.backend equals `headless`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds a headless binary from minimal.ui.sdn")
-dir_create_all("build/gui_test")
+rt_dir_create_all("build/gui_test")
 val result = build_gui_binary(
     "examples/06_io/ui/minimal.ui.sdn",
     "build/gui_test/minimal_headless",
@@ -417,27 +381,22 @@ expect(result.backend).to_equal("headless")
 
 #### serves HTML page with correct content _(slow)_
 
-- serves HTML page with correct content
+1. rt dir create all
+
+2. Ok
+
+3. Err
    - Expected: e equals ``
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("serves HTML page with correct content")
-"""
-1. Generate a web server entry point .spl
-2. Launch it via the Simple interpreter as a background process
-3. Wait for server to start
-4. HTTP GET / and verify HTML response
-5. Kill the process
-"""
-dir_create_all("build/gui_test")
+rt_dir_create_all("build/gui_test")
 
 val tree_result = parse_ui_to_tree("test/fixtures/gui/test_app.ui.sdn")
 match tree_result:
@@ -461,23 +420,22 @@ match tree_result:
 
 #### serves HTML with CSS dark theme styling _(slow)_
 
-- serves HTML with CSS dark theme styling
+1. rt dir create all
+
+2. Ok
+
+3. Err
    - Expected: e equals ``
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("serves HTML with CSS dark theme styling")
-"""
-Verify that the rendered page includes dark theme CSS.
-"""
-dir_create_all("build/gui_test")
+rt_dir_create_all("build/gui_test")
 
 val tree_result = parse_ui_to_tree("test/fixtures/gui/test_app.ui.sdn")
 match tree_result:
@@ -500,23 +458,22 @@ match tree_result:
 
 #### serves JSON state API _(slow)_
 
-- serves JSON state API
+1. rt dir create all
+
+2. Ok
+
+3. Err
    - Expected: e equals ``
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("serves JSON state API")
-"""
-Verify the /api/state endpoint returns JSON with app state.
-"""
-dir_create_all("build/gui_test")
+rt_dir_create_all("build/gui_test")
 
 val tree_result = parse_ui_to_tree("test/fixtures/gui/test_app.ui.sdn")
 match tree_result:
@@ -542,20 +499,18 @@ match tree_result:
 
 #### returns results for all 3 platforms _(slow)_
 
-- returns results for all 3 platforms
+1. rt dir create all
    - Expected: results.len() equals `3`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns results for all 3 platforms")
-dir_create_all("build/gui_test/multi")
+rt_dir_create_all("build/gui_test/multi")
 val results = build_gui_all_platforms(
     "examples/06_io/ui/minimal.ui.sdn",
     "build/gui_test/multi",
@@ -575,21 +530,19 @@ expect(results.len()).to_equal(3)
 
 #### succeeds for current platform and reports cross-compile limitation _(slow)_
 
-- succeeds for current platform and reports cross-compile limitation
+1. rt dir create all
    - Expected: current_succeeded is true
    - Expected: cross_failed equals `2`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("succeeds for current platform and reports cross-compile limitation")
-dir_create_all("build/gui_test/multi2")
+rt_dir_create_all("build/gui_test/multi2")
 val results = build_gui_all_platforms(
     "examples/06_io/ui/minimal.ui.sdn",
     "build/gui_test/multi2",
@@ -627,54 +580,3 @@ expect(cross_failed).to_equal(2)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `ac5e817b9ebb313732cf06099c98f84baef04c2c0ebe284f1e19072d9d3365e4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `ac5e817b9ebb313732cf06099c98f84baef04c2c0ebe284f1e19072d9d3365e4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `ac5e817b9ebb313732cf06099c98f84baef04c2c0ebe284f1e19072d9d3365e4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/gui/native_gui_build_spec.spl
-mirror: doc/06_spec/03_system/gui/native_gui_build_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/native_gui_build_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/native_gui_build_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/native_gui_build_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/gui/native_gui_build_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects the current platform as a known value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/native_gui_build_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns 3 supported platforms' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/native_gui_build_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'includes macos, linux, windows in supported list' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

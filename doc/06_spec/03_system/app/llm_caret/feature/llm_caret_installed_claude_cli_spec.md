@@ -3,7 +3,7 @@
 > Probe the currently installed Claude CLI without sending a prompt or allowing
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
+|-------|-------:|--------:|--------:|
 | 6 | 6 | 0 | 0 |
 
 <details>
@@ -17,9 +17,10 @@ Probe the currently installed Claude CLI without sending a prompt or allowing
 
 | Field | Value |
 |-------|-------|
-| Category | Application |
-| Status | Active |
-| Plan | doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md |
+| Category | Application / CLI |
+| Status | Active; fails closed when Claude is not installed |
+| Requirement support | REQ-LLM-CARET-CLI-HARDEN-006 |
+| Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` |
 | Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -46,8 +47,6 @@ the requirement's direct production-declaration scenarios.
 
 ## Scenarios
 
-### LLM Caret installed Claude CLI compatibility
-
 ### REQ-LLM-CARET-CLI-HARDEN-006: installed Claude CLI contract
 
 #### should resolve the installed executable and recorded provenance
@@ -61,9 +60,6 @@ the requirement's direct production-declaration scenarios.
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 24 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-SYSTEM
@@ -284,21 +280,57 @@ check_probe_artifacts("hidden-max-turns")
 
 </details>
 
-## Scenario Summary
+</details>
 
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+<details>
+<summary>Executable helper source</summary>
 
+```simple
+use app.io.mod.{file_exists, file_read, process_run_bounded}
 
-## Related Documentation
+val FEATURE_MAP = "doc/03_plan/trace/llm_caret_claude_cli_full_parity_feature_matrix.tsv"
+val CHECKER = "scripts/check/check-llm-caret-installed-claude-cli.shs"
+val ARTIFACT_ROOT = "build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli"
 
-- **Plan:** `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md`
+struct ClaudeCliProbeResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
 
+fn probe_current_claude_cli(case_name: text) -> ClaudeCliProbeResult:
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "sh",
+        [CHECKER, "--case", case_name],
+        20000,
+        32768
+    )
+    ClaudeCliProbeResult(
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: exit_code
+    )
+
+fn check_feature_map():
+    expect(file_exists(FEATURE_MAP)).to_be(true)
+    expect(file_read(FEATURE_MAP)).to_contain("\tcli\t")
+
+fn check_probe_artifacts(case_name: text):
+    val case_root = ARTIFACT_ROOT + "/" + case_name
+    expect(file_exists(case_root + "/stdout.txt")).to_be(true)
+    expect(file_exists(case_root + "/stderr.txt")).to_be(true)
+    expect(file_exists(case_root + "/exit.txt")).to_be(true)
+    expect(file_exists(case_root + "/claude-path.txt")).to_be(true)
+    expect(file_exists(case_root + "/claude-canonical-target.txt")).to_be(true)
+    expect(file_exists(case_root + "/claude-version.txt")).to_be(true)
+    expect(file_exists(case_root + "/claude-sha256.txt")).to_be(true)
+    expect(file_read(case_root + "/claude-sha256.txt").len()).to_be_greater_than(63)
+```
+
+The helper invokes only the repository checker. Each checker child is bounded
+to five seconds and each raw stdout/stderr file to a conservative 64 KiB; the
+outer SSpec allows 20 seconds for discovery plus the metadata and selected-case
+children while bounding its own returned output to 32 KiB. Neither layer
+declares a leaf runtime extern.
 
 </details>
 

@@ -1,9 +1,9 @@
 # SimpleOS QEMU runner — test_os, per-architecture test drivers, and the full
-# QemuScenario catalog with lookups.
-use os.qemu_runner.*
-use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
-use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+# QemuScenario catalog (all 27 scenarios) with lookups.
+use os._QemuRunner.runner_targets.*
+use os._QemuRunner.os_build_run.*
+use os._QemuRunner.scenario_disks.*
+use os._QemuRunner.scenario_exec.*
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -56,12 +56,23 @@ use os.toolchain_vfs_probe_contract.{
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_time_now_unix_micros() -> i64
+
 fn test_os(target: OsTarget, timeout_ms: u64) -> bool:
     """Runs QEMU and checks serial output for 'SimpleOS' within timeout.
 
     Returns true if the kernel boots, prints the expected banner, and exits successfully.
     """
-    if not file_exists(target.output):
+    if not rt_file_exists(target.output):
         print "[test] ERROR: kernel binary not found: {target.output}"
         print "[test] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
@@ -69,7 +80,7 @@ fn test_os(target: OsTarget, timeout_ms: u64) -> bool:
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[test] {arch_display_name(target.arch)} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
-    val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
     val serial_output = stdout + stderr
     print "[test] serial output:\n{serial_output}"
     val has_banner = serial_output.contains("SimpleOS")
@@ -352,7 +363,7 @@ fn scenario_x64_ssh() -> QemuScenario:
         cpu: "qemu64",
         memory: "2G",
         qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"] + _x64_nvme_disk_args() + [
-            "-netdev", "user,id=n0,hostfwd=tcp::2222-:2222",
+            "-netdev", "user,id=n0,hostfwd=tcp::2222-:22",
             "-device", "virtio-net-pci,netdev=n0"
         ],
         gui_mode: false,
@@ -508,21 +519,6 @@ fn scenario_arm64_wm_ramfb() -> QemuScenario:
     """ARM64 QEMU virt ramfb lane for the SimpleOS window manager."""
     _scenario_from_target("arm64-wm-ramfb", get_arm64_wm_qemu_target(), "ARM64 virt ramfb SimpleOS WM lane")
 
-fn scenario_arm64_desktop_engine2d() -> QemuScenario:
-    _scenario_from_target("arm64-desktop-engine2d", get_arm64_desktop_engine2d_target(), "ARM64 canonical RAMFB/Engine2D desktop")
-
-fn _host_gpu_probe_scenario(name: text, arch: Architecture) -> QemuScenario:
-    _scenario_from_target(name, get_host_gpu_probe_target(arch), "SimpleOS bounded ivshmem host-GPU render and processing probe")
-
-fn scenario_simpleos_host_gpu_x86_64() -> QemuScenario:
-    _host_gpu_probe_scenario("simpleos-host-gpu-x86_64", Architecture.X86_64)
-
-fn scenario_simpleos_host_gpu_aarch64() -> QemuScenario:
-    _host_gpu_probe_scenario("simpleos-host-gpu-aarch64", Architecture.Arm64)
-
-fn scenario_simpleos_host_gpu_riscv64() -> QemuScenario:
-    _host_gpu_probe_scenario("simpleos-host-gpu-riscv64", Architecture.Riscv64)
-
 fn scenario_arm32_virtio_fat32_smf() -> QemuScenario:
     """ARM32 QEMU virt with VirtIO block FAT32 media carrying /sys/apps/hello_world.smf."""
     _arm_fs_exec_scenario(Architecture.Arm32, "ARM32 virt boot with VirtIO-BLK FAT32 SMF executable media")
@@ -554,7 +550,7 @@ fn scenario_riscv64_smoke() -> QemuScenario:
     )
 
 fn scenario_riscv64_display_smoke() -> QemuScenario:
-    """RV64 canonical desktop over VirtIO-GPU, held for QMP capture."""
+    """RV64 virtio-gpu display smoke lane that holds for framebuffer capture."""
     QemuScenario(
         name: "riscv64-display-smoke",
         arch: Architecture.Riscv64,
@@ -564,12 +560,10 @@ fn scenario_riscv64_display_smoke() -> QemuScenario:
         qemu_extra: [
             "-bios", "default",
             "-global", "virtio-mmio.force-legacy=false",
-            "-drive", "file=build/os/fat32-riscv64-desktop.img,if=none,id=rvdesktop,format=raw",
-            "-device", "virtio-blk-pci,drive=rvdesktop,disable-modern=on,disable-legacy=off",
             "-device", "virtio-gpu-pci,disable-modern=on,disable-legacy=off"
         ],
         gui_mode: false,
-        description: "RV64 canonical desktop over VirtIO-GPU, held for QMP capture"
+        description: "RV64 virtio-gpu display smoke lane that holds for framebuffer capture"
     )
 
 fn scenario_rv64_ssh() -> QemuScenario:
@@ -585,7 +579,7 @@ fn scenario_rv64_ssh() -> QemuScenario:
             "-global", "virtio-mmio.force-legacy=false",
             "-drive", "file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw",
             "-device", "virtio-blk-device,drive=rvdisk",
-            "-netdev", "user,id=n0,hostfwd=tcp::2222-:2222",
+            "-netdev", "user,id=n0,hostfwd=tcp::2222-:22",
             "-device", "virtio-net-pci,netdev=n0,disable-modern=on,disable-legacy=off"
         ],
         gui_mode: false,
@@ -606,30 +600,6 @@ fn scenario_rv64_x25519_probe() -> QemuScenario:
         ],
         gui_mode: false,
         description: "RV64 pure Simple X25519 shallow diagnostic lane"
-    )
-
-fn scenario_riscv64_fpga_mmode() -> QemuScenario:
-    QemuScenario(
-        name: "riscv64-fpga-mmode",
-        arch: Architecture.Riscv64,
-        machine: "virt",
-        cpu: "rv64",
-        memory: "64M",
-        qemu_extra: [],
-        gui_mode: false,
-        description: "RV64 FPGA M-mode kernel-only build lane"
-    )
-
-fn scenario_riscv32_fpga_mmode() -> QemuScenario:
-    QemuScenario(
-        name: "riscv32-fpga-mmode",
-        arch: Architecture.Riscv32,
-        machine: "virt",
-        cpu: "rv32",
-        memory: "64M",
-        qemu_extra: [],
-        gui_mode: false,
-        description: "RV32 FPGA M-mode kernel-only build lane"
     )
 
 fn scenario_x64_full_stack() -> QemuScenario:
@@ -684,12 +654,6 @@ fn arm_fs_exec_disk_image_path(arch: Architecture) -> text:
         Architecture.Arm32: simpleos_platform_disk_image_output("arm32")
         _: "build/os/fat32-arm.img"
 
-fn arm64_desktop_disk_image_path() -> text:
-    "build/os/fat32-arm64-desktop.img"
-
-fn riscv64_desktop_disk_image_path() -> text:
-    "build/os/fat32-riscv64-desktop.img"
-
 fn arm_fs_exec_kernel_bin_path(arch: Architecture) -> text:
     match arch:
         Architecture.Arm64: "build/os/simpleos_arm64_fs_exec.bin"
@@ -699,10 +663,6 @@ fn arm_fs_exec_kernel_bin_path(arch: Architecture) -> text:
 fn _arm_virtio_blk_exec_disk_args(arch: Architecture) -> [text]:
     val img = arm_fs_exec_disk_image_path(arch)
     ["-global", "virtio-mmio.force-legacy=false", "-drive", "file={img},if=none,id=armdisk,format=raw", "-device", "virtio-blk-device,drive=armdisk"]
-
-fn _arm64_virtio_blk_desktop_disk_args() -> [text]:
-    val img = arm64_desktop_disk_image_path()
-    ["-global", "virtio-mmio.force-legacy=false", "-drive", "file={img},if=none,id=armdesktop,format=raw", "-device", "virtio-blk-device,drive=armdesktop"]
 
 fn riscv_fs_exec_disk_image_path(arch: Architecture) -> text:
     match arch:
@@ -726,11 +686,11 @@ fn ovmf_code_candidates() -> [text]:
 
 fn ovmf_code_path() -> text:
     """Resolve the OVMF code image for x86_64 UEFI QEMU boots."""
-    val env_path = env_get("SIMPLEOS_OVMF_CODE") ?? ""
+    val env_path = rt_env_get("SIMPLEOS_OVMF_CODE") ?? ""
     if env_path != "":
         return env_path
     for candidate in ovmf_code_candidates():
-        if file_exists(candidate):
+        if rt_file_exists(candidate):
             return candidate
     ""
 
@@ -747,11 +707,11 @@ fn desktop_uefi_bootloader_candidates() -> [text]:
 
 fn desktop_uefi_bootloader_path() -> text:
     """Resolve a repo-managed EFI bootloader artifact for the desktop UEFI lane."""
-    val env_path = env_get("SIMPLEOS_UEFI_BOOTLOADER") ?? ""
+    val env_path = rt_env_get("SIMPLEOS_UEFI_BOOTLOADER") ?? ""
     if env_path != "":
         return env_path
     for candidate in desktop_uefi_bootloader_candidates():
-        if file_exists(candidate):
+        if rt_file_exists(candidate):
             return candidate
     ""
 
@@ -765,7 +725,7 @@ fn desktop_uefi_esp_dir_path() -> text:
 
 fn desktop_uefi_boot_media_ready() -> bool:
     """True when the local disk image can be expected to boot under OVMF."""
-    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != "" and file_exists(desktop_uefi_disk_image_path()) and file_exists(desktop_uefi_esp_dir_path() + "/EFI/BOOT/BOOTX64.EFI")
+    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != "" and rt_file_exists(desktop_uefi_disk_image_path()) and rt_file_exists(desktop_uefi_esp_dir_path() + "/EFI/BOOT/BOOTX64.EFI")
 
 fn _x64_desktop_uefi_args() -> [text]:
     val fw = ovmf_code_path()
@@ -818,20 +778,13 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_x86_32_initrd_fat32_smf(),
         scenario_arm64_virtio_fat32_smf(),
         scenario_arm64_wm_ramfb(),
-        scenario_arm64_desktop_engine2d(),
-        scenario_simpleos_host_gpu_x86_64(),
-        scenario_simpleos_host_gpu_aarch64(),
-        scenario_simpleos_host_gpu_riscv64(),
         scenario_arm32_virtio_fat32_smf(),
         scenario_riscv64_virtio_fat32_smf(),
         scenario_riscv64_smoke(),
         scenario_riscv64_display_smoke(),
         scenario_riscv64_hosted(),
         scenario_rv64_ssh(),
-        scenario_rv64_x25519_probe(),
-        scenario_riscv64_fpga_mmode(),
         scenario_riscv32_virtio_fat32_smf(),
-        scenario_riscv32_fpga_mmode(),
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),
         scenario_x64_desktop_disk(),
@@ -889,10 +842,6 @@ fn scenario_exists(name: text) -> bool:
         return true
     if name == "arm64-wm-ramfb":
         return true
-    if name == "arm64-desktop-engine2d":
-        return true
-    if name == "simpleos-host-gpu-x86_64" or name == "simpleos-host-gpu-aarch64" or name == "simpleos-host-gpu-riscv64":
-        return true
     if name == "arm32-virtio-fat32-smf":
         return true
     if name == "riscv64-virtio-fat32-smf":
@@ -907,11 +856,7 @@ fn scenario_exists(name: text) -> bool:
         return true
     if name == "rv64-x25519-probe":
         return true
-    if name == "riscv64-fpga-mmode":
-        return true
     if name == "riscv32-virtio-fat32-smf":
-        return true
-    if name == "riscv32-fpga-mmode":
         return true
     if name == "x64-full-stack":
         return true
@@ -962,14 +907,6 @@ fn scenario_by_name_direct(name: text) -> QemuScenario:
         return scenario_arm64_virtio_fat32_smf()
     if name == "arm64-wm-ramfb":
         return scenario_arm64_wm_ramfb()
-    if name == "arm64-desktop-engine2d":
-        return scenario_arm64_desktop_engine2d()
-    if name == "simpleos-host-gpu-x86_64":
-        return scenario_simpleos_host_gpu_x86_64()
-    if name == "simpleos-host-gpu-aarch64":
-        return scenario_simpleos_host_gpu_aarch64()
-    if name == "simpleos-host-gpu-riscv64":
-        return scenario_simpleos_host_gpu_riscv64()
     if name == "arm32-virtio-fat32-smf":
         return scenario_arm32_virtio_fat32_smf()
     if name == "riscv64-virtio-fat32-smf":
@@ -984,12 +921,8 @@ fn scenario_by_name_direct(name: text) -> QemuScenario:
         return scenario_rv64_ssh()
     if name == "rv64-x25519-probe":
         return scenario_rv64_x25519_probe()
-    if name == "riscv64-fpga-mmode":
-        return scenario_riscv64_fpga_mmode()
     if name == "riscv32-virtio-fat32-smf":
         return scenario_riscv32_virtio_fat32_smf()
-    if name == "riscv32-fpga-mmode":
-        return scenario_riscv32_fpga_mmode()
     if name == "x64-full-stack":
         return scenario_x64_full_stack()
     if name == "x64-desktop-test":

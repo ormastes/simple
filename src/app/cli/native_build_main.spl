@@ -9,6 +9,11 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
+use app.cli.native_build_warm_receipt.{
+    NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
+    native_build_warm_artifact_restore, native_build_warm_receipt_finish
+}
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
@@ -314,7 +319,7 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     if native_build_streaming_surfaces(args):
         return 0      # streaming parse has no front-end parse cache to warm
-    val requested = native_build_shard_threads(args)
+    val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_PARSE_SHARD_WORKER_KB", 1650000))
     if requested <= 0:
         return 0
     # A parse shard is a process, not a lightweight task: the seed interpreter
@@ -339,7 +344,7 @@ fn native_build_streaming_surfaces(args: [text]) -> bool:
         (env_get("SIMPLE_STAGE3_STREAMING_SURFACES") ?? "") == "1" and
         args.contains("--entry-closure")
 
-fn native_build_shard_threads(args: [text]) -> i64:
+fn native_build_shard_threads(args: [text], budget_kb: i64) -> i64:
     var threads: i64 = 0
     var i = 0
     while i < args.len():
@@ -353,7 +358,10 @@ fn native_build_shard_threads(args: [text]) -> i64:
         i = i + 1
     if threads <= 1:
         return 0
-    threads
+    val capped = shard_threads_mem_cap(threads, budget_kb)
+    if capped <= 1:
+        return 0
+    capped
 
 # Shared work queue for the shard children. Mirrors frontend_parse_cache_dir()
 # so the claim markers live next to the entries they guard, one private dir
@@ -465,7 +473,7 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
         return 0      # the HIR cache keys off the front-end cache scope
     if (env_get("SIMPLE_PARSE_SHARDING") ?? "") == "0":
         return 0
-    native_build_shard_threads(args)
+    native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", 3000000))
 
 fn hir_shard_queue_dir() -> text:
     var root = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
@@ -506,10 +514,16 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     val mode = if queue_dir != "": "queue" else: "static"
     print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
 
-fn run_native_build_worker(args: [text]) -> i64:
+pub fn run_native_build_worker(args: [text]) -> i64:
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
-    if mode == nil or mode == "":
+    # A compiled bootstrap capsule can route the two internal `run` targets
+    # itself. Do not label that native subprocess lane as interpreted: doing so
+    # clamps parse warming to one child before the memory-aware clamp is even
+    # consulted. Source-run wrappers retain the established interpreter marker.
+    val compiled_bootstrap_route =
+        (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
+    if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "interpret")
     for arg in args:
         worker_args = worker_args.push(arg)
@@ -523,6 +537,17 @@ fn run_native_build_worker(args: [text]) -> i64:
         env_set("SIMPLE_FRONTEND_CACHE_DIR", frontend_cache_dir)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
+    val warm_receipt = native_build_warm_receipt_prepare(args, simple_bin)
+    if warm_receipt.hit:
+        if native_build_warm_artifact_restore(warm_receipt):
+            print "[native-build-warm] exact final artifact restored; worker skipped"
+            env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+            return 0
+        print "[native-build-warm] final artifact restore refused; running normal worker"
+    val old_warm_candidate = env_get(NATIVE_BUILD_WARM_CANDIDATE_ENV) ?? ""
+    # Never leak a caller's stale candidate into warm-up children. The real
+    # worker receives only this invocation's pid-private path below.
+    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, "")
     # process_run_timeout_live relays the worker's stdout/stderr to ours AS
     # THEY ARE PRODUCED (see process_ops.spl), so a slow-but-progressing
     # multi-minute worker no longer reads as a silent hang. stdout/stderr
@@ -542,9 +567,18 @@ fn run_native_build_worker(args: [text]) -> i64:
     val hir_shard_count = native_build_hir_shard_count(args)
     if hir_shard_count > 1:
         run_hir_shards(args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+    # Publish the candidate path only for the real worker. Parse-shard_main
+    # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this
+    # env into warm-up children would let a partial child author the candidate.
+    if warm_receipt.eligible:
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
     val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
+    val output_ok = output_path != "" and file_exists(output_path)
+    val _warm_promoted = native_build_warm_receipt_finish(
+        warm_receipt, stdout, code == 0, output_ok)
+    env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
     if code == 0 and output_path != "" and not file_exists(output_path):
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
         # worker chain died in a way that still reports success (an early-exit
@@ -587,9 +621,9 @@ fn native_build_has_help(args: [text]) -> bool:
 # doc/08_tracking/bug/native_build_scoping_and_bootstrap_readthrough_2026-07-30.md):
 # the worker's own entry-point check (compile_targets.spl `cli_native_build`,
 # `if entry_point == "": ... return 1`) is logically immediate, but the
-# worker only runs under a forced tree-walking interpreter
-# (`run_native_build_worker` always sets `SIMPLE_EXECUTION_MODE=interpret`
-# when unset) and must first interpret its own large `compiler.driver`-
+# source-run worker normally runs under a forced tree-walking interpreter
+# (`run_native_build_worker` sets `SIMPLE_EXECUTION_MODE=interpret` when unset
+# outside the compiled bootstrap route) and must first interpret its large `compiler.driver`-
 # touching module graph before that check's first line ever executes. So an
 # invocation that is DESTINED to fail this check still pays the full,
 # multi-minute interpreter-bootstrap cost before the (correct) error ever
@@ -629,7 +663,7 @@ fn native_build_has_help(args: [text]) -> bool:
 # entry, via `--entry <file>` or a bare positional -- so no legitimate
 # caller depends on reaching the worker without one.
 fn native_build_is_value_consuming_flag(arg: text) -> bool:
-    arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path"
+    arg == "--backend" or arg == "--backend-plugin" or arg == "--runtime-bundle" or arg == "--runtime-path"
         or arg == "--linker-script" or arg == "--entry" or arg == "--source"
         or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode"
         or arg == "--cache-dir" or arg == "--target" or arg == "--cpu"

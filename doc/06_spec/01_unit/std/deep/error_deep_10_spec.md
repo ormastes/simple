@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -343,7 +343,7 @@ check(not false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -717,7 +717,7 @@ else:
 
 </details>
 
-#### if 2
+#### option map unwrap
 
 - if 2
 
@@ -739,7 +739,7 @@ else:
 
 </details>
 
-#### if 3
+#### option none default
 
 - if 3
 
@@ -762,7 +762,7 @@ else:
 
 </details>
 
-#### for 1
+#### result ok err
 
 - for 1
 
@@ -785,7 +785,7 @@ check(c == 5)
 
 </details>
 
-#### for 2
+#### char code roundtrip
 
 - for 2
 

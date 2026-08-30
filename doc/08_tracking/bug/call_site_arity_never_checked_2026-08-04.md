@@ -1,7 +1,6 @@
 # Call-site argument count is never checked before codegen (2026-08-04)
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** OPEN (detection not armed; real call sites remain). §3's same-file
 census found 7 real sites, all repaired (`af0fdf192d8`, `7788bdf1d56`, §7). §8
 then measured the **cross-module** population §3 had declared unmeasured and
 found **154 real sites**; §9 repairs 26 more of them across three modules, and

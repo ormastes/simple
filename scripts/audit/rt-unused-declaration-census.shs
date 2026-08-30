@@ -1,0 +1,144 @@
+#!/bin/sh
+# Comment/string-aware census of Simple rt_* declarations with no code use in
+# their declaring file. This is migration inventory, never safety evidence.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+summary_out=${1:-/dev/stdout}
+declarations_out=${2:-${TMPDIR:-/tmp}/rt-unused-declarations.tsv}
+scopes_out=${3:-${TMPDIR:-/tmp}/rt-unused-scopes.tsv}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+if [ -n "${RT_UNUSED_SOURCE_ROOT:-}" ]; then
+    set -- "$RT_UNUSED_SOURCE_ROOT"
+    export RT_UNUSED_ROOT=$RT_UNUSED_SOURCE_ROOT
+else
+    set -- "$root/src" "$root/test"
+    export RT_UNUSED_ROOT=$root
+fi
+
+rg -l -0 --glob '*.spl' --glob '!**/vendor/**' --glob '!**/target/**' \
+    --glob '!**/build/**' \
+    '^[ \t]*(?:(?:pub|unsafe)[ \t]+)*extern[ \t]+fn[ \t]+rt_|@extern[ \t]*\(' "$@" |
+xargs -0 -r -n 200 perl -0ne '
+    my $file = $ARGV;
+    my $source = $_;
+    my $clean = $source;
+    # Replace strings before comments so a # inside text is not interpreted as
+    # a comment opener. Preserve newlines to keep source line numbers stable.
+    $clean =~ s{("(?:\\.|[^"\\])*")|(\#[^\n]*)}{
+        my $match = $&;
+        $match =~ s/[^\n]/ /g;
+        $match;
+    }gse;
+
+    my @declarations;
+    while ($clean =~/^[ \t]*(?:(?:pub|unsafe)[ \t]+)*extern[ \t]+fn[ \t]+(rt_[A-Za-z0-9_]+)/mg) {
+        my $symbol = $1;
+        my $offset = $-[1];
+        my $line = 1 + (substr($clean, 0, $offset) =~ tr/\n//);
+        push @declarations, [$symbol, $symbol, $line, $offset, length($symbol)];
+    }
+
+    # Attribute aliases bind a foreign rt_* symbol to the following local fn.
+    # Calls reference the local name, but the report retains provider identity.
+    my @source_lines = split /\n/, $source, -1;
+    my @clean_lines = split /\n/, $clean, -1;
+    my $line_offset = 0;
+    for (my $i = 0; $i <= $#source_lines; $i++) {
+        my $line = $source_lines[$i];
+        if ($line =~ /\@extern[ \t]*\(/) {
+            my @quoted = ($line =~ /"([A-Za-z_]\w*)"/g);
+            my $symbol = @quoted ? $quoted[-1] : "";
+            if ($symbol =~ /^rt_[A-Za-z0-9_]+$/) {
+                my $j = $i + 1;
+                while ($j <= $#clean_lines && $j - $i < 16 &&
+                       $clean_lines[$j] !~ /^[ \t]*(?:(?:pub|unsafe)[ \t]+)*fn[ \t]+([A-Za-z_]\w*)/) {
+                    $j++;
+                }
+                if ($j <= $#clean_lines && $j - $i < 16 &&
+                    $clean_lines[$j] =~ /^[ \t]*(?:(?:pub|unsafe)[ \t]+)*fn[ \t]+([A-Za-z_]\w*)/) {
+                    my $local = $1;
+                    my $column = index($clean_lines[$j], $local);
+                    my $offset = 0;
+                    for (my $k = 0; $k < $j; $k++) {
+                        $offset += length($clean_lines[$k]) + 1;
+                    }
+                    $offset += $column;
+                    push @declarations, [$symbol, $local, $j + 1, $offset, length($local)];
+                }
+            }
+        }
+    }
+
+    # Declaration identifiers are authority definitions, not uses. Blank every
+    # one before counting remaining code references, including function values.
+    for my $decl (@declarations) {
+        substr($clean, $decl->[3], $decl->[4]) = " " x $decl->[4];
+    }
+
+    my %references;
+    for my $decl (@declarations) {
+        my $local = $decl->[1];
+        next if exists $references{$local};
+        my $count = () = $clean =~ /\b\Q$local\E\b/g;
+        $references{$local} = $count;
+    }
+
+    my $relative = $file;
+    $relative =~ s/^\Q$ENV{RT_UNUSED_ROOT}\E\/// if defined $ENV{RT_UNUSED_ROOT};
+    for my $decl (@declarations) {
+        my ($symbol, $local, $line) = @$decl;
+        my $count = $references{$local};
+        my $class = $count == 0 ? "unused" : "referenced";
+        print join("\t", $symbol, $local, $relative, $line, $count, $class), "\n";
+    }
+' | sort -t "$(printf '\t')" -k2,2 -k3,3n -k1,1 >"$work/rows.tsv"
+
+{
+    printf 'symbol\tlocal_name\tfile\tline\tcode_reference_count\tclassification\n'
+    cat "$work/rows.tsv"
+} >"$declarations_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        rows++
+        if ($6 == "unused") unused++
+        else referenced++
+    }
+    END {
+        print "metric", "value"
+        print "declaration_rows", rows + 0
+        print "unused_declaration_rows", unused + 0
+        print "referenced_declaration_rows", referenced + 0
+    }
+' "$declarations_out" >"$summary_out"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == 1 { next }
+    {
+        if ($3 ~ /^test\//) scope="test"
+        else if ($3 ~ /^src\/compiler_rust\/lib\/std\//) scope="bootstrap_library"
+        else if ($3 ~ /^src\//) scope="production"
+        else scope="fixture_or_unknown"
+        rows[scope]++
+        if ($6 == "unused") unused[scope]++
+        else referenced[scope]++
+    }
+    END {
+        print "scope", "declaration_rows", "unused_declaration_rows", \
+              "referenced_declaration_rows"
+        for (scope in rows)
+            print scope, rows[scope], unused[scope] + 0, referenced[scope] + 0
+    }
+' "$declarations_out" | {
+    IFS= read -r header
+    printf '%s\n' "$header"
+    sort
+} >"$scopes_out"
+
+cat "$summary_out"
+printf '\ndeclaration scope statistics\n'
+cat "$scopes_out"

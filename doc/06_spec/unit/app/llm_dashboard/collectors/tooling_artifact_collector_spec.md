@@ -1,6 +1,30 @@
 # Tooling Artifact Collector Specification
 
-> Tests covering LLM dashboard tooling artifact collector.
+> <details>
+
+<!-- sdn-diagram:id=tooling_artifact_collector_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=tooling_artifact_collector_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+tooling_artifact_collector_spec -> app
+tooling_artifact_collector_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=tooling_artifact_collector_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,24 +41,13 @@
 
 #### summarizes context and ponytail artifacts for a readable file
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- summarizes context and ponytail artifacts for a readable file
-   - Expected: panel.context_status equals `ready`
-   - Expected: panel.ponytail_status equals `ok`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("summarizes context and ponytail artifacts for a readable file")
 val path = _write_tooling_fixture("clean", "fn hello() -> text:\n    \"ok\"\n")
 val panel = collect_llm_tooling_artifacts(path, "hello")
 
@@ -49,18 +62,16 @@ expect(panel.ponytail_status).to_equal("ok")
 
 #### renders text without internal absence markers
 
-- renders text without internal absence markers
+- expect absence marker hidden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders text without internal absence markers")
 val path = _write_tooling_fixture("smell", "interface FutureThing:\n    pass_todo\n")
 val text = render_llm_tooling_artifacts_panel_text(collect_llm_tooling_artifacts(path, "FutureThing"))
 
@@ -74,18 +85,17 @@ expect_absence_marker_hidden(text)
 
 #### renders missing files as explicit absence
 
-- renders missing files as explicit absence
+- remove file if exists
+- expect absence marker hidden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders missing files as explicit absence")
 val path = _tooling_fixture_path("missing")
 remove_file_if_exists(path)
 val text = render_llm_tooling_artifacts_panel_text(collect_llm_tooling_artifacts(path, "missing"))
@@ -100,19 +110,16 @@ expect_absence_marker_hidden(text)
 
 #### escapes html panel fields and preview
 
-- escapes html panel fields and preview
-   - Expected: html.split("<tag>").len() equals `1`
+- expect absence marker hidden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("escapes html panel fields and preview")
 val path = _write_tooling_fixture("html", "fn danger() -> text:\n    \"<tag>&\"\n")
 val html = render_llm_tooling_artifacts_panel_html(collect_llm_tooling_artifacts(path, "danger"))
 
@@ -131,12 +138,12 @@ expect_absence_marker_hidden(html)
 | Category | Application |
 | Status | Active |
 | Source | `test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering LLM dashboard tooling artifact collector.
+Tests covering:
 - LLM dashboard tooling artifact collector
 
 ## Scenario Summary
@@ -151,54 +158,3 @@ Tests covering LLM dashboard tooling artifact collector.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `efca822ea274e243fcc80df4f9ddd63c05eeacaa1b9f432dc3ee638a5321237a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `efca822ea274e243fcc80df4f9ddd63c05eeacaa1b9f432dc3ee638a5321237a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `efca822ea274e243fcc80df4f9ddd63c05eeacaa1b9f432dc3ee638a5321237a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl
-mirror: doc/06_spec/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'summarizes context and ponytail artifacts for a readable file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders text without internal absence markers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/llm_dashboard/collectors/tooling_artifact_collector_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders missing files as explicit absence' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

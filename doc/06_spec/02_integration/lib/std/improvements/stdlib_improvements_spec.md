@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 47 | 47 | 0 | 0 |
+| 46 | 46 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -25,7 +25,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -49,8 +49,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("substr extracts with length")
 val text = "hello world"
 expect text.substr(start=6, length=5) == "world"
 ```
@@ -65,7 +63,7 @@ expect text.substr(start=6, length=5) == "world"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -387,8 +385,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("join combines list with delimiter")
 val parts = ["a", "b", "c"]
 expect ",".join(parts) == "a,b,c"
 ```
@@ -403,7 +399,7 @@ expect ",".join(parts) == "a,b,c"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -632,7 +628,7 @@ expect success == true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1074,8 +1070,8 @@ Tests covering text Method Improvements, File I/O Improvements, JSON Library Imp
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 47 |
-| Active scenarios | 47 |
+| Total scenarios | 46 |
+| Active scenarios | 46 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

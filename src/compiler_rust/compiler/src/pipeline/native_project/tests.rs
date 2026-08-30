@@ -13,6 +13,325 @@ use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
+fn repo_root_for_native_project_tests() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn source_defines_callable(path: &Path, name: &str) -> bool {
+    let source = std::fs::read_to_string(path).unwrap();
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser.parse().unwrap();
+    module.items.iter().any(|item| {
+        matches!(item, simple_parser::ast::Node::Function(def)
+            if def.name == name && !def.body.statements.is_empty())
+    })
+}
+
+#[test]
+fn terminal_facade_routes_name_physical_callable_owners() {
+    let repo_root = repo_root_for_native_project_tests();
+    let cli_facade = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
+    let qemu_facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
+
+    let routes = [
+        (
+            "app.io._CliCompile.compile_targets",
+            "src/app/io/_CliCompile/compile_targets.spl",
+            &["cli_native_build"][..],
+        ),
+        (
+            "os._QemuRunner.scenario_catalog",
+            "src/os/_QemuRunner/scenario_catalog.spl",
+            &["test_os", "test_all_architectures", "scenario_by_name_direct"][..],
+        ),
+        (
+            "os._QemuRunner.scenario_exec",
+            "src/os/_QemuRunner/scenario_exec.spl",
+            &[
+                "build_scenario",
+                "run_scenario",
+                "test_scenario",
+                "scenario_test_timeout_ms",
+            ][..],
+        ),
+        (
+            "os._QemuRunner.scenario_disks",
+            "src/os/_QemuRunner/scenario_disks.spl",
+            &[
+                "_is_arm_fs_exec_scenario_name",
+                "_is_arm_fs_exec_scenario",
+                "_is_riscv_fs_exec_scenario_name",
+                "_is_riscv_fs_exec_scenario",
+                "_catalog_platform_name_for_scenario",
+                "_catalog_lane_for_scenario",
+                "_catalog_has_lane_for_scenario",
+                "_catalog_lane_for_scenario_direct",
+            ][..],
+        ),
+    ];
+
+    for (module, relative, callables) in routes {
+        let facade = if module.starts_with("app.") {
+            &cli_facade
+        } else {
+            &qemu_facade
+        };
+        assert!(
+            facade.contains(&format!("export use {module}.{{")),
+            "missing physical route {module}"
+        );
+        let owner = repo_root.join(relative);
+        assert!(
+            owner.is_file(),
+            "physical owner does not exist: {}",
+            owner.display()
+        );
+        for callable in callables {
+            assert!(
+                source_defines_callable(&owner, callable),
+                "terminal {module}.{callable} is absent or has no body"
+            );
+        }
+    }
+
+    for part in 1..=9 {
+        let module = format!("os.qemu_runner_part{part}");
+        let physical = repo_root.join(format!("src/os/qemu_runner_part{part}.spl"));
+        assert!(
+            physical.exists() || !qemu_facade.contains(&module),
+            "facade references absent qemu_runner_part{part}"
+        );
+    }
+    assert!(!cli_facade.contains("app.io._CliCompile.native_build"));
+    assert!(!cli_facade.contains("play_cli_main"));
+    assert!(!qemu_facade.contains("bootstrap_authorization_receipt_v2"));
+}
+
+#[test]
+fn qemu_facade_preserves_exact_historical_public_surface_on_physical_owners() {
+    fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
+        let tail = source.split_once(marker).unwrap().1;
+        let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
+        body.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn names(surface: &str) -> std::collections::BTreeSet<String> {
+        surface.split_whitespace().map(str::to_owned).collect()
+    }
+
+    let repo_root = repo_root_for_native_project_tests();
+    let facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
+    let expected = [
+        ("os._QemuRunner.runner_targets.", "_MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
+        ("os._QemuRunner.scenario_catalog.", "test_os run_all_architectures test_all_architectures QemuScenario scenario_lane_kind _acceptance_lane_scenario _scenario_from_target _arm_fs_exec_platform_name _riscv_fs_exec_platform_name _arm_fs_exec_scenario _riscv_fs_exec_target _riscv_fs_exec_scenario _desktop_disk_scenario_target _is_desktop_disk_scenario_name _desktop_disk_scenario_target_direct _desktop_scenario_timeout_ms _ensure_desktop_scenario_media scenario_rv64_base scenario_rv64_dtb_pci scenario_rv64_ssh scenario_rv64_x25519_probe scenario_x64_pci_lab scenario_x64_nvme scenario_x64_net_user scenario_x64_ssh scenario_x64_toolchain_vfs_probe scenario_x64_q35_pure_nvme_perf scenario_x64_gpu_2d scenario_x64_gui scenario_x64_gui_tablet scenario_x64_wm_input_test scenario_x64_wm_simple_web_check scenario_x64_nvme_fat32 scenario_arm64_virtio_fat32_smf scenario_arm64_wm_ramfb scenario_arm32_virtio_fat32_smf scenario_riscv64_virtio_fat32_smf scenario_riscv32_virtio_fat32_smf scenario_riscv64_hosted scenario_x64_full_stack scenario_x64_desktop_test arm_fs_exec_disk_image_path arm_fs_exec_kernel_bin_path _arm_virtio_blk_exec_disk_args riscv_fs_exec_disk_image_path _riscv_virtio_blk_exec_disk_args ovmf_code_candidates ovmf_code_path desktop_uefi_bootloader_candidates desktop_uefi_bootloader_path desktop_uefi_disk_image_path desktop_uefi_esp_dir_path desktop_uefi_boot_media_ready _x64_desktop_uefi_args scenario_x64_desktop_uefi get_all_scenarios get_scenario scenario_exists scenario_by_name_direct _arm_fs_exec_scenario_name _riscv_fs_exec_scenario_name"),
+        ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
+        ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
+        ("os._QemuRunner.scenario_exec.", "ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
+    ];
+    for (owner, historical_surface) in expected {
+        assert_eq!(explicit_names(&facade, owner), names(historical_surface), "public facade parity changed for {owner}");
+    }
+}
+
+#[test]
+fn terminal_facades_use_canonical_cli_contract_and_explicit_qemu_owner_scc() {
+    let repo_root = repo_root_for_native_project_tests();
+    let cli = std::fs::read_to_string(repo_root.join("src/app/io/cli_compile.spl")).unwrap();
+    let canonical = std::fs::read_to_string(repo_root.join("src/app/io/_CliCompile/compile_targets.spl")).unwrap();
+    assert!(cli.contains("export use app.io._CliCompile.compile_targets.{cli_native_build}"));
+    assert!(!cli.contains("app.io._CliCompile.native_build"));
+    for contract_marker in [
+        "cli_native_build_option_error(args)",
+        "--emit-archive",
+        "--parse-shard=",
+        "cli_native_build_resolve_output",
+    ] {
+        assert!(canonical.contains(contract_marker), "canonical CLI owner lost {contract_marker}");
+    }
+
+    // These five files are one real ownership SCC: target constructors use
+    // disk helpers, catalog selection prepares media, and media preparation
+    // can invoke scenario execution. Spell the SCC with physical imports so
+    // entry closure never needs the public facade as an internal back-edge.
+    let owners = [
+        "runner_targets",
+        "os_build_run",
+        "scenario_catalog",
+        "scenario_disks",
+        "scenario_exec",
+    ];
+    for owner in owners {
+        let source = std::fs::read_to_string(repo_root.join(format!("src/os/_QemuRunner/{owner}.spl"))).unwrap();
+        assert!(!source.contains("use os.qemu_runner"), "{owner} imports its facade");
+        for dependency in owners.into_iter().filter(|dependency| *dependency != owner) {
+            assert!(
+                source.contains(&format!("use os._QemuRunner.{dependency}.*")),
+                "QEMU owner SCC edge {owner} -> {dependency} is implicit or missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_closure_resolver_reaches_terminal_facade_owners_only_when_routed() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("src");
+    let resolved = |entry: &str| {
+        NativeProjectBuilder::new(repo_root.clone(), repo_root.join("build/test-terminal-facade"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(source_root.clone())
+            .entry_file(repo_root.join(entry))
+            .discover_files()
+            .unwrap()
+    };
+
+    let cli_files = resolved("src/app/io/cli_compile.spl");
+    assert!(cli_files
+        .iter()
+        .any(|path| { path.ends_with("src/app/io/_CliCompile/compile_targets.spl") }));
+    assert!(!cli_files
+        .iter()
+        .any(|path| path.ends_with("src/app/io/_CliCompile/native_build.spl")));
+
+    let qemu_files = resolved("src/os/qemu_runner.spl");
+    for relative in [
+        "src/os/_QemuRunner/scenario_catalog.spl",
+        "src/os/_QemuRunner/scenario_exec.spl",
+        "src/os/_QemuRunner/scenario_disks.spl",
+    ] {
+        assert!(
+            qemu_files.iter().any(|path| path.ends_with(relative)),
+            "resolver missed {relative}"
+        );
+    }
+    assert!(!qemu_files
+        .iter()
+        .any(|path| path.ends_with("src/os/qemu_runner_part4.spl")));
+}
+
+#[test]
+fn interpreter_sources_resolve_the_physical_treesitter_facade() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let treesitter_owner = repo_root.join("src/compiler_rust/lib/std/src/parser/treesitter/__init__.spl");
+    let owner_source = std::fs::read_to_string(&treesitter_owner).unwrap();
+    for public_type in ["Tree", "Node", "NodeId", "NodeArena", "TreeSitterParser"] {
+        assert!(
+            owner_source.contains(&format!("pub struct {public_type}:")),
+            "physical treesitter facade does not expose {public_type}"
+        );
+    }
+    for public_api in [
+        "pub fn get_node(self, id: NodeId) -> Option<Node>",
+        "pub fn get_text(self, node: Node) -> text",
+        "children: [NodeId]",
+    ] {
+        assert!(
+            owner_source.contains(public_api),
+            "physical treesitter facade is missing compatibility API {public_api}"
+        );
+    }
+    assert!(!repo_root
+        .join("src/compiler_rust/lib/std/src/parser/treesitter/tree.spl")
+        .exists());
+    assert!(!repo_root
+        .join("src/compiler_rust/lib/std/src/parser/treesitter/parser.spl")
+        .exists());
+
+    for (relative, needs_treesitter) in [
+        ("src/app/interpreter/ast_convert.spl", true),
+        ("src/app/interpreter/ast_convert_expr.spl", true),
+        ("src/app/interpreter/ast_convert_pattern.spl", true),
+        ("src/app/interpreter/ast_convert_stmt.spl", true),
+        ("src/app/interpreter/ast_types.spl", false),
+        ("src/app/interpreter/parser.spl", true),
+    ] {
+        let source = std::fs::read_to_string(repo_root.join(relative)).unwrap();
+        assert!(
+            !source.contains("parser.treesitter.tree"),
+            "{relative} retains synthetic tree module"
+        );
+        assert!(
+            !source.contains("parser.treesitter.parser"),
+            "{relative} retains synthetic parser module"
+        );
+        assert!(
+            !source.contains("NodeId") && !source.contains("NodeArena"),
+            "{relative} imports absent APIs"
+        );
+
+        let files = NativeProjectBuilder::new(repo_root.clone(), repo_root.join("build/test-interpreter-treesitter"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(repo_root.join("src/app"))
+            .source_dir(repo_root.join("src/compiler_rust/lib/std/src"))
+            .entry_file(repo_root.join(relative))
+            .discover_files()
+            .unwrap();
+        assert_eq!(
+            files.iter().any(|path| same_file_path(path, &treesitter_owner)),
+            needs_treesitter,
+            "{relative} treesitter facade reachability is incorrect"
+        );
+    }
+}
+
+#[test]
+fn simpleos_entry_closure_compatibility_owners_are_explicit() {
+    fn explicit_names(source: &str, marker: &str) -> std::collections::BTreeSet<String> {
+        let tail = source.split_once(marker).unwrap().1;
+        let body = tail.split_once('{').unwrap().1.split_once('}').unwrap().0;
+        body.split(',').map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned).collect()
+    }
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let facade = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build.spl")).unwrap();
+    let part1 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part1.spl")).unwrap();
+    let part2 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part2.spl")).unwrap();
+    let part3 = std::fs::read_to_string(repo_root.join("src/os/port/simpleos_multiplatform_build_part3.spl")).unwrap();
+    let catalog = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl")).unwrap();
+    let contracts = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl")).unwrap();
+    let accessors = std::fs::read_to_string(repo_root.join("src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl")).unwrap();
+    assert!(part1.contains("build_target_contracts.{") && !part1.contains("build_target_contracts.*"));
+    assert!(part2.contains("platform_target_catalog.{simpleos_platform_targets}") && !part2.contains("platform_target_catalog.*"));
+    assert!(part3.contains("platform_target_accessors.{") && !part3.contains("platform_target_accessors.*"));
+    assert!(!part2.contains("_simpleos_x86_64_platform_target"));
+    assert!(!part3.contains("_simpleos_platform_target_index"));
+    assert!(catalog.contains("_simpleos_x86_64_platform_target, _simpleos_i686_platform_target"));
+    for implementation in [&contracts, &catalog, &accessors] {
+        assert!(!implementation.contains("use os.port.simpleos_multiplatform_build.*"));
+    }
+    assert!(catalog.contains("build_target_contracts.{"));
+    assert!(accessors.contains("build_target_contracts.{"));
+    assert!(accessors.contains("platform_target_catalog.{simpleos_platform_targets}"));
+    assert!(part1.contains("intentionally compatibility-public"));
+    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part1."), explicit_names(&part1, "build_target_contracts."));
+    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part2."), explicit_names(&part2, "platform_target_catalog."));
+    assert_eq!(explicit_names(&facade, "simpleos_multiplatform_build_part3."), explicit_names(&part3, "platform_target_accessors."));
+}
+
 #[test]
 fn pure_simple_lambda_inline_helper_has_both_callers() {
     let lowering = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl");
@@ -90,11 +409,15 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "FixConfidence".to_string(),
-        variant_name: "Safe".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "FixConfidence".to_string(),
+            variant_name: "Safe".to_string(),
+        });
     mir.functions.push(function);
 
     let runtime_names = std::collections::HashMap::from([(
@@ -126,11 +449,15 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     let mut mir = MirModule::new();
     let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
     let dest = function.new_vreg();
-    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
-        dest,
-        enum_name: "ByteOrder".to_string(),
-        variant_name: "LittleEndian".to_string(),
-    });
+    function
+        .block_mut(BlockId(0))
+        .unwrap()
+        .instructions
+        .push(MirInst::EnumUnit {
+            dest,
+            enum_name: "ByteOrder".to_string(),
+            variant_name: "LittleEndian".to_string(),
+        });
     mir.functions.push(function);
 
     super::mangle::qualify_enum_runtime_names(
@@ -540,7 +867,9 @@ __attribute__((constructor)) static void llvm_style_ctor(void) {}
                 "expected .init_array among {sections:?}"
             );
             assert!(
-                StripError::VerificationFailed { sections }.to_string().contains("LIM-010"),
+                StripError::VerificationFailed { sections }
+                    .to_string()
+                    .contains("LIM-010"),
                 "post-condition failure is untagged"
             );
         }
@@ -1012,7 +1341,10 @@ fn test_multi_root_sibling_dirs_do_not_collide_on_module_prefix() {
     assert_eq!(compiler_root, src, "multi-root naming must use the shared ancestor");
     let app_prefix = module_prefix_from_path(&app_init, &app_root);
     let compiler_prefix = module_prefix_from_path(&compiler_init, &compiler_root);
-    assert_ne!(app_prefix, compiler_prefix, "sibling roots must not collide after sanitization");
+    assert_ne!(
+        app_prefix, compiler_prefix,
+        "sibling roots must not collide after sanitization"
+    );
     assert_eq!(app_prefix, "app____init__");
     assert_eq!(compiler_prefix, "compiler____init__");
 
@@ -1350,10 +1682,23 @@ fn test_incremental_cache_dir_default() {
     let cache_dir = builder.cache_dir().to_string_lossy().replace('\\', "/");
     // Entries are partitioned by a per-lane scope subdirectory (see
     // doc/05_design/compiler/incremental_build/per_lane_private_caches.md).
-    let parent = builder.cache_dir().parent().unwrap().to_string_lossy().replace('\\', "/");
-    assert!(parent.ends_with("/project/.simple/native_cache"), "unexpected cache dir {cache_dir}");
+    let parent = builder
+        .cache_dir()
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
     assert!(
-        builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"),
+        parent.ends_with("/project/.simple/native_cache"),
+        "unexpected cache dir {cache_dir}"
+    );
+    assert!(
+        builder
+            .cache_dir()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("scope-"),
         "unexpected cache dir {cache_dir}"
     );
 }
@@ -1462,7 +1807,12 @@ fn test_incremental_cache_dir_custom() {
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
     assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
-    assert!(builder.cache_dir().file_name().unwrap().to_string_lossy().starts_with("scope-"));
+    assert!(builder
+        .cache_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("scope-"));
 }
 
 #[test]
@@ -2711,7 +3061,76 @@ fn test_stage4_cli_c_providers_are_disjoint_from_current_core_c() {
     );
     let providers = build_stage4_cli_c_provider_archives(&temp.path().join("providers")).unwrap();
 
+    let (core_defined, _) = super::tools::archive_global_symbols(&core).unwrap();
+    for symbol in [
+        "copy_mem",
+        "rt_alloc",
+        "rt_free",
+        "rt_mem_guard_stats",
+        "rt_memcpy",
+        "rt_memset",
+        "rt_ptr_read_i32",
+        "rt_ptr_read_i64",
+        "rt_ptr_read_u8",
+        "rt_ptr_write_bytes_raw",
+        "rt_ptr_write_i16",
+        "rt_ptr_write_i32",
+        "rt_ptr_write_i64",
+        "rt_ptr_write_u8",
+        "rt_realloc",
+        "rt_struct_alloc",
+        "rt_struct_receiver_valid",
+    ] {
+        assert_eq!(core_defined.get(symbol), Some(&1), "core-C must have one memory provider for `{symbol}`");
+    }
+    for symbol in [
+        "rt_mem_harden_check_native",
+        "rt_mem_profile_abi_version",
+        "rt_mem_profile_features",
+        "rt_ptr_read_i32",
+        "rt_transient_raw_scope_begin",
+        "rt_transient_raw_scope_end",
+        "spl_i64_is_zero",
+    ] {
+        assert!(core_defined.contains_key(symbol), "core-C must retain runtime_memory export `{symbol}`");
+    }
+
     validate_stage4_cli_c_provider_archive_disjointness(&core, &compiler, &providers).unwrap();
+}
+
+#[test]
+fn pure_simple_runtime_bundle_separates_memory_and_hosted_ownership() {
+    let source = include_str!("../../../../../compiler/70.backend/backend/runtime_compiler.spl");
+    for (memory_flag, standalone_flag, dynload_flag) in [
+        (
+            "comp_args.push(\"/DSIMPLE_RUNTIME_MEMORY_OWNER=1\")",
+            "comp_args.push(\"/DSIMPLE_CORE_C_STANDALONE=1\")",
+            "comp_args.push(\"/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
+        ),
+        (
+            "comp_args.push(\"-DSIMPLE_RUNTIME_MEMORY_OWNER=1\")",
+            "comp_args.push(\"-DSIMPLE_CORE_C_STANDALONE=1\")",
+            "comp_args.push(\"-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1\")",
+        ),
+    ] {
+        assert_eq!(source.matches(memory_flag).count(), 1, "memory-owner flag must be emitted once per compiler flavor");
+        assert_eq!(
+            source.matches(standalone_flag).count(),
+            1,
+            "memory-owner flag must be emitted once per compiler flavor"
+        );
+        assert_eq!(
+            source.matches(dynload_flag).count(),
+            1,
+            "dynload-owner flag must be emitted once per compiler flavor"
+        );
+        assert!(
+            source.find(memory_flag).unwrap() < source.find(standalone_flag).unwrap(),
+            "memory ownership must be selected before the include_dynload-only standalone branch"
+        );
+        assert!(source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap());
+    }
+    assert!(source.contains("if include_dynload:\n                # Only the standalone core-C composition"));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -3508,6 +3927,45 @@ fn test_core_c_runtime_native_focus_contract() {
     );
 }
 
+#[test]
+fn test_core_c_runtime_owns_required_ascii_text_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let symbols = archive_defined_symbols(&runtime).expect("core-c runtime symbols should be readable");
+    for symbol in ["rt_text_is_ascii", "rt_text_to_lower_ascii", "rt_text_to_upper_ascii"] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+}
+
+#[test]
+fn test_core_c_runtime_owns_tool_host_service_family() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let symbols = archive_defined_symbols(&runtime).expect("core-c runtime symbols should be readable");
+    for symbol in [
+        "rt_process_run_owned_observed_bounded_value",
+        "rt_hostname",
+        "rt_unix_socket_connect",
+        "rt_metal_is_available",
+        "rt_coverage_clear",
+        "rt_coverage_dump_sdn",
+        "rt_package_chmod",
+        "rt_is_debug_mode_enabled",
+        "rt_file_stat",
+        "rt_process_exists",
+        "rt_ptr_read_i32",
+        "rt_string_index_of",
+        "rt_array_max",
+        "rt_array_sort",
+        "max",
+        "f64.sqrt",
+        "f64.floor",
+        "f64.ceil",
+    ] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_struct_receiver_guard_native_contract() {
@@ -3786,7 +4244,10 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
             "{symbol} must be owner-overridable (weak or undefined) in the capsule, found strong/local"
         );
     }
-    assert!(unresolved_runtime.is_subset(&owner_provided), "unexpected unresolved: {unresolved_runtime:?}");
+    assert!(
+        unresolved_runtime.is_subset(&owner_provided),
+        "unexpected unresolved: {unresolved_runtime:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -3807,10 +4268,9 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload"));
-    assert!(error.contains("rt_host_gpu_queue_emit_payload_text"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[cfg(target_os = "linux")]
@@ -3829,9 +4289,9 @@ fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("engine2d")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("missing Engine2D queue symbols"));
-    assert!(!error.contains("feature-built libsimple_runtime.a is missing"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[cfg(target_os = "linux")]
@@ -3850,7 +4310,9 @@ fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(&target_root), Some(hosted));
 }
 
@@ -3870,7 +4332,9 @@ fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    assert_eq!(builder.selected_runtime_library(temp.path()).unwrap(), Some((runtime, false)));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(&bootstrap_root), Some(hosted));
 }
 
@@ -3886,8 +4350,9 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     config.runtime_bundle = "host-gpu".to_string();
     let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("checker")).config(config);
 
-    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
-    assert!(error.contains("feature-built libsimple_runtime.a is missing"));
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
 }
 
@@ -4136,9 +4601,21 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let sync_platform = sync_root.join("platform.spl");
     let gc_path = gc_root.join("path.spl");
     let consumer = sync_root.join("consumer.spl");
-    std::fs::write(&sync_path, "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n").unwrap();
-    std::fs::write(&sync_platform, "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n").unwrap();
-    std::fs::write(&gc_path, "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n").unwrap();
+    std::fs::write(
+        &sync_path,
+        "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &sync_platform,
+        "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &gc_path,
+        "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n",
+    )
+    .unwrap();
     std::fs::write(&consumer, "use std.nogc_sync_mut.platform.{normalize_path as platform_normalize, is_absolute_path as platform_is_absolute}\n").unwrap();
     let file_sources = [&sync_path, &sync_platform, &gc_path, &consumer]
         .into_iter()
@@ -4151,7 +4628,10 @@ fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
     let expected_prefix = module_prefix_from_path(&sync_path, &src_root);
 
-    assert_eq!(use_map.get("platform_normalize"), Some(&format!("{expected_prefix}__normalize_path")));
+    assert_eq!(
+        use_map.get("platform_normalize"),
+        Some(&format!("{expected_prefix}__normalize_path"))
+    );
     assert_eq!(
         use_map.get("platform_is_absolute"),
         Some(&format!("{expected_prefix}__is_absolute_path"))
@@ -4497,10 +4977,14 @@ fn test_entry_closure_follows_use_inside_unwrap_or_return_fallback() {
     let fallback_path = src_root.join("lib/fallback_value.spl");
     std::fs::create_dir_all(main_path.parent().unwrap()).unwrap();
     std::fs::create_dir_all(fallback_path.parent().unwrap()).unwrap();
-    std::fs::write(&main_path, "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n").unwrap();
+    std::fs::write(
+        &main_path,
+        "use app.worker.{run_worker}\nfn main() -> i64:\n    return run_worker(nil)\n",
+    )
+    .unwrap();
     std::fs::write(
         &worker_path,
-        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: do:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
+        "fn run_worker(value: i64?) -> i64:\n    val unwrapped = value unwrap or_return: \\:\n        use lib.fallback_value.{load_fallback}\n        load_fallback()\n    return unwrapped\n",
     )
     .unwrap();
     std::fs::write(&fallback_path, "fn load_fallback() -> i64:\n    return 7\n").unwrap();
@@ -5818,11 +6302,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     let main_object = builder.compile_main_stub(temp.path()).unwrap();
     let args_provider = temp.path().join("args-provider.cpp");
     let args_provider_object = temp.path().join("args-provider.o");
-    std::fs::write(
-        &args_provider,
-        "extern \"C\" void rt_set_args(int, char**) {}\n",
-    )
-    .unwrap();
+    std::fs::write(&args_provider, "extern \"C\" void rt_set_args(int, char**) {}\n").unwrap();
     assert!(std::process::Command::new("c++")
         .args(["-c"])
         .arg(&args_provider)
@@ -5841,9 +6321,9 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
             .unwrap();
         let symbols = String::from_utf8_lossy(&symbols.stdout);
         assert!(symbols.lines().any(|line| line.contains(" U _rt_set_args")));
-        assert!(!symbols.lines().any(|line| {
-            line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args")
-        }));
+        assert!(!symbols
+            .lines()
+            .any(|line| { line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args") }));
     }
 
     let linked_probe = temp.path().join("linked-probe");
@@ -6497,7 +6977,14 @@ int main(void) {
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
-    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
+    double float_input = 3.141592653589793;
+    int64_t float_bits = 0;
+    memcpy(&float_bits, &float_input, sizeof(float_bits));
+    int64_t boxed_float = rt_value_float(float_input);
+    int64_t float_ptr = boxed_float & ~7LL;
+    if ((boxed_float & 7LL) != 1LL || float_ptr < 4096 ||
+        (*(uint32_t*)(uintptr_t)float_ptr) != UINT32_C(0x464C5431) ||
+        (*(int64_t*)(uintptr_t)(float_ptr + 8)) != float_bits) return 14;
 
     uint8_t* p = (uint8_t*)rt_alloc(4);
     if (!p) return 20;
@@ -6560,7 +7047,10 @@ int main(void) {
     if (rt_string_len(trim_started) != 4 || memcmp(rt_string_data(trim_started), "123 ", 4) != 0) return 105;
     int64_t t = rt_string_new((const uint8_t*)"abc", 3);
     SplArray* t_bytes = (SplArray*)rt_string_bytes(t);
-    if (rt_array_len(t_bytes) != 3 || rt_value_as_int(rt_array_get(t_bytes, 1)) != 'b') return 77;
+    /* text.bytes() is [u8]: its physical slots are raw bytes, not tagged Any
+       integers. The untyped C probe must inspect the raw slot exactly as typed
+       native [u8] lowering does; rt_value_as_int would shift 0x62 to 12. */
+    if (rt_array_len(t_bytes) != 3 || rt_array_get(t_bytes, 1) != 'b') return 77;
     if (rt_string_char_code_at(t, 2) != 'c') return 78;
     int64_t utf8 = rt_string_new((const uint8_t*)"\xC3\xA9", 2);
     if (rt_string_char_code_at(utf8, 0) != 0xE9) return 79;
@@ -6654,6 +7144,41 @@ int main(void) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_simple_lsp_mcp_reduced_closure_avoids_broad_runtime_facades() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
+    for relative in [
+        "src/app/simple_lsp_mcp/main.spl",
+        "src/app/simple_lsp_mcp/startup_log.spl",
+        "src/app/simple_lsp_mcp/json_helpers.spl",
+        "src/app/simple_lsp_mcp/tools.spl",
+    ] {
+        let source = std::fs::read_to_string(repo_root.join(relative)).unwrap();
+        assert!(
+            !source.contains("use std.io_runtime")
+                && !source.contains("use std.log")
+                && !source.contains("use std.nogc_sync_mut.io.process_ops"),
+            "{relative} reintroduced a broad facade into the reduced entry closure"
+        );
+    }
+
+    let boundary = std::fs::read_to_string(repo_root.join("src/app/io/minimal_runtime_ops.spl")).unwrap();
+    for forbidden in [
+        "rt_time_day",
+        "rt_process_output",
+        "rt_file_mmap_read_bytes",
+        "rt_term_write",
+        "rt_cpu_count",
+    ] {
+        assert!(
+            !boundary.contains(forbidden),
+            "narrow runtime boundary admitted unused symbol family member {forbidden}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -7005,7 +7530,10 @@ fn test_compile_failure_preserves_completed_objects_for_retry() {
                 .source_dir(source_dir.clone())
                 .build()
                 .unwrap();
-            assert_eq!(result.cached, 1, "retry did not reuse the object completed before the failed batch");
+            assert_eq!(
+                result.cached, 1,
+                "retry did not reuse the object completed before the failed batch"
+            );
 
             fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
             NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
@@ -7071,7 +7599,10 @@ fn test_incremental_cache_rejects_corrupt_mangled_object() {
     fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 33\n").unwrap();
     let changed = build();
     assert_eq!(changed.cached, 1, "unchanged sibling should still hit its key");
-    assert_eq!(changed.compiled, 1, "changed source key must not reuse stale object bytes");
+    assert_eq!(
+        changed.compiled, 1,
+        "changed source key must not reuse stale object bytes"
+    );
 }
 
 #[test]
@@ -7127,7 +7658,10 @@ fn test_cache_invalid_read_never_unlinks_concurrent_publication_path() {
     let path = temp.path().join("shared.o");
     fs::write(&path, b"invalid").unwrap();
     assert!(super::read_usable_cached_object(&path).is_none());
-    assert!(path.exists(), "reader must not unlink a path another builder can publish");
+    assert!(
+        path.exists(),
+        "reader must not unlink a path another builder can publish"
+    );
 }
 
 #[test]

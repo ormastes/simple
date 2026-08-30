@@ -1,10 +1,34 @@
 # Lz4 Typed Specification
 
-> Tests covering lz4_typed block codec.
+> <details>
+
+<!-- sdn-diagram:id=lz4_typed_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=lz4_typed_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+lz4_typed_spec -> std
+lz4_typed_spec -> lib
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=lz4_typed_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,18 +43,16 @@
 
 #### compress then decompress empty gives empty
 
-- compress then decompress empty gives empty
+- assert equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("compress then decompress empty gives empty")
 val input = ByteSpan.empty()
 val compressed = lz4_compress(input)
 val recovered = lz4_decompress(compressed, 0)
@@ -43,18 +65,16 @@ assert_equal(recovered.len(), 0)
 
 #### 10 repeated 'a' chars
 
-- 10 repeated 'a' chars
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("10 repeated 'a' chars")
 val input = span_from_text("aaaaaaaaaa")
 val compressed = lz4_compress(input)
 val recovered = lz4_decompress(compressed, input.len())
@@ -65,18 +85,17 @@ assert_true(spans_equal(recovered, input))
 
 #### 100 repeated 'z' chars
 
-- 100 repeated 'z' chars
+- buf100 push
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("100 repeated 'z' chars")
 var buf100: [u8] = []
 var k = 0
 while k < 100:
@@ -94,18 +113,16 @@ assert_true(spans_equal(recovered, input))
 
 #### abcabcabcabc (12 bytes)
 
-- abcabcabcabc (12 bytes)
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("abcabcabcabc (12 bytes)")
 val input = span_from_text("abcabcabcabc")
 val compressed = lz4_compress(input)
 val recovered = lz4_decompress(compressed, input.len())
@@ -116,18 +133,17 @@ assert_true(spans_equal(recovered, input))
 
 #### abcabc repeated to 30 bytes
 
-- abcabc repeated to 30 bytes
+- buf push
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("abcabc repeated to 30 bytes")
 val pat_bytes = "abcabc".bytes()
 var buf: [u8] = []
 var k = 0
@@ -149,18 +165,20 @@ assert_true(spans_equal(recovered, input))
 
 #### 100 'A's + 100 'B's + 100 alternating AB
 
-- 100 'A's + 100 'B's + 100 alternating AB
+- buf300 push
+- buf300 push
+- buf300 push
+- buf300 push
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("100 'A's + 100 'B's + 100 alternating AB")
 var buf300: [u8] = []
 var k = 0
 while k < 100:
@@ -187,18 +205,16 @@ assert_true(spans_equal(recovered, input))
 
 #### 26-byte alphabet ABCDEFGHIJ... each unique
 
-- 26-byte alphabet ABCDEFGHIJ... each unique
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("26-byte alphabet ABCDEFGHIJ... each unique")
 val input = span_from_text("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 val compressed = lz4_compress(input)
 val recovered = lz4_decompress(compressed, input.len())
@@ -209,18 +225,16 @@ assert_true(spans_equal(recovered, input))
 
 #### short mixed ascii phrase
 
-- short mixed ascii phrase
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("short mixed ascii phrase")
 val input = span_from_text("The quick brown fox jumps over the lazy dog.")
 val compressed = lz4_compress(input)
 val recovered = lz4_decompress(compressed, input.len())
@@ -233,18 +247,17 @@ assert_true(spans_equal(recovered, input))
 
 #### known-good block decodes to ABCDABCDEFGHIJKL
 
-- known-good block decodes to ABCDABCDEFGHIJKL
+- assert equal
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("known-good block decodes to ABCDABCDEFGHIJKL")
 # Canonical LZ4 block (hand-traced):
 #   Block bytes: 40 41 42 43 44 04 00 80 45 46 47 48 49 4A 4B 4C
 #   Token byte 0x40: lit_nib=4 (4 literals), mat_nib=0 (match_len=4)
@@ -293,18 +306,17 @@ assert_true(spans_equal(decoded, expected_span))
 
 #### single-literal block: one byte 0x42 'B'
 
-- single-literal block: one byte 0x42 'B'
+- assert equal
+- assert equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("single-literal block: one byte 0x42 'B'")
 # Token 0x10: lit_nib=1, mat_nib=0. Literal: 0x42. No offset (final seq).
 var one_byte_block: [u8] = [0x10u8, 0x42u8]
 val decoded = lz4_decompress(ByteSpan.new(one_byte_block), 1)
@@ -314,156 +326,14 @@ assert_equal(decoded.get(0).to_i64(), 0x42)
 
 </details>
 
-#### truncated match offset decodes to empty
+#### failure self-check (verifies assertions fire correctly)
 
-- truncated match offset decodes to empty
+#### wrong expected length detects mismatch
 
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("truncated match offset decodes to empty")
-var truncated: [u8] = [0x10u8, 0x41u8, 0x04u8]
-val decoded = lz4_decompress(ByteSpan.new(truncated), 5)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### truncated literal body decodes to empty
-
-- truncated literal body decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("truncated literal body decodes to empty")
-var truncated: [u8] = [0x30u8, 0x41u8]
-val decoded = lz4_decompress(ByteSpan.new(truncated), 3)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### truncated literal body before expected length decodes to empty
-
-- truncated literal body before expected length decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("truncated literal body before expected length decodes to empty")
-var truncated: [u8] = [0x20u8, 0x41u8]
-val decoded = lz4_decompress(ByteSpan.new(truncated), 1)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### trailing bytes after final literals decodes to empty
-
-- trailing bytes after final literals decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("trailing bytes after final literals decodes to empty")
-var trailing: [u8] = [0x10u8, 0x41u8, 0x00u8]
-val decoded = lz4_decompress(ByteSpan.new(trailing), 1)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### final literal token with match nibble decodes to empty
-
-- final literal token with match nibble decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("final literal token with match nibble decodes to empty")
-var bad_final: [u8] = [0x11u8, 0x41u8]
-val decoded = lz4_decompress(ByteSpan.new(bad_final), 1)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### zero match distance decodes to empty
-
-- zero match distance decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("zero match distance decodes to empty")
-var bad_distance: [u8] = [0x10u8, 0x41u8, 0x00u8, 0x00u8]
-val decoded = lz4_decompress(ByteSpan.new(bad_distance), 5)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### too-far match distance decodes to empty
-
-- too-far match distance decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("too-far match distance decodes to empty")
-var bad_distance: [u8] = [0x10u8, 0x41u8, 0x02u8, 0x00u8]
-val decoded = lz4_decompress(ByteSpan.new(bad_distance), 5)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### match that exceeds expected output decodes to empty
-
-- match that exceeds expected output decodes to empty
+- assert equal
+- assert equal
+- assert equal
+- assert equal
 
 
 <details>
@@ -473,56 +343,6 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("match that exceeds expected output decodes to empty")
-var overlong: [u8] = [
-    0x40u8,
-    0x41u8, 0x42u8, 0x43u8, 0x44u8,
-    0x04u8, 0x00u8
-]
-val decoded = lz4_decompress(ByteSpan.new(overlong), 6)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### truncated match length extension decodes to empty
-
-- truncated match length extension decodes to empty
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("truncated match length extension decodes to empty")
-var truncated: [u8] = [0x1Fu8, 0x41u8, 0x01u8, 0x00u8]
-val decoded = lz4_decompress(ByteSpan.new(truncated), 5)
-assert_equal(decoded.len(), 0)
-```
-
-</details>
-
-#### failure self-check (verifies assertions fire correctly)
-
-#### wrong expected length detects mismatch
-
-- wrong expected length detects mismatch
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("wrong expected length detects mismatch")
 val input = span_from_text("hello")
 val compressed = lz4_compress(input)
 # Decompress requesting only 3 bytes — should give 3 not 5
@@ -543,71 +363,23 @@ assert_equal(partial.get(2).to_i64(), 108)   # 'l'
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/compress/typed/lz4_typed_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering lz4_typed block codec.
+Tests covering:
 - lz4_typed block codec
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2e3f973dac340f6eeee3932d3519742ee541012e6dc7fb1116bffb8826cd5fba`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2e3f973dac340f6eeee3932d3519742ee541012e6dc7fb1116bffb8826cd5fba`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2e3f973dac340f6eeee3932d3519742ee541012e6dc7fb1116bffb8826cd5fba`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/common/compress/typed/lz4_typed_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/compress/typed/lz4_typed_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/compress/typed/lz4_typed_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/compress/typed/lz4_typed_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/compress/typed/lz4_typed_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compress then decompress empty gives empty' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/compress/typed/lz4_typed_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '10 repeated 'a' chars' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/compress/typed/lz4_typed_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '100 repeated 'z' chars' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

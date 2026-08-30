@@ -1,0 +1,102 @@
+# @tag: unit, gpu, web, css, regression
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 10%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 5%
+#
+# doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md ranked
+# gap-closing lane. The audit's gap table cites `draw_ir_adv.spl` (a
+# different, non-web execution engine) as ABSENT for per-command opacity and
+# rounded-gradient clip. This spec verifies, against the ACTUAL web
+# HTML/CSS pixel pipeline (`render_html_to_pixels_with_viewport` ->
+# `simple_web_html_layout_renderer_paint_layout.spl:paint()` ->
+# `..._paint_primitives.spl`), that both are ALREADY correctly implemented
+# there via `Style.opacity_pct` threaded per-node into every fill call
+# (`fb_style_background_opacity_clip`) and per-corner-radius pixel clipping
+# (`fb_rounded_rect_row_span_opacity_clip`) applied to gradient rows. This is
+# a baseline/regression proof, not new behavior — do not delete on the
+# assumption it duplicates GAP-2/GAP-3; those lanes cover DrawIR, not this
+# pipeline.
+#
+# Also covers the two GENUINE web-side gaps closed in this lane:
+# CSS `isolation` recognition and CSS `filter: grayscale()/brightness()`.
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+
+val TEST_WIDTH: i32 = 32
+val TEST_HEIGHT: i32 = 24
+val WHITE_BG: u32 = 0xFFFFFFFFu32
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+describe "rounded-gradient clip (already supported in the web pixel pipeline)":
+
+    it "clips a gradient background's corner to the border-radius, leaving the page bg visible":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 16px; height: 16px; border-radius: 6px; background-image: linear-gradient(#dc2626, #2563eb); }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        # top-left corner pixel: outside the radius-6 quarter circle -> page bg
+        expect(result.pixel_data[0]).to_equal(WHITE_BG)
+        # an interior pixel well inside the rounded box: neither the top nor
+        # bottom pure gradient stop color, nor the page background -- proves
+        # the gradient painted (and blended) inside the clip.
+        val mid = 8 + 8 * TEST_WIDTH
+        val mid_px = result.pixel_data[mid]
+        expect(mid_px == WHITE_BG).to_equal(false)
+        expect(mid_px == 0xFFDC2626u32).to_equal(false)
+        expect(mid_px == 0xFF2563EBu32).to_equal(false)
+
+describe "per-command opacity (already supported in the web pixel pipeline)":
+
+    it "composites a single element's own opacity over the page background":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #2563eb; opacity: 0.5; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        # 50%-opacity element composited over the white page bg: exact blend
+        # ((0x25*50+0xFF*50+50)/100, (0x63*50+0xFF*50+50)/100, (0xEB*50+0xFF*50+50)/100)
+        expect(result.pixel_data[2 + 2 * TEST_WIDTH]).to_equal(0xFF92B1F5u32)
+
+describe "CSS isolation recognition (GAP-1)":
+
+    it "parses isolation: isolate without breaking layout or paint":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #16a34a; isolation: isolate; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        expect(_count_color(result.pixel_data, 0xFF16A34Au32)).to_be_greater_than(0)
+
+describe "CSS filter: grayscale()/brightness() (GAP-2)":
+
+    it "desaturates the background color toward luminance-weighted gray":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #2563eb; filter: grayscale(100%); }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        val px = result.pixel_data[2 + 2 * TEST_WIDTH]
+        val r = (px >> 16) & 255u32
+        val g = (px >> 8) & 255u32
+        val b = px & 255u32
+        # fully grayscaled: R == G == B
+        expect(r).to_equal(g)
+        expect(g).to_equal(b)
+        expect(px == 0xFF2563EBu32).to_equal(false)
+        expect(px == WHITE_BG).to_equal(false)
+
+    it "brightens the background color":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #202020; filter: brightness(200%); }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        # 0x20 * 2 == 0x40
+        expect(result.pixel_data[2 + 2 * TEST_WIDTH]).to_equal(0xFF404040u32)
+
+    it "combines grayscale and brightness":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 10px; height: 10px; background-color: #ff0000; filter: grayscale(100%) brightness(50%); }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+        val px = result.pixel_data[2 + 2 * TEST_WIDTH]
+        val r = (px >> 16) & 255u32
+        val g = (px >> 8) & 255u32
+        val b = px & 255u32
+        expect(r).to_equal(g)
+        expect(g).to_equal(b)
+        # red luma ~76 (0.299*255), halved by brightness(50%) ~= 38
+        expect(r).to_be_greater_than(20u32)
+        expect(r).to_be_less_than(50u32)

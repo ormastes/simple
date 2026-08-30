@@ -1,0 +1,114 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""Direct lifecycle and UTF-8 width coverage for WidthIndex."""
+# @cover src/lib/common/encoding/width_index.spl 100%
+
+use std.spec.step
+
+use std.spec.*
+use std.encoding.width_index.{WidthIndex}
+
+fn width_index_repeat(ch: text, count: i64) -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < count:
+        parts.push(ch)
+        i = i + 1
+    "".join(parts)
+
+describe "WidthIndex lifecycle and coordinate conversion":
+    # @manual scenario evidence
+    """Covers linear, SWI, rank/select, UTF-8 width, bounds, and cleanup."""
+
+    it "maps every UTF-8 scalar width in the linear path":
+        # @req REQ-SSPEC-LIB
+        step("maps every UTF-8 scalar width in the linear path")
+        val index = WidthIndex.for_text("Aé한😀Z")
+        expect(index.mode).to_equal("linear")
+        expect(index.char_to_byte(0)).to_equal(0)
+        expect(index.char_to_byte(1)).to_equal(1)
+        expect(index.char_to_byte(2)).to_equal(3)
+        expect(index.char_to_byte(3)).to_equal(6)
+        expect(index.char_to_byte(4)).to_equal(10)
+        expect(index.char_to_byte(5)).to_equal(11)
+        expect(index.char_to_byte(6)).to_equal(-1)
+        expect(index.char_to_byte(-1)).to_equal(-1)
+        expect(index.byte_to_char(0)).to_equal(0)
+        expect(index.byte_to_char(1)).to_equal(1)
+        expect(index.byte_to_char(3)).to_equal(2)
+        expect(index.byte_to_char(6)).to_equal(3)
+        expect(index.byte_to_char(10)).to_equal(4)
+        expect(index.byte_to_char(11)).to_equal(5)
+        expect(index.byte_to_char(-1)).to_equal(-1)
+        expect(index.char_at(0)).to_equal("A")
+        expect(index.char_at(1)).to_equal("é")
+        expect(index.char_at(2)).to_equal("한")
+        expect(index.char_at(3)).to_equal("😀")
+        expect(index.char_at(9)).to_equal("")
+        expect(index.char_at(-1)).to_equal("")
+        expect(index.slice(1, 4)).to_equal("é한😀")
+        expect(index.slice(-1, 4)).to_equal("")
+        expect(index.slice(1, -1)).to_equal("")
+        expect(index.codepoint_len()).to_equal(5)
+        index.free()
+        expect(index.mode).to_equal("freed")
+        index.free()
+        expect(index.mode).to_equal("freed")
+
+    it "keeps short text linear after repeated access":
+        # @req REQ-SSPEC-LIB
+        step("keeps short text linear after repeated access")
+        val index = WidthIndex.for_text("short")
+        expect(index.char_to_byte(1)).to_equal(1)
+        expect(index.char_to_byte(2)).to_equal(2)
+        expect(index.mode).to_equal("linear")
+        index.free()
+
+    it "builds SWI lazily and dispatches subsequent coordinate queries":
+        # @req REQ-SSPEC-LIB
+        step("builds SWI lazily and dispatches subsequent coordinate queries")
+        val value = width_index_repeat("a", 260) + "é한😀Z"
+        val index = WidthIndex.for_text(value)
+        expect(index.char_to_byte(259)).to_equal(259)
+        expect(index.mode).to_equal("linear")
+        expect(index.char_to_byte(260)).to_equal(260)
+        expect(index.mode).to_equal("swi")
+        expect(index.char_to_byte(261)).to_equal(262)
+        expect(index.byte_to_char(265)).to_equal(262)
+        expect(index.char_at(262)).to_equal("😀")
+        index.free()
+        expect(index.mode).to_equal("freed")
+
+    it "falls back from an out-of-range SWI query to rank select":
+        # @req REQ-SSPEC-LIB
+        step("falls back from an out-of-range SWI query to rank select")
+        val value = width_index_repeat("a", 260) + "é한😀Z"
+        val index = WidthIndex.for_text(value)
+        expect(index.byte_to_char(1)).to_equal(1)
+        expect(index.byte_to_char(2)).to_equal(2)
+        expect(index.mode).to_equal("swi")
+        expect(index.char_to_byte(9999)).to_equal(-1)
+        expect(index.mode).to_equal("rank_select")
+        expect(index.char_to_byte(260)).to_equal(260)
+        expect(index.byte_to_char(262)).to_equal(261)
+        index.free()
+        expect(index.mode).to_equal("freed")
+
+    it "falls back after an out-of-range SWI byte query":
+        # @req REQ-SSPEC-LIB
+        step("falls back after an out-of-range SWI byte query")
+        val value = width_index_repeat("a", 260) + "é한😀Z"
+        val index = WidthIndex.for_text(value)
+        expect(index.char_to_byte(1)).to_equal(1)
+        expect(index.char_to_byte(2)).to_equal(2)
+        expect(index.mode).to_equal("swi")
+        expect(index.byte_to_char(9999)).to_equal(-1)
+        expect(index.mode).to_equal("rank_select")
+        expect(index.byte_to_char(262)).to_equal(261)
+        index.free()

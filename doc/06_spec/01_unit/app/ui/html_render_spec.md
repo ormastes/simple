@@ -1,10 +1,34 @@
 # Html Render Specification
 
-> Tests covering render_html_widget text, render_html_widget button, render_html_widget panel, render_html_widget progress, render_html_widget checkbox, render_html_widget image, render_html_widget divider, render_html_widget focus, render_html_tree, render_html_widget full catalog direct widgets, render_html_widget glass/shell widgets.
+> <details>
+
+<!-- sdn-diagram:id=html_render_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=html_render_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+html_render_spec -> common
+html_render_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=html_render_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 47 | 47 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,22 +41,13 @@
 
 #### renders div with class widget-text
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- renders div with class widget-text
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders div with class widget-text")
 val node = text_widget("txt1", "Hello World")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -44,18 +59,13 @@ expect html to_contain "widget-text"
 
 #### renders content inside the div
 
-- renders content inside the div
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders content inside the div")
 val node = text_widget("txt2", "Some content")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -67,18 +77,16 @@ expect html to_contain "Some content"
 
 #### renders as a div tag
 
-- renders as a div tag
+1. expect html starts with
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders as a div tag")
 val node = text_widget("txt3", "Test")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -92,18 +100,13 @@ expect html.starts_with("<div") to_equal true
 
 #### renders button tag with class widget-button
 
-- renders button tag with class widget-button
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders button tag with class widget-button")
 val node = button("btn1", "Click Me", "do_click")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -115,18 +118,16 @@ expect html to_contain "widget-button"
 
 #### renders as a button tag
 
-- renders as a button tag
+1. expect html starts with
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders as a button tag")
 val node = button("btn2", "OK", "confirm")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -138,18 +139,13 @@ expect html.starts_with("<button") to_equal true
 
 #### includes data-action attribute
 
-- includes data-action attribute
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes data-action attribute")
 val node = button("btn3", "Save", "save_file")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -161,18 +157,13 @@ expect html to_contain "data-action=\"save_file\""
 
 #### includes label text as content
 
-- includes label text as content
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes label text as content")
 val node = button("btn4", "Submit", "submit")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -186,18 +177,13 @@ expect html to_contain "Submit"
 
 #### renders div with class widget-panel
 
-- renders div with class widget-panel
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders div with class widget-panel")
 val node = panel("pnl1", "My Panel", [])
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -209,18 +195,13 @@ expect html to_contain "widget-panel"
 
 #### renders children inside panel
 
-- renders children inside panel
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders children inside panel")
 val child = text_widget("pnl_child", "Inner text")
 val node = panel("pnl2", "Parent", [child])
 val tree = UITree.new(node)
@@ -236,18 +217,13 @@ expect html to_contain "widget-text"
 
 #### renders div with class widget-progress
 
-- renders div with class widget-progress
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders div with class widget-progress")
 val node = progress("prog1", 75)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -259,18 +235,13 @@ expect html to_contain "widget-progress"
 
 #### includes percentage in style
 
-- includes percentage in style
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes percentage in style")
 val node = progress("prog2", 42)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -282,18 +253,13 @@ expect html to_contain "width: 42%"
 
 #### includes percentage text
 
-- includes percentage text
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes percentage text")
 val node = progress("prog3", 90)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -307,18 +273,13 @@ expect html to_contain "90%"
 
 #### renders label with class widget-checkbox
 
-- renders label with class widget-checkbox
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders label with class widget-checkbox")
 val node = checkbox("chk1", "Accept terms", false)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -330,18 +291,13 @@ expect html to_contain "widget-checkbox"
 
 #### renders input with type checkbox
 
-- renders input with type checkbox
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders input with type checkbox")
 val node = checkbox("chk2", "Enable feature", false)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -353,18 +309,16 @@ expect html to_contain "type=\"checkbox\""
 
 #### renders as a div tag
 
-- renders as a div tag
+1. expect html starts with
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders as a div tag")
 val node = checkbox("chk3", "Option", false)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -376,18 +330,13 @@ expect html.starts_with("<div") to_equal true
 
 #### includes checked attribute when checked is true
 
-- includes checked attribute when checked is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes checked attribute when checked is true")
 val node = checkbox("chk4", "Agree", true)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -399,18 +348,13 @@ expect html to_contain " checked"
 
 #### omits checked attribute when checked is false
 
-- omits checked attribute when checked is false
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("omits checked attribute when checked is false")
 val node = checkbox("chk5", "Disagree", false)
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -427,18 +371,13 @@ expect has_checked_attr to_equal false
 
 #### renders img tag with class widget-image
 
-- renders img tag with class widget-image
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders img tag with class widget-image")
 val node = image("img1", "logo.png", "Logo")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -450,18 +389,16 @@ expect html to_contain "widget-image"
 
 #### renders as an img tag
 
-- renders as an img tag
+1. expect html starts with
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders as an img tag")
 val node = image("img2", "photo.jpg", "Photo")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -473,18 +410,13 @@ expect html.starts_with("<img") to_equal true
 
 #### includes src attribute
 
-- includes src attribute
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes src attribute")
 val node = image("img3", "banner.png", "Banner")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -496,18 +428,13 @@ expect html to_contain "src=\"banner.png\""
 
 #### includes alt attribute
 
-- includes alt attribute
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes alt attribute")
 val node = image("img4", "icon.svg", "App Icon")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -521,18 +448,13 @@ expect html to_contain "alt=\"App Icon\""
 
 #### renders hr tag with class widget-divider
 
-- renders hr tag with class widget-divider
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders hr tag with class widget-divider")
 val node = divider("div1")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -544,18 +466,16 @@ expect html to_contain "widget-divider"
 
 #### renders as an hr tag
 
-- renders as an hr tag
+1. expect html starts with
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders as an hr tag")
 val node = divider("div2")
 val tree = UITree.new(node)
 val state = init_state(tree)
@@ -569,18 +489,13 @@ expect html.starts_with("<hr") to_equal true
 
 #### adds focused class when widget is focused
 
-- adds focused class when widget is focused
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds focused class when widget is focused")
 val node = text_widget("foc1", "Focused text")
 val tree = UITree.new(node)
 # init_state sets focused_id to the first widget id (the root)
@@ -595,18 +510,16 @@ expect html to_contain " focused"
 
 #### does not add focused class when widget is not focused
 
-- does not add focused class when widget is not focused
+1. var parent = panel
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("does not add focused class when widget is not focused")
 # Create a tree where the focused widget is NOT the one we render
 val root = text_widget("foc_root", "Root")
 val other = text_widget("foc_other", "Other")
@@ -627,18 +540,13 @@ expect html to_contain class_segment
 
 #### recursively renders full tree with nested elements
 
-- recursively renders full tree with nested elements
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recursively renders full tree with nested elements")
 val child1 = text_widget("tree_txt", "Hello from tree")
 val child2 = button("tree_btn", "Go", "go_action")
 val root = panel("tree_root", "Tree Panel", [child1, child2])
@@ -654,589 +562,6 @@ expect html to_contain "Go"
 
 </details>
 
-### render_html_widget full catalog direct widgets
-
-#### renders radio with checked state
-
-- renders radio with checked state
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders radio with checked state")
-var node = WidgetNode.new("radio_direct", "radio")
-node = node.set_prop("label", "Choice A")
-node = node.set_prop("checked", "true")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-radio"
-expect html to_contain "checked"
-expect html to_contain "Choice A"
-```
-
-</details>
-
-#### renders heading with requested level
-
-- renders heading with requested level
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders heading with requested level")
-var node = WidgetNode.new("heading_direct", "heading")
-node = node.set_prop("content", "Section Title")
-node = node.set_prop("level", "3")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-heading"
-expect html.starts_with("<h3") to_equal true
-expect html to_contain "Section Title"
-```
-
-</details>
-
-#### renders navigation_bar with title and action children
-
-- renders navigation_bar with title and action children
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders navigation_bar with title and action children")
-var left = WidgetNode.new("nav_left", "panel")
-left = left.add_child(button("back_btn", "Back", "go_back"))
-var title = WidgetNode.new("nav_title", "text")
-title = title.set_prop("label", "Ignored")
-var right = WidgetNode.new("nav_right", "panel")
-right = right.add_child(button("done_btn", "Done", "done"))
-var node = WidgetNode.new("nav_direct", "navigation_bar")
-node = node.set_prop("title", "Inbox")
-node = node.add_child(left)
-node = node.add_child(title)
-node = node.add_child(right)
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-navigation-bar"
-expect html to_contain "nav-left"
-expect html to_contain "Inbox"
-expect html to_contain "Back"
-expect html to_contain "Done"
-```
-
-</details>
-
-#### renders tab_bar active item and badge
-
-- renders tab_bar active item and badge
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders tab_bar active item and badge")
-var first = shell_opt("tab_first", "Files")
-first = first.set_prop("icon", "F")
-var second = shell_opt("tab_second", "Issues")
-second = second.set_prop("icon", "I")
-second = second.set_prop("badge", "3")
-var node = WidgetNode.new("tabs_direct", "tab_bar")
-node = node.set_prop("active_index", "1")
-node = node.add_child(first)
-node = node.add_child(second)
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-tab-bar"
-expect html to_contain "tab-bar-item-active"
-expect html to_contain "tab-bar-badge"
-expect html to_contain "Issues"
-```
-
-</details>
-
-#### renders card with header and child content
-
-- renders card with header and child content
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders card with header and child content")
-var node = WidgetNode.new("card_direct", "card")
-node = node.set_prop("title", "Summary")
-node = node.set_prop("subtitle", "Today")
-node = node.add_child(text_widget("card_body", "Rendered body"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-card"
-expect html to_contain "card-title"
-expect html to_contain "Summary"
-expect html to_contain "Rendered body"
-```
-
-</details>
-
-#### renders switch with on state and action
-
-- renders switch with on state and action
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders switch with on state and action")
-var node = WidgetNode.new("switch_direct", "switch")
-node = node.set_prop("label", "Notifications")
-node = node.set_prop("on", "true")
-node = node.set_prop("action", "toggle_notifications")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-switch"
-expect html to_contain "switch-on"
-expect html to_contain "toggle_notifications"
-expect html to_contain "Notifications"
-```
-
-</details>
-
-#### renders segmented_control with active segment
-
-- renders segmented_control with active segment
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders segmented_control with active segment")
-var node = WidgetNode.new("segment_direct", "segmented_control")
-node = node.set_prop("active_index", "1")
-node = node.add_child(shell_opt("segment_all", "All"))
-node = node.add_child(shell_opt("segment_open", "Open"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-segmented-control"
-expect html to_contain "segment-active"
-expect html to_contain "segment_segment_direct_1"
-expect html to_contain "Open"
-```
-
-</details>
-
-#### renders search_bar with cancel action
-
-- renders search_bar with cancel action
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders search_bar with cancel action")
-var node = WidgetNode.new("search_direct", "search_bar")
-node = node.set_prop("placeholder", "Search")
-node = node.set_prop("value", "term")
-node = node.set_prop("show_cancel", "true")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-search-bar"
-expect html to_contain "search-input"
-expect html to_contain "cancel_search_direct"
-expect html to_contain "term"
-```
-
-</details>
-
-### render_html_widget glass/shell widgets
-
-#### renders glass_title_bar with title
-
-- renders glass_title_bar with title
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders glass_title_bar with title")
-var node = WidgetNode.new("gtb", "glass_title_bar")
-node = node.set_prop("title", "My Window")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-glass-title-bar"
-expect html to_contain "titlebar-title"
-expect html to_contain "My Window"
-```
-
-</details>
-
-#### renders sidebar containing its children
-
-- renders sidebar containing its children
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders sidebar containing its children")
-var node = WidgetNode.new("sb", "sidebar")
-node = node.add_child(button("nav1", "Home", "go_home"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-sidebar"
-expect html to_contain "widget-button"
-expect html to_contain "Home"
-```
-
-</details>
-
-#### renders command_bar containing its children
-
-- renders command_bar containing its children
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders command_bar containing its children")
-var node = WidgetNode.new("cb", "command_bar")
-node = node.add_child(button("run", "Run", "do_run"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-command-bar"
-expect html to_contain "Run"
-```
-
-</details>
-
-#### renders workspace_tabs with active tab and action
-
-- renders workspace_tabs with active tab and action
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders workspace_tabs with active tab and action")
-var node = WidgetNode.new("wt", "workspace_tabs")
-node = node.set_prop("active_index", "1")
-node = node.add_child(shell_opt("t0", "One"))
-node = node.add_child(shell_opt("t1", "Two"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-workspace-tabs"
-expect html to_contain "ws-tab active"
-expect html to_contain "ws_tab_wt_1"
-expect html to_contain "Two"
-```
-
-</details>
-
-#### renders command_palette with input and results
-
-- renders command_palette with input and results
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders command_palette with input and results")
-var node = WidgetNode.new("cp", "command_palette")
-node = node.set_prop("placeholder", "Type a command")
-node = node.add_child(shell_opt("r0", "Open File"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-command-palette"
-expect html to_contain "palette-input"
-expect html to_contain "palette-item"
-expect html to_contain "Open File"
-```
-
-</details>
-
-#### renders toast with status variant
-
-- renders toast with status variant
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders toast with status variant")
-var node = WidgetNode.new("to", "toast")
-node = node.set_prop("message", "Saved")
-node = node.set_prop("status", "success")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-toast success"
-expect html to_contain "Saved"
-```
-
-</details>
-
-#### renders sheet_modal with handle, title and content
-
-- renders sheet_modal with handle, title and content
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders sheet_modal with handle, title and content")
-var node = WidgetNode.new("sm", "sheet_modal")
-node = node.set_prop("title", "Details")
-node = node.add_child(text_widget("body", "Info"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-sheet-modal"
-expect html to_contain "sheet-handle"
-expect html to_contain "sheet-title"
-expect html to_contain "Details"
-expect html to_contain "Info"
-```
-
-</details>
-
-#### renders context_menu items with actions
-
-- renders context_menu items with actions
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders context_menu items with actions")
-var item = shell_opt("c0", "Cut")
-item = item.set_prop("action", "do_cut")
-var node = WidgetNode.new("cm", "context_menu")
-node = node.add_child(item)
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-context-menu"
-expect html to_contain "context-item"
-expect html to_contain "do_cut"
-expect html to_contain "Cut"
-```
-
-</details>
-
-#### renders inspector with title and content
-
-- renders inspector with title and content
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders inspector with title and content")
-var node = WidgetNode.new("ins", "inspector")
-node = node.set_prop("title", "Properties")
-node = node.add_child(text_widget("p", "Width: 100"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-inspector"
-expect html to_contain "inspector-title"
-expect html to_contain "inspector-content"
-expect html to_contain "Properties"
-```
-
-</details>
-
-#### renders utility_rail icons with active
-
-- renders utility_rail icons with active
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders utility_rail icons with active")
-var icon = shell_opt("i0", "A")
-icon = icon.set_prop("icon", "G")
-var node = WidgetNode.new("ur", "utility_rail")
-node = node.set_prop("active_index", "0")
-node = node.add_child(icon)
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-utility-rail"
-expect html to_contain "rail-icon active"
-expect html to_contain "rail_ur_0"
-```
-
-</details>
-
-#### renders status_chip with status variant
-
-- renders status_chip with status variant
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders status_chip with status variant")
-var node = WidgetNode.new("sc", "status_chip")
-node = node.set_prop("label", "Active")
-node = node.set_prop("status", "success")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-status-chip success"
-expect html to_contain "Active"
-```
-
-</details>
-
-#### renders selection_pill with active option and action
-
-- renders selection_pill with active option and action
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders selection_pill with active option and action")
-var node = WidgetNode.new("sp", "selection_pill")
-node = node.set_prop("selected_index", "1")
-node = node.add_child(shell_opt("p0", "All"))
-node = node.add_child(shell_opt("p1", "Mine"))
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-selection-pill"
-expect html to_contain "pill-item active"
-expect html to_contain "pill_sp_1"
-expect html to_contain "Mine"
-```
-
-</details>
-
-#### renders empty_state with title and subtitle
-
-- renders empty_state with title and subtitle
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("renders empty_state with title and subtitle")
-var node = WidgetNode.new("es", "empty_state")
-node = node.set_prop("title", "No Items")
-node = node.set_prop("subtitle", "Add one to begin")
-val state = init_state(UITree.new(node))
-val html = render_html_widget(node, state)
-expect html to_contain "widget-empty-state"
-expect html to_contain "empty-title"
-expect html to_contain "empty-subtitle"
-expect html to_contain "No Items"
-expect html to_contain "Add one to begin"
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -1244,12 +569,12 @@ expect html to_contain "Add one to begin"
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/html_render_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering render_html_widget text, render_html_widget button, render_html_widget panel, render_html_widget progress, render_html_widget checkbox, render_html_widget image, render_html_widget divider, render_html_widget focus, render_html_tree, render_html_widget full catalog direct widgets, render_html_widget glass/shell widgets.
+Tests covering:
 - render_html_widget text
 - render_html_widget button
 - render_html_widget panel
@@ -1259,66 +584,16 @@ Tests covering render_html_widget text, render_html_widget button, render_html_w
 - render_html_widget divider
 - render_html_widget focus
 - render_html_tree
-- render_html_widget full catalog direct widgets
-- render_html_widget glass/shell widgets
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 47 |
-| Active scenarios | 47 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `32ebfc5b9ebf414572c7e0b8ed65819127151f93b2cd8638ab4ab83fd809791a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `32ebfc5b9ebf414572c7e0b8ed65819127151f93b2cd8638ab4ab83fd809791a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `32ebfc5b9ebf414572c7e0b8ed65819127151f93b2cd8638ab4ab83fd809791a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/html_render_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/html_render_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/html_render_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/html_render_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/html_render_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders div with class widget-text' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/html_render_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders content inside the div' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/html_render_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders as a div tag' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

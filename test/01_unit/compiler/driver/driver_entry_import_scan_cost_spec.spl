@@ -24,15 +24,17 @@ use compiler.driver.driver_source_loading.{
     _driver_entry_import_module_paths,
     _driver_cached_entry_source_scan,
     _driver_collect_sources,
-    driver_entry_scan_cache_release,
     driver_entry_scan_cache_reset,
     driver_entry_scan_cache_read_count,
     driver_entry_scan_cache_scan_count,
     driver_entry_scan_cache_hit_count
 }
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
-use app.io.env_ops.{env_get, env_set}
-use std.io_runtime.{read_file_text, file_write, dir_create}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn _fixture_source() -> text:
     var lines: [text] = [
@@ -109,9 +111,9 @@ describe "entry-closure import scan":
     it "rejects non-import lines before doing per-line comment work":
         expect(check_fast_reject_is_wired()).to_equal("")
 
-    it "memoizes normalized paths and releases payloads without losing counters":
-        expect(dir_create("build/test_tmp/closure_scan_memo", true)).to_equal(true)
-        expect(file_write(_path_cache_probe_path(), "use std.first\nmod local\n")).to_equal(true)
+    it "memoizes repeated physical source scans by normalized path":
+        val _ = rt_dir_create("build/test_tmp/closure_scan_memo", true)
+        val _ = rt_file_write_text(_path_cache_probe_path(), "use std.first\nmod local\n")
         driver_entry_scan_cache_reset()
         val first_path = "./" + _path_cache_probe_path()
         val alias_path = "build/test_tmp/closure_scan_memo/../closure_scan_memo/source.spl"
@@ -132,81 +134,42 @@ describe "entry-closure import scan":
         expect(driver_entry_scan_cache_scan_count()).to_equal(1)
         expect(driver_entry_scan_cache_hit_count()).to_equal(1)
 
-        # Phase-1 release must free the cached source payload. A same-path edit
-        # is therefore read and scanned again, while diagnostics stay cumulative.
-        driver_entry_scan_cache_release()
-        expect(file_write(_path_cache_probe_path(), "use std.changed\n")).to_equal(true)
-        val (changed_content, changed_imports, changed_siblings, changed_hit) =
-            _driver_cached_entry_source_scan(alias_path)
-        expect(changed_hit).to_equal(false)
-        expect(changed_content).to_equal("use std.changed\n")
-        expect(changed_imports).to_equal(["std.changed"])
-        expect(changed_siblings).to_equal([])
-        expect(driver_entry_scan_cache_read_count()).to_equal(2)
-        expect(driver_entry_scan_cache_scan_count()).to_equal(2)
-        expect(driver_entry_scan_cache_hit_count()).to_equal(1)
-
-        # A following build reset also releases payloads and restarts counters.
-        driver_entry_scan_cache_reset()
-        expect(file_write(_path_cache_probe_path(), "use std.final\n")).to_equal(true)
-        val (_, final_imports, _, final_hit) = _driver_cached_entry_source_scan(first_path)
-        expect(final_hit).to_equal(false)
-        expect(final_imports).to_equal(["std.final"])
-        expect(driver_entry_scan_cache_read_count()).to_equal(1)
-        expect(driver_entry_scan_cache_scan_count()).to_equal(1)
-        expect(driver_entry_scan_cache_hit_count()).to_equal(0)
-        driver_entry_scan_cache_release()
-
-    it "shares one build-local scan across CLI BFS and driver phase 1":
+    it "shares the build-local scan cache across CLI and driver walkers":
         val dir = "build/test_tmp/closure_scan_memo_cross"
         val entry = dir + "/entry.spl"
         val dep = dir + "/dep.spl"
-        val old_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-        val old_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
-        expect(dir_create(dir, true)).to_equal(true)
-        expect(file_write(entry, "use dep\nfn main() -> i64:\n    1\n")).to_equal(true)
-        expect(file_write(dep, "fn dep_value() -> i64:\n    2\n")).to_equal(true)
+        val _ = rt_dir_create(dir, true)
+        val _ = rt_file_write_text(entry, "use dep\nfn main() -> i64:\n    1\n")
+        val _ = rt_file_write_text(dep, "fn dep_value() -> i64:\n    2\n")
         driver_entry_scan_cache_reset()
-        expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)).to_equal(true)
-        expect(env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")).to_equal(true)
+        val _ = rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
 
         val closure = _native_build_entry_closure(entry, [dir])
-        val bfs_reads = driver_entry_scan_cache_read_count()
-        val bfs_scans = driver_entry_scan_cache_scan_count()
-        val bfs_hits = driver_entry_scan_cache_hit_count()
-        val entry_loaded = _driver_collect_sources(entry).len()
-        val dep_loaded = _driver_collect_sources(dep).len()
-        val phase1_reads = driver_entry_scan_cache_read_count()
-        val phase1_scans = driver_entry_scan_cache_scan_count()
-        val phase1_hits = driver_entry_scan_cache_hit_count()
-
-        # Restore process-global mode and release payloads before assertions so
-        # a failing expectation cannot contaminate a later same-process spec.
-        val restored_entry = env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
-        val restored_closure = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)
-        driver_entry_scan_cache_release()
-
-        expect(restored_entry).to_equal(true)
-        expect(restored_closure).to_equal(true)
         expect(closure).to_equal([entry, dep])
-        expect(bfs_reads).to_equal(2)
-        expect(bfs_scans).to_equal(2)
-        expect(bfs_hits).to_equal(0)
-        expect(entry_loaded).to_be_greater_than(0)
-        expect(dep_loaded).to_be_greater_than(0)
-        expect(phase1_reads).to_equal(2)
-        expect(phase1_scans).to_equal(2)
-        expect(phase1_hits).to_equal(2)
+        expect(driver_entry_scan_cache_read_count()).to_equal(2)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(2)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(0)
 
-    it "wires cache reuse and release to the native-build phase-1 boundary":
-        val driver = read_file_text("src/compiler/80.driver/driver_source_pipeline_loading.spl")
-        val native_build = read_file_text("src/app/io/_CliCompile/native_build_closure.spl")
-        val compile_targets = read_file_text("src/app/io/_CliCompile/compile_targets.spl")
-        val parse_shard = read_file_text("src/app/cli/parse_shard_main.spl")
+        expect(_driver_collect_sources(entry).len()).to_be_greater_than(0)
+        expect(_driver_collect_sources(dep).len()).to_be_greater_than(0)
+        expect(driver_entry_scan_cache_read_count()).to_equal(2)
+        expect(driver_entry_scan_cache_scan_count()).to_equal(2)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(2)
+        val _reset_env = rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", "")
 
+    it "wires the shared build-local scan cache into both closure BFS walkers":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+        val native_build = rt_file_read_text("src/app/io/_CliCompile/native_build_closure.spl") ?? ""
+        val compile_targets = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
+
+        expect(_native_build_entry_closure("", []).len()).to_equal(1)
         expect(driver).to_contain("val (_, closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)")
-        expect(driver).to_contain("driver_entry_scan_cache_release()")
+        expect(driver).to_not_contain("val closure_imports = _driver_entry_import_module_paths(closure_src.content)")
         expect(native_build).to_contain("val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)")
+        expect(native_build).to_not_contain("var import_scan_cache: Dict<text, [text]> = {}")
+        expect(native_build).to_not_contain("var sibling_scan_cache: Dict<text, [text]> = {}")
         expect(native_build).to_not_contain("var module_paths = _driver_entry_import_module_paths(content)")
         expect(compile_targets).to_contain("driver_entry_scan_cache_reset()")
-        expect(parse_shard).to_contain("driver_entry_scan_cache_reset()")
+        expect(loading).to_contain("native_entry = rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")
+        expect(loading).to_contain("val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)")

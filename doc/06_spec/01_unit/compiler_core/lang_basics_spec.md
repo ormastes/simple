@@ -1,6 +1,29 @@
 # Lang Basics Specification
 
-> Tests covering LangBasics.
+> <details>
+
+<!-- sdn-diagram:id=lang_basics_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=lang_basics_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+lang_basics_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=lang_basics_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -20,25 +43,13 @@
 
 #### should keep while-loop coverage in the core language smoke file
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- should keep while-loop coverage in the core language smoke file
-   - Expected: src contains `while count < 4:`
-   - Expected: src contains `total = total + count`
-   - Expected: src contains `check_eq_int("while sum", total, 6)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER_CORE
-step("should keep while-loop coverage in the core language smoke file")
 val src = read_source("src/compiler/10.frontend/core/test_lang_basics.spl")
 expect(src.contains("while count < 4:")).to_equal(true)
 expect(src.contains("total = total + count")).to_equal(true)
@@ -52,22 +63,13 @@ expect(src.contains("check_eq_int(\"while sum\", total, 6)")).to_equal(true)
 
 #### should parse while statements and while expressions
 
-- should parse while statements and while expressions
-   - Expected: src contains `fn parse_while_stmt() -> i64`
-   - Expected: src contains `stmt_while_stmt(cond, body, 0)`
-   - Expected: src contains `fn parse_while_expr() -> i64`
-   - Expected: src contains `expr_while_expr(cond, body, 0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER_CORE
-step("should parse while statements and while expressions")
 val src = read_source("src/compiler/10.frontend/core/parser_stmts.spl")
 expect(src.contains("fn parse_while_stmt() -> i64")).to_equal(true)
 expect(src.contains("stmt_while_stmt(cond, body, 0)")).to_equal(true)
@@ -79,22 +81,13 @@ expect(src.contains("expr_while_expr(cond, body, 0)")).to_equal(true)
 
 #### should evaluate while statements with a finite iteration guard
 
-- should evaluate while statements with a finite iteration guard
-   - Expected: src contains `fn eval_stmt_while(sid: i64) -> i64`
-   - Expected: src contains `while iterations < 1000000`
-   - Expected: src contains `if val_is_truthy(cond_val) == false: break`
-   - Expected: src contains `eval_set_error("while loop exceeded maximum iterations")`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER_CORE
-step("should evaluate while statements with a finite iteration guard")
 val src = read_source("src/compiler/10.frontend/core/interpreter/eval_stmts.spl")
 expect(src.contains("fn eval_stmt_while(sid: i64) -> i64")).to_equal(true)
 expect(src.contains("while iterations < 1000000")).to_equal(true)
@@ -106,22 +99,13 @@ expect(src.contains("eval_set_error(\"while loop exceeded maximum iterations\")"
 
 #### should evaluate while expressions with a finite iteration guard
 
-- should evaluate while expressions with a finite iteration guard
-   - Expected: src contains `fn eval_while_expr(eid: i64) -> i64`
-   - Expected: src contains `val max_iterations: i64 = 1000000`
-   - Expected: src contains `if val_is_truthy(cond_val) == false: break`
-   - Expected: src contains `eval_set_error("while loop exceeded maximum iterations")`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER_CORE
-step("should evaluate while expressions with a finite iteration guard")
 val src = read_source("src/compiler/10.frontend/core/interpreter/eval.spl")
 expect(src.contains("fn eval_while_expr(eid: i64) -> i64")).to_equal(true)
 expect(src.contains("val max_iterations: i64 = 1000000")).to_equal(true)
@@ -138,12 +122,12 @@ expect(src.contains("eval_set_error(\"while loop exceeded maximum iterations\")"
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler_core/lang_basics_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering LangBasics.
+Tests covering:
 - LangBasics
 
 ## Scenario Summary
@@ -158,63 +142,3 @@ Tests covering LangBasics.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-COMPILER_CORE`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2a917a26e1fe477ae37678ba763969aa64b0696f54f0b24ec430d2cb92c7765a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2a917a26e1fe477ae37678ba763969aa64b0696f54f0b24ec430d2cb92c7765a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2a917a26e1fe477ae37678ba763969aa64b0696f54f0b24ec430d2cb92c7765a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/compiler_core/lang_basics_spec.spl
-mirror: doc/06_spec/01_unit/compiler_core/lang_basics_spec.md (current)
-findings: 9 blockers: 0
-  narrative=100 structure=80 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler_core/lang_basics_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler_core/lang_basics_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler_core/lang_basics_spec.spl:14:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep while-loop coverage in the core language smoke file' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/compiler_core/lang_basics_spec.spl:14:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep while-loop coverage in the core language smoke file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler_core/lang_basics_spec.spl:22:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should parse while statements and while expressions' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/compiler_core/lang_basics_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should parse while statements and while expressions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler_core/lang_basics_spec.spl:31:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should evaluate while statements with a finite iteration guard' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/compiler_core/lang_basics_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should evaluate while statements with a finite iteration guard' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler_core/lang_basics_spec.spl:40:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should evaluate while expressions with a finite iteration guard' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

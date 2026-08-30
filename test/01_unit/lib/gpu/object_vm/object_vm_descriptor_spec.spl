@@ -1,0 +1,129 @@
+# @tag: gpu, object-vm, cpu-simulation
+# @cover src/lib/nogc_async_mut/gpu/object_vm/descriptor_table.spl 80%
+
+use std.spec.*
+use std.common.compute.placement_contracts.{AnyObject, ObjectRef, EntityRef, ResidencyTier}
+use std.nogc_async_mut.gpu.object_vm.{DescriptorTable}
+
+describe "GPU Object VM CPU simulation":
+
+    it "resolves arena and entity handles through one descriptor":
+        step("Create one arena descriptor with three entity indexes")
+        var vm = DescriptorTable.create()
+        val object = vm.create_arena([10u8, 20u8, 30u8], 3, ResidencyTier.DeviceLocal)
+        val resolved = vm.resolve(object)
+        expect(resolved.ok).to_be(true)
+        expect(resolved.byte_len).to_equal(3)
+        expect(resolved.entity_count).to_equal(3)
+        expect(vm.live_count()).to_equal(1)
+        expect(vm.descriptor_metadata_bytes()).to_equal(40)
+        match vm.arena_residency(object):
+            case Some(arena):
+                expect(arena.object.object_slot).to_equal(object.object_slot)
+                expect(arena.entity_count).to_equal(3u64)
+                expect(arena.byte_len).to_equal(3u64)
+            case nil: fail("arena residency did not resolve")
+        match vm.entity_ref(object, 2):
+            case Some(valid_entity): expect(vm.resolve_entity(object, valid_entity).status).to_equal("ok")
+            case nil: fail("valid entity did not resolve")
+        expect(vm.entity_ref(object, 3)).to_be_nil()
+
+    it "bumps generation when a descriptor slot is reused":
+        step("Destroy an arena and reuse its descriptor slot")
+        var vm = DescriptorTable.create()
+        val old = vm.create_arena([1u8], 1, ResidencyTier.HostHot)
+        val old_entity = vm.entity_ref(old, 0)
+        expect(vm.destroy(old).ok).to_be(true)
+        val current = vm.create_arena([2u8], 1, ResidencyTier.HostHot)
+        expect(current.object_slot).to_equal(old.object_slot)
+        expect(current.generation).to_equal(old.generation + 1)
+        expect(vm.resolve(old).status).to_equal("stale-handle")
+        match old_entity:
+            case Some(entity): expect(vm.resolve_entity(old, entity).status).to_equal("stale-handle")
+            case nil: fail("old entity fixture was not created")
+        expect(vm.resolve(current).status).to_equal("ok")
+
+    it "keeps independent lease epochs and rejects a released view":
+        step("Acquire two leases on one resident arena")
+        var vm = DescriptorTable.create()
+        val object = vm.create_arena([4u8, 9u8], 1, ResidencyTier.DeviceLocal)
+        val first = vm.acquire(object)
+        val second = vm.acquire(object)
+        match first:
+            case Some(first_view):
+                expect(first_view.device_address).to_be_greater_than(0)
+                expect(vm.read_byte(first_view, 1).value).to_equal(9u8)
+                expect(vm.release(first_view).status).to_equal("ok")
+                expect(vm.read_byte(first_view, 0).status).to_equal("stale-lease")
+                expect(vm.release(first_view).status).to_equal("stale-lease")
+            case nil: fail("first lease was not acquired")
+        match second:
+            case Some(second_view):
+                expect(vm.view_status(second_view)).to_equal("ok")
+                expect(vm.read_byte(second_view, 0).value).to_equal(4u8)
+                expect(vm.release(second_view).status).to_equal("ok")
+            case nil: fail("second lease was not acquired")
+
+    it "rejects eviction while leased pinned or in flight":
+        step("Attempt eviction while each protection kind is active")
+        var vm = DescriptorTable.create()
+        val leased = vm.create_arena([1u8], 1, ResidencyTier.DeviceLocal)
+        val view = vm.acquire(leased)
+        match view:
+            case Some(active_view):
+                expect(vm.evict(leased).status).to_equal("protected")
+                expect(vm.release(active_view).ok).to_be(true)
+            case nil: fail("protected lease was not acquired")
+        expect(vm.evict(leased).ok).to_be(true)
+
+        val pinned = vm.create_arena([2u8], 1, ResidencyTier.DeviceLocal)
+        expect(vm.pin(pinned).ok).to_be(true)
+        expect(vm.evict(pinned).status).to_equal("protected")
+        expect(vm.unpin(pinned).ok).to_be(true)
+        expect(vm.unpin(pinned).status).to_equal("not-pinned")
+        expect(vm.evict(pinned).ok).to_be(true)
+
+        val moving = vm.create_arena([3u8], 1, ResidencyTier.DeviceLocal)
+        expect(vm.begin_in_flight(moving).ok).to_be(true)
+        expect(vm.evict(moving).status).to_equal("protected")
+        expect(vm.end_in_flight(moving).ok).to_be(true)
+        expect(vm.end_in_flight(moving).status).to_equal("not-in-flight")
+        expect(vm.evict(moving).ok).to_be(true)
+        expect(vm.eviction_count()).to_equal(3)
+
+    it "coalesces duplicate residency misses and completes one transition":
+        step("Coalesce two misses into one residency transition")
+        var vm = DescriptorTable.create()
+        val object = vm.create_arena([8u8], 1, ResidencyTier.SsdCas)
+        expect(vm.acquire(object)).to_be_nil()
+        expect(vm.complete_residency(object).status).to_equal("no-pending-miss")
+        expect(vm.request_residency(object).status).to_equal("miss-started")
+        expect(vm.request_residency(object).status).to_equal("miss-coalesced")
+        expect(vm.coalesced_miss_count()).to_equal(1)
+        expect(vm.complete_residency(object).status).to_equal("ok")
+        expect(vm.resolve(object).residency).to_equal(ResidencyTier.DeviceLocal)
+        expect(vm.request_residency(object).status).to_equal("resident")
+        match vm.acquire(object):
+            case Some(view): expect(vm.view_status(view)).to_equal("ok")
+            case nil: fail("resident arena did not produce a lease")
+
+    it "returns deterministic faults for forged handles and bad offsets":
+        step("Resolve forged identities and out-of-range byte access")
+        var vm = DescriptorTable.create()
+        val object = vm.create_arena([6u8], 1, ResidencyTier.DeviceLocal)
+        val forged: ObjectRef<AnyObject> = ObjectRef(object_slot: 99u32, generation: 1u32)
+        expect(vm.resolve(forged).status).to_equal("invalid-slot")
+        val wrong_generation: ObjectRef<AnyObject> = ObjectRef(
+            object_slot: object.object_slot,
+            generation: object.generation + 1u32
+        )
+        expect(vm.resolve(wrong_generation).status).to_equal("stale-handle")
+        val invalid_entity = EntityRef(object_slot: object.object_slot, local_index: 99u32)
+        expect(vm.resolve_entity(object, invalid_entity).status).to_equal("entity-out-of-range")
+        val mismatched_entity = EntityRef(object_slot: 99u32, local_index: 0u32)
+        expect(vm.resolve_entity(object, mismatched_entity).status).to_equal("entity-object-mismatch")
+        match vm.acquire(object):
+            case Some(view):
+                expect(vm.read_byte(view, 1).status).to_equal("byte-out-of-range")
+                expect(vm.release(view).ok).to_be(true)
+            case nil: fail("fault fixture lease was not acquired")

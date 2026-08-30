@@ -132,17 +132,18 @@ fn json_find(s: text, needle: text) -> i64:
     val slen = s.len()
     if nlen > slen:
         return -1
+    # Compare with substring, not `s[i + j]`: `.len()`/`.substring()` count
+    # BYTES while `[]` counts CHARACTERS, so bounding this loop by the byte
+    # length and indexing by character ran off the end of any string holding
+    # non-ASCII text -- a provider error message in Chinese was enough to trap.
+    # Staying in bytes also keeps the RETURNED index in the same unit every
+    # caller feeds it to (`json.substring(idx + ...)`), which the character
+    # form silently got wrong even when it did not crash. See
+    # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
     var i = 0
     val last = slen - nlen
     while i <= last:
-        var j = 0
-        var matched = true
-        while j < nlen:
-            if s[i + j] != needle[j]:
-                matched = false
-                break
-            j = j + 1
-        if matched:
+        if s.substring(i, i + nlen) == needle:
             return i
         i = i + 1
     -1
@@ -160,18 +161,24 @@ fn extract_json_string(json: text, key: text) -> text:
     val trimmed = after.trim()
     if trimmed.starts_with(quote):
         val rest = trimmed.substring(1)
-        # Find unescaped closing quote
-        var end = 0
+        # Find the unescaped closing quote by ACCUMULATING characters rather
+        # than remembering an index and slicing: `.len()`/`.substring()` count
+        # BYTES while `[]` counts CHARACTERS, so the index form both ran off
+        # the end and sliced at the wrong offset on non-ASCII values. See
+        # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
+        var acc = ""
         var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
+        for ch in rest.chars():
             if escaped:
+                acc = acc + ch
                 escaped = false
             elif ch == "\\":
+                acc = acc + ch
                 escaped = true
             elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
+                return acc
+            else:
+                acc = acc + ch
     ""
 
 # Extract a raw value (number, boolean, null) for a given key from JSON
@@ -184,13 +191,13 @@ fn extract_json_value(json: text, key: text) -> text:
     val start = idx + slen
     val after = json.substring(start)
     val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
+    # Same byte/char hazard as extract_json_string above.
+    var acc = ""
+    for ch in trimmed.chars():
         if ch == "," or ch == RB() or ch == "]":
             break
-        end = end + 1
-    trimmed.substring(0, end).trim()
+        acc = acc + ch
+    acc.trim()
 
 # Digit value of a single-char string, or -1 if not 0-9.
 # ponytail: explicit compare, NOT ch.to_i64() — the seed boxes char.to_i64()

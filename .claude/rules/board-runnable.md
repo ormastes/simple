@@ -8,6 +8,10 @@ QEMU.
 QEMU is the dev harness; the board is the target. A QEMU-only result is a defect,
 not a completion.
 
+Board/HAL implementation language policy — pure Simple first, C only as a
+bootstrap boundary (with a Simple twin), inline asm only for architecturally
+irreplaceable ops: `doc/07_guide/os/hal/pure_simple_hal.md`.
+
 ## What this requires
 - **Real-firmware proxy, always:** boot via OVMF pflash (x86_64), OpenSBI
   (riscv), or EDK2/AAVMF (aarch64) — **never** QEMU `-kernel` pass semantics and

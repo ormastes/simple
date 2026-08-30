@@ -3,10 +3,9 @@
 
 **Status:** Selected baseline
 **Date:** 2026-08-12
-**Recovered:** 2026-08-14
 **Scope:** Simple language, SimpleOS, and generated RISC-V hardware
 
-The user-provided Formal Verification 2.0 proposal is the selected requirement baseline. This document turns it into traceable requirements; it does not claim that the implementation exists. Current-main partial implementations, including the fail-closed MIR evidence bridge, remain subject to these requirements and do not imply end-to-end completion.
+The user-provided Formal Verification 2.0 proposal is the selected requirement baseline. This document turns it into traceable requirements; it does not claim that the implementation exists.
 
 ## Product claim
 
@@ -42,3 +41,4 @@ Formal verification means a reproducible refinement chain from the exact typed, 
 - Proving every compiler pass universally in the first delivery.
 - Treating RVFI as proof of HWIR generator correctness or side-channel security.
 - Weakening current fail-closed RISC-V placeholder gates.
+

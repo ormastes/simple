@@ -2,6 +2,29 @@
 
 > Tests for named argument support allowing function calls with explicit parameter names, improving code clarity and enabling flexible argument ordering.
 
+<!-- sdn-diagram:id=named_arguments_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=named_arguments_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+named_arguments_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=named_arguments_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for named argument support allowing function calls with explicit parameter
 | Category | Language \| Functions |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/named_arguments_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -32,8 +55,6 @@ parameter names, improving code clarity and enabling flexible argument ordering.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 fn create_user(name: text, email: text, age: i64) -> User:
 User(name: name, email: email, age: age)
 
@@ -72,22 +93,17 @@ val user3 = create_user("Charlie", email="charlie@example.com", age=35)
 
 #### calls function with named arguments
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- calls function with named arguments
+1. fn greet
+2. expect greet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls function with named arguments")
 fn greet(name, greeting):
     return 1
 expect greet(name="world", greeting="hello") == 1
@@ -97,18 +113,17 @@ expect greet(name="world", greeting="hello") == 1
 
 #### passes values correctly with named arguments
 
-- passes values correctly with named arguments
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("passes values correctly with named arguments")
 fn add(a, b):
     return a + b
 expect add(a=10, b=20) == 30
@@ -118,18 +133,16 @@ expect add(a=10, b=20) == 30
 
 #### works with string values
 
-- works with string values
+1. fn concat
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with string values")
 fn concat(first, second):
     return first + second
 val result = concat(first="Hello", second=" World")
@@ -145,18 +158,17 @@ expect r == 1
 
 #### allows reversed argument order
 
-- allows reversed argument order
+1. fn sub
+2. expect sub
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows reversed argument order")
 fn sub(a, b):
     return a - b
 expect sub(b=10, a=30) == 20
@@ -166,18 +178,17 @@ expect sub(b=10, a=30) == 20
 
 #### reorders three arguments
 
-- reorders three arguments
+1. fn calc
+2. expect calc
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reorders three arguments")
 fn calc(x, y, z):
     return x + y * z
 expect calc(z=4, x=2, y=3) == 14
@@ -187,18 +198,17 @@ expect calc(z=4, x=2, y=3) == 14
 
 #### reorders with different calculation
 
-- reorders with different calculation
+1. fn compute
+2. expect compute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reorders with different calculation")
 fn compute(first, second, third):
     return first * 100 + second * 10 + third
 expect compute(third=3, first=1, second=2) == 123
@@ -210,18 +220,17 @@ expect compute(third=3, first=1, second=2) == 123
 
 #### mixes positional and named arguments
 
-- mixes positional and named arguments
+1. fn calc
+2. expect calc
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixes positional and named arguments")
 fn calc(x, y, z):
     return x + y * z
 expect calc(2, z=4, y=3) == 14
@@ -231,18 +240,17 @@ expect calc(2, z=4, y=3) == 14
 
 #### uses positional first then named
 
-- uses positional first then named
+1. fn process
+2. expect process
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses positional first then named")
 fn process(a, b, c):
     return a * b + c
 expect process(5, c=7, b=3) == 22
@@ -252,18 +260,17 @@ expect process(5, c=7, b=3) == 22
 
 #### uses single positional with multiple named
 
-- uses single positional with multiple named
+1. fn combine
+2. expect combine
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses single positional with multiple named")
 fn combine(base, mult, add):
     return base * mult + add
 expect combine(10, add=5, mult=2) == 25
@@ -275,18 +282,17 @@ expect combine(10, add=5, mult=2) == 25
 
 #### uses default when argument not provided
 
-- uses default when argument not provided
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses default when argument not provided")
 fn add(a, b=10):
     return a + b
 expect add(5) == 15
@@ -296,18 +302,17 @@ expect add(5) == 15
 
 #### overrides default with named argument
 
-- overrides default with named argument
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("overrides default with named argument")
 fn add(a, b=10):
     return a + b
 expect add(5, b=20) == 25
@@ -317,18 +322,19 @@ expect add(5, b=20) == 25
 
 #### works with multiple defaults
 
-- works with multiple defaults
+1. fn calculate
+2. expect calculate
+3. expect calculate
+4. expect calculate
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with multiple defaults")
 fn calculate(x, y=2, z=3):
     return x + y * z
 expect calculate(1) == 7
@@ -342,18 +348,17 @@ expect calculate(1, z=10) == 21
 
 #### uses named arguments with class methods
 
-- uses named arguments with class methods
+1. fn compute
+2. expect calc compute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses named arguments with class methods")
 class Calculator:
     fn compute(self, a, b):
         return a * b
@@ -366,18 +371,17 @@ expect calc.compute(a=6, b=7) == 42
 
 #### reorders method arguments
 
-- reorders method arguments
+1. fn subtract
+2. expect m subtract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reorders method arguments")
 class Math:
     fn subtract(self, minuend, subtrahend):
         return minuend - subtrahend
@@ -392,18 +396,17 @@ expect m.subtract(subtrahend=15, minuend=50) == 35
 
 #### handles single named argument
 
-- handles single named argument
+1. fn identity
+2. expect identity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles single named argument")
 fn identity(x):
     return x
 expect identity(x=42) == 42
@@ -413,18 +416,17 @@ expect identity(x=42) == 42
 
 #### handles many named arguments
 
-- handles many named arguments
+1. fn sum5
+2. expect sum5
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles many named arguments")
 fn sum5(a, b, c, d, e):
     return a + b + c + d + e
 expect sum5(e=5, d=4, c=3, b=2, a=1) == 15
@@ -434,18 +436,18 @@ expect sum5(e=5, d=4, c=3, b=2, a=1) == 15
 
 #### works with nested function calls
 
-- works with nested function calls
+1. fn double
+2. fn add
+3. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with nested function calls")
 fn double(x):
     return x * 2
 fn add(a, b):
@@ -467,51 +469,3 @@ expect add(a=double(x=5), b=double(x=3)) == 16
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a3a53b38391bcd015cc6e5cd3134474525f236d400d22d41a2a61293a35ba123`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a3a53b38391bcd015cc6e5cd3134474525f236d400d22d41a2a61293a35ba123`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a3a53b38391bcd015cc6e5cd3134474525f236d400d22d41a2a61293a35ba123`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/named_arguments_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/named_arguments_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/named_arguments_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/named_arguments_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/named_arguments_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls function with named arguments' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/named_arguments_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes values correctly with named arguments' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/named_arguments_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'works with string values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

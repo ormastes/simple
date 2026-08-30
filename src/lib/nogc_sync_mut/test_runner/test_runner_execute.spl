@@ -20,7 +20,7 @@ use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_d
 use std.test_runner.test_runner_metrics.{test_resource_class, test_execution_cohort_id}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{env_set, env_get}
-use std.io.{random_hex}
+use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -471,6 +471,8 @@ fn spipe_inline_helpers() -> text:
     "    expect false\n\n" +
     "fn fail_test(message: text):\n" +
     "    fail_assertion(message)\n\n" +
+    "fn fail(message: text):\n" +
+    "    fail_assertion(message)\n\n" +
     "fn assert_eq(a, b):\n" +
     "    expect a == b\n\n" +
     "fn assert_ne(a, b):\n" +
@@ -667,7 +669,7 @@ fn spipe_is_top_level_start(trimmed: text) -> bool:
 fn spipe_helpers_used(body: text, top_level: text) -> bool:
     val helper_names: [text] = [
         "step", "pending", "skip", "skip_it", "check", "check_msg",
-        "fail_assertion", "fail_test", "assert_eq", "assert_ne",
+        "fail_assertion", "fail_test", "fail", "assert_eq", "assert_ne",
         "assert_true", "assert_false", "assert_nil", "assert_not_nil",
         "pending_on", "pending_skip", "expect"
     ]
@@ -766,13 +768,25 @@ fn preprocess_spipe_file(file_path: text) -> text:
 
         # Import/use statements go before fn main()
         if trimmed.starts_with("import ") or trimmed.starts_with("use "):
-            if trimmed.starts_with("import std.spec") or trimmed.starts_with("use std.spec"):
+            # `std.spec` is the interpreter-only BDD harness and is replaced by
+            # the inline helpers below, so its imports are dropped. The
+            # `std.spec.scenario_governance` module is a plain library, and
+            # `build_coverage_wrapper` injects `use std.spec.scenario_governance
+            # .{scenario_governance_mcdc_exclusions_reset, ..._snapshot}` while
+            # its generated MC/DC dump code calls both — dropping that line
+            # left every MC/DC-lane spec at `Undefined("undefined identifier:
+            # scenario_governance_mcdc_exclusions_snapshot")`.
+            val is_spec_harness_import = (trimmed.starts_with("import std.spec") or
+                trimmed.starts_with("use std.spec")) and
+                not trimmed.starts_with("use std.spec.scenario_governance") and
+                not trimmed.starts_with("import std.spec.scenario_governance")
+            if is_spec_harness_import:
                 val delta = spipe_brace_delta(line)
                 if delta > 0:
                     skipping_spec_import = true
                     import_brace_depth = delta
                 continue
-            import_parts.push(line)
+            import_parts.push(trimmed)
             val delta = spipe_brace_delta(line)
             if delta > 0:
                 in_import_block = true
@@ -836,6 +850,65 @@ fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_pat
     cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
     cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
 
+# Graceful MC/DC-on / coverage-on degradation path: run the spec directly via
+# the interpreter (no coverage/MC/DC wrapper, no native SMF compile) when the
+# governance-mandated always-on MC/DC mode -- or the coverage instrumentation
+# wrapper (build_coverage_wrapper) -- cannot get this spec through a
+# standalone compile. This covers BOTH the original "interpreter-only
+# constructs" case (TryOperator, PatternMatch, CollectionLiteral, ...) and the
+# separate class where the WRAPPED/relocated copy itself fails to compile
+# (root-relative imports and indentation/backtick-literal reproduction can
+# break when the instrumented source is written out as a fresh temp file) --
+# both are structural incompatibilities of the instrumentation path, not real
+# test failures, and neither may fail the spec outright. The verdict below is
+# a REAL pass/fail from actually executing the ORIGINAL (unwrapped) spec --
+# this never fabricates a pass and never silently swallows a real failure.
+# `mcdc_skip_reason` is always populated so callers/reporters can surface that
+# instrumentation was skipped for this spec, per-spec, rather than implying it
+# was collected.
+fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions, start: i64, fallback_tag: text, reason: text) -> TestFileResult:
+    val binary = find_simple_binary()
+    val timeout_ms = options.timeout * 1000
+    var run_args: [text] = ["run", file_path]
+    if options.gc_log:
+        run_args.push("--gc-log")
+    if options.gc_off:
+        run_args.push("--gc=off")
+    val scoped_child = _run_scoped_child(test_resource_class(file_path), binary, run_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
+    val stdout = scoped_child.result.stdout
+    val stderr = scoped_child.result.stderr
+    val exit_code = scoped_child.result.exit_code
+    val end = time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+    print "[{fallback_tag}] {file_path}: {reason}"
+    val base_result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val evidenced = _attach_scope_evidence(base_result, scoped_child.usage, scoped_child.budget_status, file_path, options, 0, duration_ms)
+    TestFileResult(
+        path: evidenced.path, passed: evidenced.passed, failed: evidenced.failed,
+        skipped: evidenced.skipped, pending: evidenced.pending,
+        duration_ms: evidenced.duration_ms, setup_ms: evidenced.setup_ms,
+        error: evidenced.error, timed_out: evidenced.timed_out, cached: evidenced.cached,
+        in_development: evidenced.in_development, mcdc_evidence_v1: "",
+        blocked: evidenced.blocked, unsupported: evidenced.unsupported,
+        omission_evidence: evidenced.omission_evidence,
+        compile_ms: 0, execution_ms: duration_ms,
+        resource_usage: evidenced.resource_usage, resource_class: evidenced.resource_class,
+        cohort_id: evidenced.cohort_id, budget_status: evidenced.budget_status,
+        anomaly_status: evidenced.anomaly_status,
+        mcdc_skip_reason: reason
+    )
+
+# First NON-EMPTY line. `compile_output` is `stdout + "\n" + stderr`, so when
+# the compiler wrote nothing to stdout the string starts with "\n" and a
+# naive first-line take yields an empty diagnostic (observed: the printed
+# "Compiler diagnostic:" was blank for every real fallback).
+fn first_line(text_value: text) -> text:
+    for line in text_value.split("\n"):
+        val trimmed = line.trim()
+        if trimmed != "":
+            return trimmed
+    ""
+
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
@@ -878,6 +951,36 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val compile_output = compile_stdout + "\n" + compile_stderr
 
     if compile_exit != 0:
+        # MC/DC-forced standalone-SMF compilation is impossible for specs
+        # that use interpreter-only constructs (TryOperator, PatternMatch,
+        # CollectionLiteral, ...) -- "cannot compile to standalone SMF: N
+        # function(s) contain constructs that require the interpreter" is a
+        # structural incompatibility, not a real test failure, and must not
+        # fail the spec. Degrade to direct interpreter execution of the
+        # ORIGINAL (unwrapped) source -- the wrapper's MC/DC scaffolding
+        # itself depends on the same native-only path, so it cannot be
+        # salvaged here -- and record truthfully that MC/DC instrumentation
+        # was skipped for this spec rather than silently reporting a green
+        # run with implied (but never collected) coverage evidence.
+        val wrapper_active = cleanup_path != ""
+        val uncompilable_construct = compile_output.contains("cannot compile to standalone SMF")
+        if mcdc_enabled and not options.coverage and uncompilable_construct:
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            val reason = "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + first_line(compile_output)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "mcdc-fallback", reason)
+        if options.coverage and wrapper_active:
+            # The coverage wrapper (build_coverage_wrapper) writes an
+            # instrumented copy of the spec to a fresh temp file and compiles
+            # THAT. Whatever the specific diagnostic (unresolved root-relative
+            # import from the relocated copy, a parse break in the rewritten
+            # indentation/backtick-literal reproduction, or an interpreter-only
+            # construct), a failure here is a property of the instrumentation
+            # copy, not evidence the spec itself is broken -- the fallback
+            # below runs the REAL, unwrapped spec and reports its real
+            # pass/fail, so this cannot mask a genuine defect.
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
+            val reason = "Coverage instrumentation skipped: wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
+            return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason)
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
@@ -911,9 +1014,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 timed_out: false, cached: false
             )
 
+    # Both values cross the conditional extraction/persistence region and are
+    # consumed when the child argv is assembled. Keep their lexical owner at
+    # function scope; branch-local tuple bindings cannot be loaded afterward.
+    var mcdc_manifest = ""
     var mcdc_manifest_path = ""
     if mcdc_enabled:
-        val (mcdc_manifest, mcdc_manifest_valid) =
+        val (extracted_mcdc_manifest, mcdc_manifest_valid) =
             extract_compiler_mcdc_obligation_manifest(compile_output)
         if not mcdc_manifest_valid:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
@@ -925,12 +1032,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 error: "test-runner: missing or malformed MC/DC obligation manifest",
                 timed_out: false, cached: false
             )
+        mcdc_manifest = extracted_mcdc_manifest
         # O_EXCL rejects pre-existing files (including symlinks). A fresh CSPRNG
         # name in the private runner temp directory prevents tested code from
         # predicting the handoff path before creation.
         var manifest_attempt = 0
         while manifest_attempt < 4 and mcdc_manifest_path == "":
-            val nonce = random_hex(16)
+            val nonce = test_runner_random_hex(16) ?? ""
             if nonce != nil:
                 val candidate = _tp_get_temp_dir() + "/mcdc-" + nonce.unwrap() + ".obligations.sdn"
                 if rt_file_create_excl(candidate, mcdc_manifest):
@@ -957,10 +1065,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         run_args.push("--gc-log")
     if options.gc_off and not options.coverage:
         run_args.push("--gc=off")
-    if mcdc_manifest_path != "":
-        run_args.push("--simple-mcdc-manifest={mcdc_manifest_path}")
-        run_args.push("--simple-mcdc-manifest-length={mcdc_manifest.len()}")
-        run_args.push("--simple-mcdc-manifest-sha256={sha256_text(mcdc_manifest)}")
+    for manifest_arg in mcdc_manifest_transport_args(mcdc_manifest_path, mcdc_manifest):
+        run_args.push(manifest_arg)
 
     var stdout = ""
     var stderr = ""
@@ -1005,6 +1111,15 @@ fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResul
     """Compile mode: compile test file to .smf and run it.
     Delegates to run_test_file_native which already does compile-then-run."""
     run_test_file_native(file_path, options)
+
+fn mcdc_manifest_transport_args(path: text, manifest: text) -> [text]:
+    if path == "":
+        return []
+    [
+        "--simple-mcdc-manifest={path}",
+        "--simple-mcdc-manifest-length={manifest.len()}",
+        "--simple-mcdc-manifest-sha256={sha256_text(manifest)}",
+    ]
 
 # =========================================================================
 # G1: Safe mode execution with resource limits
@@ -1063,3 +1178,4 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
+export mcdc_manifest_transport_args

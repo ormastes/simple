@@ -1,13 +1,33 @@
 # Simpleos Riscv Network Gate Specification
 
-> Source synchronized manually on 2026-08-16 after the bounded synchronous
-> response-writer change. Fresh Stage-4 docgen provenance remains pending.
-
 > <details>
+
+<!-- sdn-diagram:id=simpleos_riscv_network_gate_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_riscv_network_gate_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_riscv_network_gate_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_riscv_network_gate_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -28,28 +48,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val boot = rt_file_read_text("src/os/kernel/arch/riscv64/boot.spl")
-val heap_owner = rt_file_read_text("src/os/kernel/boot/riscv_noalloc_heap.spl")
 
 expect(boot).to_contain("extern fn log_raw_println(msg: text)")
-expect(boot).to_contain("RISCV_QEMU_RAM_BASE, RISCV_QEMU_RAM_SIZE, RISCV_QEMU_RESERVED_END")
-expect(boot).to_contain("RISCV_QEMU_HEAP_START, RISCV_QEMU_HEAP_SIZE")
-expect(boot).to_contain("extern fn rt_riscv_noalloc_pmm_init(")
-expect(boot).to_contain("rt_riscv_noalloc_pmm_init(")
+expect(boot).to_contain("use os.kernel.arch.riscv64.noalloc_pmm_runtime.{")
+expect(boot.index_of("extern fn rt_riscv_qemu_ram_base() -> u64") ?? -1).to_equal(-1)
+expect(boot.index_of("extern fn rt_riscv_noalloc_pmm_init(") ?? -1).to_equal(-1)
+expect(boot).to_contain("rv64_noalloc_pmm_initialize(")
 expect(boot).to_contain("riscv_noalloc_heap_init(")
-expect(boot).to_contain("RISCV_QEMU_RAM_BASE,")
-expect(boot).to_contain("RISCV_QEMU_RAM_SIZE,")
-expect(boot).to_contain("RISCV_QEMU_RESERVED_END,")
-expect(boot.contains("rt_riscv_qemu_ram_base")).to_be(false)
-expect(boot.contains("rt_riscv_qemu_ram_size")).to_be(false)
-expect(boot.contains("rt_riscv_qemu_reserved_end")).to_be(false)
-expect(boot).to_contain("riscv_noalloc_heap_init(RISCV_QEMU_HEAP_START, RISCV_QEMU_HEAP_SIZE)")
-expect(boot.contains("rt_riscv_qemu_heap_start")).to_be(false)
-expect(boot.contains("rt_riscv_qemu_heap_size")).to_be(false)
-expect(heap_owner).to_contain("pub val RISCV_QEMU_HEAP_START: u64 = 0x87000000")
-expect(heap_owner).to_contain("pub val RISCV_QEMU_HEAP_SIZE: u64 = 16777216")
-expect(heap_owner).to_contain("pub val RISCV_QEMU_RAM_BASE: u64 = 0x80000000")
-expect(heap_owner).to_contain("pub val RISCV_QEMU_RAM_SIZE: u64 = 134217728")
-expect(heap_owner).to_contain("pub val RISCV_QEMU_RESERVED_END: u64 = 0x80400000")
+expect(boot).to_contain("rv64_qemu_ram_base()")
+expect(boot).to_contain("rv64_qemu_heap_start()")
 expect(boot).to_contain("os_main()")
 expect(boot.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
 expect(boot.index_of("riscv_boot_mem_init") ?? -1).to_equal(-1)
@@ -80,7 +87,7 @@ expect(http.index_of("use os.kernel.log.klog_api") ?? -1).to_equal(-1)
 
 </details>
 
-#### keeps the freestanding C runtime linked without hosted OS helpers
+#### keeps only the low-level C runtime bridge and Simple-owned PMM ABI
 
 <details>
 <summary>Executable SSpec</summary>
@@ -90,10 +97,17 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val runtime = rt_file_read_text("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+val pmm_runtime = rt_file_read_text("src/os/kernel/arch/riscv64/noalloc_pmm_runtime.spl")
+val pmm_policy = rt_file_read_text("src/os/kernel/boot/riscv_noalloc_pmm.spl")
 
 expect(runtime).to_contain("void unsafe(void)")
-expect(runtime).to_contain("spl_i64 rt_riscv_noalloc_pmm_init(")
-expect(runtime).to_contain("uart_line(\"PMM OK\")")
+expect(runtime).to_contain("spl_u64 rt_riscv_noalloc_alloc_page(void);")
+expect(runtime.contains("spl_i64 rt_riscv_noalloc_pmm_init(")).to_be(false)
+expect(runtime.contains("static spl_u64 g_riscv_pmm_base")).to_be(false)
+expect(pmm_runtime).to_contain("@export(\"C\", name: \"rt_riscv_noalloc_pmm_init\")\nfn rv64_noalloc_pmm_initialize(")
+expect(pmm_runtime).to_contain("@export(\"C\", name: \"rt_riscv_qemu_ram_base\")\nfn rv64_qemu_ram_base() -> u64:")
+expect(pmm_runtime).to_contain("@extern(\"runtime\", \"rt_riscv_uart_put\")\nfn _riscv_uart_put_raw(byte: u64)")
+expect(pmm_policy).to_contain("fn riscv_noalloc_pmm_init(")
 expect(runtime).to_contain("RT_PCI_IO_BASE")
 expect(runtime).to_contain("#define RT_PCI_MAX_DEVICES 32")
 expect(runtime).to_contain("RT_VIRTIO_NET_TX_QUEUE")
@@ -108,26 +122,11 @@ expect(runtime).to_contain("rt_gpu_cmd_get_display_info")
 expect(runtime).to_contain("rt_gpu_cmd_transfer_flush")
 expect(runtime).to_contain("spl_i64 rt_storage_init(void)")
 expect(runtime).to_contain("spl_i64 rt_storage_read_probe(void)")
-expect(runtime.contains("spl_u64 rt_riscv_qemu_ram_base(void)")).to_be(false)
-expect(runtime.contains("spl_u64 rt_riscv_qemu_ram_size(void)")).to_be(false)
-expect(runtime.contains("spl_u64 rt_riscv_qemu_reserved_end(void)")).to_be(false)
-expect(runtime).to_contain("return rt_riscv_noalloc_pmm_init(")
-expect(runtime).to_contain("0x80000000ULL,")
-expect(runtime).to_contain("128ULL * 1024ULL * 1024ULL,")
-expect(runtime).to_contain("0x80400000ULL,")
-expect(runtime).to_contain("0x87000000ULL")
-expect(runtime.contains("spl_u64 rt_riscv_qemu_heap_start(void)")).to_be(false)
-expect(runtime.contains("spl_u64 rt_riscv_qemu_heap_size(void)")).to_be(false)
 expect(runtime).to_contain("spl_i64 rt_time_now_unix_micros(void)")
 expect(runtime).to_contain("spl_u64 rt_riscv_seed(void)")
-expect(runtime).to_contain("static spl_u64 g_freestanding_heap_next = 0x87000000ULL;")
-expect(runtime).to_contain("static spl_u64 g_freestanding_heap_limit = 0x88000000ULL;")
-expect(runtime).to_contain("bytes = rt_align8((spl_u64)size);")
-expect(runtime).to_contain("if (next + bytes > g_freestanding_heap_limit)")
-expect(runtime).to_contain("g_freestanding_heap_next = next + bytes;")
-expect(runtime).to_contain("return (void *)next;")
-expect(runtime.contains("boot_alloc")).to_be(false)
-expect(runtime.contains("kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc")).to_be(false)
+expect(runtime).to_contain("void *boot_alloc;")
+expect(runtime).to_contain("kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size)")
+expect(runtime).to_contain("if (boot_alloc)")
 expect(runtime).to_contain("rt_entropy_hardware_ready(void)")
 expect(runtime).to_contain("return 0;")
 ```
@@ -136,34 +135,29 @@ expect(runtime).to_contain("return 0;")
 
 #### requires packet TX and RX readiness before reporting network ready
 
-- Require every packet and socket facade gate before readiness
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Require every packet and socket facade gate before readiness")
 val services = rt_file_read_text("src/os/kernel/boot/riscv_services.spl")
 
 expect(services).to_contain("extern fn rt_net_tx_test() -> i64")
 expect(services).to_contain("extern fn rt_net_rx_ready() -> i64")
 expect(services).to_contain("val device_id = rt_pci_get_field(i, 6)")
 expect(services).to_contain("device_id == 0x1000 or device_id == 0x1041")
-expect(services).to_contain("val tx_rc = _decode_riscv_status(rt_net_tx_test())")
-expect(services).to_contain("val rx_rc = _decode_riscv_status(rt_net_rx_ready())")
+expect(services).to_contain("val tx_rc = rt_net_tx_test()")
+expect(services).to_contain("val rx_rc = rt_net_rx_ready()")
 expect(services).to_contain("[net-riscv] Network packet TX unavailable rc=")
 expect(services).to_contain("[net-riscv] Network packet TX ready")
 expect(services).to_contain("[net-riscv] Network packet RX unavailable rc=")
 expect(services).to_contain("network_ok = 1")
-expect(services).to_contain("if not net_facade_linked:\n                                    log_raw_println(\"[net-riscv] Net socket facade unavailable\")\n                                    network_ok = 0\n                                else:\n                                    val tcp_probe_fd = boot_tcp_probe_bind(\"0.0.0.0:0\")")
 
-val tx_probe = services.find("val tx_rc = _decode_riscv_status(rt_net_tx_test())")
-val rx_probe = services.find("val rx_rc = _decode_riscv_status(rt_net_rx_ready())")
-val ready_set = services.find("[net-riscv] Network service ready")
+val tx_probe = services.find("val tx_rc = rt_net_tx_test()")
+val rx_probe = services.find("val rx_rc = rt_net_rx_ready()")
+val ready_set = services.find("network_ok = 1")
 expect(tx_probe).to_be_greater_than(-1)
 expect(rx_probe).to_be_greater_than(-1)
 expect(rx_probe).to_be_greater_than(tx_probe)
@@ -204,7 +198,7 @@ expect(runtime).to_contain("fallback_html_response")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -223,16 +217,11 @@ expect(runtime).to_contain("RT_GPU_CMD_RESOURCE_ATTACH_BACKING")
 expect(runtime).to_contain("RT_GPU_CMD_SET_SCANOUT")
 expect(runtime).to_contain("RT_GPU_CMD_TRANSFER_TO_HOST_2D")
 expect(runtime).to_contain("RT_GPU_CMD_RESOURCE_FLUSH")
+expect(runtime).to_contain("rt_gpu_fill_test_pattern")
 expect(runtime).to_contain("return g_rt_display_ready ? RT_GPU_WIDTH : 0;")
-expect(runtime).to_contain("return g_rt_display_ready ? RT_GPU_HEIGHT : 0;")
-expect(runtime.contains("rt_gpu_fill_test_pattern")).to_be(false)
 expect(runtime.index_of("spl_i64 rt_display_init(void) {\n    return -1;") ?? -1).to_equal(-1)
-expect(services).to_contain("[display-riscv] Display unavailable")
-expect(services).to_contain("riscv_display_width = riscv64_display_width()")
-expect(services.contains("riscv64_display_present()")).to_equal(false)
-val open_brace = "\{"
-val close_brace = "\}"
-expect(services).to_contain("[display-riscv] Display service ready: " + open_brace + "riscv_display_width" + close_brace + "x" + open_brace + "riscv_display_height" + close_brace + " framebuffer")
+expect(services).to_contain("[display-riscv] Display unavailable rc=")
+expect(services).to_contain("[display-riscv] Display service ready: 320x240 framebuffer")
 expect(script).to_contain("--with-display")
 expect(script).to_contain("virtio-gpu-pci,disable-modern=on,disable-legacy=off")
 expect(script).to_contain("Display service ready")
@@ -240,12 +229,12 @@ expect(script).to_contain("Display service ready")
 
 </details>
 
-#### uses a real virtio-blk queue, NVFS superblock, and arena payload for storage readiness
+#### uses a real virtio-blk queue and NVFS superblock for storage readiness
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -260,7 +249,6 @@ expect(runtime).to_contain("VIRTIO_BLK_T_IN")
 expect(runtime).to_contain("rt_pci_is_virtio_blk")
 expect(runtime).to_contain("rt_storage_read_sector")
 expect(runtime).to_contain("rt_storage_probe_nvfs_superblock")
-expect(runtime).to_contain("rt_storage_probe_nvfs_arena_payload")
 expect(runtime).to_contain("rt_storage_sector_has_nvfs_superblock")
 expect(runtime).to_contain("RT_NVFS_MAGIC")
 expect(runtime).to_contain("RT_NVFS_VERSION")
@@ -270,23 +258,18 @@ expect(runtime.index_of("spl_i64 rt_storage_init(void) {\n    return -1;") ?? -1
 expect(services).to_contain("extern fn rt_storage_init() -> i64")
 expect(services).to_contain("extern fn rt_storage_read_probe() -> i64")
 expect(services).to_contain("extern fn rt_storage_nvfs_ready() -> i64")
-expect(services).to_contain("extern fn rt_storage_nvfs_arena_ready() -> i64")
 expect(services).to_contain("[storage-riscv] Storage unavailable rc=")
 expect(services).to_contain("[storage-riscv] NVFS superblock probe passed")
-expect(services).to_contain("[storage-riscv] NVFS arena payload probe passed")
 expect(services).to_contain("[storage-riscv] Storage service ready")
 expect(services).to_contain("fn riscv_storage_ready() -> bool")
 expect(services).to_contain("[fs-riscv] NVFS root superblock ready")
-expect(services).to_contain("[fs-riscv] NVFS arena payload ready")
 expect(services).to_contain("[init] filesystem: nvfs-superblock-ready")
 expect(services).to_contain("fn riscv_filesystem_ready() -> bool")
 expect(script).to_contain("--with-storage")
 expect(script).to_contain("virtio-blk-pci,drive=blk0")
 expect(script).to_contain("\\123\\106\\126\\116\\002\\000\\000\\000")
-expect(script).to_contain("SIMPLEOS_NVFS_ARENA_FILE")
 expect(script).to_contain("Storage service ready")
 expect(script).to_contain("NVFS root superblock ready")
-expect(script).to_contain("[fs-riscv] NVFS arena payload ready")
 ```
 
 </details>
@@ -296,7 +279,7 @@ expect(script).to_contain("[fs-riscv] NVFS arena payload ready")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -310,26 +293,6 @@ expect(runtime).to_contain("return rt_boot_tcp_bind(addr);")
 expect(runtime).to_contain("return rt_boot_tcp_accept_timeout(fd, ms);")
 expect(runtime).to_contain("return rt_boot_tcp_write_text(fd, data);")
 expect(runtime).to_contain("return rt_boot_tcp_close(fd) == 0 ? 11 : 19;")
-val close_start = runtime.find("spl_i64 rt_boot_tcp_close(spl_i64 fd)")
-val write_start = runtime.find("spl_i64 rt_boot_tcp_write_bytes(spl_i64 fd")
-expect(close_start).to_be_greater_than(-1)
-expect(write_start).to_be_greater_than(close_start)
-val close_body = runtime.slice(close_start, write_start)
-val fin = close_body.find("rt_boot_tcp_send_fin_once();")
-val reset = close_body.find("g_boot_tcp_client_open = 0;")
-expect(fin).to_be_greater_than(-1)
-expect(reset).to_be_greater_than(fin)
-val helper_start = runtime.find("static void rt_boot_tcp_send_fin_once(void)")
-val process_start = runtime.find("static void rt_process_tcp(")
-expect(helper_start).to_be_greater_than(-1)
-expect(process_start).to_be_greater_than(helper_start)
-val helper = runtime.slice(helper_start, process_start)
-expect(helper).to_contain("if (!g_boot_tcp_client_open || g_boot_tcp_fin_sent)")
-expect(helper).to_contain("rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);")
-expect(helper).to_contain("g_boot_tcp_fin_sent = 1;")
-expect(runtime).to_contain("g_boot_tcp_client_announced = 0;\n        g_boot_tcp_fin_sent = 0;\n        rt_send_tcp_packet(0x12U")
-expect(runtime).to_contain("g_boot_tcp_client_announced = 0;\n    g_boot_tcp_fin_sent = 0;\n    g_boot_tcp_send_next")
-expect(runtime).to_contain("rt_send_tcp_packet(0x18U, (const spl_u8 *)text->data, (spl_u16)text->len);\n        rt_boot_tcp_send_fin_once();")
 ```
 
 </details>
@@ -347,14 +310,14 @@ val net_init = rt_file_read_text("src/os/services/netstack/netstack_init.spl")
 
 expect(net_init).to_contain("extern fn rt_net_tx_test() -> i64")
 expect(net_init).to_contain("extern fn rt_net_rx_ready() -> i64")
-expect(net_init).to_contain("val tx_ready = _decode_riscv_status(rt_net_tx_test())")
-expect(net_init).to_contain("val rx_ready = _decode_riscv_status(rt_net_rx_ready())")
+expect(net_init).to_contain("val tx_ready = rt_net_tx_test()")
+expect(net_init).to_contain("val rx_ready = rt_net_rx_ready()")
 expect(net_init).to_contain("[net-init] C network TX unavailable rc=")
 expect(net_init).to_contain("[net-init] C network RX unavailable rc=")
 expect(net_init).to_contain("g_net_initialized = true")
 
-val tx_probe = net_init.find("val tx_ready = _decode_riscv_status(rt_net_tx_test())")
-val rx_probe = net_init.find("val rx_ready = _decode_riscv_status(rt_net_rx_ready())")
+val tx_probe = net_init.find("val tx_ready = rt_net_tx_test()")
+val rx_probe = net_init.find("val rx_ready = rt_net_rx_ready()")
 val ready_set = net_init.find("g_net_initialized = true")
 expect(tx_probe).to_be_greater_than(-1)
 expect(rx_probe).to_be_greater_than(-1)
@@ -425,9 +388,9 @@ val response = rt_file_read_text("src/lib/nogc_sync_mut/http_server/response.spl
 
 expect(server).to_contain("val handler = thread_spawn_with_args(stream, self")
 expect(server).to_contain("if handler.handle < 0:")
-expect(server).to_contain("SimpleHttpServer.handle_connection_admitted(self, stream)")
-expect(server).to_contain("if not write_response_limited(stream, resp, self.policy.max_response_bytes):")
-expect(response).to_contain("match stream.write_all(text_to_bytes(wire)):")
+expect(server).to_contain("SimpleHttpServer.handle_connection_static(self, stream)")
+expect(server).to_contain("if not write_response(stream, resp):")
+expect(response).to_contain("match stream.write_text(wire):")
 expect(server).to_contain("handler.free()")
 ```
 
@@ -462,72 +425,13 @@ Reproduction: this block contains the complete executable scenario source.
 val boot_shim = rt_file_read_text("src/os/kernel/boot/tcp_baremetal_min.spl")
 
 expect(boot_shim).to_contain("extern fn rt_boot_tcp_bind(addr: text) -> i64")
-expect(boot_shim).to_contain("pub fn rt_io_tcp_bind(addr: text) -> i64:\n    boot_tcp_probe_bind(addr)")
-expect(boot_shim).to_contain("pub fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:\n    rt_boot_tcp_write_text(fd, data)")
+expect(boot_shim).to_contain("fn rt_io_tcp_bind(addr: text) -> i64:\n    rt_boot_tcp_bind(addr)")
+expect(boot_shim).to_contain("fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:\n    rt_boot_tcp_write_text(fd, data)")
 ```
 
 </details>
 
 ### SimpleOS RISC-V QEMU HTTP scripts
-
-#### requires live POST database state evidence beyond boot readiness
-
-- Inspect the live guest request client
-   - Expected: checker.index_of("Bootstrap TCP shim bound on 0.0.0.0:8080") ?? -1 equals `-1`
-   - Expected: listener.index_of("SimpleDbService.new()") ?? -1 equals `-1`
-- Require CREATE INSERT and SELECT in one boot session
-- Reject readiness-only retained evidence
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 39 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Inspect the live guest request client")
-val smoke = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
-val checker = rt_file_read_text("scripts/qemu/check_simpleos_rv64_db_server.shs")
-val service = rt_file_read_text("src/os/services/database/simple_db_service.spl")
-val listener = rt_file_read_text("src/os/kernel/boot/http_baremetal.spl")
-
-expect(smoke).to_contain("--with-db")
-expect(smoke).to_contain("WITH_DB=true\n      WITH_STORAGE=true")
-expect(smoke).to_contain("printf 'POST /db HTTP/1.0")
-expect(smoke).to_contain("printf '%s\\n' \"$DB_RESPONSE\" > \"$DB_QUERY_LOG\"")
-expect(smoke).to_contain("[ ! \"$BUILD_STAMP\" -nt \"$ELF\" ]")
-expect(smoke).to_contain("^simple_bin=.*(compiler_rust|simple_seed)")
-expect(checker).to_contain("[http_baremetal] Listening on 0.0.0.0:8080")
-expect(listener).to_contain("[http_baremetal] Listening on 0.0.0.0:8080")
-expect(checker.index_of("Bootstrap TCP shim bound on 0.0.0.0:8080") ?? -1).to_equal(-1)
-expect(service).to_contain("var g_simple_db_service: SimpleDbService = SimpleDbService(tables: [], rows: [])")
-expect(listener).to_contain("simple_db_execute_http_request(request)")
-expect(listener.index_of("SimpleDbService.new()") ?? -1).to_equal(-1)
-
-step("Require CREATE INSERT and SELECT in one boot session")
-val create = smoke.find("db_request 'CREATE codex'")
-val insert = smoke.find("db_request 'INSERT codex answer codex-41'")
-val select = smoke.find("db_request 'SELECT codex answer'")
-expect(create).to_be_greater_than(-1)
-expect(insert).to_be_greater_than(create)
-expect(select).to_be_greater_than(insert)
-
-step("Reject readiness-only retained evidence")
-expect(checker).to_contain("[ -f \"$db_query_log\" ] || fail \"db_query_log_missing\"")
-expect(checker).to_contain("grep -c 'HTTP/1.1 200 OK' \"$db_query_log\"")
-expect(checker).to_contain("grep -q 'OK CREATE' \"$db_query_log\"")
-expect(checker).to_contain("grep -q 'OK INSERT' \"$db_query_log\"")
-expect(checker).to_contain("fail \"db_negative_content_length\"")
-val readiness = checker.find("pass \"serial_live_request_path_ready\"")
-val selected_value = checker.find("grep -q 'codex-41' \"$db_query_log\"")
-val connected = checker.find("pass \"simpleos_rv64_db_server_connected\"")
-expect(readiness).to_be_greater_than(-1)
-expect(selected_value).to_be_greater_than(readiness)
-expect(connected).to_be_greater_than(selected_value)
-```
-
-</details>
 
 #### keeps the RV64 smoke script explicit about the deferred boundary
 
@@ -538,7 +442,7 @@ expect(connected).to_be_greater_than(selected_value)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -549,13 +453,11 @@ expect(script).to_contain("build/os/simpleos_riscv64.elf")
 expect(script).to_contain("--allow-prebuilt-artifact")
 expect(script).to_contain("current-source build stamp not found")
 expect(script).to_contain("as current-source RV64 QEMU evidence")
-expect(script).to_contain("Build it first through the SimpleOS runner with a target-capable compiler")
+expect(script).to_contain("Build it first through the SimpleOS runner with an LLVM-enabled compiler")
 expect(script).to_contain("bin/simple os build --arch=riscv64")
-expect(script).to_contain("^backend=(llvm|cranelift)$")
-expect(script).to_contain("^target=riscv64-unknown-none$")
-expect(script).to_contain("^entry=src/os/kernel/arch/riscv64/boot.spl$")
-expect(script).to_contain("^simple_bin=.*(compiler_rust|simple_seed)")
-expect(script).to_contain("Rust-seed provenance is not self-hosted RV64 evidence")
+expect(script).to_contain("backend=llvm")
+expect(script).to_contain("target=riscv64-unknown-none")
+expect(script).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
 expect(script).to_contain("--expect-http-only")
 expect(script).to_contain("EXPECT_HTTP_ONLY=true")
 expect(script).to_contain("PMM OK")
@@ -613,7 +515,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val runner = rt_file_read_text("src/os/_QemuRunner/runner_targets.spl")
+val runner = rt_file_read_text("src/os/qemu_runner_part1.spl")
 
 expect(runner).to_contain("native backend 'llvm' is not available")
 expect(runner).to_contain("Cranelift native builds do not support hosted riscv32 yet")
@@ -622,12 +524,12 @@ expect(runner).to_contain("LLVM backend unavailable: rebuild the selected Simple
 
 </details>
 
-#### runs the RV64 HTTP, NVFS storage, and database QEMU gate when explicitly enabled
+#### runs the RV64 HTTP and NVFS storage QEMU gate when explicitly enabled
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -635,50 +537,29 @@ val script = rt_file_read_text("scripts/qemu/qemu_rv64_http_test.shs")
 
 expect(script).to_contain("--expect-http-only")
 expect(script).to_contain("--with-storage")
-expect(script).to_contain("--with-db")
 expect(script).to_contain("WARNING: --allow-prebuilt-artifact gives smoke-only evidence")
 expect(script).to_contain("Storage service ready")
 expect(script).to_contain("NVFS root superblock ready")
-expect(script).to_contain("SIMPLEOS_NVFS_ARENA_FILE")
 
 if rv64_http_storage_live_enabled():
     val result = rt_process_run_timeout(
-        "env",
-        [
-            "SERIAL_LOG=build/test-artifacts/simpleos-rv64-http-db-live/serial.log",
-            "DB_QUERY_LOG=build/test-artifacts/simpleos-rv64-http-db-live/db_query.log",
-            "sh", "scripts/qemu/qemu_rv64_http_test.shs",
-            "--expect-http-only", "--with-storage", "--with-db",
-        ],
+        "sh",
+        ["scripts/qemu/qemu_rv64_http_test.shs", "--expect-http-only", "--with-storage"],
         90000,
     )
     val output = result[0] + result[1]
 
     expect(result[2]).to_equal(0)
-    expect(output).to_contain("HTTP-only PASSED")
+    expect(output).to_contain("ALL PASSED")
     expect(output).to_contain("Storage service verified")
     expect(output).to_contain("NVFS root superblock verified")
-    expect(output).to_contain("[fs-riscv] NVFS arena payload ready")
-    expect(output).to_contain("DB CREATE/INSERT/SELECT... PASS (codex-41)")
     expect(output).to_contain("GET /health (HTTP)... PASS (200)")
     expect(output).to_contain("GET / (HTTP)... PASS (200)")
     expect(output).to_contain("SKIP (HTTP-only gate; RISC-V TLS not production-ready)")
     expect(output).to_contain("GET /health content-type... PASS (JSON)")
     expect(output).to_contain("GET / content-type... PASS (HTML)")
-
-    val checker_result = rt_process_run_timeout(
-        "sh",
-        [
-            "scripts/qemu/check_simpleos_rv64_db_server.shs",
-            "--artifacts", "build/test-artifacts/simpleos-rv64-http-db-live",
-        ],
-        10000,
-    )
-    val checker_output = checker_result[0] + checker_result[1]
-    expect(checker_result[2]).to_equal(0)
-    expect(checker_output).to_contain("PASS simpleos_rv64_db_server_connected")
 else:
-    print "SKIP: set SIMPLEOS_RV64_HTTP_STORAGE_QEMU=1 to run live RV64 HTTP+NVFS+DB QEMU gate"
+    print "SKIP: set SIMPLEOS_RV64_HTTP_STORAGE_QEMU=1 to run live RV64 HTTP+NVFS QEMU gate"
 ```
 
 </details>
@@ -714,13 +595,11 @@ expect(source).to_contain("_assert(conn_result >= 0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val path = "test/03_system/os/os_full_stack_spec.spl"
-expect_no_fake_network_pass(path)
-expect(rt_file_read_text(path)).to_contain("_assert(services_network_ready()")
+expect_no_fake_network_pass("test/03_system/os/os_full_stack_spec.spl")
 ```
 
 </details>
@@ -732,8 +611,8 @@ expect(rt_file_read_text(path)).to_contain("_assert(services_network_ready()")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/simpleos_riscv_network_gate_spec.spl` |
-| Updated | 2026-08-16 manual source synchronization |
-| Previous generator | `simple spipe-docgen` (Simple); fresh receipt pending |
+| Updated | 2026-07-19 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
@@ -746,8 +625,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

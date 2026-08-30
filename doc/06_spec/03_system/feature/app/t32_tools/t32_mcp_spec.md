@@ -2,6 +2,29 @@
 
 > Tests for the T32 MCP server JSON helpers: encoding, object builders, field extraction, and JSON-RPC / MCP protocol response builders. All functions under test are pure (no I/O, no side effects).
 
+<!-- sdn-diagram:id=t32_mcp_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=t32_mcp_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+t32_mcp_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=t32_mcp_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 33 | 33 | 0 | 0 |
@@ -22,7 +45,7 @@ Tests for the T32 MCP server JSON helpers: encoding, object builders, field extr
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/app/t32_tools/t32_mcp_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -43,19 +66,13 @@ All functions under test are pure (no I/O, no side effects).
 
 #### returns double-quote char
 
-- returns double-quote char
-   - Expected: t32_Q() equals `"`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns double-quote char")
 expect(t32_Q()).to_equal("\"")
 ```
 
@@ -63,19 +80,13 @@ expect(t32_Q()).to_equal("\"")
 
 #### returns left brace
 
-- returns left brace
-   - Expected: t32_LB() equals `{`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns left brace")
 expect(t32_LB()).to_equal("{")
 ```
 
@@ -83,19 +94,13 @@ expect(t32_LB()).to_equal("{")
 
 #### returns right brace
 
-- returns right brace
-   - Expected: t32_RB() equals `}`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns right brace")
 expect(t32_RB()).to_equal("}")
 ```
 
@@ -105,18 +110,13 @@ expect(t32_RB()).to_equal("}")
 
 #### escapes double quotes
 
-- escapes double quotes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("escapes double quotes")
 val result = t32_escape_json("he\"llo")
 expect(result).to_contain("\\\"")
 ```
@@ -125,18 +125,13 @@ expect(result).to_contain("\\\"")
 
 #### escapes backslashes
 
-- escapes backslashes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("escapes backslashes")
 val result = t32_escape_json("a\\b")
 expect(result).to_contain("\\\\")
 ```
@@ -145,18 +140,13 @@ expect(result).to_contain("\\\\")
 
 #### escapes newlines
 
-- escapes newlines
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("escapes newlines")
 val result = t32_escape_json("a\nb")
 expect(result).to_contain("\\n")
 ```
@@ -165,18 +155,13 @@ expect(result).to_contain("\\n")
 
 #### escapes tabs
 
-- escapes tabs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("escapes tabs")
 val result = t32_escape_json("a\tb")
 expect(result).to_contain("\\t")
 ```
@@ -185,19 +170,13 @@ expect(result).to_contain("\\t")
 
 #### leaves plain text unchanged
 
-- leaves plain text unchanged
-   - Expected: result equals `hello world`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("leaves plain text unchanged")
 val result = t32_escape_json("hello world")
 expect(result).to_equal("hello world")
 ```
@@ -208,19 +187,13 @@ expect(result).to_equal("hello world")
 
 #### wraps simple string
 
-- wraps simple string
-   - Expected: result equals `"hello"`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("wraps simple string")
 val result = t32_js("hello")
 expect(result).to_equal("\"hello\"")
 ```
@@ -229,18 +202,13 @@ expect(result).to_equal("\"hello\"")
 
 #### wraps and escapes
 
-- wraps and escapes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("wraps and escapes")
 val result = t32_js("a\"b")
 expect(result).to_contain("\\\"")
 ```
@@ -251,19 +219,13 @@ expect(result).to_contain("\\\"")
 
 #### builds quoted key with value
 
-- builds quoted key with value
-   - Expected: result equals `"name":"Alice"`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds quoted key with value")
 val result = t32_jp("name", "\"Alice\"")
 expect(result).to_equal("\"name\":\"Alice\"")
 ```
@@ -276,19 +238,13 @@ expect(result).to_equal("\"name\":\"Alice\"")
 
 #### wraps single pair in braces
 
-- wraps single pair in braces
-   - Expected: result equals `{"k":"v"}`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("wraps single pair in braces")
 val pair = t32_jp("k", t32_js("v"))
 val result = t32_jo1(pair)
 expect(result).to_equal("{\"k\":\"v\"}")
@@ -300,19 +256,13 @@ expect(result).to_equal("{\"k\":\"v\"}")
 
 #### joins two pairs with comma
 
-- joins two pairs with comma
-   - Expected: result equals `{"a":"1","b":"2"}`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("joins two pairs with comma")
 val p1 = t32_jp("a", t32_js("1"))
 val p2 = t32_jp("b", t32_js("2"))
 val result = t32_jo2(p1, p2)
@@ -325,18 +275,13 @@ expect(result).to_equal("{\"a\":\"1\",\"b\":\"2\"}")
 
 #### joins three pairs
 
-- joins three pairs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("joins three pairs")
 val p1 = t32_jp("x", "1")
 val p2 = t32_jp("y", "2")
 val p3 = t32_jp("z", "3")
@@ -352,18 +297,13 @@ expect(result).to_contain("\"z\":3")
 
 #### joins four pairs
 
-- joins four pairs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("joins four pairs")
 val p1 = t32_jp("a", "1")
 val p2 = t32_jp("b", "2")
 val p3 = t32_jp("c", "3")
@@ -381,19 +321,13 @@ expect(result).to_contain("\"d\":4")
 
 #### extracts string value
 
-- extracts string value
-   - Expected: result equals `localhost`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts string value")
 val json = "{\"host\":\"localhost\",\"port\":20000}"
 val result = t32_extract_field(json, "host")
 expect(result).to_equal("localhost")
@@ -403,19 +337,13 @@ expect(result).to_equal("localhost")
 
 #### extracts numeric value
 
-- extracts numeric value
-   - Expected: result equals `20000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts numeric value")
 val json = "{\"host\":\"localhost\",\"port\":20000}"
 val result = t32_extract_field(json, "port")
 expect(result).to_equal("20000")
@@ -425,19 +353,13 @@ expect(result).to_equal("20000")
 
 #### returns empty for missing key
 
-- returns empty for missing key
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty for missing key")
 val json = "{\"host\":\"localhost\"}"
 val result = t32_extract_field(json, "xxx")
 expect(result).to_equal("")
@@ -449,18 +371,13 @@ expect(result).to_equal("")
 
 #### extracts raw quoted value with quotes
 
-- extracts raw quoted value with quotes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts raw quoted value with quotes")
 val json = "{\"name\":\"test\"}"
 val result = t32_extract_field_raw(json, "name")
 expect(result).to_start_with("\"")
@@ -470,19 +387,13 @@ expect(result).to_start_with("\"")
 
 #### extracts raw numeric value
 
-- extracts raw numeric value
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts raw numeric value")
 val json = "{\"count\":42}"
 val result = t32_extract_field_raw(json, "count")
 expect(result).to_equal("42")
@@ -492,19 +403,13 @@ expect(result).to_equal("42")
 
 #### returns null for missing key
 
-- returns null for missing key
-   - Expected: result equals `null`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns null for missing key")
 val json = "{\"a\":1}"
 val result = t32_extract_field_raw(json, "missing")
 expect(result).to_equal("null")
@@ -516,19 +421,13 @@ expect(result).to_equal("null")
 
 #### extracts numeric id
 
-- extracts numeric id
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts numeric id")
 val json = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"test\"}"
 val result = t32_extract_id(json)
 expect(result).to_equal("42")
@@ -538,18 +437,13 @@ expect(result).to_equal("42")
 
 #### extracts string id
 
-- extracts string id
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts string id")
 val json = "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"test\"}"
 val result = t32_extract_id(json)
 expect(result).to_start_with("\"")
@@ -561,19 +455,13 @@ expect(result).to_start_with("\"")
 
 #### extracts from params object
 
-- extracts from params object
-   - Expected: result equals `hello`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts from params object")
 val json = "{\"method\":\"test\",\"params\":{\"name\":\"hello\",\"x\":1}}"
 val result = t32_extract_nested(json, "name")
 expect(result).to_equal("hello")
@@ -583,19 +471,13 @@ expect(result).to_equal("hello")
 
 #### returns empty when params missing
 
-- returns empty when params missing
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty when params missing")
 val json = "{\"method\":\"test\"}"
 val result = t32_extract_nested(json, "name")
 expect(result).to_equal("")
@@ -609,18 +491,13 @@ expect(result).to_equal("")
 
 #### builds success response
 
-- builds success response
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds success response")
 val result = t32_make_json_result("1", "{\"ok\":true}")
 expect(result).to_contain("\"jsonrpc\":\"2.0\"")
 expect(result).to_contain("\"id\":1")
@@ -631,18 +508,13 @@ expect(result).to_contain("\"result\":")
 
 #### builds error response
 
-- builds error response
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds error response")
 val result = t32_make_error("1", -32601, "Method not found")
 expect(result).to_contain("\"jsonrpc\":\"2.0\"")
 expect(result).to_contain("\"error\":")
@@ -656,18 +528,13 @@ expect(result).to_contain("Method not found")
 
 #### builds tool result with content array
 
-- builds tool result with content array
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds tool result with content array")
 val result = t32_make_tool_result("1", "hello world")
 expect(result).to_contain("\"type\":\"text\"")
 expect(result).to_contain("\"content\":")
@@ -678,18 +545,13 @@ expect(result).to_contain("hello world")
 
 #### builds tool error with isError flag
 
-- builds tool error with isError flag
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds tool error with isError flag")
 val result = t32_make_tool_error("1", 500, "Something broke")
 expect(result).to_contain("\"isError\":true")
 expect(result).to_contain("Something broke")
@@ -703,18 +565,13 @@ expect(result).to_contain("Something broke")
 
 #### includes area_name and semihost parameters
 
-- includes area_name and semihost parameters
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes area_name and semihost parameters")
 val schema = t32_make_tool_schema("t32_setup_headless", "Headless setup")
 expect(schema).to_contain("area_name")
 expect(schema).to_contain("semihost")
@@ -728,18 +585,13 @@ expect(schema).to_contain("t32_setup_headless")
 
 #### includes area_name and clear parameters
 
-- includes area_name and clear parameters
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes area_name and clear parameters")
 val schema = t32_make_tool_schema("t32_area_read", "Read AREA")
 expect(schema).to_contain("area_name")
 expect(schema).to_contain("clear")
@@ -752,18 +604,13 @@ expect(schema).to_contain("t32_area_read")
 
 #### includes group and search parameters
 
-- includes group and search parameters
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes group and search parameters")
 val schema = t32_make_tool_schema("t32_cmm_commands", "CMM commands")
 expect(schema).to_contain("group")
 expect(schema).to_contain("search")
@@ -776,18 +623,13 @@ expect(schema).to_contain("t32_cmm_commands")
 
 #### includes capture_area parameter
 
-- includes capture_area parameter
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes capture_area parameter")
 val schema = t32_make_tool_schema("t32_cmm_run", "Run CMM")
 expect(schema).to_contain("capture_area")
 expect(schema).to_contain("script")
@@ -807,54 +649,3 @@ expect(schema).to_contain("script")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `737d3ed8c4094d484f822e3d30031c85540ded9336f756f69443c7c2a9008756`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `737d3ed8c4094d484f822e3d30031c85540ded9336f756f69443c7c2a9008756`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `737d3ed8c4094d484f822e3d30031c85540ded9336f756f69443c7c2a9008756`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/feature/app/t32_tools/t32_mcp_spec.spl
-mirror: doc/06_spec/03_system/feature/app/t32_tools/t32_mcp_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=55 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/app/t32_tools/t32_mcp_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
-  why: Retained evidence must be visible or linked from the professional manual.
-  improve: Select a supported evidence display and regenerate.
-doc/06_spec/03_system/feature/app/t32_tools/t32_mcp_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/app/t32_tools/t32_mcp_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/app/t32_tools/t32_mcp_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns double-quote char' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/t32_tools/t32_mcp_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns left brace' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/t32_tools/t32_mcp_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns right brace' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1677,6 +1677,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_run", system::rt_process_run);
     insert_simple!("rt_process_run_bounded", system::rt_process_run_bounded);
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
+    // Declared by src/lib/nogc_sync_mut/io/resource_scope.spl and reached by
+    // every directory-mode `simple test` run via _run_scoped_child; the C
+    // definition is compiled into the runtime crate but had no interpreter
+    // dispatch entry, so directory mode died with `unknown extern function`.
+    insert_simple!(
+        "rt_process_run_owned_observed_bounded_value",
+        system::rt_process_run_owned_observed_bounded_value
+    );
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     // Piped-process family -- present in the C runtime and declared by real
@@ -1684,6 +1692,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
     insert_simple!("rt_process_write_stdin", system::rt_process_write_stdin);
+    // Implemented in system.rs and declared by process_ops.spl, but never
+    // registered here (found by the same extern census as the entry above).
+    insert_simple!("rt_process_write_stdin_some", system::rt_process_write_stdin_some);
     insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
@@ -1713,6 +1724,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mmap_raw", memory::rt_mmap_raw);
     insert_simple!("rt_munmap_raw", memory::rt_munmap_raw);
     insert_simple!("rt_mprotect", memory::rt_mprotect);
+    insert_simple!("rt_page_size", memory::rt_page_size);
     insert_simple!("rt_madvise_raw", memory::rt_madvise_raw);
     insert_simple!("rt_msync_flags", memory::rt_msync_flags);
     insert_simple!("rt_mlock", memory::rt_mlock);
@@ -2451,6 +2463,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_bits_to_f64", wsffi::spl_bits_to_f64);
     insert_simple!("spl_dlclose", wsffi::spl_dlclose);
     insert_simple!("spl_dlopen", wsffi::spl_dlopen);
+    insert_simple!("spl_backend_plugin_run_v1", wsffi::spl_backend_plugin_run_v1);
     insert_simple!("spl_dlopen_checked", wsffi::spl_dlopen_checked);
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
     insert_simple!("spl_dlsym_checked", wsffi::spl_dlsym_checked);
@@ -3044,6 +3057,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loader_memory_extern_family_includes_page_size_alignment_query() {
+        for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
+            assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
+        }
+    }
+
+    #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
     }
@@ -3323,7 +3343,7 @@ mod tests {
             // multi-byte suffix: byte-wise tail compare must not split a
             // codepoint or report a false hit
             ("héllo…", "…", true),
-            ("héllo…", "o…", false),
+            ("héllo…", "o…", true),
         ];
 
         for &(subject, suffix, expected) in cases {

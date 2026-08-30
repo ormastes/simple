@@ -57,7 +57,7 @@ fn no_destructor(p: *void) -> void:
     val _ = 0
 val k1 = tls_key_alloc(no_destructor)
 val k2 = tls_key_alloc(no_destructor)
-expect(k1).to_not_equal(k2)
+expect(k1 == k2).to_equal(false)
 ```
 
 </details>
@@ -147,7 +147,7 @@ expect(got).to_equal(0x22)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -171,8 +171,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("AC-3: semaphore_create with initial=1 returns a valid handle")
 val h = semaphore_create(1)
 expect(h).to_be_greater_than(0)
 ```
@@ -187,7 +185,7 @@ expect(h).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -195,7 +193,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("AC-3: semaphore_create returns distinct handles")
 val h1 = semaphore_create(0)
 val h2 = semaphore_create(0)
-expect(h1).to_not_equal(h2)
+expect(h1 == h2).to_equal(false)
 ```
 
 </details>
@@ -303,7 +301,7 @@ expect(r2).to_equal("timeout")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -327,8 +325,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("AC-3: event_wait_create with manual_reset=true returns a valid handle")
 val h = event_wait_create(true)
 expect(h).to_be_greater_than(0)
 ```
@@ -344,7 +340,7 @@ expect(h).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

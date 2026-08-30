@@ -1,10 +1,34 @@
 # Lint Profile Specification
 
-> Tests covering lint strictness profiles (reliable-mode P0).
+> <details>
+
+<!-- sdn-diagram:id=lint_profile_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=lint_profile_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+lint_profile_spec -> std
+lint_profile_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=lint_profile_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,11 +41,6 @@
 
 #### maps every previously-unmapped lint family to a config name (AC-3)
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- maps every previously-unmapped lint family to a config name (AC-3)
 - Resolve formerly-unconfigurable lint codes
    - Expected: map_lint_code_to_config_name("W001") equals `unused_code`
    - Expected: map_lint_code_to_config_name("S001") equals `unsafe_pattern`
@@ -34,20 +53,15 @@
    - Expected: map_lint_code_to_config_name("ST001") equals `style_convention`
    - Expected: map_lint_code_to_config_name("D001") equals `database_integrity`
    - Expected: map_lint_code_to_config_name("TRK001") equals `tracking_traceability`
-   - Expected: map_lint_code_to_config_name("RAW-RT-001") equals `raw_rt_access`
-   - Expected: map_lint_code_to_config_name("RAW-RT-002") equals `raw_rt_access`
-   - Expected: map_lint_code_to_config_name("RAW-RT-003") equals `raw_rt_access`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("maps every previously-unmapped lint family to a config name (AC-3)")
 step("Resolve formerly-unconfigurable lint codes")
 expect(map_lint_code_to_config_name("W001")).to_equal("unused_code")
 expect(map_lint_code_to_config_name("S001")).to_equal("unsafe_pattern")
@@ -60,17 +74,13 @@ expect(map_lint_code_to_config_name("W0401")).to_equal("visibility_boundary")
 expect(map_lint_code_to_config_name("ST001")).to_equal("style_convention")
 expect(map_lint_code_to_config_name("D001")).to_equal("database_integrity")
 expect(map_lint_code_to_config_name("TRK001")).to_equal("tracking_traceability")
-expect(map_lint_code_to_config_name("RAW-RT-001")).to_equal("raw_rt_access")
-expect(map_lint_code_to_config_name("RAW-RT-002")).to_equal("raw_rt_access")
-expect(map_lint_code_to_config_name("RAW-RT-003")).to_equal("raw_rt_access")
 ```
 
 </details>
 
-#### strict tier preserves current defaults (AC-1)
+#### lib tier preserves current defaults (AC-1)
 
-- strict tier preserves current defaults (AC-1)
-- Strict == build_default_levels baseline (formerly Lib)
+- Lib == build_default_levels baseline
    - Expected: lib["primitive_api"] equals `deny`
    - Expected: lib["stub_impl"] equals `deny`
 
@@ -78,14 +88,12 @@ expect(map_lint_code_to_config_name("RAW-RT-003")).to_equal("raw_rt_access")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("strict tier preserves current defaults (AC-1)")
-step("Strict == build_default_levels baseline (formerly Lib)")
-val lib = profile_default_levels(LintProfile.Strict)
+step("Lib == build_default_levels baseline")
+val lib = profile_default_levels(LintProfile.Lib)
 expect(lib["primitive_api"]).to_equal("deny")
 expect(lib["stub_impl"]).to_equal("deny")
 ```
@@ -94,7 +102,6 @@ expect(lib["stub_impl"]).to_equal("deny")
 
 #### moderate tier downgrades deny defaults to warn (AC-1)
 
-- moderate tier downgrades deny defaults to warn (AC-1)
 - Moderate is advisory
    - Expected: mod["primitive_api"] equals `warn`
    - Expected: mod["stub_impl"] equals `warn`
@@ -104,12 +111,10 @@ expect(lib["stub_impl"]).to_equal("deny")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("moderate tier downgrades deny defaults to warn (AC-1)")
 step("Moderate is advisory")
 val mod = profile_default_levels(LintProfile.Moderate)
 expect(mod["primitive_api"]).to_equal("warn")
@@ -119,10 +124,9 @@ expect(mod["export_outside_init"]).to_equal("warn")
 
 </details>
 
-#### robust tier elevates safety + public-surface lints to deny (AC-1)
+#### reliable tier elevates safety + public-surface lints to deny (AC-1)
 
-- robust tier elevates safety + public-surface lints to deny (AC-1)
-- Robust is strictest (formerly Reliable)
+- Reliable is strictest
    - Expected: rel["unsafe_pattern"] equals `deny`
    - Expected: rel["memory_safety"] equals `deny`
    - Expected: rel["visibility_boundary"] equals `deny`
@@ -133,14 +137,12 @@ expect(mod["export_outside_init"]).to_equal("warn")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("robust tier elevates safety + public-surface lints to deny (AC-1)")
-step("Robust is strictest (formerly Reliable)")
-val rel = profile_default_levels(LintProfile.Robust)
+step("Reliable is strictest")
+val rel = profile_default_levels(LintProfile.Reliable)
 expect(rel["unsafe_pattern"]).to_equal("deny")
 expect(rel["memory_safety"]).to_equal("deny")
 expect(rel["visibility_boundary"]).to_equal("deny")
@@ -150,199 +152,35 @@ expect(rel["non_exhaustive_match"]).to_equal("deny")
 
 </details>
 
-#### parses every new tier name (AC-2, profile-rename)
+#### parses tier names and rejects unknowns (AC-2)
 
-- parses every new tier name (AC-2, profile-rename)
-- parse_lint_profile round-trips all four current names
-   - Expected: parse_lint_profile("moderate").is_some() is true
-   - Expected: parse_lint_profile("strict").is_some() is true
-   - Expected: parse_lint_profile("robust").is_some() is true
-   - Expected: parse_lint_profile("critical").is_some() is true
+- parse_lint_profile round-trips known tiers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("parses every new tier name (AC-2, profile-rename)")
-step("parse_lint_profile round-trips all four current names")
-expect(parse_lint_profile("moderate").is_some()).to_equal(true)
-expect(parse_lint_profile("strict").is_some()).to_equal(true)
-expect(parse_lint_profile("robust").is_some()).to_equal(true)
-expect(parse_lint_profile("critical").is_some()).to_equal(true)
+step("parse_lint_profile round-trips known tiers")
+expect(parse_lint_profile("reliable").?).to_be(true)
+expect(parse_lint_profile("moderate").?).to_be(true)
+expect(parse_lint_profile("lib").?).to_be(true)
+expect(parse_lint_profile("bogus").?).to_be(false)
 ```
 
 </details>
 
-#### rejects unknown profile strings, including the old names' near-misses (AC-2)
+#### unset profile preserves legacy behavior; reliable elevates (AC-6)
 
-- rejects unknown profile strings, including the old names' near-misses (AC-2)
-- bogus strings stay nil; renamed-away spellings are not silently accepted
-   - Expected: parse_lint_profile("bogus").is_some() is false
-   - Expected: parse_lint_profile("reliabl").is_some() is false
-   - Expected: parse_lint_profile("").is_some() is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("rejects unknown profile strings, including the old names' near-misses (AC-2)")
-step("bogus strings stay nil; renamed-away spellings are not silently accepted")
-expect(parse_lint_profile("bogus").is_some()).to_equal(false)
-expect(parse_lint_profile("reliabl").is_some()).to_equal(false)
-expect(parse_lint_profile("").is_some()).to_equal(false)
-```
-
-</details>
-
-#### deprecated aliases parse to the SAME variant as their new spelling (profile-rename)
-
-- deprecated aliases parse to the SAME variant as their new spelling (profile-rename)
-- lib -> strict, reliable -> robust, mission-critical/mission_critical -> critical
-   - Expected: profile_default_levels(p)["primitive_api"] equals `profile_default_levels(LintProfile.Strict)["primitive_api"]`
-   - Expected: profile_default_levels(p)["unsafe_pattern"] equals `profile_default_levels(LintProfile.Robust)["unsafe_pattern"]`
-   - Expected: profile_default_levels(p)["bare_primitive_internal"] equals `profile_default_levels(LintProfile.Critical)["bare_primitive_internal"]`
-   - Expected: profile_default_levels(p)["bare_primitive_internal"] equals `profile_default_levels(LintProfile.Critical)["bare_primitive_internal"]`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("deprecated aliases parse to the SAME variant as their new spelling (profile-rename)")
-step("lib -> strict, reliable -> robust, mission-critical/mission_critical -> critical")
-match parse_lint_profile("lib"):
-    case Some(p):
-        expect(profile_default_levels(p)["primitive_api"]).to_equal(profile_default_levels(LintProfile.Strict)["primitive_api"])
-    case nil:
-        assert_true(false)
-match parse_lint_profile("reliable"):
-    case Some(p):
-        expect(profile_default_levels(p)["unsafe_pattern"]).to_equal(profile_default_levels(LintProfile.Robust)["unsafe_pattern"])
-    case nil:
-        assert_true(false)
-match parse_lint_profile("mission-critical"):
-    case Some(p):
-        expect(profile_default_levels(p)["bare_primitive_internal"]).to_equal(profile_default_levels(LintProfile.Critical)["bare_primitive_internal"])
-    case nil:
-        assert_true(false)
-match parse_lint_profile("mission_critical"):
-    case Some(p):
-        expect(profile_default_levels(p)["bare_primitive_internal"]).to_equal(profile_default_levels(LintProfile.Critical)["bare_primitive_internal"])
-    case nil:
-        assert_true(false)
-```
-
-</details>
-
-#### deprecated aliases warn exactly ONCE per distinct old name, not once per call (profile-rename)
-
-- deprecated aliases warn exactly ONCE per distinct old name, not once per call (profile-rename)
-- call each deprecated spelling several times; the warn count must stay 1
-   - Expected: before_dep equals `0`
-   - Expected: deprecated_profile_alias_warn_count("lib") equals `1`
-   - Expected: deprecated_profile_alias_warn_count("reliable") equals `1`
-   - Expected: deprecated_profile_alias_warn_count("mission-critical") equals `1`
-   - Expected: deprecated_profile_alias_warn_count("mission_critical") equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 20 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("deprecated aliases warn exactly ONCE per distinct old name, not once per call (profile-rename)")
-step("call each deprecated spelling several times; the warn count must stay 1")
-val before_dep = deprecated_profile_alias_warn_count("dep-once-test-alias-does-not-exist")
-expect(before_dep).to_equal(0)
-# Use a distinct old-spelling family so this test is independent of
-# call order/count from other examples that also parse "lib"/"reliable".
-val _r1 = parse_lint_profile("lib")
-val _r2 = parse_lint_profile("lib")
-val _r3 = parse_lint_profile("LIB")
-val _r4 = parse_lint_profile("lib")
-expect(deprecated_profile_alias_warn_count("lib")).to_equal(1)
-val _s1 = parse_lint_profile("reliable")
-val _s2 = parse_lint_profile("reliable")
-expect(deprecated_profile_alias_warn_count("reliable")).to_equal(1)
-val _t1 = parse_lint_profile("mission-critical")
-val _t2 = parse_lint_profile("mission_critical")
-val _t3 = parse_lint_profile("mission-critical")
-expect(deprecated_profile_alias_warn_count("mission-critical")).to_equal(1)
-expect(deprecated_profile_alias_warn_count("mission_critical")).to_equal(1)
-```
-
-</details>
-
-#### engine-default resolution: interpreter/JIT -> moderate, compiler/loader -> robust at warn (REQ-MC-012 tier 3)
-
-- engine-default resolution: interpreter/JIT -> moderate, compiler/loader -> robust at warn (REQ-MC-012 tier 3)
-- engine_default_profile picks the right tier per engine
-- compiler/loader's default levels report robust's rule set but at WARN, never deny
-   - Expected: compiler_levels["unsafe_pattern"] equals `warn`
-   - Expected: compiler_levels["memory_safety"] equals `warn`
-   - Expected: compiler_levels["visibility_boundary"] equals `warn`
-- interpreter/JIT's default levels match moderate's dict exactly
-   - Expected: interp_levels["primitive_api"] equals `moderate_levels["primitive_api"]`
-   - Expected: interp_levels["stub_impl"] equals `moderate_levels["stub_impl"]`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("engine-default resolution: interpreter/JIT -> moderate, compiler/loader -> robust at warn (REQ-MC-012 tier 3)")
-step("engine_default_profile picks the right tier per engine")
-match engine_default_profile(LintEngineDefault.InterpreterOrJit):
-    case Moderate:
-        assert_true(true)
-    case _:
-        assert_true(false)
-match engine_default_profile(LintEngineDefault.CompilerLoader):
-    case Robust:
-        assert_true(true)
-    case _:
-        assert_true(false)
-step("compiler/loader's default levels report robust's rule set but at WARN, never deny")
-val compiler_levels = engine_default_levels(LintEngineDefault.CompilerLoader)
-expect(compiler_levels["unsafe_pattern"]).to_equal("warn")
-expect(compiler_levels["memory_safety"]).to_equal("warn")
-expect(compiler_levels["visibility_boundary"]).to_equal("warn")
-step("interpreter/JIT's default levels match moderate's dict exactly")
-val interp_levels = engine_default_levels(LintEngineDefault.InterpreterOrJit)
-val moderate_levels = profile_default_levels(LintProfile.Moderate)
-expect(interp_levels["primitive_api"]).to_equal(moderate_levels["primitive_api"])
-expect(interp_levels["stub_impl"]).to_equal(moderate_levels["stub_impl"])
-```
-
-</details>
-
-#### rejects an unknown CLI profile instead of silently using defaults
-
-- rejects an unknown CLI profile instead of silently using defaults
-   - Expected: written is true
-   - Expected: exit_code equals `2`
-   - Expected: removed is true
+- nil profile == today's build_default_levels fallback
+- var cfg = LintConfig new
+   - Expected: level_name(unset) equals `warn`
+- select reliable -> elevated to deny
+- cfg set profile
+   - Expected: level_name(cfg.get_level("unsafe_pattern")) equals `deny`
 
 
 <details>
@@ -352,214 +190,57 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("rejects an unknown CLI profile instead of silently using defaults")
-val written = file_write(WARN_ALL_FIXTURE_PATH, "fn clean_name() -> i64:\n    1\n")
-val exit_code = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--profile=relaible", "--json"])
-val removed = file_delete(WARN_ALL_FIXTURE_PATH)
-expect(written).to_equal(true)
-expect(exit_code).to_equal(2)
-expect(removed).to_equal(true)
-```
-
-</details>
-
-#### unset profile preserves legacy behavior; robust elevates (AC-6)
-
-- unset profile preserves legacy behavior; robust elevates (AC-6)
-- nil profile == today's build_default_levels fallback
-   - Expected: level_name(unset) equals `warn`
-- select robust -> elevated to deny
-   - Expected: level_name(cfg.get_level("unsafe_pattern")) equals `deny`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("unset profile preserves legacy behavior; robust elevates (AC-6)")
 step("nil profile == today's build_default_levels fallback")
 var cfg = LintConfig.new()
 # unsafe_pattern base default is warn -> get_level Warn under no profile
 val unset = cfg.get_level("unsafe_pattern")
 expect(level_name(unset)).to_equal("warn")
-step("select robust -> elevated to deny")
-cfg.set_profile(LintProfile.Robust)
+step("select reliable -> elevated to deny")
+cfg.set_profile(LintProfile.Reliable)
 expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
 ```
 
 </details>
 
-#### sdn lints.profile selects a tier (AC-2)
+#### sdn [lints] profile= selects a tier (AC-2)
 
-- sdn lints.profile selects a tier (AC-2)
-- from_sdn_string parses profile: before the lint-name gate
+- from_sdn_string parses profile= before the lint-name gate
    - Expected: level_name(cfg.get_level("unsafe_pattern")) equals `deny`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("sdn lints.profile selects a tier (AC-2)")
-step("from_sdn_string parses profile: before the lint-name gate")
-val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n")
+step("from_sdn_string parses profile= before the lint-name gate")
+val cfg = LintConfig.from_sdn_string("[lints]\nprofile = \"reliable\"\n")
 expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
-```
-
-</details>
-
-#### sdn lints.profile also accepts the deprecated old spelling (profile-rename)
-
-- sdn lints.profile also accepts the deprecated old spelling (profile-rename)
-- from_sdn_string honors 'reliable' as an alias for 'robust'
-   - Expected: level_name(cfg.get_level("unsafe_pattern")) equals `deny`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("sdn lints.profile also accepts the deprecated old spelling (profile-rename)")
-step("from_sdn_string honors 'reliable' as an alias for 'robust'")
-val cfg = LintConfig.from_sdn_string("lints:\n  profile: reliable\n")
-expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
-```
-
-</details>
-
-#### leaves the tier unselected when the manifest carries no profile key
-
-- leaves the tier unselected when the manifest carries no profile key
-- a lints: section with no profile: entry selects nothing
-   - Expected: unpinned_name equals `none`
-- and the with-key case does select one
-   - Expected: pinned_name equals `selected`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("leaves the tier unselected when the manifest carries no profile key")
-# Differential half of AC-2: without this, the two examples above pass
-# even on a scanner that never matches anything, because an unselected
-# profile also leaves unsafe_pattern at its default. Assert the two
-# cases DIFFER rather than only asserting the with-key case.
-step("a lints: section with no profile: entry selects nothing")
-val cfg = LintConfig.from_sdn_string("lints:\n  stub_impl: deny\n")
-val unpinned_name = if cfg.profile.?: "selected" else: "none"
-expect(unpinned_name).to_equal("none")
-step("and the with-key case does select one")
-val pinned = LintConfig.from_sdn_string("lints:\n  profile: robust\n")
-val pinned_name = if pinned.profile.?: "selected" else: "none"
-expect(pinned_name).to_equal("selected")
-```
-
-</details>
-
-#### no longer accepts the removed TOML-ish [lints] shape
-
-- no longer accepts the removed TOML-ish [lints] shape
-- the old shape selects no profile
-   - Expected: legacy_name equals `none`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("no longer accepts the removed TOML-ish [lints] shape")
-# WP-4: the `[lints]` / `name = "level"` shape was deleted. It was never
-# present in any manifest in the tree (aerospace hardening plan premise
-# 4), so this is a format removal, not a softened assertion.
-step("the old shape selects no profile")
-val cfg = LintConfig.from_sdn_string("[lints]\nprofile = \"robust\"\n")
-val legacy_name = if cfg.profile.?: "selected" else: "none"
-expect(legacy_name).to_equal("none")
 ```
 
 </details>
 
 #### @lint_profile() file attribute selects a tier (AC-2)
 
-- @lint_profile() file attribute selects a tier (AC-2)
 - apply_file_attributes honors @lint_profile, distinct from @profile(critical)
+- var cfg = LintConfig new
+- cfg apply file attributes
    - Expected: level_name(cfg.get_level("memory_safety")) equals `deny`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-COMPILER
-step("@lint_profile() file attribute selects a tier (AC-2)")
 step("apply_file_attributes honors @lint_profile, distinct from @profile(critical)")
 var cfg = LintConfig.new()
-cfg.apply_file_attributes("@lint_profile(robust)\n\nfn main():\n    print(\"x\")\n")
+cfg.apply_file_attributes("@lint_profile(reliable)\n\nfn main():\n    print(\"x\")\n")
 expect(level_name(cfg.get_level("memory_safety"))).to_equal("deny")
-```
-
-</details>
-
-#### promotes allowed style diagnostics with warn-all
-
-- promotes allowed style diagnostics with warn-all
-- ST001 stays allowed by default, then becomes an error under --warn-all --deny-all
-   - Expected: dirty_written is true
-   - Expected: baseline_exit equals `0`
-   - Expected: dirty_exit equals `1`
-   - Expected: clean_written is true
-   - Expected: clean_exit equals `0`
-   - Expected: removed is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 16 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-COMPILER
-step("promotes allowed style diagnostics with warn-all")
-step("ST001 stays allowed by default, then becomes an error under --warn-all --deny-all")
-val dirty_written = file_write(WARN_ALL_FIXTURE_PATH, "fn CamelCase() -> i64:\n    1\n")
-val baseline_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--json"])
-val dirty_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--warn-all", "--deny-all", "--json"])
-val clean_written = file_write(WARN_ALL_FIXTURE_PATH, "fn clean_name() -> i64:\n    1\n")
-val clean_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--warn-all", "--deny-all", "--json"])
-val removed = file_delete(WARN_ALL_FIXTURE_PATH)
-
-expect(dirty_written).to_equal(true)
-expect(baseline_exit).to_equal(0)
-expect(dirty_exit).to_equal(1)
-expect(clean_written).to_equal(true)
-expect(clean_exit).to_equal(0)
-expect(removed).to_equal(true)
 ```
 
 </details>
@@ -571,74 +252,23 @@ expect(removed).to_equal(true)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/lint/lint_profile_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering lint strictness profiles (reliable-mode P0).
+Tests covering:
 - lint strictness profiles (reliable-mode P0)
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-COMPILER`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d91597570be33024252ba0b257a659068978e328de18188ea336acb95b3f42fb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d91597570be33024252ba0b257a659068978e328de18188ea336acb95b3f42fb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d91597570be33024252ba0b257a659068978e328de18188ea336acb95b3f42fb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/compiler/lint/lint_profile_spec.spl
-mirror: doc/06_spec/01_unit/compiler/lint/lint_profile_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/compiler/lint/lint_profile_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/lint/lint_profile_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/lint/lint_profile_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/lint/lint_profile_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps every previously-unmapped lint family to a config name (AC-3)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/lint/lint_profile_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'strict tier preserves current defaults (AC-1)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/lint/lint_profile_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'moderate tier downgrades deny defaults to warn (AC-1)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

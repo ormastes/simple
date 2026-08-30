@@ -16,7 +16,7 @@ catalog mutation API. Any unexpected insertion or seal failure after begin
 consumes the session into permanent quarantine, so a partial catalog can never
 be observed or retried.
 
-The preflight is O(R² + A²), where R is capped at 16 and aliases are bounded by
+The preflight is O(R² + A²), where R is capped at 17 and aliases are bounded by
 the catalog at 8. Verification is O(total bounded manifest bytes plus Ed25519
 work). All retained values are deep-copied by the catalog owner. This is a boot
 path, not a request hot path.

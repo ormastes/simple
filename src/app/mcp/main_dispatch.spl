@@ -7,21 +7,12 @@ use .main_lazy_query_tools
 use .main_lazy_play_tools
 use .main_lazy_assistant
 use .main_lazy_node_tools
-use .main_lazy_caret_tools
+use .main_lazy_ctx_tools
+use .main_lazy_telemetry
 use .main_editor_tools
 use .cli_passthrough
-use .main_static_tools.{_mcp_core_tool_names}
 
-# CONSTRAINT: dispatch_tool is NOT filtered by the active tool set.
-# Only tools/list advertisement is filtered (see _mcp_tools_list_result in main.spl).
-# Clients holding a stale "all" tool list must still be able to call any tool
-# even when the server is running in "core" mode.  Filtering dispatch would
-# silently break those clients.
 fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
-    # TODO(native-arg-extract): native/cranelift full-program codegen drops the
-    # tools/call params, so tool_name arrives "" and every call dies here. Fixing
-    # it lets the fast compiled simple_mcp_server / simple_lsp_mcp_server replace
-    # slow source mode. See doc/08_tracking/bug/mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md
     if tool_name == "":
         return make_tool_error(id, -32602, "Missing tool name")
 
@@ -34,14 +25,7 @@ fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
     val cli_result = _dispatch_cli_direct(id, tool_name, body)
     if cli_result != "":
         return cli_result
-    make_tool_error(id, -32601, _mcp_unknown_tool_message(tool_name))
-
-# Build a client-facing "unknown tool" message that names the tools actually
-# advertised in the default (core) tools/list, so a client that mistyped a
-# name (or is holding a stale schema) knows what to call instead.
-fn _mcp_unknown_tool_message(name: text) -> text:
-    val names = _mcp_core_tool_names()
-    "unknown tool '" + name + "'; available: " + names.join(", ")
+    make_tool_error(id, -32601, "Unknown tool: " + tool_name)
 
 fn _is_vcs_tool(name: text) -> bool:
     if name == "simple_diff":
@@ -65,8 +49,6 @@ fn _is_query_tool(name: text) -> bool:
         return true
     if name == "simple_api_diff":
         return true
-    if name == "simple_pipe":
-        return true
     if name == "simple_context":
         return true
     if name == "simple_ponytail":
@@ -75,6 +57,8 @@ fn _is_query_tool(name: text) -> bool:
 
 fn _is_in_process_tool(name: text) -> bool:
     if name == "simple_read":
+        return true
+    if name == "simple_visibility":
         return true
     if name == "simple_status":
         return true
@@ -234,7 +218,28 @@ fn _is_in_process_tool(name: text) -> bool:
         return true
     if name == "node_repl":
         return true
-    is_caret_tool(name)
+    _is_ctx_tool(name)
+
+fn _is_ctx_tool(name: text) -> bool:
+    if name == "simple_ctx_index":
+        return true
+    if name == "simple_ctx_search":
+        return true
+    if name == "simple_ctx_execute":
+        return true
+    if name == "simple_ctx_execute_file":
+        return true
+    if name == "simple_ctx_batch_execute":
+        return true
+    if name == "simple_ctx_fetch_and_index":
+        return true
+    if name == "simple_ctx_stats":
+        return true
+    if name == "simple_ctx_doctor":
+        return true
+    if name == "simple_ctx_upgrade":
+        return true
+    name == "simple_token_stats"
 
 fn _dispatch_cli_direct(id: text, name: text, body: text) -> text:
     if name == "simple_check":
@@ -294,7 +299,7 @@ fn _dispatch_cli_direct(id: text, name: text, body: text) -> text:
     if name == "simple_info":
         return handle_cli_passthrough_direct(id, body, name, "info", 30)
     if name == "simple_check_arch":
-        return handle_cli_passthrough_direct(id, body, name, "check-arch", 60)
+        return handle_cli_passthrough_direct(id, body, name, "run src/app/cli/arch_check_entry.spl", 60)
     if name == "simple_todo_scan":
         return handle_cli_passthrough_direct(id, body, name, "todo-scan", 60)
     if name == "simple_todo_gen":
@@ -305,10 +310,6 @@ fn _dispatch_cli_direct(id: text, name: text, body: text) -> text:
         return handle_cli_passthrough_direct(id, body, name, "env", 10)
     if name == "simple_duplicate_check":
         return handle_cli_passthrough_direct(id, body, name, "duplicate-check", 120)
-    if name == "simple_sspec_maintain":
-        return handle_cli_passthrough_direct(id, body, name, "sspec-maintain", 120)
-    if name == "simple_sspec_scan":
-        return handle_cli_passthrough_direct(id, body, name, "sspec-maintain", 120)
     if name == "simple_desugar":
         return handle_cli_passthrough_direct(id, body, name, "desugar", 30)
     if name == "simple_spec_coverage":
@@ -375,8 +376,6 @@ fn _dispatch_query(id: text, name: text, body: text) -> text:
         return handle_simple_dependencies(id, body)
     if name == "simple_api_diff":
         return handle_simple_api_diff(id, body)
-    if name == "simple_pipe":
-        return handle_simple_pipe(id, body)
     if name == "simple_context":
         return handle_simple_context(id, body)
     if name == "simple_ponytail":
@@ -388,6 +387,8 @@ fn _dispatch_query(id: text, name: text, body: text) -> text:
 fn _dispatch_in_process(id: text, name: text, body: text) -> text:
     if name == "simple_read":
         return handle_simple_read(id, body)
+    if name == "simple_visibility":
+        return handle_simple_visibility(id, body)
     if name == "simple_status":
         return handle_simple_status(id, body)
     if name == "simple_edit":
@@ -546,8 +547,26 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_assistant_get_notifications(id, body)
     if name == "node_repl":
         return handle_node_repl(id, body)
-    if is_caret_tool(name):
-        return handle_caret_tool(id, name, body)
+    if name == "simple_ctx_index":
+        return handle_simple_ctx_index(id, body)
+    if name == "simple_ctx_search":
+        return handle_simple_ctx_search(id, body)
+    if name == "simple_ctx_execute":
+        return handle_simple_ctx_execute(id, body)
+    if name == "simple_ctx_execute_file":
+        return handle_simple_ctx_execute_file(id, body)
+    if name == "simple_ctx_batch_execute":
+        return handle_simple_ctx_batch_execute(id, body)
+    if name == "simple_ctx_fetch_and_index":
+        return handle_simple_ctx_fetch_and_index(id, body)
+    if name == "simple_ctx_stats":
+        return handle_simple_ctx_stats(id, body)
+    if name == "simple_ctx_doctor":
+        return handle_simple_ctx_doctor(id, body)
+    if name == "simple_ctx_upgrade":
+        return handle_simple_ctx_upgrade(id, body)
+    if name == "simple_token_stats":
+        return handle_simple_token_stats(id, body)
     make_tool_error(id, -32601, "Unknown in-process tool: " + name)
 
 # --- McpServer facade adapter ---

@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+state=${STAGE3_FAKE_SYSTEMD_STATE:?}
+mode=${STAGE3_FAKE_SYSTEMCTL_MODE:-normal}
+[ "${1-}" = --user ] && shift
+action=${1:?}; shift
+if [ "$mode" != normal ] && [ ! -e "$state/systemctl-$mode-fired" ]; then
+  : >"$state/systemctl-$mode-fired"
+  printf '%s\n' "$$" >"$state/injected-helper.pid"
+  case $mode in
+    overflow)
+      /usr/bin/head -c 70000 /dev/zero
+      trap '' TERM
+      while :; do :; done
+      ;;
+    timeout)
+      trap '' TERM
+      while :; do :; done
+      ;;
+    read-error)
+      trap '' TERM
+      while :; do :; done
+      ;;
+    read-error-term-marker)
+      trap ': >"$state/term-observed"' TERM
+      while :; do :; done
+      ;;
+    *) exit 97 ;;
+  esac
+fi
+case $action in
+  show)
+    service=${1:?}; shift
+    unit=${service%.service}
+    property=
+    for arg in "$@"; do case $arg in --property=*) property=${arg#*=} ;; esac; done
+    [ -n "$property" ] || exit 2
+    file=$state/units/$unit/$property
+    [ -f "$file" ] || exit 1
+    head -n 1 "$file"
+    ;;
+  stop|kill)
+    service=
+    for arg in "$@"; do case $arg in *.service) service=$arg ;; esac; done
+    unit=${service%.service}
+    unit_dir=$state/units/$unit
+    if [ -d "$unit_dir" ]; then
+      printf '%s\n' inactive >"$unit_dir/ActiveState"
+      : >"$unit_dir/stopped"
+      cgroup=$state/cgroup/fake/$unit
+      [ ! -d "$cgroup" ] || printf 'populated 0\nfrozen 0\n' >"$cgroup/cgroup.events"
+    fi
+    ;;
+  *) exit 2 ;;
+esac

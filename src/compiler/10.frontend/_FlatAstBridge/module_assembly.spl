@@ -37,13 +37,14 @@ use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NA
 use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_valid}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types.{ParserFunction}  # explicit: a glob is not an import-origin for surface projection
 use compiler.frontend.parser_types_expr.*
 use compiler.common.attributes.{parse_function_attrs}
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
 use compiler.common.diagnostics.span.{Span}
-use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals, lex_tokenize_all}
 use compiler.frontend.resource_registry.{resource_registry_declare}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
 use compiler.frontend.effect_registry.{effect_registry_declare}
@@ -68,6 +69,17 @@ fn fab_phase_prof_enabled() -> bool:
     if _fab_phase_prof_cached < 0:
         _fab_phase_prof_cached = if (_sffi_env_get("SIMPLE_PARSE_PHASE_PROFILE") ?? "") == "1": 1 else: 0
     _fab_phase_prof_cached == 1
+
+# Lexer-only attribution probe (2026-08-28, default off): SIMPLE_LEX_PHASE_PROFILE=1
+# runs a standalone tokenize pass over the module BEFORE the real parse and
+# prints one LEXPHASE line per file, so the parse_module_body term of PARSEPHASE
+# can be split into "lexer" and "parser" halves. The extra pass doubles lexer
+# work in profile mode only. Level-gated perf probe -- do not delete.
+var _fab_lex_prof_cached: i64 = -1
+fn fab_lex_prof_enabled() -> bool:
+    if _fab_lex_prof_cached < 0:
+        _fab_lex_prof_cached = if (_sffi_env_get("SIMPLE_LEX_PHASE_PROFILE") ?? "") == "1": 1 else: 0
+    _fab_lex_prof_cached == 1
 @unsafe(reason: "raw transient-array scope begin ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
 @unsafe(reason: "raw transient-array scope pause ABI", capabilities: [ffi])
@@ -180,6 +192,67 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
             start = i + 1
         i = i + 1
     0
+
+# Construct a field behind a call boundary from scalar flat-AST identities.
+# The native bridge inserts a pool safepoint at the caller's field-loop
+# backedge. Keeping Type, Expr, or Span aggregates in that caller makes the
+# following iteration lower them through conditional aggregate joins. Early
+# returns keep every aggregate branch local to this helper; the caller retains
+# only scalar ids and immediately pushes the completed ParserField.
+fn flat_parser_field_from_nodes(
+    name: text,
+    has_type_node: bool,
+    type_node: i64,
+    default_node: i64,
+    raw_bits: i64
+) -> ParserField:
+    val has_default = default_node >= 0
+    val has_bits = raw_bits > 0
+    var bits: i64 = 0
+    if has_bits:
+        bits = raw_bits
+
+    if has_type_node:
+        if has_default:
+            val default_expr = convert_flat_expr(default_node)
+            val declared_type = convert_flat_type(type_node)
+            return ParserField(
+                name: name, type_: declared_type,
+                has_default: true, default: default_expr,
+                visibility: Visibility.Private, is_public: false,
+                is_volatile: false, has_bits: has_bits, bits: bits,
+                has_fixed_address: false, fixed_address: 0,
+                span: make_span())
+        val declared_type = convert_flat_type(type_node)
+        return ParserField(
+            name: name, type_: declared_type,
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: make_span()),
+            visibility: Visibility.Private, is_public: false,
+            is_volatile: false, has_bits: has_bits, bits: bits,
+            has_fixed_address: false, fixed_address: 0,
+            span: make_span())
+
+    if has_default:
+        val default_expr = convert_flat_expr(default_node)
+        return ParserField(
+            name: name,
+            type_: Type(kind: TypeKind.Infer, span: make_span()),
+            has_default: true, default: default_expr,
+            visibility: Visibility.Private, is_public: false,
+            is_volatile: false, has_bits: has_bits, bits: bits,
+            has_fixed_address: false, fixed_address: 0,
+            span: make_span())
+
+    return ParserField(
+        name: name,
+        type_: Type(kind: TypeKind.Infer, span: make_span()),
+        has_default: false,
+        default: Expr(kind: ExprKind.NilLit, span: make_span()),
+        visibility: Visibility.Private, is_public: false,
+        is_volatile: false, has_bits: has_bits, bits: bits,
+        has_fixed_address: false, fixed_address: 0,
+        span: make_span())
 
 fn flat_ast_to_module(path: text) -> ParserModule:
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
@@ -369,9 +442,6 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # used for function params/returns; falls back to Infer
                     # (unchanged behavior) when a field has no recorded type
                     # node.
-                    var ft = Type(kind: TypeKind.Infer, span: span)
-                    if fi < f_types.len():
-                        ft = convert_flat_type(f_types[fi])
                     # Field default: the flat AST records a default expr id per
                     # field (-1 = none; ast_types.spl `field_defaults`). This
                     # was `val fd = nil` — hardcoded ABSENT — so `has_default`
@@ -381,16 +451,9 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     var fd_id: i64 = -1
                     if fi < f_defaults.len():
                         fd_id = f_defaults[fi]
-                    val field_has_default = fd_id >= 0
                     var fb: i64 = -1
                     if fi < f_bits.len():
                         fb = f_bits[fi]
-                    var field_default = Expr(kind: ExprKind.NilLit, span: span)
-                    if field_has_default:
-                        field_default = convert_flat_expr(fd_id)
-                    var field_bits: i64 = 0
-                    if fb > 0:
-                        field_bits = fb
                     # NAMED construction (NOT positional): on stage4 the
                     # positional ParserField(...) form misaligns the 12-field desugared
                     # ParserField struct, so `type_` receives a non-Type value ->
@@ -399,20 +462,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     # (bug doc iteration 20 #86; gdb: lower_type_list <- lower_type
                     # <- lower_field <- lower_struct). Explicit field names pin
                     # every slot.
-                    fields.push(ParserField(
-                        name: f_names[fi],
-                        type_: ft,
-                        has_default: field_has_default,
-                        default: field_default,
-                        visibility: Visibility.Private,
-                        is_public: false,
-                        is_volatile: false,
-                        has_bits: fb > 0,
-                        bits: field_bits,
-                        has_fixed_address: false,
-                        fixed_address: 0,
-                        span: span
-                    ))
+                    var field_type_node: i64 = -1
+                    if fi < f_types.len():
+                        field_type_node = f_types[fi]
+                    fields.push(flat_parser_field_from_nodes(
+                        f_names[fi], fi < f_types.len(), field_type_node,
+                        fd_id, fb))
                     fi = fi + 1
                 # decl_get_type_params returns the struct/class's own `<T, U,
                 # ...>` names (threaded through by parse_struct_decl via
@@ -619,8 +674,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     name: i_tp_names[i_tpi],
                     bounds: [],
                     has_default: false,
-                    default: Type(kind: TypeKind.Infer, span: span),
-                    span: span
+                    default: Type(kind: TypeKind.Infer, span: make_span()),
+                    span: make_span()
                 ))
                 i_tpi = i_tpi + 1
             # #157: restore the trait link that parse_impl_decl records via
@@ -629,19 +684,26 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # un-overridden trait default methods for the concrete type.
             val impl_trait_name = decl_get_impl_trait(idx)
             val impl_has_trait = impl_trait_name != ""
+            # `span` was allocated before the declaration walk. Parsing the
+            # impl methods (and even earlier declarations) crosses pool
+            # safepoints, so copying that six-word aggregate here dereferenced
+            # reclaimed storage in the admitted Stage2 compiler (GPF at
+            # flat_ast_to_module+0x40b4 / 0x4d6264). Rebuild the empty span
+            # after those safepoints, immediately before the impl aggregates.
+            val impl_span = make_span()
             val impl_trait_type = if impl_has_trait:
-                Type(kind: TypeKind.Named(impl_trait_name, []), span: span)
+                Type(kind: TypeKind.Named(impl_trait_name, []), span: impl_span)
             else:
-                Type(kind: TypeKind.Infer, span: span)
+                Type(kind: TypeKind.Infer, span: impl_span)
             impls.push(Impl(
-                type_: Type(kind: TypeKind.Named(target_name, []), span: span),
+                type_: Type(kind: TypeKind.Named(target_name, []), span: impl_span),
                 has_trait_: impl_has_trait,
                 trait_: impl_trait_type,
                 type_params: i_type_params,
                 where_clause: [],
                 methods: methods,
                 assoc_types: [],
-                span: span
+                span: impl_span
             ))
         elif tag_text == "4" or tag_text == "5":
             val c_name = decl_get_name(idx)
@@ -1299,6 +1361,11 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    if fab_lex_prof_enabled():
+        val _lx_t0 = _sffi_time_now_unix_micros()
+        val _lx_tokens = lex_tokenize_all(source)
+        val _lx_t1 = _sffi_time_now_unix_micros()
+        print("LEXPHASE\ttokenize_all\t{_lx_t1 - _lx_t0}\ttokens\t{_lx_tokens}\tchars\t{source.len()}\tpath\t{path}")
     reset_all_pools()
     parser_init_with_path(source, path)
     val _rt_zero = if flat_roundtrip_enabled(): flat_pools_dump_all() else: ""

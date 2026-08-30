@@ -47,9 +47,11 @@ All provider traffic is supplied by the offline Claude fixture.
 - Check captured output and status
    - Expected: result.exit_code equals `0`
 
+The checker runs a deterministic provider failure and unknown-option rejection.
+It requires their expected nonzero exits while the enclosing evidence checker
+returns zero, and it rejects a retained fixture secret.
 
-<details>
-<summary>Executable SSpec</summary>
+## Execution Boundary
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

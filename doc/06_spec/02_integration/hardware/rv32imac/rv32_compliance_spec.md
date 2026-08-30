@@ -2,6 +2,30 @@
 
 > Harness for running riscv-arch-test compliance suite. Compiles test programs, loads into simulation ROM, and compares signatures.
 
+<!-- sdn-diagram:id=rv32_compliance_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=rv32_compliance_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+rv32_compliance_spec -> std
+rv32_compliance_spec -> hardware
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=rv32_compliance_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -109,10 +133,15 @@ expect(alu_execute(AluOp.Xor, 0xFFFF, 0xF0F0)).to_equal(0x0F0F)
    - Expected: alu_execute(AluOp.Srl, 1024, 10) equals `1`
 
 
+- Verify: SLT/SLTU: comparison operations
+   - Expected: alu_execute(AluOp.Slt, 0xFFFFFFFF, 0) equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: alu_execute(AluOp.Sltu, 0xFFFFFFFF, 0) equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -141,9 +170,9 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("SLT/SLTU: comparison operations")
 # Signed: -1 < 0
-expect(alu_execute(AluOp.Slt, 0xFFFFFFFF, 0)).to_equal(1)
+expect(alu_execute(AluOp.Slt, 0xFFFFFFFF, 0)).to_equal(1)  # oracle: pinned constant asserted by this scenario
 # Unsigned: 0xFFFFFFFF > 0
-expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 0)).to_equal(0)
+expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 0)).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -156,15 +185,17 @@ expect(alu_execute(AluOp.Sltu, 0xFFFFFFFF, 0)).to_equal(0)
    - Expected: muldiv_execute(MulDivOp.Mul, 7, 6) equals `42`
 
 
+- Verify: DIV: division by zero returns all ones
+   - Expected: muldiv_execute(MulDivOp.Div, 42, zero) and 0xFFFFFFFF equals `0xFFFFFFFF`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("MUL: rd = (rs1 * rs2)[31:0]")
 expect(muldiv_execute(MulDivOp.Mul, 7, 6)).to_equal(42)
 ```
 
@@ -172,19 +203,13 @@ expect(muldiv_execute(MulDivOp.Mul, 7, 6)).to_equal(42)
 
 #### MUL: handles overflow
 
-- MUL: handles overflow
-   - Expected: muldiv_execute(MulDivOp.Mul, 0x80000000, 2) and 0xFFFFFFFF equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("MUL: handles overflow")
 expect(muldiv_execute(MulDivOp.Mul, 0x80000000, 2) and 0xFFFFFFFF).to_equal(0)
 ```
 
@@ -192,9 +217,19 @@ expect(muldiv_execute(MulDivOp.Mul, 0x80000000, 2) and 0xFFFFFFFF).to_equal(0)
 
 #### DIV: rd = rs1 / rs2 (signed)
 
-- DIV: rd = rs1 / rs2 (signed)
-   - Expected: muldiv_execute(MulDivOp.Div, 20, 3) equals `6`
+<details>
+<summary>Executable SSpec</summary>
 
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(muldiv_execute(MulDivOp.Div, 20, 3)).to_equal(6)
+```
+
+</details>
+
+#### DIV: division by zero returns all ones
 
 <details>
 <summary>Executable SSpec</summary>

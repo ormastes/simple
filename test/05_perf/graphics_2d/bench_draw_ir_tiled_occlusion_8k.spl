@@ -1,0 +1,140 @@
+# 8K production tiled-DrawIR opaque-barrier benchmark.
+# Compares the same executor, scene, backend, submission and full readback with
+# only the conservative barrier proof enabled/disabled.
+
+use std.gpu.engine2d.engine.Engine2D
+use common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+use std.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_render_tiled,
+    engine2d_draw_ir_render_tiled_unculled
+}
+
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+val W: i32 = 7680
+val H: i32 = 4320
+val TILE: i32 = 256
+val COLS: i32 = 30
+val ROWS: i32 = 17
+val TILES: i32 = 510
+val SAMPLES: i64 = 1
+
+struct LaneEvidence:
+    p50_ns: i64
+    p95_ns: i64
+    checksum: i64
+    ops_rendered: i32
+    ops_occluded: i32
+
+fn sort_samples(samples: [i64]):
+    var i: i64 = 1
+    while i < samples.len():
+        val key = samples[i]
+        var j = i - 1
+        while j >= 0 and samples[j] > key:
+            samples[j + 1] = samples[j]
+            j = j - 1
+        samples[j + 1] = key
+        i = i + 1
+
+fn checksum(pixels: [u32]) -> i64:
+    var value: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < pixels.len():
+        value = (value ^ pixels[i].to_i64()) * 1099511628211
+        i = i + 1
+    value & 0x7FFFFFFFFFFFFFFF
+
+fn rss_kb() -> i64:
+    val status = rt_file_read_text("/proc/self/status")
+    val start = status.find("VmRSS:")
+    if start < 0:
+        return 0
+    var i = start + 6
+    while i < status.len() and (status[i] == ' ' or status[i] == '\t'):
+        i = i + 1
+    var value: i64 = 0
+    while i < status.len() and status[i] >= '0' and status[i] <= '9':
+        value = value * 10 + (status[i] as i64 - '0' as i64)
+        i = i + 1
+    value
+
+fn tile_geometry() -> ([i32], [i32], [i32], [i32], [bool], [i32], [i32]):
+    var tx: [i32] = [0; TILES]
+    var ty: [i32] = [0; TILES]
+    var tw: [i32] = [0; TILES]
+    var th: [i32] = [0; TILES]
+    var live: [bool] = [true; TILES]
+    var starts: [i32] = [0; TILES + 1]
+    var items: [i32] = [0; TILES * 2]
+    var t: i32 = 0
+    while t < TILES:
+        val col = t % COLS
+        val row = t / COLS
+        tx[t] = col * TILE
+        ty[t] = row * TILE
+        tw[t] = if tx[t] + TILE > W: W - tx[t] else: TILE
+        th[t] = if ty[t] + TILE > H: H - ty[t] else: TILE
+        starts[t] = t * 2
+        items[t * 2] = 0
+        items[t * 2 + 1] = 1
+        t = t + 1
+    starts[TILES] = TILES * 2
+    (tx, ty, tw, th, live, starts, items)
+
+fn run_lane(optimized: bool, commands: [DrawIrCommand],
+            tx: [i32], ty: [i32], tw: [i32], th: [i32],
+            live: [bool], starts: [i32], items: [i32]) -> LaneEvidence:
+    var engine = Engine2D.create_with_backend(W, H, "software")
+    var samples: [i64] = [0; SAMPLES]
+    var final_checksum: i64 = 0
+    var rendered: i32 = 0
+    var occluded: i32 = 0
+    var frame: i64 = 0
+    while frame < SAMPLES:
+        val started = rt_time_now_nanos()
+        var outcome = if optimized:
+            engine2d_draw_ir_render_tiled(
+                engine, commands, tx, ty, tw, th, live, starts, items)
+        else:
+            engine2d_draw_ir_render_tiled_unculled(
+                engine, commands, tx, ty, tw, th, live, starts, items)
+        samples[frame] = rt_time_now_nanos() - started
+        engine = outcome.engine
+        rendered = outcome.ops_rendered
+        occluded = outcome.ops_occluded
+        if frame == SAMPLES - 1:
+            final_checksum = checksum(outcome.readback.pixels)
+        frame = frame + 1
+    sort_samples(samples)
+    engine.shutdown()
+    LaneEvidence(p50_ns: samples[SAMPLES / 2], p95_ns: samples[SAMPLES - 1],
+                 checksum: final_checksum, ops_rendered: rendered,
+                 ops_occluded: occluded)
+
+fn main():
+    val commands = [
+        draw_ir_rect("under", 0, 0, W, H, 0xFFDC2626u32),
+        draw_ir_rect("barrier", 0, 0, W, H, 0xFF2563EBu32)
+    ]
+    val (tx, ty, tw, th, live, starts, items) = tile_geometry()
+    val optimized = run_lane(true, commands, tx, ty, tw, th, live, starts, items)
+    val baseline = run_lane(false, commands, tx, ty, tw, th, live, starts, items)
+    val parity = optimized.checksum == baseline.checksum
+    val target = optimized.p95_ns <= 12500000
+    print("DRAW_IR_TILED_8K status=" + (if target and parity: "pass" else: "fail") +
+          " viewport=7680x4320 backend=software frames=1 p95_kind=single-sample tiles=510" +
+          " optimized_p50_ns=" + optimized.p50_ns.to_string() +
+          " optimized_p95_ns=" + optimized.p95_ns.to_string() +
+          " baseline_p50_ns=" + baseline.p50_ns.to_string() +
+          " baseline_p95_ns=" + baseline.p95_ns.to_string() +
+          " target_p95_ns=12500000 optimized_ops=" + optimized.ops_rendered.to_string() +
+          " occluded_ops=" + optimized.ops_occluded.to_string() +
+          " baseline_ops=" + baseline.ops_rendered.to_string() +
+          " checksum=" + optimized.checksum.to_string() +
+          " checksum_parity=" + parity.to_string() +
+          " rss_kb=" + rss_kb().to_string() +
+          " fallback=false readback_mode=full_host_mirror")
+
+main()

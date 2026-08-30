@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+bootstrap=scripts/bootstrap/bootstrap-from-scratch.sh
+workflow=.github/workflows/rust-bootstrap-multiplatform.yml
+compiler_manifest=src/compiler_rust/compiler/Cargo.toml
+
+sh -n "$bootstrap" || fail "bootstrap shell syntax"
+help=$(sh "$bootstrap" --help)
+printf '%s\n' "$help" | grep -Fq 'default: cranelift' \
+    || fail "Cranelift is not the documented bootstrap default"
+grep -qx 'backend="cranelift"' "$bootstrap" \
+    || fail "Cranelift is not the implemented bootstrap default"
+
+set +e
+reject_output=$(sh "$bootstrap" --backend=llvm --no-mcp 2>&1)
+reject_rc=$?
+set -e
+[ "$reject_rc" -ne 0 ] || fail "legacy Rust LLVM backend was accepted"
+printf '%s\n' "$reject_output" |
+    grep -Fq "Rust bootstrap backend 'llvm' is unavailable" \
+    || fail "legacy Rust LLVM rejection is not actionable"
+
+if grep -Eq 'backend:[[:space:]]+llvm|--features[[:space:]]+([^[:space:]]*,)?llvm|LLVM_SYS_180_PREFIX|llvm@18|clang-18|lld-18|llvm-18-dev|libpolly-18' "$workflow"; then
+    fail "normal Rust bootstrap CI still provisions or enables LLVM 18"
+fi
+grep -Fq 'backend: cranelift' "$workflow" \
+    || fail "Rust bootstrap CI has no Cranelift producer"
+grep -Fq 'inkwell = { version = "0.5", optional = true, features = ["llvm18-0"] }' "$compiler_manifest" \
+    || fail "legacy binding changed without a reviewed upstream migration"
+grep -Fq 'Legacy source compatibility only; excluded from the normal bootstrap graph.' "$compiler_manifest" \
+    || fail "legacy LLVM source boundary is undocumented"
+
+printf 'rust_bootstrap_llvm_isolation=true\n'

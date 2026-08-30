@@ -1,8 +1,5 @@
 # macOS Vulkan live backend is unavailable before rendering
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 ## Status
 
 Open. The current trusted self-hosted Vulkan harness rebuilds, but no current

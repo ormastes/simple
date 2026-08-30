@@ -1,7 +1,6 @@
 # JIT: `text.substring(n).to_int()` chained returns the raw text pointer, silently
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** OPEN
 **Found:** 2026-08-04
 
 ## Symptom

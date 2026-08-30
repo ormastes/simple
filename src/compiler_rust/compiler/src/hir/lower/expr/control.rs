@@ -1353,7 +1353,7 @@ impl Lowerer {
     /// Look up the field types for an enum variant.
     /// Returns None if the enum or variant is not found.
     /// If expected_ty is provided and is an enum type, use it directly.
-    fn get_enum_variant_field_types_with_hint(
+    pub(crate) fn get_enum_variant_field_types_with_hint(
         &self,
         enum_name: &str,
         variant_name: &str,
@@ -1368,13 +1368,35 @@ impl Lowerer {
             }
         }
 
-        // First, try to use the expected type if it's an enum
+        // First, try to use the expected type if it's an enum.
+        //
+        // ROOT FIX (stage2 native enum-dispatch wall, 2026-08-28): unwrap
+        // `Pointer` (the `T?` optional representation) for EVERY variant, not
+        // just `Some`. An `if val pl = optional_enum:` binding carries the
+        // POINTER type, so `match pl: case Variant(x)` used to skip this
+        // branch and fall into the wildcard search below, which iterates a
+        // HashMap and returns the FIRST enum owning a same-named variant —
+        // per-process-random. In the self-hosted compiler closure this typed
+        // `patterns` (from `case Tuple(patterns)` over `HirPatternPayload?`)
+        // as ANY, so `pat.kind` was index-guessed against an unrelated struct
+        // (HirSymbol, `kind` at slot 2) and the compiled stage2 read garbage —
+        // the `nested match pattern kind not supported` wall and the
+        // add-two-dead-externs heisenbug. Reproduce: probe with an optional
+        // enum payload plus a decoy enum sharing the variant name flips
+        // pass/fail across identical rebuilds before this fix.
         if expected_ty != TypeId::ANY {
+            let mut base_ty = expected_ty;
+            for _ in 0..4 {
+                match self.module.types.get(base_ty) {
+                    Some(HirType::Pointer { inner, .. }) => base_ty = *inner,
+                    _ => break,
+                }
+            }
             if let Some(HirType::Enum {
                 name: enum_type_name,
                 variants,
                 ..
-            }) = self.module.types.get(expected_ty)
+            }) = self.module.types.get(base_ty)
             {
                 for (name, fields) in variants {
                     if name == variant_name {
@@ -1384,19 +1406,47 @@ impl Lowerer {
             }
         }
 
-        // Handle wildcard enum name "_" - search all enums for the variant
+        // Handle wildcard enum name "_" - search all enums for the variant.
+        //
+        // HARDENING (same 2026-08-28 fix): the registry is a HashMap, so
+        // "first match" was per-process-random whenever more than one enum
+        // owns the variant name (`Tuple` is owned by HirPatternKind,
+        // HirPatternPayload, PatternKind, ...). Collect every candidate:
+        // when they all agree on the payload field types the answer is safe;
+        // when they disagree, pick deterministically (smallest owner name) so
+        // an eventual wrong pick is at least stable and diagnosable instead
+        // of flipping with unrelated layout changes.
         if enum_name == "_" {
-            // Search all types for an enum with this variant
+            let mut candidates: Vec<(String, Option<Vec<TypeId>>)> = Vec::new();
             for (_, hir_type) in self.module.types.iter() {
-                if let HirType::Enum { variants, .. } = hir_type {
+                if let HirType::Enum { name: owner, variants, .. } = hir_type {
                     for (name, fields) in variants {
                         if name == variant_name {
-                            return fields.clone();
+                            candidates.push((owner.clone(), fields.clone()));
                         }
                     }
                 }
             }
-            return None;
+            if candidates.is_empty() {
+                return None;
+            }
+            let all_agree = candidates.windows(2).all(|w| w[0].1 == w[1].1);
+            if all_agree {
+                return candidates.into_iter().next().and_then(|(_, f)| f);
+            }
+            // GENUINE AMBIGUITY: two or more enums own this variant name with
+            // DIFFERENT payload shapes and no expected type disambiguated them.
+            // The pick below is deterministic but it is still a GUESS, and a
+            // wrong guess here is exactly the defect class this fix repairs.
+            // Surface it (gated, default-off) so a recurrence is diagnosable
+            // rather than silent; the deterministic order keeps it stable.
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            if crate::hir::lower::trace_field_get_enabled() {
+                let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                let owners: Vec<&str> = candidates.iter().map(|(o, _)| o.as_str()).collect();
+                eprintln!("[ENUM-AMBIG] variant `{variant_name}` owned by {owners:?} with DIFFERING payloads; guessing `{}` in {fpath}", owners[0]);
+            }
+            return candidates.into_iter().next().and_then(|(_, f)| f);
         }
 
         // Look up the enum type by name
@@ -1593,6 +1643,10 @@ impl Lowerer {
                             .as_ref()
                             .and_then(|types| types.get(i).copied())
                             .unwrap_or(TypeId::ANY);
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                            eprintln!("[PB] {enum_name}.{variant_name} slot{i} expected_ty={:?} field_ty={:?} ({:?}) in {fpath}", expected_ty, field_ty, self.module.types.get(field_ty), );
+                        }
                         self.collect_pattern_bindings(p, field_ty, bindings);
                     }
                 }

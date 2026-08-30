@@ -3,8 +3,7 @@
 - **Filed:** 2026-07-27
 - **Lane:** NILQ
 - **Companion:** `dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27.md`
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** Production hazards repaired; test-suite hazard filed, not repaired
 
 ## Method
 

@@ -10,6 +10,13 @@
 # Returns -2 if the name is not a recognized builtin.
 
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+use compiler.core.interpreter.value.*
+use compiler.core.interpreter.module_loader_core.*
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 
 # ===== Builtin Functions =====
 # Returns >= -1 if handled (value_id or -1 for error), returns -2 if not a builtin
@@ -55,8 +62,40 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
     # First-character dispatch to skip irrelevant builtins early
     val first = name[0]
     # Fast reject: most user functions don't start with these chars
-    if first != "p" and first != "_" and first != "i" and first != "t" and first != "l" and first != "@" and first != "s" and first != "a":
+    if first != "p" and first != "_" and first != "i" and first != "t" and first != "l" and first != "@" and first != "s" and first != "a" and first != "r":
         return -2
+
+    if name == "rt_env_get":
+        if arg_eids.len() == 0:
+            return val_make_text("")
+        val key_value = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+        return val_make_text(rt_env_get(val_to_text(key_value)) ?? "")
+
+    if name == "rt_file_exists":
+        if arg_eids.len() == 0:
+            return val_make_bool(false)
+        val path_value = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+        return val_make_bool(rt_file_exists(val_to_text(path_value)))
+
+    if name == "rt_file_delete":
+        if arg_eids.len() == 0:
+            return val_make_bool(false)
+        val delete_path_value = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+        return val_make_bool(rt_file_delete(val_to_text(delete_path_value)))
+
+    if name == "rt_file_write_text_at":
+        if arg_eids.len() < 3:
+            return val_make_int(-1)
+        val write_path = eval_expr(arg_eids[0])
+        val write_offset = eval_expr(arg_eids[1])
+        val write_data = eval_expr(arg_eids[2])
+        if eval_had_error: return -1
+        return val_make_int(rt_file_write_text_at(
+            val_to_text(write_path), val_get_int(write_offset), val_to_text(write_data)
+        ))
 
     # sizeof("type_name") / size_of("type_name") — type size introspection
     if name == "sizeof" or name == "size_of":
@@ -712,9 +751,11 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                 val mw_prefix = val_to_text(mw_prefix_val) + "."
                 var mw_result: [i64] = []
                 var mw_i: i64 = 0
-                for mw_path in loaded_module_paths:
+                val mw_paths = loaded_module_paths_snapshot()
+                val mw_files = loaded_module_file_paths_snapshot()
+                for mw_path in mw_paths:
                     if mw_path.starts_with(mw_prefix):
-                        val mw_fp = loaded_module_file_paths[mw_i]
+                        val mw_fp = mw_files[mw_i]
                         var mw_f_fields: [text] = ["path", "module_name", "exists"]
                         var mw_f_vals: [i64] = []
                         mw_f_vals.push(val_make_text(mw_fp))

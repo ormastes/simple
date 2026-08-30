@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+bootstrap_build_jobs_resolve "" default 32 16 || fail "safe default rejected"
+[ "$bootstrap_build_jobs_desired" -eq 1 ] || fail "safe default was not one"
+[ "$bootstrap_build_jobs_effective" -eq 1 ] || fail "safe default effective count changed"
+
+bootstrap_build_jobs_resolve 16 cli 32 16 || fail "16-core request rejected"
+[ "$bootstrap_build_jobs_effective" -eq 16 ] || fail "16-core request not effective"
+[ "$bootstrap_build_jobs_source" = cli ] || fail "CLI authority missing"
+
+bootstrap_build_jobs_resolve full cli 64 16 || fail "bounded symbolic request rejected"
+[ "$bootstrap_build_jobs_desired" -eq 64 ] || fail "full request lost host desire"
+[ "$bootstrap_build_jobs_effective" -eq 16 ] || fail "full request did not obey ceiling"
+
+bootstrap_build_jobs_resolve 16 env 8 16 || fail "host clamp request rejected"
+[ "$bootstrap_build_jobs_effective" -eq 8 ] || fail "host CPU clamp missing"
+
+bootstrap_build_jobs_resolve 4 env 32 16 || fail "environment request rejected"
+[ "$bootstrap_build_jobs_effective" -eq 4 ] || fail "environment authority missing"
+bootstrap_build_jobs_resolve 16 cli 32 16 || fail "CLI override rejected"
+[ "$bootstrap_build_jobs_effective" -eq 16 ] || fail "CLI precedence missing"
+
+if bootstrap_build_jobs_resolve 0 cli 32 16 >/dev/null 2>&1; then fail "zero admitted"; fi
+if bootstrap_build_jobs_resolve 17 cli 32 16 >/dev/null 2>&1; then fail "ceiling bypassed"; fi
+if bootstrap_build_jobs_resolve 1 cli 32 65 >/dev/null 2>&1; then fail "hard max bypassed"; fi
+if bootstrap_build_jobs_resolve "" cli 32 16 >/dev/null 2>&1; then fail "empty CLI value admitted"; fi
+if bootstrap_build_jobs_resolve 999999999999999999999999999999 cli 32 16 >/dev/null 2>&1; then fail "long request reached arithmetic"; fi
+if bootstrap_build_jobs_resolve 1 cli 999999999999999999999999999999 16 >/dev/null 2>&1; then fail "long host count reached arithmetic"; fi
+if bootstrap_build_jobs_resolve 1 cli 32 999999999999999999999999999999 >/dev/null 2>&1; then fail "long ceiling reached arithmetic"; fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+bootstrap_build_jobs_resolve 16 cli 32 16
+bootstrap_build_jobs_write_receipt "$tmp/jobs.env" contract-test
+bootstrap_build_jobs_verify_receipt "$tmp/jobs.env" 16 || fail "receipt did not verify"
+grep -Fxq schema=simple-bootstrap-effective-build-jobs-v1 "$tmp/jobs.env" || fail "schema missing"
+grep -Fxq effective=16 "$tmp/jobs.env" || fail "effective count missing"
+grep -Fxq cache_writer_policy=single-native-build-owner "$tmp/jobs.env" || fail "owner policy missing"
+grep -Fxq parallel_cache_writers=false "$tmp/jobs.env" || fail "parallel writer policy missing"
+grep -Fxq memory_budget_policy=external-not-derived-from-jobs "$tmp/jobs.env" || fail "memory policy missing"
+receipt_before=$(sha256sum "$tmp/jobs.env" | awk '{print $1}')
+if bootstrap_build_jobs_write_receipt "$tmp/jobs.env" contract-test >/dev/null 2>&1; then
+  fail "receipt collision overwrote immutable evidence"
+fi
+receipt_after=$(sha256sum "$tmp/jobs.env" | awk '{print $1}')
+[ "$receipt_before" = "$receipt_after" ] || fail "receipt changed after collision"
+
+ln -s jobs.env "$tmp/jobs-link.env"
+if bootstrap_build_jobs_write_receipt "$tmp/jobs-link.env" contract-test >/dev/null 2>&1; then
+  fail "symlink receipt collision admitted"
+fi
+
+echo "PASS: build jobs are safe-by-default, bounded, authoritative, host-clamped, and receipted"

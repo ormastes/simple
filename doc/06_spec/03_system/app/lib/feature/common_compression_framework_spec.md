@@ -2,9 +2,28 @@
 
 > This planning spec replaces the subset contract with the full pure-Simple target.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+<!-- sdn-diagram:id=common_compression_framework_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=common_compression_framework_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+common_compression_framework_spec -> deterministic fixtures, and assert typed success and failure results without subset-only caveats
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=common_compression_framework_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,7 +39,7 @@ This planning spec replaces the subset contract with the full pure-Simple target
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/lib/feature/common_compression_framework_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 This planning spec replaces the subset contract with the full pure-Simple target.
@@ -328,81 +347,3 @@ expect(decoded.is_err()).to_equal(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-COMPRESSION-001`
-- `REQ-001`
-- `REQ-008A:`
-- `REQ-001/REQ-002/REQ-006/REQ-007:`
-- `REQ-003/REQ-004:`
-- `REQ-006A/REQ-008A/REQ-012:`
-- `REQ-006/REQ-006A/REQ-008/REQ-008A:`
-- `REQ-009:`
-- `REQ-009A:`
-- `REQ-009B:`
-- `REQ-009C:`
-- `REQ-009D:`
-- `REQ-010:`
-- `REQ-010A:`
-- `REQ-010B:`
-- `REQ-010C:`
-- `REQ-010D:`
-- `REQ-011:`
-- `REQ-011A:`
-- `REQ-011B:`
-- `REQ-011C:`
-- `REQ-011D:`
-- `REQ-013:`
-- `REQ-013A:`
-- `REQ-013B:`
-- `REQ-014:`
-- `REQ-014A:`
-- `REQ-014B:`
-- `REQ-005/REQ-009/REQ-010/REQ-011/REQ-012`
-- `REQ-COMPRESSION-003`
-- `REQ-COMPRESSION-005`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `43bd438c5be4591145a25aa283aa7475f6f1ef58da5327d7d6d8990e97bef688`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `43bd438c5be4591145a25aa283aa7475f6f1ef58da5327d7d6d8990e97bef688`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `43bd438c5be4591145a25aa283aa7475f6f1ef58da5327d7d6d8990e97bef688`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/app/lib/feature/common_compression_framework_spec.spl
-mirror: doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/lib/feature/common_compression_framework_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/lib/feature/common_compression_framework_spec.spl:171:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips zstd payloads through the shared facade with auto-detect' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/lib/feature/common_compression_framework_spec.spl:180:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips lz4 payloads with an explicit codec hint' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/lib/feature/common_compression_framework_spec.spl:189:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips gzip payloads through the shared facade' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

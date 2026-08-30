@@ -94,21 +94,46 @@ bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
 - **`bin/release/simple` is fully self-sufficient** — in-process compilation, no subprocess calls
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
-## Incremental: Rebuild Only Pure-Simple
-Normal bootstrap is pure-Simple-only. It reuses the existing Rust seed/runtime
-and does not run cargo, even when Rust source hashes changed:
+## Incremental: rebuild ONLY pure-Simple
+When you changed **only `.spl` sources** (src/compiler, src/lib, src/app) and the
+Rust seed is unchanged, skip the cargo/Rust rebuild and re-run only the
+pure-Simple stages:
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple
 ```
+
+Bootstrap scheduling is selected separately with
+`--strategy=adhoc|normal|full`; it does not replace `--mode`:
+
+- `normal` is the default and reuses incremental caches. Once a compiler phase
+  is admitted, its tool builds and compiler/tool tests use immutable compiler
+  bytes plus isolated caches while the next compiler phase is allowed to run.
+  Memory admission may queue side work; it must never create a second writer to
+  a canonical cache.
+- `adhoc` runs only explicitly selected diagnostic work and is non-admitting by
+  default.
+- `full` promotes hash-identical normal receipts, runs the remaining complete
+  build/test DAG, terminalizes task crashes/timeouts, continues independent
+  work, marks descendants `BLOCKED_UPSTREAM`, and reports only after every task
+  is terminal. It does not imply deployment.
+
+Canonical hash mismatches remain fatal for admission, publication, release, and
+deployment. Warning-only mismatch handling is permitted solely for explicitly
+labeled temporary diagnostic rows.
+
+The ordinary `bootstrap-from-scratch.sh` entry automatically uses this
+supervisor. Explicit Stage-2 stop, Stage-3 recovery, receipt validation,
+target-VM, and diagnostic-sweep commands remain direct specialized lanes.
 - Reuses the existing `src/compiler_rust/target/bootstrap/simple` seed + runtime
-  lib; **never runs cargo** unless `--full-bootstrap` is passed. Errors out if
-  no seed exists yet.
+  lib; **never runs cargo** (even if it detects stale Rust sources — it prints a
+  note and proceeds). Errors out if no seed exists yet (build one with a full
+  bootstrap first).
 - "If the Rust seed can build the changed pure-Simple" is enforced by Stage 2: the
   seed recompiles the changed `.spl`. If Stage 2 fails, the new pure-Simple needs
-  a Rust feature the seed lacks — rerun with `--full-bootstrap`.
+  a Rust feature the seed lacks — drop `--pure-simple` and run a full bootstrap.
 - Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
 - Pure-Simple build modes:
-  - `dynload` (default): reuse `build/bootstrap/native_cache` unless compiler/AOP/loader
+  - `dynload` (default): reuse `.simple/native_cache` unless compiler/AOP/loader
     inputs changed; native-build emits native plus SMF cache where supported.
   - `one-binary`: clear native cache and build the monolithic native executable.
 - Dependency tracing intentionally over-invalidates around AOP/MDSOC weaving,
@@ -130,35 +155,10 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   `run` rejection, and strict native build/execute of `p2_add.spl`.
 - Multiplatform bootstrap CI exercises both LLVM and Cranelift through that
   wrapper and uploads only the resulting pure-Simple Stage 2/Stage 3 binaries,
-  never the Rust seed as a platform artifact. Note (2026-07-18): the LLVM
-  stage-2 link currently fails with 62 undefined symbols (Windows CI runs that
-  step continue-on-error); Cranelift is the working stage-2/3 path. See
-  doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md.
+  never the Rust seed as a platform artifact.
 - The Linux Stage 3 artifact owns the strict x86_64/AArch64/RISC-V LLVM
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
-
-## Beta release-line convergence
-
-A long-running beta bootstrap lane periodically fetches and inspects `main` for
-new reviewed bug fixes: before each candidate attempt, after repairing a
-bootstrap failure, and before release admission. Discovery is read-only and produces a candidate list;
-it never cherry-picks automatically and never pushes a protected ref. Each
-selected fix must carry exact source SHA, review receipt, target-line base SHA,
-post-application SHA, and renewed focused evidence before the integration
-authority may update `release/X.Y`.
-
-`main` always remains the development trunk; the protected ref must not be
-rebased or repointed onto a release branch, made to track it, or absorb the
-whole release line. Normally a fix lands on `main` first and is then
-backported. If an emergency fix is developed on `release/X.Y` first, candidate
-qualification remains blocked until an equivalent reviewed forward-port is
-integrated into `main`. Bug fixes have no waiver. Genuinely release-specific
-compatibility work uses a distinct non-fix classification with reason, owner,
-and expiry. Bootstrap receipts record the last scanned `main` SHA and the
-backport/forward-port change identities so periodic scans are idempotent.
-Shared bug fixes may not remain release-only. The bootstrap worker prepares
-changes but never pushes `main` itself; protected integration authority does.
 
 ## Verification tiering — match the gate to the change
 
@@ -281,43 +281,24 @@ object cache does not touch (they dominate kernel build wall time).
 
 ## Bootstrap Commands
 ```bash
-# Normal pure-Simple bootstrap:
+# Full bootstrap (recommended):
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
-
-# Full Rust + pure-Simple bootstrap:
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
-
+# WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
+# without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
+# silent no-op, -c exit 1). After --deploy, ALWAYS smoke-test:
+#   setsid timeout 30 bin/simple -c "print(1+1)"   # expect 2
+#   bin/simple lint <any .spl>                      # must not core dump
+# If broken, restore the working seed:
+#   cp src/compiler_rust/target/release/simple bin/release/<triple>/simple.new \
+#     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
-# Manual full-bootstrap seed/runtime rebuild:
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
-
-# Internal stage replay after a full-bootstrap seed exists:
+# Manual stages:
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
 SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple
 ```
-
-### Coordinated strategy supervisor
-
-Ordinary `--strategy=normal|full` runs now enter the compatibility scheduler in
-`scripts/bootstrap/bootstrap-strategy.sh`. The existing stage engine remains the
-only compiler/admission authority. At immutable Stage-2 smoke admission it
-continues immediately into Stage 3 while a reserved-resource task runs the
-broader Stage-2 hello-world native-build qualification. Descendants remain
-quarantined until the parent and engine receipts pass under the same generation
-lease. Late parent failure recursively invalidates Stage 2/3/4/deploy/release
-and preserves artifacts as tainted evidence.
-
-Do not bypass a scheduler failure by copying or deploying its Stage-3/4 output.
-Read `OUTPUT/scheduler/current.env`, then the named generation's
-`failure-manifest.env` and `invalidations/*.env`. Repair and mint a new planner
-receipt/generation. `--strategy=adhoc` is the explicit legacy/recovery route;
-coordinated `--clean-release` and `--mode=one-binary` currently fail closed
-rather than pretending their monolithic cache semantics are isolated.
-
-Full contract and evidence map:
-`doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
 
 ## Redeploy #79 Key Findings (2026-07-11)
 
@@ -343,15 +324,3 @@ does not set it. Ensure the wrapper sets both when invoking native-build in
 hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`).
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.
-
-## Seed-sibling refresh (2026-08-18) — distinct from a self-hosted redeploy
-
-The "do not hand-roll `cargo build --release`" warning above is about faking a
-SELF-HOSTED redeploy. Refreshing the deployed RUST SEED binary with a seed-side
-fix is legitimate and was done twice on 2026-08-18 (brace-escape lexer fix,
-cleanup_old_logs statx fix): `cd src/compiler_rust && CARGO_TARGET_DIR=<warm>
-cargo build --release --bin simple`, verify the fix on the fresh binary, then
-deploy `cp <bin> bin/release/<triple>/simple.new && mv ... simple` (never plain
-cp — Text file busy). Always record binary identity (size/mtime) and rerun a
-spec proving the fix on the DEPLOYED path. This does not change that default
-tooling should ultimately be the pure-Simple self-hosted binary.

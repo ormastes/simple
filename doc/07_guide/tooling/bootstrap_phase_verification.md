@@ -57,10 +57,33 @@ So each registry entry declares a mode:
   receipt) that does not exist outside a real bootstrap. It cannot be executed
   here, so what is verified is that it **exists**, and **parses as POSIX shell**
   (`sh -n`). This is deliberately weaker than running it and is reported
-  separately as `PRESENT`, never counted as executed. It still catches the
+separately as `PRESENT`, never counted as executed. It still catches the
   failure mode that matters most for an umbrella: a phase whose gate was
   deleted, renamed, or left syntactically broken, which would make that phase's
-  verification a silent no-op inside a real bootstrap run.
+verification a silent no-op inside a real bootstrap run.
+
+### Stage 4 tooling matrix scheduling contract
+
+`stage4-tooling-matrix.shs --build-jobs=<effective>` uses the admitted effective
+job count as a bounded case-worker ceiling (normally capped at 16 by
+`bootstrap-build-jobs-policy.shs`). The parent schedules only dependency-ready
+matrix rows. Each worker owns a distinct HOME, TMPDIR, XDG cache/config/data
+root, log, receipt, and result path; the native-build row retains its distinct
+explicit cache. Workers never write the shared summary. The parent alone reaps
+exact worker PIDs/process groups and commits `scheduler/schedule.tsv` and
+`summary.env` in frozen manifest order. It captures and verifies the complete
+frozen source/tool identity immediately before dispatch and again after all
+workers stop; per-task receipt snapshots copy that admitted identity instead of
+launching concurrent repeated tree scans. TERM/INT/HUP cancels and waits for all
+active groups before removing that invocation's scheduler state. Every command
+inside a row remains covered by `--timeout-seconds`; one timeout or failure does
+not stop independent rows, while dependents terminalize fail-closed.
+
+The focused fake-artifact contract is
+`test/02_integration/bootstrap_stage4_tooling_matrix_test.shs`. It checks the
+worker bound, jobs=1 parity, manifest ordering, failure continuation, isolated
+cache/tmp ownership, per-case timeout, receipt collision protection, and signal
+cleanup without building a compiler.
 
 ## Phase → gate map
 
@@ -117,7 +140,7 @@ work and is not done here.
 | **Stage 2 → Stage 3 fixpoint** (byte-identical self-compilation) | **No gate.** The 3-stage self-compilation *verification* that `bin/simple build bootstrap` claims is not asserted by any script in `scripts/check/`. |
 | **Deploy step** (writing `bin/release/<triple>/simple`, symlink flip) | **No gate.** `rollback-bootstrap-deploy.shs` exists to undo a deploy; nothing verifies one. |
 | **Cross-platform lanes** (FreeBSD, Windows, aarch64) | Only `check-freebsd-bootstrap-qemu.shs`, invoked from the bootstrap driver, and it is not in this umbrella because it needs a VM. `bootstrap-windows.sh`/`.cmd` have no gate at all. |
-| **`stage4-tooling-matrix.shs` / `stage4-tools-only.sh`** | No gate. |
+| **`stage4-tooling-matrix.shs` / `stage4-tools-only.sh`** | A focused fake-artifact behavioral contract exists at `test/02_integration/bootstrap_stage4_tooling_matrix_test.shs`, but it is not registered in this umbrella; live admitted-Stage3 execution remains outside this guide's umbrella gate. |
 | **`preserve-phase-binary.shs`** (per-phase binary preservation) | No gate — nothing verifies the preserved binary matches what the phase produced. |
 
 ### Gap 3: gates that exist but are never invoked by any automated path

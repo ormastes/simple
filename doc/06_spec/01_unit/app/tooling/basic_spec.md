@@ -1,6 +1,29 @@
 # Basic Specification
 
-> Tests covering basic module compilation, GC configuration, GC mode selection, file extension extraction, source extension detection, main wrapper detection, code wrapping, Result handling, match on Result, empty list for args, exit codes, string contains check, string interpolation.
+> <details>
+
+<!-- sdn-diagram:id=basic_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=basic_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+basic_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=basic_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,13 @@
 
 #### compiles successfully
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- compiles successfully
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("compiles successfully")
 expect 1 + 1 == 2
 ```
 
@@ -42,18 +56,13 @@ expect 1 + 1 == 2
 
 #### GC enabled by default
 
-- GC enabled by default
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("GC enabled by default")
 val gc_log = false
 val gc_off = false
 expect gc_off == false
@@ -63,18 +72,13 @@ expect gc_off == false
 
 #### GC disabled with gc_off
 
-- GC disabled with gc_off
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("GC disabled with gc_off")
 val gc_off = true
 expect gc_off == true
 ```
@@ -83,18 +87,13 @@ expect gc_off == true
 
 #### GC logging enabled
 
-- GC logging enabled
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("GC logging enabled")
 val gc_log = true
 val gc_off = false
 expect gc_log == true
@@ -106,18 +105,13 @@ expect gc_log == true
 
 #### selects no_gc when gc_off true
 
-- selects no_gc when gc_off true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("selects no_gc when gc_off true")
 val gc_off = true
 val gc_log = false
 val mode = if gc_off: "no_gc" elif gc_log: "gc_logging" else: "default"
@@ -128,18 +122,13 @@ expect mode == "no_gc"
 
 #### selects gc_logging when gc_log true
 
-- selects gc_logging when gc_log true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("selects gc_logging when gc_log true")
 val gc_off = false
 val gc_log = true
 val mode = if gc_off: "no_gc" elif gc_log: "gc_logging" else: "default"
@@ -150,18 +139,13 @@ expect mode == "gc_logging"
 
 #### selects default when both false
 
-- selects default when both false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("selects default when both false")
 val gc_off = false
 val gc_log = false
 val mode = if gc_off: "no_gc" elif gc_log: "gc_logging" else: "default"
@@ -174,18 +158,13 @@ expect mode == "default"
 
 #### extracts .spl extension
 
-- extracts .spl extension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts .spl extension")
 val path = "test.spl"
 val parts = path.split(".")
 val ext = if parts.len() > 1: parts[parts.len() - 1] else: ""
@@ -196,18 +175,13 @@ expect ext == "spl"
 
 #### extracts .smf extension
 
-- extracts .smf extension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts .smf extension")
 val path = "test.smf"
 val parts = path.split(".")
 val ext = if parts.len() > 1: parts[parts.len() - 1] else: ""
@@ -218,18 +192,13 @@ expect ext == "smf"
 
 #### handles no extension
 
-- handles no extension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles no extension")
 val path = "test"
 val parts = path.split(".")
 val ext = if parts.len() > 1: parts[parts.len() - 1] else: ""
@@ -240,18 +209,13 @@ expect ext == ""
 
 #### handles path with directory
 
-- handles path with directory
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles path with directory")
 val path = "src/test.spl"
 val parts = path.split(".")
 val ext = if parts.len() > 1: parts[parts.len() - 1] else: ""
@@ -264,18 +228,13 @@ expect ext == "spl"
 
 #### recognizes .spl as source
 
-- recognizes .spl as source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes .spl as source")
 val ext = "spl"
 val is_source = ext == "spl" or ext == "simple" or ext == "sscript" or ext == ""
 expect is_source == true
@@ -285,18 +244,13 @@ expect is_source == true
 
 #### recognizes .simple as source
 
-- recognizes .simple as source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes .simple as source")
 val ext = "simple"
 val is_source = ext == "spl" or ext == "simple" or ext == "sscript" or ext == ""
 expect is_source == true
@@ -306,18 +260,13 @@ expect is_source == true
 
 #### recognizes .sscript as source
 
-- recognizes .sscript as source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes .sscript as source")
 val ext = "sscript"
 val is_source = ext == "spl" or ext == "simple" or ext == "sscript" or ext == ""
 expect is_source == true
@@ -327,18 +276,13 @@ expect is_source == true
 
 #### recognizes empty extension as source
 
-- recognizes empty extension as source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("recognizes empty extension as source")
 val ext = ""
 val is_source = ext == "spl" or ext == "simple" or ext == "sscript" or ext == ""
 expect is_source == true
@@ -348,18 +292,13 @@ expect is_source == true
 
 #### rejects .smf as non-source
 
-- rejects .smf as non-source
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects .smf as non-source")
 val ext = "smf"
 val is_source = ext == "spl" or ext == "simple" or ext == "sscript" or ext == ""
 expect is_source == false
@@ -371,18 +310,13 @@ expect is_source == false
 
 #### needs wrapper for simple expression
 
-- needs wrapper for simple expression
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("needs wrapper for simple expression")
 val code = "42"
 val needs = not (code.contains("main") or code.contains("fn ") or code.contains("let "))
 expect needs == true
@@ -392,18 +326,13 @@ expect needs == true
 
 #### needs wrapper for arithmetic
 
-- needs wrapper for arithmetic
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("needs wrapper for arithmetic")
 val code = "2 + 2"
 val needs = not (code.contains("main") or code.contains("fn ") or code.contains("let "))
 expect needs == true
@@ -413,18 +342,13 @@ expect needs == true
 
 #### no wrapper for main function
 
-- no wrapper for main function
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("no wrapper for main function")
 val code = "fn main(): print 42"
 val needs = not (code.contains("main") or code.contains("fn ") or code.contains("let "))
 expect needs == false
@@ -434,18 +358,13 @@ expect needs == false
 
 #### no wrapper for function def
 
-- no wrapper for function def
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("no wrapper for function def")
 val code = "fn add(a, b): a + b"
 val needs = not (code.contains("main") or code.contains("fn ") or code.contains("let "))
 expect needs == false
@@ -455,18 +374,13 @@ expect needs == false
 
 #### no wrapper for let statement
 
-- no wrapper for let statement
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("no wrapper for let statement")
 val code = "let x = 42"
 val needs = not (code.contains("main") or code.contains("fn ") or code.contains("let "))
 expect needs == false
@@ -478,18 +392,16 @@ expect needs == false
 
 #### wraps simple expression
 
-- wraps simple expression
+1. expect wrapped contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("wraps simple expression")
 val code = "42"
 val needs = not code.contains("main")
 val wrapped = if needs: "main = {code}" else: code
@@ -500,18 +412,13 @@ expect wrapped.contains("main = 42") == true
 
 #### does not wrap main
 
-- does not wrap main
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("does not wrap main")
 val code = "fn main(): print 42"
 val needs = not code.contains("main")
 val wrapped = if needs: "main = {code}" else: code
@@ -524,18 +431,16 @@ expect wrapped == code
 
 #### Ok returns exit code
 
-- Ok returns exit code
+1. expect Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Ok returns exit code")
 expect Ok(0).is_ok() == true
 ```
 
@@ -543,18 +448,16 @@ expect Ok(0).is_ok() == true
 
 #### Err returns error
 
-- Err returns error
+1. expect Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Err returns error")
 expect Err("failed").is_err() == true
 ```
 
@@ -564,18 +467,17 @@ expect Err("failed").is_err() == true
 
 #### matches Ok
 
-- matches Ok
+1. Ok
+2. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches Ok")
 val result = Ok(0)
 val matched = match result:
     Ok(code) => "success"
@@ -587,18 +489,17 @@ expect matched == "success"
 
 #### matches Err
 
-- matches Err
+1. Ok
+2. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("matches Err")
 val result = Err("failed")
 val matched = match result:
     Ok(code) => "success"
@@ -612,18 +513,16 @@ expect matched == "error"
 
 #### creates empty args list
 
-- creates empty args list
+1. expect args len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates empty args list")
 val args = []
 expect args.len() == 0
 ```
@@ -632,18 +531,16 @@ expect args.len() == 0
 
 #### creates args list with items
 
-- creates args list with items
+1. expect args len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates args list with items")
 val args = ["--flag", "value"]
 expect args.len() == 2
 ```
@@ -654,18 +551,13 @@ expect args.len() == 2
 
 #### success returns 0
 
-- success returns 0
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("success returns 0")
 expect 0 == 0
 ```
 
@@ -673,18 +565,13 @@ expect 0 == 0
 
 #### error returns 1
 
-- error returns 1
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("error returns 1")
 expect 1 == 1
 ```
 
@@ -694,18 +581,16 @@ expect 1 == 1
 
 #### detects main keyword
 
-- detects main keyword
+1. expect code contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects main keyword")
 val code = "fn main(): print 42"
 expect code.contains("main") == true
 ```
@@ -714,18 +599,16 @@ expect code.contains("main") == true
 
 #### detects fn keyword
 
-- detects fn keyword
+1. expect code contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects fn keyword")
 val code = "fn add(a, b): a + b"
 expect code.contains("fn ") == true
 ```
@@ -734,18 +617,16 @@ expect code.contains("fn ") == true
 
 #### detects let keyword
 
-- detects let keyword
+1. expect code contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects let keyword")
 val code = "let x = 42"
 expect code.contains("let ") == true
 ```
@@ -754,18 +635,16 @@ expect code.contains("let ") == true
 
 #### rejects when not present
 
-- rejects when not present
+1. expect code contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects when not present")
 val code = "42"
 expect code.contains("main") == false
 ```
@@ -776,18 +655,16 @@ expect code.contains("main") == false
 
 #### interpolates path in message
 
-- interpolates path in message
+1. expect msg contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("interpolates path in message")
 val path = "test.spl"
 val msg = "Watching {path} for changes..."
 expect msg.contains("test.spl") == true
@@ -797,18 +674,16 @@ expect msg.contains("test.spl") == true
 
 #### interpolates exit code
 
-- interpolates exit code
+1. expect msg contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("interpolates exit code")
 val code = 42
 val msg = "{code}"
 expect msg.contains("42") == true
@@ -823,12 +698,12 @@ expect msg.contains("42") == true
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/basic_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering basic module compilation, GC configuration, GC mode selection, file extension extraction, source extension detection, main wrapper detection, code wrapping, Result handling, match on Result, empty list for args, exit codes, string contains check, string interpolation.
+Tests covering:
 - basic module compilation
 - GC configuration
 - GC mode selection
@@ -855,51 +730,3 @@ Tests covering basic module compilation, GC configuration, GC mode selection, fi
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `549be88cfbe114b45c1c82066eb1bc47b535ce36efb718d86bc155c91dae2a5e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `549be88cfbe114b45c1c82066eb1bc47b535ce36efb718d86bc155c91dae2a5e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `549be88cfbe114b45c1c82066eb1bc47b535ce36efb718d86bc155c91dae2a5e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/basic_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/basic_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/basic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/basic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/basic_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles successfully' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/basic_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'GC enabled by default' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/basic_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'GC disabled with gc_off' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

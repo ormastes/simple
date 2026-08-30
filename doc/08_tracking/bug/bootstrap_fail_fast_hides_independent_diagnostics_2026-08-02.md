@@ -15,6 +15,11 @@ later retry. Repeated retries waste bootstrap time and serialize bug discovery.
 - Check every independent selected `.spl` file even after failures.
 - Group captured diagnostics by file and return nonzero when any file fails.
 - Preserve per-file incremental caches and isolate cache writers.
+- Retain a source-hashed manifest, exact compiler identities, per-file logs and
+  terminal results, and a completion receipt after failure or interruption.
+- Treat a compiler signal or timeout as one file outcome and continue through
+  the end of the manifest; distinguish a real signal from an ordinary exit with
+  the same shell status.
 - Never deploy or admit an artifact from the diagnostic mode.
 - Cover one failure beside a success and aggregation of multiple failures.
 
@@ -27,6 +32,14 @@ cache directories preserve incremental state and isolate parallel writers. The
 bootstrap entry rejects deployment/release/full-CLI combinations, and the
 diagnostic runner has no artifact output path.
 
-The integration contract covers an exact failure, an adjacent successful file,
-two-error aggregation, nonzero status, all-file execution, parallel cache
-separation, and cache preservation across runs.
+The runner now defaults to `src/compiler`, `src/lib`, and `src/app` and retains
+`manifest.tsv`, `results.tsv`, `summary.env`, compiler hashes, and per-source
+logs below the selected output. `complete=true` is published only when every
+manifest row is terminal. Cleanup retains partial evidence with
+`complete=false`.
+
+The integration contract covers exact and adjacent failures, an ordinary exit
+139, a real SIGSEGV, post-crash continuation, timeouts and descendant cleanup,
+nonzero aggregate status, deterministic terminal rows, parallel cache
+separation, and cache preservation. Canonical build/admission behavior remains
+fail-fast; this diagnostic mode still has no artifact output path.

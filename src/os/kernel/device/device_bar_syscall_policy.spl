@@ -1,0 +1,77 @@
+"""Pure validation for generation-aware PCI BAR map/unmap syscall ABIs."""
+
+val DEVICE_BAR_MAX_WINDOW: u64 = 0x10000000u64
+val DEVICE_BAR_PAGE_SIZE: u64 = 4096u64
+
+struct DeviceBarMapSyscallRequest:
+    ok: bool
+    reason: text
+    bdf: u64
+    bus: u8
+    device: u8
+    function: u8
+    bar_index: u8
+    byte_offset: u64
+    byte_len: u64
+    hint_page: u64
+
+struct DeviceBarUnmapSyscallRequest:
+    ok: bool
+    reason: text
+    user_addr: u64
+    requested_len: u64
+
+fn _device_bar_map_blocked(reason: text) -> DeviceBarMapSyscallRequest:
+    DeviceBarMapSyscallRequest(ok: false, reason: reason, bdf: 0u64,
+        bus: 0u8, device: 0u8, function: 0u8, bar_index: 0u8,
+        byte_offset: 0u64, byte_len: 0u64, hint_page: 0u64)
+
+fn decode_device_bar_map_syscall(bdf: u64, bar_index: u64,
+        byte_offset: u64, byte_len: u64, hint_page: u64,
+        flags: u64) -> DeviceBarMapSyscallRequest:
+    # @decision DBM_ABI_RESERVED
+    if flags != 0u64:
+        return _device_bar_map_blocked("blocked:map-flags-unsupported")
+    # @decision DBM_ABI_BDF
+    if bdf > 0xFFFFFFu64 or ((bdf >> 8) & 0xFFu64) > 31u64 or
+            (bdf & 0xFFu64) > 7u64:
+        return _device_bar_map_blocked("blocked:bdf-invalid")
+    # @decision DBM_ABI_BAR
+    if bar_index > 5u64:
+        return _device_bar_map_blocked("blocked:bar-index-out-of-range")
+    # @decision DBM_ABI_LEN
+    if byte_len == 0u64 or byte_len > DEVICE_BAR_MAX_WINDOW:
+        return _device_bar_map_blocked("blocked:window-length-invalid")
+    # @decision DBM_ABI_HINT
+    if hint_page != 0u64 and
+            (hint_page < 0x400000u64 or
+             (hint_page % DEVICE_BAR_PAGE_SIZE) != 0u64):
+        return _device_bar_map_blocked("blocked:map-hint-invalid")
+    DeviceBarMapSyscallRequest(ok: true, reason: "ok:device-bar-map-request",
+        bdf: bdf, bus: ((bdf >> 16) & 0xFFu64).to_u8(),
+        device: ((bdf >> 8) & 0xFFu64).to_u8(),
+        function: (bdf & 0xFFu64).to_u8(), bar_index: bar_index.to_u8(),
+        byte_offset: byte_offset, byte_len: byte_len, hint_page: hint_page)
+
+fn decode_device_bar_unmap_syscall(user_addr: u64, requested_len: u64,
+        arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> DeviceBarUnmapSyscallRequest:
+    # @decision DBU_ABI_RESERVED
+    if arg2 != 0u64 or arg3 != 0u64 or arg4 != 0u64 or arg5 != 0u64:
+        return DeviceBarUnmapSyscallRequest(ok: false,
+            reason: "blocked:unmap-arguments-unsupported", user_addr: 0u64,
+            requested_len: 0u64)
+    # The returned address may include a physical-page delta; it need not be
+    # page aligned. Exact owner-ledger lookup supplies the page envelope.
+    # @decision DBU_ABI_EXTENT
+    if user_addr < 0x400000u64 or requested_len == 0u64 or
+            requested_len > DEVICE_BAR_MAX_WINDOW:
+        return DeviceBarUnmapSyscallRequest(ok: false,
+            reason: "blocked:unmap-extent-invalid", user_addr: 0u64,
+            requested_len: 0u64)
+    DeviceBarUnmapSyscallRequest(ok: true,
+        reason: "ok:device-bar-unmap-request", user_addr: user_addr,
+        requested_len: requested_len)
+
+export DeviceBarMapSyscallRequest, DeviceBarUnmapSyscallRequest,
+    DEVICE_BAR_MAX_WINDOW, DEVICE_BAR_PAGE_SIZE,
+    decode_device_bar_map_syscall, decode_device_bar_unmap_syscall

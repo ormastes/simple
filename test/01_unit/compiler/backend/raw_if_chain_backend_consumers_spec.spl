@@ -1,0 +1,48 @@
+"""Raw if-chain backend consumer contracts.
+
+Every fallback consumes the pinned scalar owner directly.  Legacy paths either
+preserve ordered condition arms or emit a hard diagnostic for binding arms;
+they must never rebuild nested raw if nodes or silently substitute Nil/no-op.
+"""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "raw if-chain backend consumers":
+    it "emits ordered expression and statement chains from scalar getters":
+        val expr = source("src/compiler/10.frontend/core/compiler/cg_expr.spl")
+        val stmt = source("src/compiler/10.frontend/core/compiler/cg_stmt.spl")
+        val helpers = source("src/compiler/10.frontend/core/compiler/cg_helpers.spl")
+        val facade = source("src/compiler/10.frontend/core/compiler/c_codegen.spl")
+
+        expect(expr).to_contain("if tag == EXPR_IF_CHAIN:")
+        expect(expr).to_contain("flat_if_arm_then_expr_get(arm_id)")
+        expect(stmt).to_contain("if tag == STMT_IF_CHAIN:")
+        expect(stmt).to_contain("flat_if_arm_body_at(arm_id, body_i)")
+        expect(helpers).to_contain("fn cg_flat_if_chain_condition_only")
+        expect(helpers).to_contain("static_assert(false")
+        expect(facade).to_contain("s_tag == STMT_IF or s_tag == STMT_IF_CHAIN")
+        expect(facade).to_contain("cg_emit_if_chain_as_stmt(init_expr)")
+
+    it "keeps compile-C conversion flat and fails closed for binding arms":
+        val entry = source("src/compiler/70.backend/backend/compile_c_entry.spl")
+
+        expect(entry).to_contain("fn convert_flat_expr_if_chain")
+        expect(entry).to_contain("ExprKind.IfChain(arms")
+        expect(entry).to_contain("legacy C entry does not support if val/var or pattern-binding arms")
+        expect(entry).to_contain("if flat_ast_conversion_error != \"\":")
+        expect(entry).to_not_contain("expr_if_expr(")
+        expect(entry).to_not_contain("stmt_if_stmt(")
+
+    it "lowers condition chains in the HIR fallback and returns Error on unsupported arms":
+        val lowering = source("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+
+        expect(lowering).to_contain("if tag == EXPR_IF_CHAIN:")
+        expect(lowering).to_contain("if tag == STMT_IF_CHAIN:")
+        expect(lowering).to_contain("HirExprKind.IfChain(arms")
+        expect(lowering).to_contain("bootstrap HIR fallback cannot lower malformed or binding")
+        expect(lowering).to_contain("HirExprKind.Error")

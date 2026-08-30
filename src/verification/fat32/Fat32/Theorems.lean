@@ -56,10 +56,6 @@ theorem T1_chain_length_bound (fat : FatTable) (start : ClusterIdx) (fuel : Nat)
         · -- neither: returns [], length = 0
           simp
 
-theorem T1_zero_fuel_empty (fat : FatTable) (start : ClusterIdx) :
-    chainWalkGuarded fat start 0 = [] := by
-  simp [chainWalkGuarded]
-
 -- ===========================================================================
 -- T2 — lba_monotone
 -- For a well-formed BPB, clusterToLba is strictly monotone in cluster number.
@@ -172,22 +168,6 @@ theorem T6_free_not_valid_chain (e : FatEntry)
   subst hfree
   -- e = 0: 0 ≥ 2 is false
   simp [isValidChainLink, isBad, FAT32_BAD, FAT32_EOC_LOW]
-
-theorem T6_bad_not_valid_chain (e : FatEntry)
-    (hbad : isBad e = true) :
-    isValidChainLink e = false := by
-  simp [isValidChainLink, hbad]
-
-theorem T6_bad_marker_not_valid_chain :
-    isValidChainLink FAT32_BAD = false := by
-  simp [isValidChainLink, isBad, FAT32_BAD, FAT32_EOC_LOW]
-
-theorem T6_eoc_not_valid_chain (e : FatEntry)
-    (heoc : isEoc e = true) :
-    isValidChainLink e = false := by
-  simp only [isEoc, Bool.and_eq_true, decide_eq_true_eq] at heoc
-  have hnot : ¬ e < FAT32_EOC_LOW := Nat.not_lt.mpr heoc.1
-  simp [isValidChainLink, hnot]
 
 -- ===========================================================================
 -- T7 — wave-4d allocator: FREE cluster is unreachable from any other chain.

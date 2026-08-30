@@ -10,9 +10,7 @@ OUTPUT_FORMAT("elf64-littleaarch64")
 ENTRY(_start)
 
 MEMORY {
-    /* The canonical fs-exec descriptor provisions 384 MiB from 0x40000000.
-     * The first 2 MiB remain reserved for QEMU's generated DTB/firmware data. */
-    RAM (rwx) : ORIGIN = 0x40200000, LENGTH = 382M
+    RAM (rwx) : ORIGIN = 0x40200000, LENGTH = 254M
 }
 
 SECTIONS {
@@ -38,8 +36,6 @@ SECTIONS {
         *(.data*)
     } > RAM
 
-    _kernel_load_end = .;
-
     .bss (NOLOAD) : ALIGN(4K) {
         _sbss = .;
         *(.bss*)
@@ -60,5 +56,4 @@ SECTIONS {
     } > RAM
 
 INCLUDE "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld"
-    _image_size = _kernel_end - _start;
 }

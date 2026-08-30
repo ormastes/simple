@@ -1,0 +1,92 @@
+"""
+# Filesystem server terminal evidence
+
+The filesystem-launched combined server may report a clean bounded stop only
+after its WebSocket owner, HTTP listener, and database service all prove that
+their retained resources closed. DBD transient close failures use the existing
+three-attempt owner protocol; exhausted retries remain a non-successful,
+quarantined terminal condition.
+"""
+
+use std.spec
+use std.io_runtime.{file_read}
+use os.apps.servers_user.main.{server_shutdown_exit_code_v1}
+use os.apps.dbd.dbd_close_owner.{
+    DbdCloseOwnerV1, DbdCloseStateV1, DbdCloseDispositionV1,
+    DBD_MAX_CLOSE_ATTEMPTS_V1
+}
+
+describe "filesystem server terminal evidence":
+    it "admits success only when every server resource owner closed":
+        expect(server_shutdown_exit_code_v1(true, true, true)).to_equal(0i64)
+        expect(server_shutdown_exit_code_v1(false, true, true)).to_equal(9i64)
+        expect(server_shutdown_exit_code_v1(true, false, true)).to_equal(9i64)
+        expect(server_shutdown_exit_code_v1(true, true, false)).to_equal(9i64)
+
+    it "publishes the success marker only behind the aggregate close result":
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        val shutdown = source.split(
+            "val websocket_closed = websocket.shutdown()")[1]
+        val decision = shutdown.index_of(
+            "val shutdown_rc = server_shutdown_exit_code_v1(")
+        val failure = shutdown.index_of("if shutdown_rc != 0:")
+        val success = shutdown.index_of("bounded idle stop close=ok")
+        expect(decision).to_be_greater_than(-1)
+        expect(decision).to_be_less_than(failure)
+        expect(failure).to_be_less_than(success)
+        expect(shutdown).to_contain("return shutdown_rc")
+
+describe "DBD bounded close completion":
+    it "retains a failed descriptor and closes it on a bounded retry":
+        var owner = DbdCloseOwnerV1.new("server-listener")
+        expect(owner.acquire(91i64)).to_be(true)
+        expect(owner.commit_close_result(-1i64)).to_equal(
+            DbdCloseDispositionV1.Retryable)
+        expect(owner.fd).to_equal(91i64)
+        expect(owner.owns_fd()).to_be(true)
+        expect(owner.commit_close_result(0i64)).to_equal(
+            DbdCloseDispositionV1.Closed)
+        expect(owner.owns_fd()).to_be(false)
+
+    it "retains authority in quarantine after the bounded retry budget":
+        var owner = DbdCloseOwnerV1.new("websocket-client")
+        expect(owner.acquire(92i64)).to_be(true)
+        var attempts: i64 = 0
+        while attempts < DBD_MAX_CLOSE_ATTEMPTS_V1:
+            val _ = owner.commit_close_result(-1i64)
+            attempts = attempts + 1
+        expect(owner.state).to_equal(DbdCloseStateV1.Quarantined)
+        expect(owner.fd).to_equal(92i64)
+        expect(owner.owns_fd()).to_be(true)
+        expect(owner.can_attempt_close()).to_be(false)
+
+    it "drives retained descriptors to close or quarantine before success":
+        val dbd = file_read("src/os/apps/dbd/dbd.spl")
+        val close_service = dbd.split(
+            "pub me close_service() -> bool:")[1].split(
+                "pub me attach_filesystem_dbfs_vfs(")[0]
+        expect(close_service).to_contain(
+            "close_rounds < DBD_MAX_CLOSE_ATTEMPTS_V1")
+        expect(close_service).to_contain("self.retry_pending_closes()")
+        expect(close_service).to_contain(
+            "not self.client_close.owns_fd()")
+        expect(close_service).to_contain(
+            "not self.listener_close.owns_fd()")
+        expect(close_service).to_contain(
+            "resources_closed and storage_closed")
+        expect(close_service).to_contain("lifecycle_terminal")
+        expect(close_service).to_contain(
+            "self.listener_close_terminal_code == \"\"")
+
+    it "keeps WebSocket fd authority in the bounded close owner":
+        val source = file_read("src/os/apps/servers_user/main.spl")
+        expect(source).to_contain(
+            "transport_close: DbdCloseOwnerV1")
+        expect(source).to_contain(
+            "while self.transport_close.can_attempt_close():")
+        expect(source).to_contain(
+            "if self.transport_close.owns_fd():")
+        expect(source).to_contain(
+            "if not self.active or not self.transport_close.is_open():")
+        expect(source).to_contain(
+            "if not self.transport_close.is_open():")

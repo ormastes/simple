@@ -1,6 +1,12 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @tag: system, os, memory, swap, dma, gpu, nic
 # @cover src/os/kernel/memory/memory_leveling_manager.spl 80%
 # @cover src/os/kernel/memory/memory_swap.spl 80%
+
+use std.spec.step
 
 use std.spec.*
 use std.memory_leveling.{
@@ -27,10 +33,15 @@ use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpl
 use os.kernel.memory.memory_swap.{memory_swap_store_new}
 use os.kernel.memory.memory_leveling_capabilities.{memory_leveling_qemu_capabilities, memory_leveling_can_migrate_gpu, memory_leveling_can_migrate_nic}
 use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
+use os.kernel.boot.mmio.{mmio_reset_for_test}
+use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_alloc_pages}
 
 describe "SimpleOS GPU NIC DMA memory leveling":
+    # @manual scenario evidence
 
     it "REQ-001 REQ-002 keeps language and kernel configurations separate":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-001 REQ-002 keeps language and kernel configurations separate")
         step("Create an independently owned language placement configuration")
         val intent = simple_memory_iso_cpu_cold()
         var placement = simple_memory_placement_config_from_intent(intent)
@@ -47,6 +58,8 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(os_config.swap_enabled).to_equal(true)
 
     it "REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-003 REQ-005 REQ-006 enforces identity ownership pins and DMA order")
         step("Allocate a tracked cold CPU buffer with stable identity")
         val intent = simple_memory_iso_cpu_cold()
         val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
@@ -72,6 +85,8 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.unmap_device(allocation.allocation_id, 91).state).to_equal("cpu_owned")
 
     it "REQ-008 REQ-014 bounds pressure and reports incremental counters":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-008 REQ-014 bounds pressure and reports incremental counters")
         step("Configure a pressure batch larger than the hard safety bound")
         var config = simpleos_memory_leveling_config_default()
         config.pressure_batch_limit = 1000
@@ -94,13 +109,15 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(stats.candidate_count).to_equal(70)
 
     it "REQ-007 preserves CPU and device reservations":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-007 preserves CPU and device reservations")
         step("Configure CPU GPU NIC and DMA reservations over shared capacity")
         var config = simpleos_memory_leveling_config_default()
         config.physical_capacity_bytes = 100
         config.cpu_capacity_bytes = 100
         config.cpu_reserved_bytes = 20
-        config.cpu_low_watermark_bytes = 25
-        config.cpu_high_watermark_bytes = 50
+        config.cpu_low_watermark_bytes = 20
+        config.cpu_high_watermark_bytes = 40
         config.gpu_capacity_bytes = 50
         config.gpu_reserved_bytes = 10
         config.nic_reserved_bytes = 10
@@ -118,6 +135,8 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.request(simple_memory_placement_config_from_intent(gpu_intent), memory_leveling_policy_from_intent(gpu_intent), 1, 1, 2).reason).to_equal("reservation-protected")
 
     it "REQ-009 preserves bytes across committed swap transitions":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-009 preserves bytes across committed swap transitions")
         step("Prepare a cold allocation for swap")
         val intent = simple_memory_iso_cpu_cold()
         val manager = memory_leveling_manager_new(simpleos_memory_leveling_config_default())
@@ -139,6 +158,8 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(store.release(written.slot_id, allocation.allocation_id).ok).to_equal(true)
 
     it "REQ-011 validates scatter DMA metadata and synchronization":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-011 validates scatter DMA metadata and synchronization")
         step("Create a DMA descriptor with two explicit physical segments")
         val buffer = SharedDmaBuffer(
             cpu_virt_addr: 0x1000,
@@ -164,13 +185,16 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(dma_mapping_unmap(returned).is_ok()).to_equal(true)
 
     it "REQ-012 protects GPU queues and NIC buffers through completion":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-012 protects GPU queues and NIC buffers through completion")
         step("Register a permanently pinned GPU command queue")
         var config = simpleos_memory_leveling_config_default()
         config.gpu_capacity_bytes = 65536
+        config.gpu_reserved_bytes = 0
         config.nic_capacity_bytes = 65536
         config.nic_reserved_bytes = 0
         val manager = memory_leveling_manager_new(config)
-        expect(manager.register_gpu_queue(501, 12, 4096, 0x12000).ok).to_equal(true)
+        expect(manager.register_gpu_queue(501, 12, 4096, gpu_pages.addr).ok).to_equal(true)
 
         step("Submit and complete GPU work while release remains protected")
         expect(manager.device_submit(501, 12).state).to_equal("device_owned")
@@ -180,7 +204,7 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(manager.release(501, 12).reason).to_equal("protected")
 
         step("Release a temporary NIC buffer only after its completion")
-        expect(manager.register_nic_buffer(502, 13, 2048, 0x14000, true).ok).to_equal(true)
+        expect(manager.register_nic_buffer(502, 13, 2048, nic_pages.addr, true).ok).to_equal(true)
         expect(manager.device_submit(502, 13).ok).to_equal(true)
         expect(manager.release(502, 13).reason).to_equal("protected")
         expect(manager.device_complete(502, 13).ok).to_equal(true)
@@ -189,6 +213,8 @@ describe "SimpleOS GPU NIC DMA memory leveling":
         expect(memory_leveling_device_migration_unavailable(502).reason).to_equal("migration-unavailable")
 
     it "REQ-013 REQ-015 reports QEMU support without hardware overclaim":
+        # @req REQ-SSPEC-SYSTEM
+        step("REQ-013 REQ-015 reports QEMU support without hardware overclaim")
         step("Inspect the QEMU virtio capability report")
         val capabilities = memory_leveling_qemu_capabilities()
         expect(capabilities.virtio_gpu_backing).to_equal(true)

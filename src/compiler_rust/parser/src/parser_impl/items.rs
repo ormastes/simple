@@ -598,10 +598,19 @@ impl<'a> Parser<'a> {
             | TokenKind::Val
             | TokenKind::Trait
             | TokenKind::From
-            | TokenKind::Import
-            | TokenKind::Const
-            | TokenKind::Static
-            | TokenKind::Type
+            | TokenKind::Import => self.parse_item(),
+            // Design A.5 data items: `@section/@align/@global const|static`
+            // keep their attributes so the backend can place the bytes.
+            TokenKind::Const | TokenKind::Static => {
+                let mut node = self.parse_item()?;
+                match &mut node {
+                    Node::Const(c) => c.attributes = attributes,
+                    Node::Static(s) => s.attributes = attributes,
+                    _ => {}
+                }
+                Ok(node)
+            }
+            TokenKind::Type
             | TokenKind::Newtype
             | TokenKind::Extend
             | TokenKind::Bitfield

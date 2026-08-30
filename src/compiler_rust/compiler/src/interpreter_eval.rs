@@ -773,6 +773,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 || name == "always_inline"
                                 || name == "inline"
                                 || name == "force_inline"
+                                // Memory-order directives (design A.2,
+                                // asm_embedded_hal_and_dual_run.md): honoured by
+                                // the LLVM backend (codegen/llvm/functions/inline_asm.rs);
+                                // no interpreter semantics.
+                                || name == "volatile"
+                                || name == "no_reorder"
                             {
                                 continue;
                             }

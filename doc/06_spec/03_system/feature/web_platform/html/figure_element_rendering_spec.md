@@ -27,7 +27,20 @@ Selected `<figure>` UA-default rendering through Web semantics, Draw IR, and Eng
 
 Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
 
-## Scenarios
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
 
 ### Production figure element rendering
 
@@ -51,10 +64,18 @@ Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("should lower figure UA margins through Draw IR to pixels")
-val html = _figure_html()
+fn _check_figure_semantics(html: text):
+    val root = html_tree_builder_build(html)
+    val identity_index = system_dom_identity_index(root)
+    val figure_path = be_dom_path_for_route(root, identity_index, system_dom_route(identity_index, "figure"))
+    val body_path = be_dom_path_for_route(root, identity_index, system_dom_route(identity_index, "body"))
+    expect(figure_path.len()).to_be_greater_than(1)
+    expect(be_dom_get_tag(figure_path[figure_path.len() - 1])).to_equal(
+        "figure"
+    )
+    expect(figure_path[figure_path.len() - 2].node_id).to_equal(
+        body_path[body_path.len() - 1].node_id
+    )
 
 step("Parse figure as a body child")
 _check_figure_semantics(html)

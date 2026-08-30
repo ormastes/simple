@@ -2,6 +2,29 @@
 
 > {$ let count: i32 = 0 $}
 
+<!-- sdn-diagram:id=web_framework_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=web_framework_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+web_framework_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=web_framework_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 16 | 16 | 0 | 0 |
@@ -21,7 +44,7 @@
 | Category | Tools \| Web Framework |
 | Status | Planned |
 | Source | `test/03_system/feature/usage/web_framework_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## .sui File Structure
@@ -37,8 +60,6 @@
 {$ let count: i32 = 0 $}
 
 {- server -}
-use std.spec.step
-
 fn render(): String = count.to_string()
 
 {+ client +}
@@ -58,22 +79,18 @@ dom.getElementById("btn").addEventListener("click", increment)
 
 #### builds simple .sui file
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+1. fn test basic build
 
-
-- builds simple .sui file
+2. expect test basic build
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds simple .sui file")
 # web_build should succeed and return exit code 0
 @fs
 fn test_basic_build() -> i64:
@@ -86,18 +103,18 @@ expect test_basic_build() == 0
 
 #### generates HTML output
 
-- generates HTML output
+1. fn test html output
+
+2. expect test html output
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates HTML output")
 @fs
 fn test_html_output() -> bool:
     # Output directory should contain app.html
@@ -110,18 +127,18 @@ expect test_html_output()
 
 #### generates manifest file
 
-- generates manifest file
+1. fn test manifest
+
+2. expect test manifest
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates manifest file")
 @fs
 fn test_manifest() -> bool:
     # Output directory should contain app.manifest.json
@@ -136,18 +153,18 @@ expect test_manifest()
 
 #### compiles client code to WASM
 
-- compiles client code to WASM
+1. fn test wasm output
+
+2. expect test wasm output
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("compiles client code to WASM")
 @fs
 fn test_wasm_output() -> bool:
     # Client code should generate .wasm file
@@ -160,18 +177,18 @@ expect test_wasm_output()
 
 #### generates hydration script
 
-- generates hydration script
+1. fn test hydration script
+
+2. expect test hydration script
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates hydration script")
 @fs
 fn test_hydration_script() -> bool:
     # Client code should generate .hydration.js
@@ -184,18 +201,18 @@ expect test_hydration_script()
 
 #### includes WASM loader in HTML
 
-- includes WASM loader in HTML
+1. fn test wasm loader
+
+2. expect test wasm loader
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes WASM loader in HTML")
 @fs
 fn test_wasm_loader() -> bool:
     # HTML should contain loadWasm call
@@ -210,18 +227,18 @@ expect test_wasm_loader()
 
 #### minifies HTML when enabled
 
-- minifies HTML when enabled
+1. fn test minify html
+
+2. expect test minify html
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("minifies HTML when enabled")
 @fs
 fn test_minify_html() -> bool:
     # Minified HTML should have fewer lines
@@ -234,18 +251,18 @@ expect test_minify_html()
 
 #### optimizes WASM when enabled
 
-- optimizes WASM when enabled
+1. fn test optimize wasm
+
+2. expect test optimize wasm
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("optimizes WASM when enabled")
 @fs
 fn test_optimize_wasm() -> bool:
     # wasm-opt should be applied if available
@@ -260,18 +277,18 @@ expect test_optimize_wasm()
 
 #### binds multiple events
 
-- binds multiple events
+1. fn test multiple events
+
+2. expect test multiple events
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("binds multiple events")
 @fs
 fn test_multiple_events() -> bool:
     # Multiple addEventListener calls should all be captured
@@ -284,18 +301,18 @@ expect test_multiple_events()
 
 #### manifest contains binding info
 
-- manifest contains binding info
+1. fn test manifest bindings
+
+2. expect test manifest bindings
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("manifest contains binding info")
 @fs
 fn test_manifest_bindings() -> bool:
     # Manifest should have selector, event, handler info
@@ -310,18 +327,18 @@ expect test_manifest_bindings()
 
 #### creates project directory
 
-- creates project directory
+1. fn test init creates dir
+
+2. expect test init creates dir
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates project directory")
 @fs
 fn test_init_creates_dir() -> bool:
     # web_init should create project directory
@@ -334,18 +351,18 @@ expect test_init_creates_dir()
 
 #### creates app.sui template
 
-- creates app.sui template
+1. fn test init creates sui
+
+2. expect test init creates sui
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates app.sui template")
 @fs
 fn test_init_creates_sui() -> bool:
     # Template should contain all required blocks
@@ -360,18 +377,18 @@ expect test_init_creates_sui()
 
 #### fails for missing file
 
-- fails for missing file
+1. fn test missing file
+
+2. expect test missing file
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fails for missing file")
 @fs
 fn test_missing_file() -> i64:
     # web_build should return non-zero for missing file
@@ -384,18 +401,18 @@ expect test_missing_file() != 0
 
 #### fails for invalid syntax
 
-- fails for invalid syntax
+1. fn test invalid syntax
+
+2. expect test invalid syntax
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fails for invalid syntax")
 @fs
 fn test_invalid_syntax() -> i64:
     # Parser errors should cause build failure
@@ -410,18 +427,18 @@ expect test_invalid_syntax() != 0
 
 #### creates nested output directories
 
-- creates nested output directories
+1. fn test nested output
+
+2. expect test nested output
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates nested output directories")
 @fs
 fn test_nested_output() -> bool:
     # Should create nested/output/dir path
@@ -434,18 +451,18 @@ expect test_nested_output()
 
 #### uses custom module name
 
-- uses custom module name
+1. fn test custom module
+
+2. expect test custom module
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses custom module name")
 @fs
 fn test_custom_module() -> bool:
     # Files should use custom module name
@@ -468,51 +485,3 @@ expect test_custom_module()
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `49d54d3e3fd1b91898acb6faf40e135d515f465a10429d3883869f3f7c37282b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `49d54d3e3fd1b91898acb6faf40e135d515f465a10429d3883869f3f7c37282b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `49d54d3e3fd1b91898acb6faf40e135d515f465a10429d3883869f3f7c37282b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/web_framework_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/web_framework_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/web_framework_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/web_framework_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/web_framework_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds simple .sui file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/web_framework_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates HTML output' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/web_framework_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates manifest file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

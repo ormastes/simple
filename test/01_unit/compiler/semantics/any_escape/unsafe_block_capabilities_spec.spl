@@ -6,7 +6,7 @@
 
 # @cover src/compiler/35.semantics/any_escape/checker.spl 60%
 # @cover src/compiler/10.frontend/core/parser_stmts.spl 10%
-# @req REQ-SSPEC-COMPILER
+# @req REQ-MC-ANY-001
 """
 # `unsafe(capabilities: [...]):` block form reaches the Any-escape checker
 
@@ -67,10 +67,10 @@ Only the BLOCK form is carried on HIR. The declaration-level `@unsafe(...)`
 annotation form still reaches the checker through `AnyEscapeProfile`.
 """
 
-use std.spec.step
-
 use std.spec.*
 use compiler.frontend.{parse_full_frontend}
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+use compiler.core.ast.{module_get_decls, decl_get_name}
 use compiler.common.config.{Logger}
 use compiler.hir.hir_lowering.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
@@ -107,6 +107,21 @@ fn count_of(found: [text], want: text) -> i64:
             n = n + 1
     n
 
+fn parses_clean(name: text, source: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    not parser_has_errors()
+
+fn malformed_retains_decl(name: text, source: text, want: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    if not parser_has_errors():
+        return false
+    for decl in module_get_decls():
+        if decl_get_name(decl) == want:
+            return true
+    false
+
 fn first_unsafe_caps(hm: HirModule) -> [text]:
     """Capability list of the first `UnsafeBlock` statement in the first
     function; `["<none>"]` when no UnsafeBlock is found at all."""
@@ -121,12 +136,53 @@ fn first_unsafe_caps(hm: HirModule) -> [text]:
                 case _: ()
     ["<none>"]
 
+fn first_value_unsafe_caps(hm: HirModule) -> [text]:
+    """Capabilities on the first value-position UnsafeBlock initializer."""
+    for key in hm.functions.keys():
+        val f = hm.functions[key]
+        for s in f.body.stmts:
+            match s.kind:
+                case HirStmtKind.Let(_, _, init):
+                    match init.kind:
+                        case HirExprKind.UnsafeBlock(body): return body.unsafe_caps
+                        case _: ()
+                case _: ()
+    ["<none>"]
+
 # ============================================================================
 # Primary Scenarios
 # ============================================================================
 
 describe "unsafe(capabilities: [...]) block form":
-    # @manual scenario evidence
+
+    it "keeps ordinary unsafe and danger calls after contextual rollback":
+        step("Verify: unsafe(1) and danger(1) remain ordinary calls")
+        val source = "fn calls(reason: i64, capabilities: i64) -> i64:\n" +
+            "    val a = unsafe(1)\n" +
+            "    val b = unsafe(reason)\n" +
+            "    val c = unsafe(reason: \"x\")\n" +
+            "    danger(capabilities)\n"
+        expect(parses_clean("unsafe_ordinary_calls.spl", source)).to_equal(true)
+
+    it "diagnoses missing commas in recognized unsafe headers and then recovers":
+        step("Verify: malformed recognized headers diagnose")
+        val missing_cap_comma = "fn bad():\n" +
+            "    unsafe(capabilities: [ffi raw_ptr]):\n" +
+            "        pass\n" +
+            "fn sentinel_cap() -> i64: 1\n"
+        val missing_arg_comma = "fn bad():\n" +
+            "    unsafe(reason: \"x\" capabilities: [ffi]):\n" +
+            "        pass\n" +
+            "fn sentinel_arg() -> i64: 2\n"
+        expect(malformed_retains_decl("unsafe_missing_cap_comma.spl", missing_cap_comma, "sentinel_cap")).to_equal(true)
+        expect(malformed_retains_decl("unsafe_missing_arg_comma.spl", missing_arg_comma, "sentinel_arg")).to_equal(true)
+
+    it "parses the capability block as a value initializer":
+        # @req: REQ-MC-ANY-001
+        step("Verify: parses the capability block as a value initializer")
+        val caps = first_value_unsafe_caps(lower_fixture("block_form_value"))
+        expect(caps.len()).to_equal(1)
+        expect(caps[0]).to_equal("ffi")
 
     it "parses the block form into HirExprKind.UnsafeBlock carrying its capabilities":
         # @req REQ-SSPEC-COMPILER
@@ -134,7 +190,7 @@ describe "unsafe(capabilities: [...]) block form":
         step("lower the §8.1 primary-spelling fixture")
         val caps = first_unsafe_caps(lower_fixture("block_form_type_erasure"))
         step("the statement IS an UnsafeBlock (pre-fix: plain expression statement)")
-        expect(caps.len()).to_equal(1)
+        expect(caps.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         step("and the body carries the parsed capability name")
         expect(caps[0]).to_equal("type_erasure")
 
@@ -144,7 +200,7 @@ describe "unsafe(capabilities: [...]) block form":
         step("check the fixture with an EMPTY grant list")
         val found = check_fixture("block_form_type_erasure")
         step("no origin report: the grant came from the HIR node")
-        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_equal(0)
+        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     # Neighbour 1 — a capability list is not a grant; only type_erasure is.
     it "still reports the origin when the block asks for raw_ptr only":
@@ -162,7 +218,7 @@ describe "unsafe(capabilities: [...]) block form":
         step("check a type_erasure block that returns the erased value")
         val found = check_fixture("block_form_leak")
         expect(count_of(found, "E-MC-ANY-002/escape_return")).to_be_greater_than(0)
-        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_equal(0)
+        expect(count_of(found, "E-MC-ANY-001/outside_unsafe")).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     # Neighbour 3 — a typo'd capability is never a silent grant.
     it "does not grant erasure for an unknown capability name":
@@ -177,4 +233,4 @@ describe "unsafe(capabilities: [...]) block form":
         # @req REQ-SSPEC-COMPILER
         step("keeps the bare `unsafe:` form as an UnsafeBlock with no capabilities")
         val caps = first_unsafe_caps(lower_fixture("block_form_bare"))
-        expect(caps.len()).to_equal(0)
+        expect(caps.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement

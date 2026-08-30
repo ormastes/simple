@@ -1,8 +1,7 @@
 # Bootstrap parser rejects labeled tuple return types
 
 **Date:** 2026-07-17
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** SOURCE FIXED; FRESH STAGE3 VERIFICATION REQUIRED
 **Owner:** pure-Simple bootstrap parser
 
 ## Evidence

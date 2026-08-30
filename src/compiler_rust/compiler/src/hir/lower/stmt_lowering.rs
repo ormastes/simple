@@ -35,6 +35,69 @@ const OPTION_ENUM_ID: i64 = 1;
 /// along (`interpreter/node_exec.rs`, `exec_augmented_assignment`), where the
 /// `is_suspend` await decision is computed independently of `bin_op` — so this
 /// makes the JIT match the reference behaviour rather than inventing one.
+/// Design A.3.4: assembler directives a raw `asm { }` block may NOT carry
+/// because the item attributes (`@section`, `@global`, `@align`) express
+/// them. `.code32`/`.code64`, `.option`, `.arch`, `.cfi_*` stay allowed.
+/// Returns the offending directive for the E-ASM-DIRECTIVE message.
+pub(crate) fn raw_asm_rejected_directive(instructions: &[String]) -> Option<&'static str> {
+    const REJECTED: [&str; 8] = [
+        ".section", ".global", ".globl", ".type", ".size", ".align", ".p2align", ".balign",
+    ];
+    for instruction in instructions {
+        let text = instruction.trim_start();
+        for directive in REJECTED {
+            if let Some(rest) = text.strip_prefix(directive) {
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    return Some(directive);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Design A.4: `clobbers(...)` accepts arch register names plus the pseudo
+/// names `memory` and `flags`/`cc`. The list is the union over the targets
+/// the seed can emit for (x86_64, aarch64, riscv, arm32); an unknown name is
+/// E-ASM-CLOBBER at lowering time.
+pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
+    match name {
+        "memory" | "cc" | "flags" => return true,
+        _ => {}
+    }
+    const X86: [&str; 24] = [
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
+        "r14", "r15", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+    ];
+    if X86.contains(&name) {
+        return true;
+    }
+    let bytes = name.as_bytes();
+    let numbered = |prefix: u8, max: u32| -> bool {
+        bytes.len() >= 2
+            && bytes[0] == prefix
+            && name[1..].bytes().all(|b| b.is_ascii_digit())
+            && name[1..].parse::<u32>().is_ok_and(|n| n <= max)
+    };
+    // aarch64 x0..x30 / w0..w30 / v0..v31 / q,d,s registers; arm32 r0..r15;
+    // riscv x0..x31, f0..f31, a0..a7, t0..t6, s0..s11.
+    numbered(b'x', 31)
+        || numbered(b'w', 30)
+        || numbered(b'v', 31)
+        || numbered(b'q', 31)
+        || numbered(b'd', 31)
+        || numbered(b's', 31)
+        || numbered(b'r', 15)
+        || numbered(b'f', 31)
+        || numbered(b'a', 7)
+        || numbered(b't', 6)
+        || matches!(name, "lr" | "sp" | "fp" | "pc" | "ra" | "gp" | "tp" | "zero")
+        || name.starts_with("xmm")
+        || name.starts_with("ymm")
+        || name.starts_with("zmm")
+        || name.starts_with("st")
+}
+
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
         ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
@@ -78,6 +141,12 @@ impl Lowerer {
     }
 
     pub(super) fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+        // A block is a lexical name scope. Keep allocated local slots (HIR
+        // statements already refer to their indices), but restore the visible
+        // name-to-slot bindings after lowering so a local declared in one
+        // match/if arm cannot shadow an outer function or import in later
+        // code.
+        let saved_local_map = ctx.local_map.clone();
         // Enter block scope for lifetime tracking
         let span = block.statements.first().and_then(|n| match n {
             Node::Let(l) => Some(l.span),
@@ -94,6 +163,7 @@ impl Lowerer {
 
         // Exit block scope
         self.lifetime_context.exit_scope();
+        ctx.local_map = saved_local_map;
 
         Ok(stmts)
     }
@@ -130,13 +200,17 @@ impl Lowerer {
                 } else {
                     Mutability::Immutable
                 };
+                let previous_bindings: Vec<_> = bindings
+                    .iter()
+                    .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                    .collect();
                 for (name, ty) in &bindings {
                     ctx.add_local(name.clone(), *ty, mutability);
                 }
                 let mut then_block = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                 then_block.extend(self.lower_block(body, ctx)?);
-                for (name, _) in &bindings {
-                    ctx.local_map.remove(name);
+                for (name, previous) in previous_bindings {
+                    ctx.restore_name_binding(&name, previous);
                 }
                 else_block = Some(vec![
                     store,
@@ -511,6 +585,10 @@ impl Lowerer {
                     } else {
                         Mutability::Immutable
                     };
+                    let previous_bindings: Vec<_> = bindings
+                        .iter()
+                        .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                        .collect();
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
@@ -526,8 +604,8 @@ impl Lowerer {
                     then_block.extend(self.lower_block(&if_stmt.then_block, ctx)?);
 
                     // 7. Clean up bindings from scope
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
+                    for (name, previous) in previous_bindings {
+                        ctx.restore_name_binding(&name, previous);
                     }
 
                     // 8. Handle else block (elif branches + else)
@@ -645,6 +723,10 @@ impl Lowerer {
                     } else {
                         Mutability::Immutable
                     };
+                    let previous_bindings: Vec<_> = bindings
+                        .iter()
+                        .map(|(name, _)| (name.clone(), ctx.lookup(name)))
+                        .collect();
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
@@ -653,8 +735,8 @@ impl Lowerer {
                         self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                     then_block.extend(self.lower_block(&while_stmt.body, ctx)?);
 
-                    for (name, _) in &bindings {
-                        ctx.local_map.remove(name);
+                    for (name, previous) in previous_bindings {
+                        ctx.restore_name_binding(&name, previous);
                     }
 
                     return Ok(vec![HirStmt::Loop {
@@ -1068,20 +1150,74 @@ impl Lowerer {
             }
 
             Node::InlineAsm(asm_stmt) => {
-                if asm_stmt.constraints.is_empty() && asm_stmt.target_match.is_empty() && asm_stmt.clobbers.is_empty() {
-                    Ok(vec![HirStmt::InlineAsm {
-                        instructions: asm_stmt.instructions.clone(),
-                        volatile: asm_stmt.volatile,
-                    }])
-                } else {
+                // `asm match` target arms are still not lowered here (the arm
+                // selection needs the build target, which HIR lowering does not
+                // see). Operand-bound blocks ARE lowered now: until 2026-08-28
+                // they were silently dropped, so every `csrr {r}, sstatus`
+                // style site compiled to `return 0` (see
+                // doc/03_plan/os/hal/asm_to_simple_migration_plan.md, 1.1).
+                if !asm_stmt.target_match.is_empty() {
                     if std::env::var("SIMPLE_DEBUG_ASM").as_deref() == Ok("1") {
-                        eprintln!(
-                            "[asm] skipping operand-bound or target-matched asm block at {:?}",
-                            asm_stmt.span
-                        );
+                        eprintln!("[asm] skipping target-matched asm block at {:?}", asm_stmt.span);
                     }
-                    Ok(vec![])
+                    return Ok(vec![]);
                 }
+                // Design A.3.4: a raw block (no operand constraints) must not
+                // carry directives the item attributes express (`.section`,
+                // `.global`, `.type`, `.size`, `.align`) — letting them through
+                // would silently split a function across sections.
+                if asm_stmt.constraints.is_empty() {
+                    if let Some(directive) = raw_asm_rejected_directive(&asm_stmt.instructions) {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-DIRECTIVE: `{directive}` is not allowed inside a raw asm block; \
+                             use @section/@global/@align on the item instead"
+                        )));
+                    }
+                }
+                use simple_parser::ast::AsmConstraintKind;
+                let mut operands = Vec::new();
+                let mut clobbers: Vec<String> = asm_stmt.clobbers.clone();
+                for c in &asm_stmt.constraints {
+                    let kind = match &c.kind {
+                        AsmConstraintKind::In => crate::hir::HirAsmOperandKind::In,
+                        AsmConstraintKind::Out | AsmConstraintKind::LateOut => crate::hir::HirAsmOperandKind::Out,
+                        AsmConstraintKind::InOut => crate::hir::HirAsmOperandKind::InOut,
+                        AsmConstraintKind::Clobber => {
+                            if let Some(reg) = &c.reg_class {
+                                clobbers.push(reg.clone());
+                            }
+                            continue;
+                        }
+                        // clobber_abi / options: no codegen support yet; the
+                        // block still lowers with a `memory` clobber, which is
+                        // the conservative side.
+                        AsmConstraintKind::ClobberAbi(_) | AsmConstraintKind::Options(_) => continue,
+                    };
+                    let Some(operand_expr) = &c.operand else { continue };
+                    let expr = self.lower_expr(operand_expr, ctx)?;
+                    operands.push(crate::hir::HirAsmOperand {
+                        name: c.name.clone(),
+                        kind,
+                        reg: c.reg_class.clone().unwrap_or_else(|| "reg".to_string()),
+                        expr,
+                    });
+                }
+                // Design A.4: an unknown clobber name would be emitted into
+                // the LLVM constraint string verbatim and fail deep inside the
+                // assembler; reject it here with a source-level error.
+                for clobber in &clobbers {
+                    if !is_known_asm_clobber(clobber) {
+                        return Err(LowerError::Unsupported(format!(
+                            "E-ASM-CLOBBER: unknown clobber name `{clobber}` in clobbers(...)"
+                        )));
+                    }
+                }
+                Ok(vec![HirStmt::InlineAsm {
+                    instructions: asm_stmt.instructions.clone(),
+                    volatile: asm_stmt.volatile,
+                    operands,
+                    clobbers,
+                }])
             }
 
             // Context statement: context obj: body

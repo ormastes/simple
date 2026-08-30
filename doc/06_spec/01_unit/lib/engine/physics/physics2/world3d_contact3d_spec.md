@@ -20,7 +20,7 @@ Before this fix, `PhysicsWorld3D` detected contacts in full 3D but its solver on
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-20 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -55,26 +55,26 @@ separates them.
 
 #### sphere falling along z onto a static box resolves penetration and kills z relative velocity
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- sphere falling along z onto a static box resolves penetration and kills z relative velocity
 - Drop a dynamic sphere onto a static box floor under -z gravity
+- var world = PhysicsWorld3D create
+- world add static body
+- world add box collider
+- world add dynamic body
+- world add sphere collider
+- world step
 - The floor must stop the sphere and absorb its downward velocity
    - Expected: pos.z > -1.0 is true
    - Expected: math_abs(vel.z) < 5.0 is true
+- world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("sphere falling along z onto a static box resolves penetration and kills z relative velocity")
 step("Drop a dynamic sphere onto a static box floor under -z gravity")
 var world = PhysicsWorld3D.create(z_gravity_config())
 val floor = make_node(0)
@@ -102,22 +102,27 @@ world.destroy()
 
 #### off-axis oblique impact produces angular velocity on a non-z axis
 
-- off-axis oblique impact produces angular velocity on a non-z axis
 - Rest a sphere on the floor, then push it sideways every step
+- var world = PhysicsWorld3D create
+- world add static body
+- world add box collider
+- world add dynamic body
+- world add sphere collider
+- world apply force
+- world step
 - Sliding friction on a z-normal floor must spin the sphere about y, not z
    - Expected: pos.z > -1.0 is true
    - Expected: math_abs(ang.y) > 0.001 is true
+- world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("off-axis oblique impact produces angular velocity on a non-z axis")
 step("Rest a sphere on the floor, then push it sideways every step")
 var world = PhysicsWorld3D.create(z_gravity_config())
 val floor = make_node(0)
@@ -148,23 +153,27 @@ world.destroy()
 
 #### xy-plane scene (all z=0) matches pre-fix behavior — regression
 
-- xy-plane scene (all z=0) matches pre-fix behavior — regression
 - Run the same drop scenario rotated into the xy plane (z stays 0 throughout)
+- var world = PhysicsWorld3D create
+- world add static body
+- world add box collider
+- world add dynamic body
+- world add sphere collider
+- world step
 - z must stay exactly 0.0 -- the 3D fix must not disturb a pure-2D scene
    - Expected: pos.y > -1.0 is true
    - Expected: pos.x equals `0.0`
    - Expected: pos.z equals `0.0`
+- world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("xy-plane scene (all z=0) matches pre-fix behavior — regression")
 step("Run the same drop scenario rotated into the xy plane (z stays 0 throughout)")
 var world = PhysicsWorld3D.create(default_physics_config_3d())
 val floor = make_node(0)
@@ -189,28 +198,37 @@ world.destroy()
 
 #### Begin -> Stay -> End contact event sequence over 3 steps
 
-- Begin -> Stay -> End contact event sequence over 3 steps
 - Configure a deterministic zero-gravity anchor + mover pair
+- var config = default physics config 3d
+- config gravity = Vec3
+- var world = PhysicsWorld3D create
+- world add static body
+- world add sphere collider
+- world add dynamic body
+- world add sphere collider
 - Step once: the spheres first overlap this frame
+- world step
    - Expected: events1.len() equals `1`
    - Expected: events1[0].phase equals `CONTACT_PHASE_BEGIN`
 - Step again with no new force: contact continues (STAY)
+- world step
    - Expected: events2.len() equals `1`
    - Expected: events2[0].phase equals `CONTACT_PHASE_STAY`
 - Push the mover away with a large force until the spheres separate (END)
+- world apply force
+- world step
    - Expected: events3.len() equals `1`
    - Expected: events3[0].phase equals `CONTACT_PHASE_END`
+- world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("Begin -> Stay -> End contact event sequence over 3 steps")
 step("Configure a deterministic zero-gravity anchor + mover pair")
 var config = default_physics_config_3d()
 config.backend = PhysicsBackend.CpuScalar
@@ -267,54 +285,3 @@ world.destroy()
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `adc8be357a1734fcc428a3463ee5b3196bfb16c4262dc28960fe116190f54be6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `adc8be357a1734fcc428a3463ee5b3196bfb16c4262dc28960fe116190f54be6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `adc8be357a1734fcc428a3463ee5b3196bfb16c4262dc28960fe116190f54be6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.spl
-mirror: doc/06_spec/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sphere falling along z onto a static box resolves penetration and kills z relative velocity' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'off-axis oblique impact produces angular velocity on a non-z axis' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/engine/physics/physics2/world3d_contact3d_spec.spl:121:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'xy-plane scene (all z=0) matches pre-fix behavior — regression' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

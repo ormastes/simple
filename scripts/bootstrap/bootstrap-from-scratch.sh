@@ -506,7 +506,7 @@ if [ -n "${resume_stage3_output}" ]; then
     echo "error: Stage 3 resume is mutually exclusive with rebuild/deploy/diagnostic options" >&2
     exit 1
   }
-  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
+  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1 unless SIMPLE_NATIVE_BUILD_THREADS is set; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -998,6 +998,17 @@ selfhost_jobs="${jobs}"
 if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
   selfhost_jobs=2
 fi
+# Opt-in override of the self-host thread count (stage 2/3/4 recompiles);
+# unset keeps the profile-derived value above.  `full` = host CPUs.
+case "${SIMPLE_NATIVE_BUILD_THREADS:-}" in
+  '') ;;
+  full) selfhost_jobs="${host_cpus}" ;;
+  *[!0-9]*|0)
+    echo "error: SIMPLE_NATIVE_BUILD_THREADS must be a positive integer or 'full'" >&2
+    exit 1
+    ;;
+  *) selfhost_jobs="${SIMPLE_NATIVE_BUILD_THREADS}" ;;
+esac
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
 
 native_cache_dir="${output_dir}/native_cache"
@@ -1125,6 +1136,57 @@ bootstrap_stamp_cache_lane() {
     > "${native_cache_dir}/.cache_scope" 2>/dev/null || true
 }
 
+# Stage 3 evidence is run-scoped even though its canonical filenames are
+# stable. A reused output may therefore contain a complete prior run. Preserve
+# that evidence with a same-directory atomic rename before applying the fresh
+# run's nonexistence gate; caches and every other provenance input stay intact.
+bootstrap_stage3_archive_prior_evidence() (
+  bsape_path=$1
+  bsape_generation=$2
+  if [ ! -e "${bsape_path}" ] && [ ! -L "${bsape_path}" ]; then
+    return 0
+  fi
+  case "${bsape_generation}" in
+    ''|*/*) echo "error: invalid Stage 3 evidence generation" >&2; return 1 ;;
+  esac
+  if [ -L "${bsape_path}" ] || [ ! -f "${bsape_path}" ]; then
+    echo "error: refusing non-regular prior Stage 3 evidence: ${bsape_path}" >&2
+    return 1
+  fi
+  bsape_archive="${bsape_path}.prior-to-${bsape_generation}"
+  if [ -e "${bsape_archive}" ] || [ -L "${bsape_archive}" ]; then
+    echo "error: Stage 3 evidence archive already exists: ${bsape_archive}" >&2
+    return 1
+  fi
+  mv "${bsape_path}" "${bsape_archive}" || {
+    echo "error: could not archive prior Stage 3 evidence: ${bsape_path}" >&2
+    return 1
+  }
+  echo "  Stage 3 evidence: archived prior ${bsape_path}"
+)
+
+# A timed-out Rust native-build leaves every already-published object in its
+# producer-scoped cache.  Retry only the one unambiguous recovery case while
+# the exact same seed process lineage and cache scope are still available.
+# Re-entering the whole bootstrap would rebuild the seed, change the producer
+# fingerprint, and strand those valid objects in the prior scope.
+bootstrap_stage2_single_timeout_cache_retry_eligible() {
+  bsscre_log=$1
+  [ -f "${bsscre_log}" ] && [ ! -L "${bsscre_log}" ] || return 1
+  awk '
+    /^FAILED FILES \(1\):$/ { failed_headers++ }
+    /^  - .* => .*: timeout \([0-9]+s\)$/ { timeout_rows++ }
+    /^  - .* => / { failure_rows++ }
+    /^Build failed: native-build aborted: 1 file\(s\) failed to compile$/ {
+      failed_summaries++
+    }
+    END {
+      exit !(failed_headers == 1 && timeout_rows == 1 &&
+             failure_rows == 1 && failed_summaries == 1)
+    }
+  ' "${bsscre_log}"
+}
+
 run_logged() {
   label=$1
   shift
@@ -1157,6 +1219,8 @@ CANDIDATE_FRONTEND_ROOT=${repo_root}
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
+NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
+NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-1}   # 1 = --low-memory (single worker); 0 = full parallel
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
@@ -1316,7 +1380,8 @@ bootstrap_native_build_main() {
     --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
     --entry-closure \
-    --low-memory
+    --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
   set -- "$@" \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
@@ -1328,7 +1393,7 @@ bootstrap_native_build_main() {
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
-    SIMPLE_BOOTSTRAP_LOW_MEMORY=1 \
+    SIMPLE_BOOTSTRAP_LOW_MEMORY="${NATIVE_LOW_MEMORY}" \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
@@ -1576,7 +1641,12 @@ prepare_rust_authority_workspace() {
     return 0
   fi
 
-  rm -rf "${rust_authority_root}"
+  # The authority root is already content-addressed by every Rust seed input.
+  # Preserve its Cargo target so an interrupted/retried build with the same
+  # fingerprint can reuse dependency artifacts. Ephemeral HOME/config/tmp state
+  # is recreated below; a changed fingerprint selects a different root.
+  rm -rf "${rust_authority_home}" "${rust_authority_cargo_home}" \
+    "${rust_authority_tmp}"
   mkdir -p "${rust_authority_target}" "${rust_authority_home}" \
     "${rust_authority_cargo_home}" "${rust_authority_tmp}"
   vendored_sources_absolute=$(
@@ -1869,6 +1939,9 @@ else
   stage2_receiver_evidence="${stage3_provenance_dir}/stage2-receiver.env"
   stage2_receiver_log="${stage3_provenance_dir}/stage2-receiver.log"
   stage3_sanity_evidence="${stage3_provenance_dir}/stage3-sanity.env"
+  # Compiler-capsule caches. Tool closures (full CLI and test runner) are
+  # deliberately separate and producer-bound; see bootstrap_parallel_handoff.md.
+  # A later phase must not inherit a writable tool cache from its parent phase.
   stage2_provenance_cache="${stage3_provenance_dir}/stage2-native-cache"
   stage3_provenance_cache="${stage3_provenance_dir}/stage3-native-cache"
   stage2_provenance_home="${stage3_provenance_dir}/stage2-home"
@@ -1901,6 +1974,17 @@ else
   rm -rf "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"
+  if [ -n "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER:-}" ]; then
+    stage2_cleanup_marker_tmp="${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}.tmp.$$"
+    {
+      echo schema=simple-bootstrap-stage2-cleanup-v1
+      echo status=ready
+      echo output_dir="${output_dir}"
+    } >"${stage2_cleanup_marker_tmp}"
+    chmod 400 "${stage2_cleanup_marker_tmp}"
+    mv "${stage2_cleanup_marker_tmp}" \
+      "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}"
+  fi
   # Stage 2/3 native-build caches are content-hash keyed by the pure-Simple
   # driver itself (driver_native_sources_fingerprint scopes each cache entry
   # under the loaded source set's combined hash — see
@@ -2017,6 +2101,14 @@ else
     echo "error: could not freeze Stage 2 runtime authority" >&2
     exit 1
   }
+  bootstrap_stage3_verify_hosted_runtime_authority \
+    "$(absolute_path "${stage2_runtime_authority}")" || {
+    echo "error: frozen Stage 2 authority lacks one admitted hosted runtime" >&2
+    exit 1
+  }
+  stage2_hosted_runtime_relative_path=\
+${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
+  stage2_hosted_runtime_sha256=${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_origin_after}")" \
     "${runtime_origin_absolute}" || exit 1
@@ -2038,6 +2130,13 @@ else
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" || {
     echo "error: private admitted Rust authority is incomplete" >&2
+    exit 1
+  }
+  [ "${BOOTSTRAP_STAGE4_HOSTED_RUNTIME_RELATIVE_PATH}" = \
+      "${stage2_hosted_runtime_relative_path}" ] &&
+    [ "${BOOTSTRAP_STAGE4_HOSTED_RUNTIME_SHA256}" = \
+      "${stage2_hosted_runtime_sha256}" ] || {
+    echo "error: hosted runtime identity changed while pinning Stage 2 authority" >&2
     exit 1
   }
   stage_runtime_absolute=${BOOTSTRAP_STAGE4_RUNTIME_PATH}
@@ -2166,6 +2265,19 @@ else
   # unquoted expansion is safe and no glob character can occur.  Empty by
   # default => both uses are byte-identical to before this existed.
   stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
+  # Allocatable mission-critical mode for Stage 3 (step 1, 2026-08-28).
+  # OPT-IN via SIMPLE_STAGE3_MISSION_CRITICAL=1: pins SIMPLE_SAFETY_PROFILE=
+  # critical (read by driver_types.spl into CompileContext.assurance_policy)
+  # and SIMPLE_ASSURANCE_WARNING_PHASE=1 (safety_pass_severity_phased drops the
+  # critical Deny to Warn), so the recompile stays green while every violation
+  # is printed.  Same opt-in in resume-stage3-from-admitted.sh; unset keeps the
+  # args hash byte-identical.  Default-on is a separate lane (hash change).
+  stage3_mc_env=
+  case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
+    '') ;;
+    1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
+    *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
+  esac
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -2177,6 +2289,7 @@ else
       "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      ${stage3_mc_env} \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_COMPILER_PHASE_PROFILE=1" \
       "SIMPLE_COMPILER_PHASE_PROFILE_FILE=${stage3_phase_profile}" \
@@ -2203,10 +2316,11 @@ else
     "${stage_runtime_absolute}" || exit 1
   cmp -s "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
-  set +e
-  bootstrap_stage3_run_transcribed \
+  stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
+  bootstrap_run_stage2_native() {
+    bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
-    "$(absolute_path "${log_dir}/stage2-native-build.log")" \
+    "${stage2_native_log}" \
     "${stage2_home_absolute}" "${stage2_tmp_absolute}" "${stage_build_path}" \
     RUST_LOG="${stage_build_rust_log}" \
     LIBRARY_PATH="${bootstrap_link_library_path}" \
@@ -2230,8 +2344,22 @@ else
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \
     -o "${stage2_bin}"
+  }
+  set +e
+  bootstrap_run_stage2_native
   stage2_status=$?
   set -e
+  if [ "${stage2_status}" -ne 0 ] &&
+    bootstrap_stage2_single_timeout_cache_retry_eligible \
+      "${stage2_native_log}"; then
+    echo "  Stage 2: one worker timed out; retrying once with the same producer-scoped cache"
+    cp "${stage2_native_log}" \
+      "${stage2_tmp_absolute}/stage2-native-build.before-cache-retry.log"
+    set +e
+    bootstrap_run_stage2_native
+    stage2_status=$?
+    set -e
+  fi
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
@@ -2474,6 +2602,10 @@ else
   # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0, so entry-closure discovery still
   # happens -- inside the self-hosted driver, which is the point of Stage 3.
   # Stage 2 above is a seed build by design and keeps its --entry/--source form.
+  bootstrap_stage3_archive_prior_evidence \
+    "${stage3_memory_snapshot}" "${stage3_evidence_run_id}" || exit 1
+  bootstrap_stage3_archive_prior_evidence \
+    "${stage3_phase_profile}" "${stage3_evidence_run_id}" || exit 1
   set +e
   [ ! -e "${stage3_memory_snapshot}" ] && [ ! -L "${stage3_memory_snapshot}" ] || exit 1
   [ ! -e "${stage3_phase_profile}" ] && [ ! -L "${stage3_phase_profile}" ] || exit 1
@@ -2493,6 +2625,7 @@ else
     MALLOC_TRIM_THRESHOLD_=0 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    ${stage3_mc_env} \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_COMPILER_PHASE_PROFILE=1 \
     SIMPLE_COMPILER_PHASE_PROFILE_FILE="${stage3_phase_profile}" \

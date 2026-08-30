@@ -2,6 +2,30 @@
 
 > Tests for the bitmap-based physical page frame allocator (PhysMemManager). Tests allocate/free logic using the PhysMemManager struct directly.
 
+<!-- sdn-diagram:id=pmm_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=pmm_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+pmm_spec -> std
+pmm_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=pmm_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 22 | 22 | 0 | 0 |
@@ -26,7 +50,7 @@ Tests for the bitmap-based physical page frame allocator (PhysMemManager). Tests
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/os/kernel/memory/pmm_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -47,20 +71,13 @@ the bitmap I/O operations that require bare-metal execution.
 
 #### initializes with zero pages
 
-- initializes with zero pages
-   - Expected: pmm.total_pages equals `0`
-   - Expected: pmm.free_pages equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("initializes with zero pages")
 val pmm = _make_pmm(0, 0, 0)
 expect(pmm.total_pages).to_equal(0)
 expect(pmm.free_pages).to_equal(0)
@@ -70,19 +87,13 @@ expect(pmm.free_pages).to_equal(0)
 
 #### tracks total pages
 
-- tracks total pages
-   - Expected: pmm.total_pages equals `1024`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("tracks total pages")
 val pmm = _make_pmm(0x100000, 1024, 1024)
 expect(pmm.total_pages).to_equal(1024)
 ```
@@ -91,19 +102,13 @@ expect(pmm.total_pages).to_equal(1024)
 
 #### tracks free pages
 
-- tracks free pages
-   - Expected: pmm.free_pages equals `512`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("tracks free pages")
 val pmm = _make_pmm(0x100000, 1024, 512)
 expect(pmm.free_pages).to_equal(512)
 ```
@@ -112,19 +117,13 @@ expect(pmm.free_pages).to_equal(512)
 
 #### stores bitmap address
 
-- stores bitmap address
-   - Expected: pmm.bitmap_addr equals `0xDEAD0000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("stores bitmap address")
 val pmm = _make_pmm(0xDEAD0000, 256, 256)
 expect(pmm.bitmap_addr).to_equal(0xDEAD0000)
 ```
@@ -133,19 +132,13 @@ expect(pmm.bitmap_addr).to_equal(0xDEAD0000)
 
 #### initializes last_alloc_index to zero
 
-- initializes last_alloc_index to zero
-   - Expected: pmm.last_alloc_index equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("initializes last_alloc_index to zero")
 val pmm = _make_pmm(0x100000, 1024, 1024)
 expect(pmm.last_alloc_index).to_equal(0)
 ```
@@ -156,19 +149,13 @@ expect(pmm.last_alloc_index).to_equal(0)
 
 #### total_memory returns total_pages * 4096
 
-- total_memory returns total_pages * 4096
-   - Expected: pmm.total_memory() equals `256 * 4096`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("total_memory returns total_pages * 4096")
 val pmm = _make_pmm(0x100000, 256, 256)
 expect(pmm.total_memory()).to_equal(256 * 4096)
 ```
@@ -177,19 +164,13 @@ expect(pmm.total_memory()).to_equal(256 * 4096)
 
 #### free_memory returns free_pages * 4096
 
-- free_memory returns free_pages * 4096
-   - Expected: pmm.free_memory() equals `128 * 4096`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("free_memory returns free_pages * 4096")
 val pmm = _make_pmm(0x100000, 256, 128)
 expect(pmm.free_memory()).to_equal(128 * 4096)
 ```
@@ -198,19 +179,13 @@ expect(pmm.free_memory()).to_equal(128 * 4096)
 
 #### used_pages returns total - free
 
-- used_pages returns total - free
-   - Expected: pmm.used_pages() equals `400`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("used_pages returns total - free")
 val pmm = _make_pmm(0x100000, 1000, 600)
 expect(pmm.used_pages()).to_equal(400)
 ```
@@ -219,19 +194,13 @@ expect(pmm.used_pages()).to_equal(400)
 
 #### total_memory for zero pages is zero
 
-- total_memory for zero pages is zero
-   - Expected: pmm.total_memory() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("total_memory for zero pages is zero")
 val pmm = _make_pmm(0, 0, 0)
 expect(pmm.total_memory()).to_equal(0)
 ```
@@ -244,19 +213,13 @@ expect(pmm.total_memory()).to_equal(0)
 
 #### creates a frame with valid pfn
 
-- creates a frame with valid pfn
-   - Expected: frame.pfn equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("creates a frame with valid pfn")
 val frame = PageFrame(pfn: 0)
 expect(frame.pfn).to_equal(0)
 ```
@@ -265,19 +228,13 @@ expect(frame.pfn).to_equal(0)
 
 #### pfn maps to correct physical address
 
-- pfn maps to correct physical address
-   - Expected: addr.addr equals `10 * 4096`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("pfn maps to correct physical address")
 val frame = PageFrame(pfn: 10)
 val addr = frame.to_phys_addr()
 expect(addr.addr).to_equal(10 * 4096)
@@ -289,20 +246,13 @@ expect(addr.addr).to_equal(10 * 4096)
 
 #### alloc index 0 maps to pfn 0
 
-- alloc index 0 maps to pfn 0
-   - Expected: addr.addr equals `0`
-   - Expected: back.pfn equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("alloc index 0 maps to pfn 0")
 val frame = PageFrame(pfn: 0)
 val addr = frame.to_phys_addr()
 expect(addr.addr).to_equal(0)
@@ -314,19 +264,13 @@ expect(back.pfn).to_equal(0)
 
 #### alloc index 1023 maps to address 4190208
 
-- alloc index 1023 maps to address 4190208
-   - Expected: addr.addr equals `1023 * 4096`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("alloc index 1023 maps to address 4190208")
 val frame = PageFrame(pfn: 1023)
 val addr = frame.to_phys_addr()
 expect(addr.addr).to_equal(1023 * 4096)
@@ -338,7 +282,7 @@ expect(addr.addr).to_equal(1023 * 4096)
 
 #### decrementing free_pages simulates allocation
 
-- decrementing free_pages simulates allocation
+1. var pmm =  make pmm
    - Expected: pmm.free_pages equals `99`
    - Expected: pmm.used_pages() equals `1`
 
@@ -346,12 +290,10 @@ expect(addr.addr).to_equal(1023 * 4096)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("decrementing free_pages simulates allocation")
 var pmm = _make_pmm(0x100000, 100, 100)
 # Simulate allocating a page
 pmm.free_pages = pmm.free_pages - 1
@@ -363,7 +305,7 @@ expect(pmm.used_pages()).to_equal(1)
 
 #### incrementing free_pages simulates freeing
 
-- incrementing free_pages simulates freeing
+1. var pmm =  make pmm
    - Expected: pmm.free_pages equals `51`
    - Expected: pmm.used_pages() equals `49`
 
@@ -371,12 +313,10 @@ expect(pmm.used_pages()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("incrementing free_pages simulates freeing")
 var pmm = _make_pmm(0x100000, 100, 50)
 # Simulate freeing a page
 pmm.free_pages = pmm.free_pages + 1
@@ -388,19 +328,13 @@ expect(pmm.used_pages()).to_equal(49)
 
 #### cannot allocate when free_pages is zero
 
-- cannot allocate when free_pages is zero
-   - Expected: can_alloc is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("cannot allocate when free_pages is zero")
 val pmm = _make_pmm(0x100000, 100, 0)
 val can_alloc = pmm.free_pages > 0
 expect(can_alloc).to_equal(false)
@@ -410,7 +344,7 @@ expect(can_alloc).to_equal(false)
 
 #### free then re-alloc restores count
 
-- free then re-alloc restores count
+1. var pmm =  make pmm
    - Expected: pmm.free_pages equals `100`
    - Expected: pmm.free_pages equals `99`
 
@@ -418,12 +352,10 @@ expect(can_alloc).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("free then re-alloc restores count")
 var pmm = _make_pmm(0x100000, 100, 99)
 # Free one page
 pmm.free_pages = pmm.free_pages + 1
@@ -437,7 +369,7 @@ expect(pmm.free_pages).to_equal(99)
 
 #### next-fit hint advances on allocation
 
-- next-fit hint advances on allocation
+1. var pmm =  make pmm
    - Expected: pmm.last_alloc_index equals `1`
    - Expected: pmm.last_alloc_index equals `2`
 
@@ -445,12 +377,10 @@ expect(pmm.free_pages).to_equal(99)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("next-fit hint advances on allocation")
 var pmm = _make_pmm(0x100000, 100, 100)
 # Simulate allocation at index 0, hint moves to 1
 pmm.last_alloc_index = 1
@@ -464,19 +394,18 @@ expect(pmm.last_alloc_index).to_equal(2)
 
 #### next-fit hint wraps around
 
-- next-fit hint wraps around
+1. var pmm =  make pmm
+2. pmm last alloc index =
    - Expected: pmm.last_alloc_index equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("next-fit hint wraps around")
 var pmm = _make_pmm(0x100000, 100, 100)
 pmm.last_alloc_index = 99
 # Next alloc wraps to 0
@@ -490,19 +419,13 @@ expect(pmm.last_alloc_index).to_equal(0)
 
 #### PAGE_SIZE is 4096
 
-- PAGE_SIZE is 4096
-   - Expected: 4096 equals `4096`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("PAGE_SIZE is 4096")
 expect(4096).to_equal(4096)
 ```
 
@@ -510,19 +433,13 @@ expect(4096).to_equal(4096)
 
 #### MAX_PHYS_PAGES covers 4GB
 
-- MAX_PHYS_PAGES covers 4GB
-   - Expected: 1048576 equals `1048576`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("MAX_PHYS_PAGES covers 4GB")
 # 4GB / 4KB = 1,048,576 pages
 expect(1048576).to_equal(1048576)
 ```
@@ -531,19 +448,13 @@ expect(1048576).to_equal(1048576)
 
 #### BITMAP_SIZE_BYTES is MAX_PHYS_PAGES / 8
 
-- BITMAP_SIZE_BYTES is MAX_PHYS_PAGES / 8
-   - Expected: 131072 equals `1048576 / 8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("BITMAP_SIZE_BYTES is MAX_PHYS_PAGES / 8")
 expect(131072).to_equal(1048576 / 8)
 ```
 
@@ -561,54 +472,3 @@ expect(131072).to_equal(1048576 / 8)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `67bd32433097bb2cd62292731a2a9b2db50ff491ecdd4ebdb668e4e2a2ba1993`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `67bd32433097bb2cd62292731a2a9b2db50ff491ecdd4ebdb668e4e2a2ba1993`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `67bd32433097bb2cd62292731a2a9b2db50ff491ecdd4ebdb668e4e2a2ba1993`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/os/kernel/memory/pmm_spec.spl
-mirror: doc/06_spec/01_unit/os/kernel/memory/pmm_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/memory/pmm_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/memory/pmm_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/kernel/memory/pmm_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 21 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/kernel/memory/pmm_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initializes with zero pages' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/kernel/memory/pmm_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks total pages' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/kernel/memory/pmm_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks free pages' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,110 @@
+# @cover scripts/os/build_pid1_catalog_media.shs 100%
+# @cover scripts/qemu/qemu_rv64_pid1_catalog_test.shs 100%
+# @cover scripts/os/build_pid1_kernel_riscv64.shs 100%
+# @req REQ-005
+"""# PID1 catalogue media and QEMU handoff contract
+
+## Overview
+
+The PID1 QEMU lane must use real target service images staged at the fixed
+short FAT aliases required by early boot. It must boot the RV64 kernel entry
+which calls `os_main_prepare_pid1`; historical SMF fixture probes are not
+substitutes for this contract.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "PID1 catalogue media and QEMU handoff contract":
+    it "builds service images before invoking the strict media consumer":
+        val source = file_read("scripts/os/build_pid1_catalog_media.shs")
+        expect(source).to_contain("build_root_service_catalog.shs")
+        expect(source).to_contain("pid1_catalog_disk_bake.spl")
+        expect(source).to_contain("SIMPLEOS_PID1_CATALOG_TARGET")
+        expect(source).to_contain("BAKE_COMPILER=\"${SIMPLE_BAKE_COMPILER:-bin/simple}\"")
+        expect(source).to_contain("SIMPLE_BAKE_COMPILER is not executable")
+        expect(source).to_contain("SIMPLE_BAKE_COMPILER does not support run")
+        expect(source).to_contain("\"$BAKE_COMPILER\" run --help")
+        expect(source).to_contain("\"$BAKE_COMPILER\" run src/os/port/pid1_catalog_disk_bake.spl")
+        expect(source).to_contain("SUCCESS: PID1 catalogue media ready")
+
+    it "uses the os_main RV64 boot entry and NVMe-backed catalogue disk":
+        val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
+        expect(source).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
+        expect(source).to_contain("target=riscv64-unknown-none")
+        expect(source).to_contain("-device \"nvme,drive=pid1root")
+        expect(source).to_contain("[os_main] Root filesystem mounted")
+        expect(source).to_contain("[os_main] PID1 prepared pid=")
+        expect(source).to_contain("[pid1] userspace handoff pid=")
+
+    it "builds the real RV64 PID1 kernel instead of a userspace smoke payload":
+        val source = file_read("scripts/os/build_pid1_kernel_riscv64.shs")
+        expect(source).to_contain("SIMPLE_BUILD_COMPILER must name the admitted fresh Stage2 compiler")
+        expect(source).to_contain("native-build --target \"$TARGET\" --help")
+        expect(source).to_contain("grep -Fq -- '--target'")
+        expect(source).to_contain("grep -Fq -- '--linker-script'")
+        expect(source).to_contain("--source build/os/generated --source src/os --source src/lib")
+        expect(source).to_contain("--entry \"$ENTRY\"")
+        expect(source).to_contain("--target \"$TARGET\"")
+        expect(source).to_contain("--linker-script src/os/kernel/arch/riscv64/linker.ld")
+        expect(source).to_contain("SIMPLE_BOOT_MINIMAL=1")
+        expect(source).to_contain("target=riscv64-unknown-none")
+        expect(source).to_contain("entry=src/os/kernel/arch/riscv64/boot.spl")
+        expect(source).to_contain("os_main_prepare_pid1")
+
+    it "fails closed unless the ELF entry address is the canonical kernel boot function":
+        val source = file_read("scripts/os/build_pid1_kernel_riscv64.shs")
+        val boot = file_read("src/os/kernel/arch/riscv64/boot.spl")
+        val native_linker = file_read("src/compiler_rust/compiler/src/pipeline/native_project/linker.rs")
+        expect(source).to_contain("KERNEL_BOOT_START='src__os__kernel__arch__riscv64__boot__spl_start'")
+        expect(source).to_contain("ELF_ENTRY_HEX")
+        expect(source).to_contain("BOOT_START_HEX")
+        expect(source).to_contain("RV64 ELF entry $ELF_ENTRY_HEX is not canonical kernel boot")
+        expect(source).to_contain("kernel_boot_entry=$KERNEL_BOOT_START")
+        expect(boot).to_contain("fn spl_start():")
+        expect(boot).to_contain("generic `_start` symbols")
+        expect(native_linker).to_contain("let configured_entry_alias = configured_raw_start_alias.or(configured_spl_start_alias)")
+        expect(native_linker).to_contain("cmd.arg(format!(\"--entry={}\", sym));")
+
+    it "pins the field guard runtime ABI that a fresh RV64 compiler must declare":
+        val runtime_specs = file_read("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val field_lowering = file_read("src/compiler_rust/compiler/src/codegen/instr/fields.rs")
+        expect(runtime_specs).to_contain("RuntimeFuncSpec::new(\"rt_struct_receiver_valid\", &[I64, I64, I64], &[I8])")
+        expect(field_lowering).to_contain("call_runtime_3(ctx, builder, \"rt_struct_receiver_valid\", receiver, offset, width)")
+
+    it "uses dedicated UART capture and a PCI virtio network backend":
+        val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
+        expect(source.contains("-nographic")).to_equal(false)
+        expect(source).to_contain("-display none")
+        expect(source).to_contain("-chardev \"file,id=pid1_uart,path=$SERIAL_LOG,append=off\"")
+        expect(source).to_contain("-serial chardev:pid1_uart")
+        expect(source).to_contain("-netdev user,id=pid1net")
+        expect(source).to_contain("-device virtio-net-pci,netdev=pid1net")
+
+    it "fails closed until lifecycle instrumentation is emitted by trusted runtime owners":
+        val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
+        expect(source).to_contain("runtime_lifecycle_instrumentation_present")
+        expect(source).to_contain("EVIDENCE INSTRUMENTATION MISSING")
+        expect(source).to_contain("[pid1] catalog-launch id=1 service=vfs pid=")
+        expect(source).to_contain("[pid1] endpoint-ready service=vfs")
+        expect(source).to_contain("[pid1] service-crash service=net")
+        expect(source).to_contain("[pid1] service-restart service=net")
+        expect(source).to_contain("[kernel] job-teardown service=net revoked-cspaces=")
+        expect(source).to_contain("serial_has_required_lifecycle_evidence")
+
+    it "requires explicitly baked test media before expecting a net fault lifecycle":
+        val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
+        val media = file_read("scripts/os/build_pid1_catalog_media.shs")
+        expect(source).to_contain("--test-net-fault-after-ready")
+        expect(source).to_contain("strict PID1 lifecycle evidence requires --test-net-fault-after-ready media")
+        expect(source).to_contain("FAULTNETCFG")
+        expect(media).to_contain("SIMPLEOS_PID1_CATALOG_TEST_NET_FAULT_AFTER_READY")
+        expect(media).to_contain("--test-net-fault-after-ready")
+
+    it "requires physical short aliases instead of accepting a marker-only image":
+        val source = file_read("scripts/qemu/qemu_rv64_pid1_catalog_test.shs")
+        expect(source).to_contain("INIT    SMF")
+        expect(source).to_contain("VFS     SMF")
+        expect(source).to_contain("NET     SMF")
+        expect(source).to_contain("HTTP    SMF")
+        expect(source).to_contain("PID1 SERVICE LIFECYCLE PASSED")

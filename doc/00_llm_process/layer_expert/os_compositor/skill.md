@@ -3,19 +3,10 @@
 ## Role
 
 Own layer-specific process knowledge for `src/os/compositor/` — the WM
-compositor layer: the scene/CSS projection lane (`wm_scene.spl`), the host
-compositor core (`host_compositor_core.spl` — `class HostCompositor`, WM state,
-hit-test, focus, and since 2026-08-04 GUI-session content dispatch), platform
+compositor layer: the scene/CSS projection lane (`wm_scene.spl`), the shared
+host-compositor bootstrap boundary (`host_compositor_entry.spl`), platform
 hosted backends (`hosted_backend_*.spl`), and the shared web-render surface
 bridge (`web_render_surface.spl`, `simple_web_window_renderer.spl`).
-
-> **Stale-reference warning:** `host_compositor_entry.spl` is now a **6-line
-> re-export facade only** (`use os.compositor.host_compositor_core.*` +
-> `host_compositor_bootstrap.*`). Any doc citing `host_compositor_entry.spl:NNN`
-> for real logic is out of date — the code moved to `host_compositor_core.spl`.
-> The production winit entry imports the core directly so optional
-> filesystem/background and alternate-backend deps stay out of its native entry
-> closure.
 
 ## Pipeline Links
 
@@ -29,7 +20,7 @@ bridge (`web_render_surface.spl`, `simple_web_window_renderer.spl`).
   `render_scene_to_backend`, `scene_to_html`,
   `WM_SCENE_CSS_RENDER_PIXEL_CAP` = 10000 — above this, the CSS engine is
   skipped for Metal fast-lane or a themed direct-rect fallback).
-- Hosted chrome lane: `host_compositor_core.spl` (`HostCompositor` :536,
+- Hosted chrome lane: `host_compositor_entry.spl` (`HostCompositor`,
   `HeadlessHostCompositorBackend`, `HostedWindow`, `render_frame`,
   `host_chrome_scene_html`, `host_chrome_scene_fingerprint`,
   `host_wm_force_direct_chrome` / `host_wm_chrome_force_direct` to pin the
@@ -46,10 +37,7 @@ bridge (`web_render_surface.spl`, `simple_web_window_renderer.spl`).
   [doc/00_llm_process/feature_expert/wm_gui_window_drawing/skill.md](../../feature_expert/wm_gui_window_drawing/skill.md),
   [doc/00_llm_process/feature_expert/rendering_inside_rendering/skill.md](../../feature_expert/rendering_inside_rendering/skill.md)
   (nested `WmContentFrame` compositing: `parent_window_id`/offsets, `WM_CONTENT_ORIGIN_GUI`,
-  producers `wm_gui_content_frame_from_pixels` / `simple_web_child_content_frame_cached`),
-  [doc/00_llm_process/feature_expert/simpleos_wm_qemu_evidence/skill.md](../../feature_expert/simpleos_wm_qemu_evidence/skill.md)
-  (QEMU gate consuming this layer's frames + provenance),
-  [doc/00_llm_process/feature_expert/interaction_input_routing/skill.md](../../feature_expert/interaction_input_routing/skill.md).
+  producers `wm_gui_content_frame_from_pixels` / `simple_web_child_content_frame_cached`).
 
 ## Update Rule
 
@@ -57,7 +45,7 @@ When this layer's public contract, source ownership, tests, architecture, or
 verification requirements change, update this skill with the new links and
 handoff notes.
 
-## Current Frame and Font Ownership (2026-07-14)
+## Handoff Notes (2026-07-03)
 
 - The canonical font-capable frame route is `SharedWmScene ->
   DrawIrComposition -> Engine2D`. `FontRenderBatch` remains transient Engine2D
@@ -115,13 +103,11 @@ level-gated probes. See log-retention policy
   has no dedicated revision field by design — `composition_id` doubles as
   the revision key). `draw_ir_patch_commands_equal` is the round-trip
   oracle. Documented, non-silent limitation: only kind/component_id/
-  parent_id/geometry/color/text_value/computed_style/glyph_run are
-  diffed/compared; glyph-only changes reuse UpdateStyle's full-command carrier —
-  border_rect/content_rect/hit_rect/clip_rect/image_uri/edge/points are not
-  yet patchable; `apply()` collapses the result into the
+  parent_id/geometry/color/text_value/computed_style are diffed/compared —
+  border_rect/content_rect/hit_rect/clip_rect/image_uri/edge/points/
+  glyph_run are not yet patchable; `apply()` collapses the result into the
   base composition's first batch (multi-batch structural preservation is
-  out of scope this slice). Spec: `draw_ir_patch_spec.spl` (13 active;
-  current runner execution pending bootstrap repair).
+  out of scope this slice). Spec: `draw_ir_patch_spec.spl` (12/12).
 - **`simple test` vs `simple run` divergence on `text?`-lookup + equality
   (bug filed, workaround applied in new code only):** a "loop, return
   first match as `T?`, compare with `== nil`" pattern gives a DIFFERENT
@@ -153,10 +139,6 @@ level-gated probes. See log-retention policy
   surface-agnostic primitives only — no compositor adapter consumes them
   yet. Don't assume WM pointer dispatch or physics has moved onto the new
   core until an adapter lands here.
-  **Partially superseded 2026-08-04:** hosted GUI pointer/key/text dispatch now
-  lives in this layer (`HostCompositor.dispatch_gui_*`) — see the 2026-08-04
-  session update. It uses `UISession` primitives directly, not the new
-  interaction-input-routing core; physics remains unwired.
 
 ## Session update 2026-08-04 (HostCompositor owns GUI-session content dispatch)
 
@@ -401,20 +383,5 @@ persist it.**
   `CaptureCompositorBackend` and `FakeCompositorBackend` are test-only
   (module-global counters, not a readback buffer) and should not be reused
   outside `host_compositor_entry_spec.spl`.
-
-## Theme snapshot access + frame provenance (2026-07-26)
-
-Never consume `active_wm_theme_render_snapshot()` (Option return) on native
-lanes — its Some payload masks to null (instruction-proven at
-`_wm_draw_ir_window_revision`). Use the owning-module accessors in
-`wm_chrome_theme.spl`: `active_wm_theme_id()`,
-`active_wm_theme_material_sha256()`, `active_theme_solid_fallback_rgba()`,
-or `active_wm_theme_snapshot_present()` + `_unchecked()` for the full
-aggregate (bind it to a name other than `snapshot`). The guest WM now
-presents frames end-to-end (`content-presented` with 64-char material
-digest); its remaining lane gap is app provisioning — `[production-
-readiness]` needs 3 spawned app surfaces and `make_os_disk.shs` mode 26
-stages no app binaries. Full channel rules:
-`doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

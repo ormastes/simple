@@ -1,0 +1,94 @@
+# This is the ONLY workflow holding main-cache writer credentials.
+name: cache-main-writer
+
+# Mode A (design 15.2): build the exact main commit, then publish signed action
+# mappings for what THIS job built. No attested relabeling of branch results.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only by default. The job needs no write scope on the repository at all;
+# its only write authority is against the cache gateway, via a secret.
+permissions:
+  contents: read
+
+# Never run two main publishers at once: concurrent publishers can race on the
+# same action mapping. Do NOT cancel in progress -- a cancelled publisher can
+# leave a partial mapping set, and a completed one is always safe.
+concurrency:
+  group: cache-main-writer
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # A fork can never reach this job: `push` to main only fires on the
+    # upstream repository. Stated explicitly so the property is auditable.
+    if: github.repository == 'ormastes/simple'
+    steps:
+      - name: Checkout the exact main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          # Full history: the promotion gate needs a real merge-base check
+          # against origin/main, which a shallow clone cannot answer.
+          fetch-depth: 0
+
+      - name: Preflight (fail closed on missing secrets)
+        id: preflight
+        env:
+          CACHE_GATEWAY_URL: ${{ secrets.CACHE_GATEWAY_URL }}
+          CACHE_GATEWAY_TOKEN_ID: ${{ secrets.CACHE_GATEWAY_TOKEN_ID }}
+          CACHE_GATEWAY_SECRET: ${{ secrets.CACHE_GATEWAY_SECRET }}
+          PROMOTION_SIGNING_KEY: ${{ secrets.PROMOTION_SIGNING_KEY }}
+        run: |
+          set -eu
+          OUT="$(sh scripts/ci/cache-preflight.shs trusted_main_ci)"
+          printf '%s\n' "$OUT"
+          VERDICT="$(printf '%s\n' "$OUT" | tail -1)"
+          if [ "$VERDICT" = "VERDICT: write-main" ]; then
+            echo "writer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "writer=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::cache publishing disabled for this run: $VERDICT"
+          fi
+
+      - name: Record the workflow digest
+        id: wf
+        run: |
+          set -eu
+          DIGEST="$(git hash-object .github/workflows/cache-main-writer.yml)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Build the exact main commit
+        env:
+          SIMPLE_CACHE_MAPPINGS_OUT: ${{ runner.temp }}/cache-mappings.txt
+        run: |
+          set -eu
+          bin/simple build
+
+      # Publishing is deliberately the LAST step and is best-effort: it cannot
+      # fail the build, because the build has already succeeded by this point
+      # and a cache upload is not part of correctness.
+      - name: Publish signed main action mappings
+        if: steps.preflight.outputs.writer == 'true'
+        continue-on-error: true
+        env:
+          CACHE_GATEWAY_URL: ${{ secrets.CACHE_GATEWAY_URL }}
+          CACHE_GATEWAY_TOKEN_ID: ${{ secrets.CACHE_GATEWAY_TOKEN_ID }}
+          CACHE_GATEWAY_SECRET: ${{ secrets.CACHE_GATEWAY_SECRET }}
+          CACHE_GATEWAY_ROOT: ${{ secrets.CACHE_GATEWAY_ROOT }}
+          PROMOTION_SIGNING_KEY: ${{ secrets.PROMOTION_SIGNING_KEY }}
+          CACHE_WORKFLOW_DIGEST: ${{ steps.wf.outputs.digest }}
+          CACHE_TARGET_PROFILE: ${{ secrets.CACHE_TARGET_PROFILE }}
+          CACHE_TOOLCHAIN_DIGEST: ${{ steps.wf.outputs.digest }}
+          PROMOTION_MERGE_STRATEGY: fast_forward
+        run: |
+          set -eu
+          sh scripts/ci/cache-publish-main.shs "${{ runner.temp }}/cache-mappings.txt"
+
+      - name: Authority audit (proves developers cannot write main)
+        run: |
+          set -eu
+          bin/simple run src/app/cache_gateway/main.spl audit

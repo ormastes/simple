@@ -4,8 +4,7 @@
 - **Lane:** MATCHER (reported by lane DBDUR, seconded by lane SPECFIX)
 - **Severity:** High — rejected a *correct* value, and the mirror matcher passed a
   *wrong* one
-- Status: CLOSED (not reproducible)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** FIXED in the seed interpreter builtin
 
 ## Symptom
 

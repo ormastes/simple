@@ -1,17 +1,18 @@
-# Claude Full Insights Command
+# Claude Full Insights Command Spec
 
-> Focused parity for upstream `commands/insights.ts`.
+> Focused source-synchronized parity for the Claude-full insights command.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+## Coverage
 
-<details>
-<summary>Full Scenario Manual</summary>
+- Command metadata: `local-jsx`, `insights`, visible, interactive-only.
+- Source parity floor: `insights.spl` is at least 3200 lines and reports 3200 modeled upstream lines.
+- Metrics: analyzes only sessions from the last 30 days.
+- Report generation: emits HTML, report path, browser-open success and fallback.
+- Failure branches: no local sessions, noninteractive mode, and write failure.
 
-# Claude Full Insights Command
+## Evidence
 
-Focused parity for upstream `commands/insights.ts`.
+`bin/simple test test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl --mode=interpreter`
 
 ## At a Glance
 
@@ -293,80 +294,3 @@ expect(writeFailure.metrics.topTaskKind).to_equal("debugging")
 ```
 
 </details>
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-LLM-CARET-HIDDEN-008`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `70c527178761162ad574d50a11e66c87178017bf34fd25926369e74251d0c3ae`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `70c527178761162ad574d50a11e66c87178017bf34fd25926369e74251d0c3ae`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `70c527178761162ad574d50a11e66c87178017bf34fd25926369e74251d0c3ae`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **83/100**; effective score: **83/100**; blockers: **0**.
-
-SSpec documentization score: 83/100
-source: test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl
-mirror: doc/06_spec/03_system/tools/llm/claude_full/commands/insights_command_spec.md (current)
-findings: 10 blockers: 0
-  narrative=100 structure=80 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/tools/llm/claude_full/commands/insights_command_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/llm/claude_full/commands/insights_command_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 42 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:37:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep command metadata and source parity floor' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep command metadata and source parity floor' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:58:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should summarize only the last thirty days of local sessions' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should summarize only the last thirty days of local sessions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:84:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should generate report HTML and handle browser fallback' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should generate report HTML and handle browser fallback' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:104:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject no-data noninteractive and write-failure states' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

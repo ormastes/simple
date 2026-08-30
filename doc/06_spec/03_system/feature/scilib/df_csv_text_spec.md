@@ -2,6 +2,29 @@
 
 > Validates pure CSV text import/export for simple numeric DataFrames.
 
+<!-- sdn-diagram:id=df_csv_text_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=df_csv_text_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+df_csv_text_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=df_csv_text_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -23,7 +46,7 @@ Validates pure CSV text import/export for simple numeric DataFrames.
 | Plan | doc/03_plan/agent_tasks/science_math_lib_set.md |
 | Design | doc/05_design/science_math_lib_set.md |
 | Source | `test/03_system/feature/scilib/df_csv_text_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates pure CSV text import/export for simple numeric DataFrames.
@@ -34,26 +57,13 @@ Validates pure CSV text import/export for simple numeric DataFrames.
 
 #### parses numeric CSV text into F64 columns
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- parses numeric CSV text into F64 columns
-   - Expected: df.num_rows() equals `Index.new(2)`
-   - Expected: df.num_cols() equals `Index.new(2)`
-   - Expected: df.col(Symbol.from("x")).unwrap().values.flat_f64(0) equals `Float64.new(1.5)`
-   - Expected: df.col(Symbol.from("y")).unwrap().values.flat_f64(1) equals `Float64.new(4.0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses numeric CSV text into F64 columns")
 val df = from_csv_text("x,y\n1.5,2.5\n3.0,4.0").unwrap()
 expect(df.num_rows()).to_equal(Index.new(2))
 expect(df.num_cols()).to_equal(Index.new(2))
@@ -65,22 +75,13 @@ expect(df.col(Symbol.from("y")).unwrap().values.flat_f64(1)).to_equal(Float64.ne
 
 #### infers integer CSV columns as I64
 
-- infers integer CSV columns as I64
-   - Expected: id.dtype equals `DType.I64`
-   - Expected: score.dtype equals `DType.F64`
-   - Expected: id.values.flat_i64(1) equals `Int64.new(2)`
-   - Expected: score.values.flat_f64(0) equals `Float64.new(10.5)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("infers integer CSV columns as I64")
 val df = from_csv_text("id,score\n1,10.5\n2,20.25").unwrap()
 val id = df.col(Symbol.from("id")).unwrap()
 val score = df.col(Symbol.from("score")).unwrap()
@@ -94,7 +95,9 @@ expect(score.values.flat_f64(0)).to_equal(Float64.new(10.5))
 
 #### exports a DataFrame to CSV text and parses it back
 
-- exports a DataFrame to CSV text and parses it back
+1. SeriesErased F64Series
+2. SeriesErased I64Series
+3. ]) unwrap
    - Expected: csv.starts_with("x,y\n") is true
    - Expected: parsed.col(Symbol.from("x")).unwrap().values.flat_f64(1) equals `Float64.new(3.0)`
    - Expected: parsed.col(Symbol.from("y")).unwrap().dtype equals `DType.I64`
@@ -104,12 +107,10 @@ expect(score.values.flat_f64(0)).to_equal(Float64.new(10.5))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exports a DataFrame to CSV text and parses it back")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series(name: Symbol.from("x"), values: array([Float64.new(1.0), Float64.new(3.0)]), dtype: DType.F64, missing: [Bool.new(false), Bool.new(false)])),
     SeriesErased.I64Series(Series(name: Symbol.from("y"), values: array_i64([Int64.new(2), Int64.new(4)]), dtype: DType.I64, missing: [Bool.new(false), Bool.new(false)]))
@@ -126,20 +127,13 @@ expect(parsed.col(Symbol.from("y")).unwrap().values.flat_i64(1)).to_equal(Int64.
 
 #### round-trips blank CSV cells as missing values
 
-- round-trips blank CSV cells as missing values
-   - Expected: df.col(Symbol.from("y")).unwrap().is_missing(Index.new(0)).unwrap() is true
-   - Expected: df.col(Symbol.from("x")).unwrap().is_missing(Index.new(1)).unwrap() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("round-trips blank CSV cells as missing values")
 val df = from_csv_text("x,y\n1.0,\n,4.0").unwrap()
 expect(df.col(Symbol.from("y")).unwrap().is_missing(Index.new(0)).unwrap()).to_equal(true)
 expect(df.col(Symbol.from("x")).unwrap().is_missing(Index.new(1)).unwrap()).to_equal(true)
@@ -152,21 +146,13 @@ expect(csv).to_contain(",4.0")
 
 #### returns errors for malformed CSV
 
-- returns errors for malformed CSV
-   - Expected: from_csv_text("").is_err() is true
-   - Expected: from_csv_text("x,y\n1.0").is_err() is true
-   - Expected: from_csv_text("x\nnope").is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns errors for malformed CSV")
 expect(from_csv_text("").is_err()).to_equal(true)
 expect(from_csv_text("x,y\n1.0").is_err()).to_equal(true)
 expect(from_csv_text("x\nnope").is_err()).to_equal(true)
@@ -187,56 +173,8 @@ expect(from_csv_text("x\nnope").is_err()).to_equal(true)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/science_math_lib_set.md`
-- **Design:** `doc/05_design/science_math_lib_set.md`
+- **Plan:** [doc/03_plan/agent_tasks/science_math_lib_set.md](doc/03_plan/agent_tasks/science_math_lib_set.md)
+- **Design:** [doc/05_design/science_math_lib_set.md](doc/05_design/science_math_lib_set.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `55e5c7a859960f1adeb83ba11f86d42f8a1cd2eaf4b9267e69cd5fa49537709b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `55e5c7a859960f1adeb83ba11f86d42f8a1cd2eaf4b9267e69cd5fa49537709b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `55e5c7a859960f1adeb83ba11f86d42f8a1cd2eaf4b9267e69cd5fa49537709b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/scilib/df_csv_text_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/df_csv_text_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/df_csv_text_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/df_csv_text_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/df_csv_text_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses numeric CSV text into F64 columns' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/df_csv_text_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'infers integer CSV columns as I64' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/df_csv_text_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exports a DataFrame to CSV text and parses it back' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

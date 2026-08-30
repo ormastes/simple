@@ -2,6 +2,30 @@
 
 > Tests for TextEditor: construction, insert_char, delete_char, newline,
 
+<!-- sdn-diagram:id=editor_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=editor_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+editor_spec -> std
+editor_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=editor_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 47 | 47 | 0 | 0 |
@@ -20,7 +44,7 @@ Tests for TextEditor: construction, insert_char, delete_char, newline,
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/apps/editor/editor_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests for TextEditor: construction, insert_char, delete_char, newline,
@@ -35,20 +59,13 @@ Tests for TextEditor: construction, insert_char, delete_char, newline,
 
 #### has Normal variant
 
-- has Normal variant
-   - Expected: mode equals `EditorMode.Normal`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("has Normal variant")
-"""EditorMode.Normal exists and equals itself."""
 val mode = EditorMode.Normal
 expect(mode).to_equal(EditorMode.Normal)
 ```
@@ -57,19 +74,13 @@ expect(mode).to_equal(EditorMode.Normal)
 
 #### has Insert variant
 
-- has Insert variant
-   - Expected: mode equals `EditorMode.Insert`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("has Insert variant")
 val mode = EditorMode.Insert
 expect(mode).to_equal(EditorMode.Insert)
 ```
@@ -78,19 +89,13 @@ expect(mode).to_equal(EditorMode.Insert)
 
 #### has Command variant
 
-- has Command variant
-   - Expected: mode equals `EditorMode.Command`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("has Command variant")
 val mode = EditorMode.Command
 expect(mode).to_equal(EditorMode.Command)
 ```
@@ -99,19 +104,13 @@ expect(mode).to_equal(EditorMode.Command)
 
 #### mode_name returns NORMAL
 
-- mode_name returns NORMAL
-   - Expected: name equals `NORMAL`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("mode_name returns NORMAL")
 val name = mode_name(EditorMode.Normal)
 expect(name).to_equal("NORMAL")
 ```
@@ -120,19 +119,13 @@ expect(name).to_equal("NORMAL")
 
 #### mode_name returns INSERT
 
-- mode_name returns INSERT
-   - Expected: name equals `INSERT`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("mode_name returns INSERT")
 val name = mode_name(EditorMode.Insert)
 expect(name).to_equal("INSERT")
 ```
@@ -141,19 +134,13 @@ expect(name).to_equal("INSERT")
 
 #### mode_name returns COMMAND
 
-- mode_name returns COMMAND
-   - Expected: name equals `COMMAND`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("mode_name returns COMMAND")
 val name = mode_name(EditorMode.Command)
 expect(name).to_equal("COMMAND")
 ```
@@ -166,20 +153,13 @@ expect(name).to_equal("COMMAND")
 
 #### starts with one empty line
 
-- starts with one empty line
-   - Expected: ed.lines.len() equals `1`
-   - Expected: ed.lines[0] equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with one empty line")
 val ed = TextEditor.new()
 expect(ed.lines.len()).to_equal(1)
 expect(ed.lines[0]).to_equal("")
@@ -189,19 +169,13 @@ expect(ed.lines[0]).to_equal("")
 
 #### starts with cursor at row 0
 
-- starts with cursor at row 0
-   - Expected: ed.cursor_row equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with cursor at row 0")
 val ed = TextEditor.new()
 expect(ed.cursor_row).to_equal(0)
 ```
@@ -210,19 +184,13 @@ expect(ed.cursor_row).to_equal(0)
 
 #### starts with cursor at col 0
 
-- starts with cursor at col 0
-   - Expected: ed.cursor_col equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with cursor at col 0")
 val ed = TextEditor.new()
 expect(ed.cursor_col).to_equal(0)
 ```
@@ -231,19 +199,13 @@ expect(ed.cursor_col).to_equal(0)
 
 #### starts with scroll_row at 0
 
-- starts with scroll_row at 0
-   - Expected: ed.scroll_row equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with scroll_row at 0")
 val ed = TextEditor.new()
 expect(ed.scroll_row).to_equal(0)
 ```
@@ -252,18 +214,13 @@ expect(ed.scroll_row).to_equal(0)
 
 #### starts with no file_path
 
-- starts with no file_path
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with no file_path")
 val ed = TextEditor.new()
 expect(ed.file_path).to_be_nil
 ```
@@ -272,19 +229,13 @@ expect(ed.file_path).to_be_nil
 
 #### starts not modified
 
-- starts not modified
-   - Expected: ed.modified is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts not modified")
 val ed = TextEditor.new()
 expect(ed.modified).to_equal(false)
 ```
@@ -293,19 +244,13 @@ expect(ed.modified).to_equal(false)
 
 #### starts in Normal mode
 
-- starts in Normal mode
-   - Expected: ed.mode equals `EditorMode.Normal`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts in Normal mode")
 val ed = TextEditor.new()
 expect(ed.mode).to_equal(EditorMode.Normal)
 ```
@@ -314,19 +259,13 @@ expect(ed.mode).to_equal(EditorMode.Normal)
 
 #### starts with empty command_buffer
 
-- starts with empty command_buffer
-   - Expected: ed.command_buffer equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with empty command_buffer")
 val ed = TextEditor.new()
 expect(ed.command_buffer).to_equal("")
 ```
@@ -335,19 +274,13 @@ expect(ed.command_buffer).to_equal("")
 
 #### starts with empty yank_buffer
 
-- starts with empty yank_buffer
-   - Expected: ed.yank_buffer.len() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with empty yank_buffer")
 val ed = TextEditor.new()
 expect(ed.yank_buffer.len()).to_equal(0)
 ```
@@ -356,19 +289,13 @@ expect(ed.yank_buffer.len()).to_equal(0)
 
 #### starts with Ready status message
 
-- starts with Ready status message
-   - Expected: ed.status_message equals `Ready`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("starts with Ready status message")
 val ed = TextEditor.new()
 expect(ed.status_message).to_equal("Ready")
 ```
@@ -377,19 +304,13 @@ expect(ed.status_message).to_equal("Ready")
 
 #### has default visible_rows of 20
 
-- has default visible_rows of 20
-   - Expected: ed.visible_rows equals `20`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("has default visible_rows of 20")
 val ed = TextEditor.new()
 expect(ed.visible_rows).to_equal(20)
 ```
@@ -398,19 +319,13 @@ expect(ed.visible_rows).to_equal(20)
 
 #### has default visible_cols of 80
 
-- has default visible_cols of 80
-   - Expected: ed.visible_cols equals `80`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("has default visible_cols of 80")
 val ed = TextEditor.new()
 expect(ed.visible_cols).to_equal(80)
 ```
@@ -419,18 +334,13 @@ expect(ed.visible_cols).to_equal(80)
 
 #### has nil vfs by default
 
-- has nil vfs by default
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("has nil vfs by default")
 val ed = TextEditor.new()
 expect(ed.vfs).to_be_nil
 ```
@@ -441,18 +351,17 @@ expect(ed.vfs).to_be_nil
 
 #### adds character at cursor position
 
-- adds character at cursor position
+1. var ed = TextEditor new
+2. ed insert char
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("adds character at cursor position")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -463,19 +372,18 @@ expect(ed.lines[0]).to_contain("A")
 
 #### advances cursor after insert
 
-- advances cursor after insert
+1. var ed = TextEditor new
+2. ed insert char
    - Expected: ed.cursor_col equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("advances cursor after insert")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -486,19 +394,19 @@ expect(ed.cursor_col).to_equal(1)
 
 #### inserts multiple characters sequentially
 
-- inserts multiple characters sequentially
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
    - Expected: ed.cursor_col equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("inserts multiple characters sequentially")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("H")
@@ -511,19 +419,18 @@ expect(ed.lines[0]).to_start_with("Hi")
 
 #### marks document as modified
 
-- marks document as modified
+1. var ed = TextEditor new
+2. ed insert char
    - Expected: ed.modified is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("marks document as modified")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("X")
@@ -534,19 +441,20 @@ expect(ed.modified).to_equal(true)
 
 #### inserts at middle of existing text
 
-- inserts at middle of existing text
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
+4. ed insert char
    - Expected: ed.lines[0] equals `ABC`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("inserts at middle of existing text")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -562,18 +470,19 @@ expect(ed.lines[0]).to_equal("ABC")
 
 #### removes character at cursor
 
-- removes character at cursor
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
+4. ed delete char
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("removes character at cursor")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -587,19 +496,19 @@ expect(ed.lines[0]).to_start_with("B")
 
 #### marks document as modified
 
-- marks document as modified
+1. var ed = TextEditor new
+2. ed insert char
+3. ed delete char
    - Expected: ed.modified is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("marks document as modified")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("X")
@@ -614,19 +523,20 @@ expect(ed.modified).to_equal(true)
 
 #### deletes character before cursor (backspace)
 
-- deletes character before cursor (backspace)
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
+4. ed delete char before
    - Expected: ed.cursor_col equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("deletes character before cursor (backspace)")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -639,7 +549,8 @@ expect(ed.cursor_col).to_equal(1)
 
 #### does nothing when cursor at column 0 row 0
 
-- does nothing when cursor at column 0 row 0
+1. var ed = TextEditor new
+2. ed delete char before
    - Expected: ed.cursor_col equals `0`
    - Expected: ed.cursor_row equals `0`
 
@@ -647,12 +558,10 @@ expect(ed.cursor_col).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("does nothing when cursor at column 0 row 0")
 var ed = TextEditor.new()
 ed.delete_char_before()
 expect(ed.cursor_col).to_equal(0)
@@ -663,7 +572,11 @@ expect(ed.cursor_row).to_equal(0)
 
 #### joins with previous line when at column 0
 
-- joins with previous line when at column 0
+1. var ed = TextEditor new
+2. ed insert char
+3. ed newline
+4. ed insert char
+5. ed delete char before
    - Expected: ed.cursor_row equals `0`
    - Expected: ed.lines.len() equals `1`
 
@@ -671,12 +584,10 @@ expect(ed.cursor_row).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("joins with previous line when at column 0")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -694,7 +605,10 @@ expect(ed.lines.len()).to_equal(1)
 
 #### splits line at cursor
 
-- splits line at cursor
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
+4. ed newline
    - Expected: ed.lines.len() equals `2`
    - Expected: ed.lines[0] equals `A`
 
@@ -702,12 +616,10 @@ expect(ed.lines.len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("splits line at cursor")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -723,19 +635,19 @@ expect(ed.lines[1]).to_start_with("B")
 
 #### moves cursor to next row
 
-- moves cursor to next row
+1. var ed = TextEditor new
+2. ed insert char
+3. ed newline
    - Expected: ed.cursor_row equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("moves cursor to next row")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("X")
@@ -747,19 +659,20 @@ expect(ed.cursor_row).to_equal(1)
 
 #### resets cursor col to 0
 
-- resets cursor col to 0
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
+4. ed newline
    - Expected: ed.cursor_col equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resets cursor col to 0")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("X")
@@ -772,19 +685,18 @@ expect(ed.cursor_col).to_equal(0)
 
 #### marks document as modified
 
-- marks document as modified
+1. var ed = TextEditor new
+2. ed newline
    - Expected: ed.modified is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("marks document as modified")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.newline()
@@ -795,7 +707,9 @@ expect(ed.modified).to_equal(true)
 
 #### creates empty line when at end of text
 
-- creates empty line when at end of text
+1. var ed = TextEditor new
+2. ed insert char
+3. ed newline
    - Expected: ed.lines.len() equals `2`
    - Expected: ed.lines[1] equals ``
 
@@ -803,12 +717,10 @@ expect(ed.modified).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("creates empty line when at end of text")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("Z")
@@ -825,19 +737,18 @@ expect(ed.lines[1]).to_equal("")
 
 #### switches to Insert on 'i' key
 
-- switches to Insert on 'i' key
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.mode equals `EditorMode.Insert`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("switches to Insert on 'i' key")
 var ed = TextEditor.new()
 ed.handle_normal_key("i")
 expect(ed.mode).to_equal(EditorMode.Insert)
@@ -847,19 +758,18 @@ expect(ed.mode).to_equal(EditorMode.Insert)
 
 #### sets INSERT status message
 
-- sets INSERT status message
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.status_message equals `-- INSERT --`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("sets INSERT status message")
 var ed = TextEditor.new()
 ed.handle_normal_key("i")
 expect(ed.status_message).to_equal("-- INSERT --")
@@ -869,19 +779,18 @@ expect(ed.status_message).to_equal("-- INSERT --")
 
 #### switches to Insert on 'a' key (append)
 
-- switches to Insert on 'a' key (append)
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.mode equals `EditorMode.Insert`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("switches to Insert on 'a' key (append)")
 var ed = TextEditor.new()
 ed.handle_normal_key("a")
 expect(ed.mode).to_equal(EditorMode.Insert)
@@ -891,19 +800,18 @@ expect(ed.mode).to_equal(EditorMode.Insert)
 
 #### switches to Insert on 'o' key (open below)
 
-- switches to Insert on 'o' key (open below)
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.mode equals `EditorMode.Insert`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("switches to Insert on 'o' key (open below)")
 var ed = TextEditor.new()
 ed.handle_normal_key("o")
 expect(ed.mode).to_equal(EditorMode.Insert)
@@ -915,19 +823,18 @@ expect(ed.mode).to_equal(EditorMode.Insert)
 
 #### switches to Normal on escape
 
-- switches to Normal on escape
+1. var ed = TextEditor new
+2. ed handle insert key
    - Expected: ed.mode equals `EditorMode.Normal`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("switches to Normal on escape")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.handle_insert_key("escape")
@@ -938,19 +845,18 @@ expect(ed.mode).to_equal(EditorMode.Normal)
 
 #### clears status message on escape
 
-- clears status message on escape
+1. var ed = TextEditor new
+2. ed handle insert key
    - Expected: ed.status_message equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("clears status message on escape")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.status_message = "-- INSERT --"
@@ -964,18 +870,17 @@ expect(ed.status_message).to_equal("")
 
 #### inserts character on regular key
 
-- inserts character on regular key
+1. var ed = TextEditor new
+2. ed handle insert key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("inserts character on regular key")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.handle_insert_key("A")
@@ -986,19 +891,18 @@ expect(ed.lines[0]).to_contain("A")
 
 #### handles enter key
 
-- handles enter key
+1. var ed = TextEditor new
+2. ed handle insert key
    - Expected: ed.lines.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("handles enter key")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.handle_insert_key("enter")
@@ -1009,19 +913,19 @@ expect(ed.lines.len()).to_equal(2)
 
 #### handles backspace key
 
-- handles backspace key
+1. var ed = TextEditor new
+2. ed insert char
+3. ed handle insert key
    - Expected: ed.cursor_col equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("handles backspace key")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("X")
@@ -1035,19 +939,18 @@ expect(ed.cursor_col).to_equal(0)
 
 #### h does not go below col 0
 
-- h does not go below col 0
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.cursor_col equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("h does not go below col 0")
 var ed = TextEditor.new()
 ed.cursor_col = 0
 ed.handle_normal_key("h")
@@ -1058,19 +961,18 @@ expect(ed.cursor_col).to_equal(0)
 
 #### k does not go below row 0
 
-- k does not go below row 0
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.cursor_row equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("k does not go below row 0")
 var ed = TextEditor.new()
 ed.cursor_row = 0
 ed.handle_normal_key("k")
@@ -1081,19 +983,18 @@ expect(ed.cursor_row).to_equal(0)
 
 #### j does not go past last line
 
-- j does not go past last line
+1. var ed = TextEditor new
+2. ed handle normal key
    - Expected: ed.cursor_row equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("j does not go past last line")
 var ed = TextEditor.new()
 # Only 1 line, so j should not advance
 ed.handle_normal_key("j")
@@ -1104,19 +1005,21 @@ expect(ed.cursor_row).to_equal(0)
 
 #### 0 moves to start of line
 
-- 0 moves to start of line
+1. var ed = TextEditor new
+2. ed insert char
+3. ed insert char
+4. ed insert char
+5. ed handle normal key
    - Expected: ed.cursor_col equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("0 moves to start of line")
 var ed = TextEditor.new()
 ed.mode = EditorMode.Insert
 ed.insert_char("A")
@@ -1141,54 +1044,3 @@ expect(ed.cursor_col).to_equal(0)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `5dea522c2c87e58525a841bc7e5ea6c509941f6e126d2131d86e1f51ef28c763`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `5dea522c2c87e58525a841bc7e5ea6c509941f6e126d2131d86e1f51ef28c763`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `5dea522c2c87e58525a841bc7e5ea6c509941f6e126d2131d86e1f51ef28c763`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/os/apps/editor/editor_spec.spl
-mirror: doc/06_spec/01_unit/os/apps/editor/editor_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/apps/editor/editor_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/apps/editor/editor_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/apps/editor/editor_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 24 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/apps/editor/editor_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Normal variant' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/apps/editor/editor_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Insert variant' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/apps/editor/editor_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Command variant' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

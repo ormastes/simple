@@ -156,10 +156,6 @@ If multiple LLMs participate in research:
 - Generate mirrored `doc/06_spec/...` manuals from SSpec and read them as
   manuals; revise steps, captures, inline/previous expansion, and visibility
   until primary flows are understandable without opening the source test.
-- For formal-verification manuals, keep generated readiness evidence separate
-  from durable Lean/BYL proof obligations and from stricter release gates. A
-  SPipe matrix pass must not be worded as mission-critical release evidence
-  while a strict SBY proof lane is still blocked.
 
 **2.4 Detail Design**
 - Data structures, algorithms, module interactions, error handling
@@ -235,8 +231,7 @@ If multiple LLMs participate in research:
 
 **3.11-3.13** Bug Reports + Duplication Check + Refactoring (files >800 lines split).
 
-**3.14** Full Test Suite: `bin/simple test test --whole --mode=interpreter`, then
-`bin/simple lint <changed .spl files>` and the applicable duplication gate.
+**3.14** Full Test Suite: `bin/simple test && bin/simple build lint && bin/simple build check`
 
 **3.15** Run `/verify` + VCS Sync.
 
@@ -480,6 +475,12 @@ After approval, use the jj linear push flow from `$release`: capture file count,
 
 ## Self-Sufficiency Principle
 
+### Shared knowledge selection
+
+Before implementation, every participant follows `knowledge_selection.md` and
+uses the same retained feature-plus-layer receipt. Kernel and driver paths
+always select MDSOC-only knowledge; feature guidance cannot enable ECS there.
+
 The core design principle: **every phase, every LLM, is self-sufficient.**
 
 Before starting any phase, check if prerequisite artifacts exist:
@@ -500,32 +501,6 @@ Before starting any phase, check if prerequisite artifacts exist:
 **Multi-LLM case:** Each LLM runs its phase, checks prior artifacts exist, extends them if present.
 
 **Rule:** Never fail because another LLM didn't run. Never overwrite another LLM's work -- append and annotate.
-
-### Performance and memory lanes
-
-All cooperating LLMs use the same compiler-performance contract rather than
-inventing agent-specific lint or benchmark rules. The canonical operator guide
-is [Compiler Performance Diagnostics](../../compiler/performance_diagnostics.md),
-with the source audit at
-[Simple Compiler Performance and Memory Efficiency Audit](../../../01_research/local/simple_compiler_performance_memory_efficiency_audit.md).
-
-Route work by evidence strength:
-
-| Tier | Normal surface | Evidence responsibility |
-|------|----------------|-------------------------|
-| Fast typed checks | `simple check`, LSP, normal builds | High-confidence collection, copy, allocation, layout, and API diagnostics |
-| MIR optimization and remarks | Optimized builds | Proved transformations and exact rejection reasons |
-| Deep analysis | `simple perf --deep`, CI | Bounded interprocedural complexity/resource summaries and explicit incomplete states |
-| Profile-guided diagnosis | Benchmarks/production sampling | Hotness, cardinality, allocation/copy bytes, latency, and peak-memory evidence |
-
-Review hot paths in this order: algorithmic complexity, allocations/copies,
-data layout/locality, loop-invariant work, then dispatch overhead. Preserve
-Pure Simple behavior and APIs. Static reasoning is not runtime measurement;
-record unavailable evidence honestly. Risky optimizer work requires paired
-semantic and structural SSpec coverage, and uncertain missed opportunities
-belong in structured remarks rather than ordinary warning noise. Before
-handoff, synchronize the research, architecture, design, plan, guide, skill,
-executable SSpec, and mirrored manual affected by the lane.
 
 ---
 

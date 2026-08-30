@@ -1,0 +1,37 @@
+# codex-system-test
+# @manual: primary
+# @req NFR-003 NFR-005 NFR-008
+use std.spec.*
+use std.io_runtime.{time_now_unix_micros, file_write, dir_create_all}
+use compiler.driver.cache.action_key.{ActionDep, ResolutionProbe}
+use compiler.driver.cache.native_module_witness.{NativeModuleResolutionFactV1, NativeModuleLayoutFactV1, native_module_cache_witness_v1}
+
+fn representative_witness():
+    native_module_cache_witness_v1(
+        "app.compiler.consumer", "mir-sha256-consumer",
+        [ActionDep(module_id: "compiler.dep", iface_digest: "iface-sha256-dep")],
+        [NativeModuleResolutionFactV1(import_id: "compiler.dep", probes: [ResolutionProbe(path: "/src/compiler/dep.spl", found: true)], selected: "/src/compiler/dep.spl", selected_count: 1, dir_generation: "generation-a", resolver_version: "resolver-v1")],
+        [NativeModuleLayoutFactV1(owner_module_id: "compiler.dep", type_id: "Record", layout_digest: "layout-size8-align8", owner_count: 1)])
+
+describe "native module cache witness synthetic microbaseline":
+    it "should retain at least 99 percent warm witness hits across one thousand actions":
+        val expected = representative_witness().digest()
+        val started = time_now_unix_micros()
+        var hits = 0
+        var mismatches = 0
+        var i = 0
+        while i < 1000:
+            if representative_witness().digest() == expected:
+                hits = hits + 1
+            else:
+                mismatches = mismatches + 1
+            i = i + 1
+        val elapsed_us = time_now_unix_micros() - started
+        val hit_percent_x100 = hits * 10000 / 1000
+        expect(hits).to_be_greater_than(989)
+        expect(mismatches).to_equal(0)
+        expect(hit_percent_x100).to_be_greater_than(9899)
+        expect(elapsed_us).to_be_less_than(5000001)
+        dir_create_all("build/test-artifacts/05_perf/compiler/native_module_cache_witness")
+        file_write("build/test-artifacts/05_perf/compiler/native_module_cache_witness/microbaseline-receipt.txt",
+            "schema=native-module-cache-witness-microbaseline-v1\nsource_kind=synthetic-unit-baseline\nactions=1000\nhits={hits}\nmisses={1000 - hits}\nmismatches={mismatches}\nhit_percent_x100={hit_percent_x100}\nwitness_digest_elapsed_us={elapsed_us}\ntarget_hit_percent_x100=9900\nmax_elapsed_us=5000000\n")

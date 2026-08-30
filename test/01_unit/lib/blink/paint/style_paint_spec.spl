@@ -42,7 +42,13 @@ use std.blink.html_parser.tree_builder.{build_html_tree}
 use std.blink.css_parser.tokenizer.{tokenize_css}
 use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
 use std.blink.layout.style_bridge.{build_styled_layout, StyledLayout}
-use std.blink.paint.style_paint.{paint_chunks_from_styled_layout}
+use std.blink.paint.style_paint.{
+    paint_chunks_from_styled_layout, paint_chunk_rows_from_styled_layout
+}
+use std.common.ui.draw_ir.{draw_ir_embedding_config, draw_ir_source_manual}
+use std.common.ui.render_opt.paint_chunk_draw_ir_lowerer.{
+    paint_chunk_draw_ir_lower_composition
+}
 use std.skia.entity.color.{sk_color_argb}
 
 fn _start(name: text) -> HtmlToken:
@@ -93,14 +99,14 @@ describe "paint_chunks_from_styled_layout":
                 expect("first div laid out").to_equal("it did not")
 
         step("width/height come from CSS, unaffected by margin")
-        expect(rects.rect_w[1]).to_equal(100)
-        expect(rects.rect_h[1]).to_equal(50)
+        expect(rects.rect_w[1]).to_equal(100)  # oracle: 100 — named expected value from the requirement
+        expect(rects.rect_h[1]).to_equal(50)  # oracle: 50 — named expected value from the requirement
 
         step("colour is packed opaque red, matching the sk_color_argb oracle")
         expect(rects.colour[1]).to_equal(sk_color_argb(255, 255, 0, 0))
 
         step("body plus both divs each contributed a rect")
-        expect(rects.rect_count).to_equal(3)
+        expect(rects.rect_count).to_equal(3)  # oracle: 3 — named expected value from the requirement
 
     it "contributes no rect for a display:none element":
         # @req REQ-SSPEC-LIB
@@ -113,7 +119,7 @@ describe "paint_chunks_from_styled_layout":
         val rects = paint_chunks_from_styled_layout(layout)
 
         step("only body and the visible div contributed a rect")
-        expect(rects.rect_count).to_equal(2)
+        expect(rects.rect_count).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "still emits a rect for a box with an unset (transparent) background":
         # @req REQ-SSPEC-LIB
@@ -129,3 +135,45 @@ describe "paint_chunks_from_styled_layout":
         expect(rects.rect_count).to_equal(3)
         expect(rects.colour[0]).to_equal(0)
         expect(rects.colour[1]).to_equal(0)
+
+    it "keeps transparent backgrounds in retained rows instead of inferring occlusion":
+        val css = "div { width: 40px; height: 20px; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        val rows = paint_chunk_rows_from_styled_layout(layout)
+
+        expect(rows.valid).to_equal(true)
+        expect(rows.rects.rect_count).to_equal(3)
+        expect(rows.chunks.chunk_count).to_equal(3)
+        expect(rows.rects.colour[0]).to_equal(0)
+        expect(rows.rects.colour[1]).to_equal(0)
+        expect(rows.stable_command_ids[1]).to_equal("blink-bg:2:0")
+
+    it "emits paired retained rows with semantic stable ids in the direct paint order":
+        val css = "div { background-color: red; width: 20px; height: 10px; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        val rows = paint_chunk_rows_from_styled_layout(layout)
+
+        expect(rows.valid).to_equal(true)
+        expect(rows.reason).to_equal("")
+        expect(rows.chunks.chunk_count).to_equal(rows.rects.rect_count)
+        expect(rows.stable_command_ids.len()).to_equal(rows.rects.rect_count)
+        expect(rows.stable_command_ids[0]).to_equal("blink-bg:1:0")
+        expect(rows.stable_command_ids[1]).to_equal("blink-bg:2:0")
+        expect(rows.stable_command_ids[2]).to_equal("blink-bg:3:0")
+        expect(rows.chunks.owner[1]).to_equal(2u32)
+        expect(rows.chunks.order[2]).to_equal(2u32)
+
+        val lowered = paint_chunk_draw_ir_lower_composition(
+            rows.chunks, rows.rects, rows.stable_command_ids,
+            "blink-composition", "blink-scene", "cpu", "blink-backgrounds",
+            draw_ir_embedding_config("blink-surface", "blink-root", 0, 0, 800, 600, 0, 1000, true),
+            draw_ir_source_manual())
+        expect(lowered.valid).to_equal(true)
+        if val composition = lowered.composition:
+            expect(composition.batches.len()).to_equal(1)
+            expect(composition.batches[0].commands[0].component_id).to_equal("blink-bg:1:0")
+            expect(composition.batches[0].commands[2].component_id).to_equal("blink-bg:3:0")
+        else:
+            expect("lowered composition").to_equal("missing")

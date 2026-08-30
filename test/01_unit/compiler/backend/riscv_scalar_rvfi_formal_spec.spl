@@ -1,0 +1,226 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.backend.backend.riscv_scalar_rvfi_formal.{RiscvFormalJobStatusV1,
+    RiscvScalarFormalArtifactsV1, generate_rv32_add_formal_artifacts,
+    reduce_rv32_add_formal_evidence, reduce_rv32_add_external_receipt_v1,
+    reduce_rv32_add_external_equivalence_receipt_v1,
+    reduce_rv32_add_external_sail_receipt_v1,
+    riscv_formal_job_receipt_v1}
+
+fn external_receipt(artifacts: RiscvScalarFormalArtifactsV1,
+    mutant_status: text) -> text:
+    "schema fv2-rv32-add-formal-receipt-v1\n" +
+    "module " + artifacts.module_name + "\n" +
+    "hwir_sha256 " + artifacts.hwir_hash + "\n" +
+    "rtl_sha256 " + artifacts.rtl_hash + "\n" +
+    "rvfi_contract_sha256 " + artifacts.rvfi_contract_hash + "\n" +
+    "assumption_manifest_sha256 " + artifacts.assumption_manifest_hash + "\n" +
+    "input_sha256 " + artifacts.core_file + " " + sha256_text(artifacts.core_vhdl) + "\n" +
+    "input_sha256 " + artifacts.harness_file + " " + sha256_text(artifacts.harness_vhdl) + "\n" +
+    "input_sha256 " + artifacts.mutant_harness_file + " " + sha256_text(artifacts.mutant_harness_vhdl) + "\n" +
+    "input_sha256 " + artifacts.prove_sby_file + " " + sha256_text(artifacts.prove_sby) + "\n" +
+    "input_sha256 " + artifacts.cover_sby_file + " " + sha256_text(artifacts.cover_sby) + "\n" +
+    "input_sha256 " + artifacts.mutant_sby_file + " " + sha256_text(artifacts.mutant_sby) + "\n" +
+    "prove_status proved\nprove_output_sha256 " + sha256_text("prove-log") + "\n" +
+    "cover_status covered\ncover_output_sha256 " + sha256_text("cover-log") + "\n" +
+    "mutant_status " + mutant_status + "\nmutant_output_sha256 " + sha256_text("mutant-log") + "\n" +
+    "sby_version_sha256 " + sha256_text("SBY-v0.67") + "\n" +
+    "yosys_version_sha256 " + sha256_text("Yosys-0.67") + "\n" +
+    "ghdl_version_sha256 " + sha256_text("GHDL-4.1") + "\n" +
+    "boolector_version_sha256 " + sha256_text("Boolector-3.2")
+
+fn equivalence_receipt(artifacts: RiscvScalarFormalArtifactsV1) -> text:
+    external_receipt(artifacts, "counterexample") + "\n" +
+    "equivalence_schema fv2-rtl-netlist-equivalence-receipt-v1\n" +
+    "equivalence_status proved\n" +
+    "equivalence_module " + artifacts.module_name + "_rvfi\n" +
+    "equivalence_rtl_sha256 " + artifacts.rtl_hash + "\n" +
+    "netlist_sha256 " + sha256_text("synthesized-netlist") + "\n" +
+    "equivalence_output_sha256 " + sha256_text("equiv-log") + "\n" +
+    "equivalence_policy_sha256 " + sha256_text(
+        "ghdl-vhdl2008|prep-top|equiv-opt-assert-synth-top|synth-top|write-json")
+
+fn sail_receipt(artifacts: RiscvScalarFormalArtifactsV1) -> text:
+    "schema fv2-rv32-add-sail-receipt-v1\nstatus agreed\n" +
+    "module " + artifacts.module_name + "\n" +
+    "oracle_repository https://github.com/riscv/sail-riscv.git\n" +
+    "oracle_revision a33475aeb80090127433b5a8b30e717edaa19e71\n" +
+    "oracle_lock_sha256 " + sha256_text("lock") + "\n" +
+    "simulator_sha256 " + sha256_text("sim") + "\n" +
+    "config_sha256 " + sha256_text("config") + "\n" +
+    "sail_compiler_version_sha256 " + sha256_text("sail-version") + "\n" +
+    "probe_source_sha256 " + sha256_text("source") + "\n" +
+    "probe_elf_sha256 " + sha256_text("elf") + "\n" +
+    "probe_disassembly_sha256 " + sha256_text("objdump") + "\n" +
+    "trace_sha256 " + sha256_text("trace") + "\n" +
+    "run_output_sha256 " + sha256_text("output") + "\n" +
+    "hwir_sha256 " + artifacts.hwir_hash + "\n" +
+    "rtl_sha256 " + artifacts.rtl_hash + "\n" +
+    "rvfi_contract_sha256 " + artifacts.rvfi_contract_hash + "\n" +
+    "assumption_manifest_sha256 " + artifacts.assumption_manifest_hash + "\n" +
+    "instruction 002081b3\nrs1 00000005\nrs2 00000007\nrd 0000000c"
+
+describe "bounded RV32 ADD formal evidence":
+    it "generates separate proof, cover, and expected-failing mutation jobs":
+        val generated = generate_rv32_add_formal_artifacts("fv2_add", 0x002081B3)
+        expect(generated.is_ok()).to_be(true)
+        if generated.is_ok():
+            val artifacts = generated.ok().unwrap()
+            expect(artifacts.prove_sby).to_contain("mode prove")
+            expect(artifacts.cover_sby).to_contain("mode cover")
+            expect(artifacts.harness_vhdl).to_contain("retirement_reachable: cover")
+            expect(artifacts.harness_vhdl).to_contain("unsigned(rvfi_rs1_rdata)+unsigned(rvfi_rs2_rdata)")
+            expect(artifacts.mutant_harness_vhdl).to_contain("unsigned(rvfi_rs1_rdata)-unsigned(rvfi_rs2_rdata)")
+            expect(artifacts.manifest).to_contain(
+                "executor=scripts/rtl/run-fv2-rv32-add-formal.shs")
+            expect(artifacts.manifest).to_contain(
+                "expected_results=prove:proved,cover:covered,mutant:counterexample")
+
+    it "keeps a constructed prove-cover-counterexample tuple at specified":
+        val artifacts = generate_rv32_add_formal_artifacts("fv2_add_receipt", 0x002081B3).ok().unwrap()
+        val prove = riscv_formal_job_receipt_v1("rv32i.add.prove",
+            artifacts.prove_sby, "PASS", "sby-0.67/yosys-0.67/boolector",
+            RiscvFormalJobStatusV1.Proved)
+        val cover = riscv_formal_job_receipt_v1("rv32i.add.cover",
+            artifacts.cover_sby, "PASS reached", "sby-0.67/yosys-0.67/boolector",
+            RiscvFormalJobStatusV1.Covered)
+        val mutant = riscv_formal_job_receipt_v1("rv32i.add.mutant",
+            artifacts.mutant_sby, "FAIL counterexample", "sby-0.67/yosys-0.67/boolector",
+            RiscvFormalJobStatusV1.Counterexample)
+        val receipt = reduce_rv32_add_formal_evidence(artifacts,
+            prove, cover, mutant)
+        expect(receipt.status).to_equal(FormalStatus.Specified)
+        expect(receipt.permits_verified_release()).to_be(false)
+        expect(receipt.diagnostic()).to_equal("")
+        expect(receipt.evidence_receipt_hashes.len()).to_equal(3)
+
+    it "fails closed on timeout, missing cover, or a surviving mutant":
+        val artifacts = generate_rv32_add_formal_artifacts("fv2_add_failure", 0x002081B3).ok().unwrap()
+        val good_prove = riscv_formal_job_receipt_v1("rv32i.add.prove",
+            artifacts.prove_sby, "PASS", "sby", RiscvFormalJobStatusV1.Proved)
+        val good_cover = riscv_formal_job_receipt_v1("rv32i.add.cover",
+            artifacts.cover_sby, "PASS", "sby", RiscvFormalJobStatusV1.Covered)
+        val good_mutant = riscv_formal_job_receipt_v1("rv32i.add.mutant",
+            artifacts.mutant_sby, "FAIL trace", "sby", RiscvFormalJobStatusV1.Counterexample)
+        val timed_out = riscv_formal_job_receipt_v1("rv32i.add.prove",
+            artifacts.prove_sby, "timeout", "sby", RiscvFormalJobStatusV1.Timeout)
+        val wrong_cover = riscv_formal_job_receipt_v1("rv32i.add.cover",
+            artifacts.cover_sby, "unknown", "sby", RiscvFormalJobStatusV1.Unknown)
+        val survivor = riscv_formal_job_receipt_v1("rv32i.add.mutant",
+            artifacts.mutant_sby, "PASS", "sby", RiscvFormalJobStatusV1.Proved)
+        val timeout = reduce_rv32_add_formal_evidence(artifacts,
+            timed_out, good_cover, good_mutant)
+        val no_cover = reduce_rv32_add_formal_evidence(artifacts,
+            good_prove, wrong_cover, good_mutant)
+        val surviving_mutant = reduce_rv32_add_formal_evidence(artifacts,
+            good_prove, good_cover, survivor)
+        expect(timeout.status).to_equal(FormalStatus.Failed)
+        expect(no_cover.status).to_equal(FormalStatus.Failed)
+        expect(surviving_mutant.status).to_equal(FormalStatus.Failed)
+
+    it "rejects a forged proof receipt copied from the cover job":
+        val artifacts = generate_rv32_add_formal_artifacts("fv2_add_forgery", 0x002081B3).ok().unwrap()
+        val forged = riscv_formal_job_receipt_v1("rv32i.add.prove",
+            artifacts.cover_sby, "PASS", "sby", RiscvFormalJobStatusV1.Proved)
+        expect(forged.diagnostic("rv32i.add.prove", artifacts.prove_sby,
+            RiscvFormalJobStatusV1.Proved)).to_contain("JOB-HASH")
+
+    it "never promotes caller-built formal receipt text to executed evidence":
+        val artifacts = generate_rv32_add_formal_artifacts(
+            "fv2_add_external", 0x002081B3).ok().unwrap()
+        val accepted = reduce_rv32_add_external_receipt_v1(artifacts,
+            external_receipt(artifacts, "counterexample"))
+        val surviving_mutant = reduce_rv32_add_external_receipt_v1(artifacts,
+            external_receipt(artifacts, "proved"))
+        val stale_artifacts = generate_rv32_add_formal_artifacts(
+            "fv2_add_external_stale", 0x002081B3).ok().unwrap()
+        val stale_core = reduce_rv32_add_external_receipt_v1(stale_artifacts,
+            external_receipt(artifacts, "counterexample"))
+        val wrong_module_text = external_receipt(artifacts, "counterexample").replace(
+            "module " + artifacts.module_name,
+            "module another_module")
+        val wrong_module = reduce_rv32_add_external_receipt_v1(
+            artifacts, wrong_module_text)
+        val wrong_hwir = reduce_rv32_add_external_receipt_v1(
+            artifacts, external_receipt(artifacts, "counterexample").replace(
+                "hwir_sha256 " + artifacts.hwir_hash,
+                "hwir_sha256 " + sha256_text("different-hwir")))
+        expect(accepted.status).to_equal(FormalStatus.Failed)
+        expect(accepted.evidence_receipt_hashes.len()).to_equal(0)
+        expect(accepted.engine_versions.len()).to_equal(0)
+        expect(surviving_mutant.status).to_equal(FormalStatus.Failed)
+        expect(stale_core.status).to_equal(FormalStatus.Failed)
+        expect(wrong_module.status).to_equal(FormalStatus.Failed)
+        expect(wrong_hwir.status).to_equal(FormalStatus.Failed)
+
+    it "never promotes caller-built equivalence text to backend evidence":
+        val artifacts = generate_rv32_add_formal_artifacts(
+            "fv2_add_equivalence", 0x002081B3).ok().unwrap()
+        val text = equivalence_receipt(artifacts)
+        val accepted = reduce_rv32_add_external_equivalence_receipt_v1(
+            artifacts, text)
+        val stale_rtl = reduce_rv32_add_external_equivalence_receipt_v1(
+            artifacts, text.replace(
+                "equivalence_rtl_sha256 " + artifacts.rtl_hash,
+                "equivalence_rtl_sha256 " + sha256_text("stale-rtl")))
+        val wrong_module = reduce_rv32_add_external_equivalence_receipt_v1(
+            artifacts, text.replace(
+                "equivalence_module " + artifacts.module_name + "_rvfi",
+                "equivalence_module wrong_rvfi"))
+        val failed = reduce_rv32_add_external_equivalence_receipt_v1(
+            artifacts, text.replace("equivalence_status proved",
+                "equivalence_status failed"))
+        val stale_netlist = reduce_rv32_add_external_equivalence_receipt_v1(
+            artifacts, text.replace(
+                "netlist_sha256 " + sha256_text("synthesized-netlist"),
+                "netlist_sha256 short"))
+        val trailing_field = reduce_rv32_add_external_equivalence_receipt_v1(
+            artifacts, text.replace(
+                "equivalence_status proved",
+                "equivalence_status proved ignored"))
+        expect(accepted.status).to_equal(FormalStatus.Failed)
+        expect(accepted.netlist_hash).to_equal("")
+        expect(accepted.permits_verified_release()).to_be(false)
+        expect(stale_rtl.status).to_equal(FormalStatus.Failed)
+        expect(wrong_module.status).to_equal(FormalStatus.Failed)
+        expect(failed.status).to_equal(FormalStatus.Failed)
+        expect(stale_netlist.status).to_equal(FormalStatus.Failed)
+        expect(trailing_field.status).to_equal(FormalStatus.Failed)
+
+    it "never promotes caller-built Sail text to model evidence":
+        val artifacts = generate_rv32_add_formal_artifacts(
+            "fv2_add_sail", 0x002081B3).ok().unwrap()
+        val text = sail_receipt(artifacts)
+        val accepted = reduce_rv32_add_external_sail_receipt_v1(artifacts, text)
+        val wrong_revision = reduce_rv32_add_external_sail_receipt_v1(
+            artifacts, text.replace(
+                "a33475aeb80090127433b5a8b30e717edaa19e71",
+                "0000000000000000000000000000000000000000"))
+        val wrong_result = reduce_rv32_add_external_sail_receipt_v1(
+            artifacts, text.replace("rd 0000000c", "rd 0000000d"))
+        val absent_compiler_identity = reduce_rv32_add_external_sail_receipt_v1(
+            artifacts, text.replace(
+                "sail_compiler_version_sha256 " + sha256_text("sail-version") + "\n",
+                ""))
+        val stale_rtl = reduce_rv32_add_external_sail_receipt_v1(
+            artifacts, text.replace("rtl_sha256 " + artifacts.rtl_hash,
+                "rtl_sha256 " + sha256_text("stale")))
+        val stale_rvfi = reduce_rv32_add_external_sail_receipt_v1(
+            artifacts, text.replace("rvfi_contract_sha256 " +
+                artifacts.rvfi_contract_hash,
+                "rvfi_contract_sha256 " + sha256_text("stale-rvfi")))
+        val stale_assumptions = reduce_rv32_add_external_sail_receipt_v1(
+            artifacts, text.replace("assumption_manifest_sha256 " +
+                artifacts.assumption_manifest_hash,
+                "assumption_manifest_sha256 " + sha256_text("stale-assumptions")))
+        expect(accepted.status).to_equal(FormalStatus.Failed)
+        expect(accepted.permits_verified_release()).to_be(false)
+        expect(accepted.evidence_receipt_hashes.len()).to_equal(0)
+        expect(accepted.engine_versions.len()).to_equal(0)
+        expect(wrong_revision.status).to_equal(FormalStatus.Failed)
+        expect(wrong_result.status).to_equal(FormalStatus.Failed)
+        expect(absent_compiler_identity.status).to_equal(FormalStatus.Failed)
+        expect(stale_rtl.status).to_equal(FormalStatus.Failed)
+        expect(stale_rvfi.status).to_equal(FormalStatus.Failed)
+        expect(stale_assumptions.status).to_equal(FormalStatus.Failed)

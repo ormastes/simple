@@ -1,6 +1,29 @@
 # Debug State Specification
 
-> Tests covering DebugState to_string, DebugState description, DebugState is_stopped, DebugState is_running, DebugState is_paused, DebugState is_terminated, DebugState is_active, DebugState is_halted, DebugState can_continue, DebugState summary.
+> <details>
+
+<!-- sdn-diagram:id=debug_state_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=debug_state_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+debug_state_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=debug_state_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,16 @@
 
 #### converts Stopped to string
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- converts Stopped to string
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("converts Stopped to string")
 # Branch: case Stopped: "stopped"
 val state = "stopped"
 assert_true(state == "stopped")
@@ -42,18 +59,16 @@ assert_true(state == "stopped")
 
 #### converts Running to string
 
-- converts Running to string
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("converts Running to string")
 # Branch: case Running: "running"
 val state = "running"
 assert_true(state == "running")
@@ -63,18 +78,16 @@ assert_true(state == "running")
 
 #### converts Paused to string
 
-- converts Paused to string
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("converts Paused to string")
 # Branch: case Paused: "paused"
 val state = "paused"
 assert_true(state == "paused")
@@ -84,18 +97,16 @@ assert_true(state == "paused")
 
 #### converts Terminated to string
 
-- converts Terminated to string
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("converts Terminated to string")
 # Branch: case Terminated: "terminated"
 val state = "terminated"
 assert_true(state == "terminated")
@@ -107,18 +118,16 @@ assert_true(state == "terminated")
 
 #### describes Stopped
 
-- describes Stopped
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("describes Stopped")
 # Branch: case Stopped: "Debugger stopped at breakpoint"
 val desc = "Debugger stopped at breakpoint"
 assert_true(desc == "Debugger stopped at breakpoint")
@@ -128,18 +137,16 @@ assert_true(desc == "Debugger stopped at breakpoint")
 
 #### describes Running
 
-- describes Running
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("describes Running")
 # Branch: case Running: "Program executing"
 val desc = "Program executing"
 assert_true(desc == "Program executing")
@@ -149,18 +156,16 @@ assert_true(desc == "Program executing")
 
 #### describes Paused
 
-- describes Paused
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("describes Paused")
 # Branch: case Paused: "Execution paused by user"
 val desc = "Execution paused by user"
 assert_true(desc == "Execution paused by user")
@@ -170,18 +175,16 @@ assert_true(desc == "Execution paused by user")
 
 #### describes Terminated
 
-- describes Terminated
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("describes Terminated")
 # Branch: case Terminated: "Program terminated"
 val desc = "Program terminated"
 assert_true(desc == "Program terminated")
@@ -193,18 +196,16 @@ assert_true(desc == "Program terminated")
 
 #### returns true for Stopped
 
-- returns true for Stopped
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for Stopped")
 # Branch: case Stopped: true
 val is_stopped = true
 assert_true(is_stopped)
@@ -214,18 +215,16 @@ assert_true(is_stopped)
 
 #### returns false for other states
 
-- returns false for other states
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns false for other states")
 # Branch: case _: false
 val is_stopped = false
 assert_false(is_stopped)
@@ -237,18 +236,16 @@ assert_false(is_stopped)
 
 #### returns true for Running
 
-- returns true for Running
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for Running")
 # Branch: case Running: true
 val is_running = true
 assert_true(is_running)
@@ -258,18 +255,16 @@ assert_true(is_running)
 
 #### returns false for other states
 
-- returns false for other states
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns false for other states")
 # Branch: case _: false
 val is_running = false
 assert_false(is_running)
@@ -281,18 +276,16 @@ assert_false(is_running)
 
 #### returns true for Paused
 
-- returns true for Paused
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for Paused")
 # Branch: case Paused: true
 val is_paused = true
 assert_true(is_paused)
@@ -302,18 +295,16 @@ assert_true(is_paused)
 
 #### returns false for other states
 
-- returns false for other states
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns false for other states")
 # Branch: case _: false
 val is_paused = false
 assert_false(is_paused)
@@ -325,18 +316,16 @@ assert_false(is_paused)
 
 #### returns true for Terminated
 
-- returns true for Terminated
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for Terminated")
 # Branch: case Terminated: true
 val is_terminated = true
 assert_true(is_terminated)
@@ -346,18 +335,16 @@ assert_true(is_terminated)
 
 #### returns false for other states
 
-- returns false for other states
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns false for other states")
 # Branch: case _: false
 val is_terminated = false
 assert_false(is_terminated)
@@ -369,18 +356,16 @@ assert_false(is_terminated)
 
 #### returns false for Terminated
 
-- returns false for Terminated
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns false for Terminated")
 # Branch: case Terminated: false
 val is_active = false
 assert_false(is_active)
@@ -390,18 +375,16 @@ assert_false(is_active)
 
 #### returns true for other states
 
-- returns true for other states
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for other states")
 # Branch: case _: true
 val is_active = true
 assert_true(is_active)
@@ -413,18 +396,16 @@ assert_true(is_active)
 
 #### returns true for Stopped
 
-- returns true for Stopped
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for Stopped")
 # Branch: case Stopped: true
 val is_halted = true
 assert_true(is_halted)
@@ -434,18 +415,16 @@ assert_true(is_halted)
 
 #### returns true for Paused
 
-- returns true for Paused
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns true for Paused")
 # Branch: case Paused: true
 val is_halted = true
 assert_true(is_halted)
@@ -455,18 +434,16 @@ assert_true(is_halted)
 
 #### returns false for other states
 
-- returns false for other states
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns false for other states")
 # Branch: case _: false
 val is_halted = false
 assert_false(is_halted)
@@ -478,18 +455,16 @@ assert_false(is_halted)
 
 #### delegates to is_halted
 
-- delegates to is_halted
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("delegates to is_halted")
 # Branch: return self.is_halted()
 val can_continue = true
 assert_true(can_continue)
@@ -501,18 +476,16 @@ assert_true(can_continue)
 
 #### categorizes as halted when active and halted
 
-- categorizes as halted when active and halted
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("categorizes as halted when active and halted")
 # Branch: if self.is_active() and self.is_halted()
 val status = "halted"
 assert_true(status == "halted")
@@ -522,18 +495,16 @@ assert_true(status == "halted")
 
 #### categorizes as executing when active and not halted
 
-- categorizes as executing when active and not halted
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("categorizes as executing when active and not halted")
 # Branch: if self.is_active() and not self.is_halted()
 val status = "executing"
 assert_true(status == "executing")
@@ -543,18 +514,16 @@ assert_true(status == "executing")
 
 #### categorizes as terminated when not active
 
-- categorizes as terminated when not active
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("categorizes as terminated when not active")
 # Branch: else (not active)
 val status = "terminated"
 assert_true(status == "terminated")
@@ -569,12 +538,12 @@ assert_true(status == "terminated")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/dap/debug_state_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering DebugState to_string, DebugState description, DebugState is_stopped, DebugState is_running, DebugState is_paused, DebugState is_terminated, DebugState is_active, DebugState is_halted, DebugState can_continue, DebugState summary.
+Tests covering:
 - DebugState to_string
 - DebugState description
 - DebugState is_stopped
@@ -598,51 +567,3 @@ Tests covering DebugState to_string, DebugState description, DebugState is_stopp
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f7a77c8e4fe3aa572b81e4689a98d87f22b39b1069427e27147c2b6dc398b3c1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f7a77c8e4fe3aa572b81e4689a98d87f22b39b1069427e27147c2b6dc398b3c1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f7a77c8e4fe3aa572b81e4689a98d87f22b39b1069427e27147c2b6dc398b3c1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/dap/debug_state_spec.spl
-mirror: doc/06_spec/01_unit/app/dap/debug_state_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/dap/debug_state_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/dap/debug_state_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/dap/debug_state_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts Stopped to string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/dap/debug_state_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts Running to string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/dap/debug_state_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts Paused to string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

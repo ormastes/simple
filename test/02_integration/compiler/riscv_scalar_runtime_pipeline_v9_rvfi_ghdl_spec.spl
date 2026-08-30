@@ -1,0 +1,80 @@
+# codex-system-test
+# Generated-VHDL smoke for the sealed V9 RVFI retirement observer.  This is
+# intentionally a black-box test: it verifies wrapper ports rather than its
+# private completion wiring.
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, ghdl_run_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v9_rvfi_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_pipeline_v9_rvfi}
+
+fn v9_rvfi_tb(entity: text, xlen: i32) -> text:
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+entity {entity}_tb is end entity;
+architecture sim of {entity}_tb is
+  signal clk, rst, in_valid : std_logic := '0';
+  signal instruction : std_logic_vector(31 downto 0) := (others=>'0');
+  signal instruction_length_bytes : std_logic_vector(2 downto 0) := "100";
+  signal rs1_value, rs2_value, pc_before, fallthrough_pc : std_logic_vector({xlen - 1} downto 0) := (others=>'0');
+  signal privilege : std_logic_vector(1 downto 0) := "11";
+  signal provider_event_id, decode_event_id, bus_response_id : std_logic_vector(63 downto 0) := (others=>'0');
+  signal bus_request_ready, bus_response_valid, bus_response_fault, fence_effect_ready, csr_present : std_logic := '0';
+  signal bus_response_data, bus_response_cause, bus_response_tval, csr_read_value : std_logic_vector({xlen - 1} downto 0) := (others=>'0');
+  signal rvfi_valid, rvfi_trap, rvfi_halt, rvfi_intr : std_logic;
+  signal rvfi_order : std_logic_vector(63 downto 0); signal rvfi_insn : std_logic_vector(31 downto 0);
+  signal rvfi_mode, rvfi_ixl : std_logic_vector(1 downto 0);
+  signal rvfi_rs1_addr, rvfi_rs2_addr, rvfi_rd_addr : std_logic_vector(4 downto 0);
+  signal rvfi_rs1_rdata, rvfi_rs2_rdata, rvfi_rd_wdata, rvfi_pc_rdata, rvfi_pc_wdata, rvfi_mem_addr, rvfi_mem_rdata, rvfi_mem_wdata : std_logic_vector({xlen - 1} downto 0);
+  signal rvfi_mem_rmask, rvfi_mem_wmask : std_logic_vector(31 downto 0);
+begin
+  dut: entity work.{entity}_rvfi port map(
+    clk=>clk,rst=>rst,in_valid=>in_valid,rvfi_input_ready=>open,instruction=>instruction,instruction_length_bytes=>instruction_length_bytes,rs1_value=>rs1_value,rs2_value=>rs2_value,pc_before=>pc_before,fallthrough_pc=>fallthrough_pc,privilege=>privilege,provider_event_id=>provider_event_id,decode_event_id=>decode_event_id,bus_request_ready=>bus_request_ready,bus_response_valid=>bus_response_valid,bus_response_id=>bus_response_id,bus_response_data=>bus_response_data,bus_response_fault=>bus_response_fault,bus_response_cause=>bus_response_cause,bus_response_tval=>bus_response_tval,fence_effect_ready=>fence_effect_ready,csr_present=>csr_present,csr_read_value=>csr_read_value,
+    rvfi_valid=>rvfi_valid,rvfi_order=>rvfi_order,rvfi_insn=>rvfi_insn,rvfi_trap=>rvfi_trap,rvfi_halt=>rvfi_halt,rvfi_intr=>rvfi_intr,rvfi_mode=>rvfi_mode,rvfi_ixl=>rvfi_ixl,rvfi_rs1_addr=>rvfi_rs1_addr,rvfi_rs2_addr=>rvfi_rs2_addr,rvfi_rs1_rdata=>rvfi_rs1_rdata,rvfi_rs2_rdata=>rvfi_rs2_rdata,rvfi_rd_addr=>rvfi_rd_addr,rvfi_rd_wdata=>rvfi_rd_wdata,rvfi_pc_rdata=>rvfi_pc_rdata,rvfi_pc_wdata=>rvfi_pc_wdata,rvfi_mem_addr=>rvfi_mem_addr,rvfi_mem_rmask=>rvfi_mem_rmask,rvfi_mem_wmask=>rvfi_mem_wmask,rvfi_mem_rdata=>rvfi_mem_rdata,rvfi_mem_wdata=>rvfi_mem_wdata,v9_runtime_protocol_fault=>open,v9_csr_commit_valid=>open,v9_csr_commit_address=>open,v9_csr_commit_value=>open,v9_fence_effect_valid=>open);
+  process
+    procedure tick is begin wait for 1 ns; clk<='1'; wait for 1 ns; clk<='0'; wait for 1 ns; end procedure;
+    procedure await_retire(constant label_text : string) is begin for n in 1 to 80 loop if rvfi_valid='1' then return; end if; tick; end loop; assert false report label_text severity failure; end procedure;
+    procedure issue(constant insn : std_logic_vector(31 downto 0); constant lhs, rhs : std_logic_vector({xlen - 1} downto 0)) is begin
+      instruction<=insn; rs1_value<=lhs; rs2_value<=rhs; pc_before<=std_logic_vector(to_unsigned(16#{xlen}#,{xlen})); fallthrough_pc<=std_logic_vector(to_unsigned(16#{xlen + 4}#,{xlen})); in_valid<='1'; tick; in_valid<='0';
+    end procedure;
+  begin
+    rst<='1'; tick; rst<='0'; wait for 1 ns;
+    -- MUL x5,x0,x3: the accepted x0 address must suppress hostile source data.
+    issue(x"023002B3",(others=>'1'),std_logic_vector(to_unsigned(2,{xlen}))); await_retire("RVFI x0-source MUL did not retire");
+    assert rvfi_order=std_logic_vector(to_unsigned(0,64)) and rvfi_insn=x"023002B3" and rvfi_rs1_addr="00000" and rvfi_rs1_rdata=(rvfi_rs1_rdata'range=>'0') and rvfi_rs2_addr="00011" and rvfi_rs2_rdata=std_logic_vector(to_unsigned(2,{xlen})) and rvfi_rd_addr="00101" and rvfi_rd_wdata=(rvfi_rd_wdata'range=>'0') and rvfi_pc_rdata=std_logic_vector(to_unsigned(16#{xlen}#,{xlen})) and rvfi_pc_wdata=std_logic_vector(to_unsigned(16#{xlen + 4}#,{xlen})) and rvfi_trap='0' and rvfi_halt='0' and rvfi_intr='0' and rvfi_mem_rmask=(rvfi_mem_rmask'range=>'0') and rvfi_mem_wmask=(rvfi_mem_wmask'range=>'0') report "RVFI x0-source retirement projection mismatch" severity failure;
+    tick;
+    -- A second accepted retirement proves the externally visible sequential order.
+    issue(x"023102B3",std_logic_vector(to_unsigned(13,{xlen})),std_logic_vector(to_unsigned(2,{xlen}))); await_retire("RVFI normal MUL did not retire");
+    assert rvfi_order=std_logic_vector(to_unsigned(1,64)) and rvfi_insn=x"023102B3" and rvfi_rs1_addr="00010" and rvfi_rs1_rdata=std_logic_vector(to_unsigned(13,{xlen})) and rvfi_rs2_addr="00011" and rvfi_rs2_rdata=std_logic_vector(to_unsigned(2,{xlen})) and rvfi_rd_addr="00101" and rvfi_rd_wdata=std_logic_vector(to_unsigned(26,{xlen})) and rvfi_ixl="{if xlen == 32: "01" else: "10"}" and rvfi_mode="11" report "RVFI ordered normal retirement projection mismatch" severity failure;
+    finish;
+  end process;
+end architecture;
+"""
+
+fn simulate_v9_rvfi(entity: text, config: CoreConfig, bus: LsuConfig) -> bool:
+    val emitted = compile_strict_riscv_scalar_runtime_pipeline_v9_rvfi(entity, config, bus)
+    if not emitted.is_success(): return false
+    val workdir = ghdl_unique_workdir(entity)
+    if workdir.is_err(): return false
+    val isolated = workdir.ok().unwrap()
+    val path = isolated + "/" + entity + ".vhd"
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + v9_rvfi_tb(entity, config.xlen)): return false
+    if not ghdl_analyze_in(path, isolated).success: return false
+    if not ghdl_elaborate_in(entity + "_tb", isolated).success: return false
+    ghdl_run_in(entity + "_tb", Some("2us"), isolated).success
+
+describe "runtime scalar pipeline V9 RVFI GHDL integration":
+    slow_it "projects accepted x0 source normalization and ordered RV32 retirements":
+        val available = ghdl_available(); expect(available).to_equal(true)
+        if not available: return
+        expect(simulate_v9_rvfi("runtime_pipeline_v9_rvfi_rv32", CoreConfig.rv32im_zicsr_zifencei(), LsuConfig.rv32_product_default())).to_equal(true)
+
+    slow_it "projects accepted x0 source normalization and ordered RV64 retirements":
+        val available = ghdl_available(); expect(available).to_equal(true)
+        if not available: return
+        expect(simulate_v9_rvfi("runtime_pipeline_v9_rvfi_rv64", CoreConfig.rv64im_zicsr_zifencei(), LsuConfig.rv64_product_default())).to_equal(true)

@@ -1,9 +1,7 @@
 # Web Semantic/Layout + DrawIR Pipeline — Optimization & Refactoring Plan
 
-Status: active, partially implemented. Source anchors below were refreshed on
-2026-07-31 after the stage split. Inert `srcdoc` DrawIR flattening is
-implemented; five legacy pixel callers and qualified parity remain RED. Scope:
-the private web semantic/layout stages and their relationship to the existing Draw IR layer
+Status: draft plan (not yet executed). Scope: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+(9,456 lines) and its relationship to the existing Draw IR layer
 (`src/lib/common/ui/draw_ir*.spl`, `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`).
 
 Related: `doc/03_plan/ui/rendering/draw_ir_multibackend_plan.md` (Engine2D backend/op
@@ -44,95 +42,48 @@ documentation-only — nothing here changes behavior today.
 
 ## 1. Current State
 
-### 2026-07-29 implementation status
+### 1.1 The monolith's internal stages (file:line)
 
-- The architectural decision remains unchanged: there is no new `WebIR`;
-  private web semantic/layout state lowers to `DrawIrComposition`.
-- The shared Draw IR contract now owns rectangle translation/intersection, and
-  the Engine2D executor reuses it for command clips. This is a bounded,
-  behavior-preserving part of Phase 1.
-- The first retained-render slice is done in source and runtime-blocked:
-  authoritative BrowserSession document/style/resource revisions feed one
-  worker-owned `SimpleWebRenderSession`, and an unchanged frame reuses the
-  existing semantic/layout/Draw IR result. Stage-selective mutation,
-  viewport, animation, scroll, and resource invalidation remain open. No
-  whole-HTML pixel cache was added.
-- External `<img>` and CSS background lowering cover part of Phase 2. Static
-  inert `srcdoc` batch embedding is implemented, while exact Path-A/Path-B
-  parity and the five legacy pixel caller migrations remain open.
-- The CPU benchmark adapter no longer owns a private painter. It constructs
-  the requested `cpu`/`cpu_simd` `Engine2D` and executes the composition only
-  through `engine2d_draw_ir_adv_composition(..., false)`.
+`simple_web_html_layout_renderer.spl` runs one parse→style→layout pipeline that
+feeds **two independent output paths**:
 
-### Ordered next backlog
-
-1. **Done in source, runtime-blocked:** retain DOM `parent_id` on main HTML
-   commands and owning-element IDs on synthetic image/input overlays; image
-   command lowering is also present. Keep the
-   REQ-WEB-BROWSER-003/004 semantic composition oracle before pixels and
-   round-trip it through the existing hosted SBRF/Draw IR v2 codec.
-2. **Done in source, execution/parity held:** emit inert `srcdoc` through
-   flattened `DrawIrBatch` values; migrate five legacy pixel callers only
-   after their exact parity gates.
-3. **Partial, runtime-blocked:** finish authoritative mutation/style/resource
-   revision sites and split the retained owner into stage-selective
-   parse/style/layout/paint invalidation. Exact unchanged reuse and close
-   reclamation are implemented.
-4. Cut `ui.browser` over from its ignored composition/pixel rebuild to the
-   supplied `DrawIrComposition`, then run exact Path-A/Path-B corpus parity and
-   route production frames through one persistent Engine2D owner.
-5. Classify private bitmap text, heuristic scenes, CPU fallback, and readback
-   routes as explicit compatibility/diagnostic/recovery paths with guards.
-6. Prove web execution separately on physical CUDA, Vulkan, and Metal; Metal
-   evidence does not qualify the other backends.
-7. Consider Draw IR diff/damage only after retained-stage measurements prove
-   unchanged-frame reuse is insufficient.
-
-`simple_web_html_layout_renderer_paint_layout.spl` remains a pre-existing
->800-line stage-owner exception. Split it only behind the semantic composition
-and pixel-parity gates above; do not mix file movement with fidelity changes.
-
-### 1.1 Current source map
-
-The public facade is `simple_web_html_layout_renderer.spl`; its private stages
-are split by owner, not line number:
-
-| Stage | Current owner | Status |
+| Stage | Functions | Lines |
 |---|---|---|
-| HTML parse/CSS cascade | `simple_web_html_layout_renderer_core.spl`, `_declarations.spl`, `_decl_apply.spl`, `_style.spl` | private semantic state |
-| Layout | `simple_web_html_layout_renderer_layout.spl` | private semantic state |
-| **Path A: direct pixels** | `_paint_layout.spl`, `_paint_primitives.spl`, facade software entry points | compatibility/reference path |
-| **Path B: DrawIR** | `_paint_layout.spl` (`_html_draw_ir_style_props`, `_html_draw_ir_command`, `_html_draw_ir_commands`), facade DrawIR entry points | canonical shared display list |
-| CPU benchmark adapter | `simple_web_layout_engine2d_cpu.spl` | `Engine2D` + shared DrawIR executor only |
-| Iframe Draw IR | facade recursive composition + `draw_ir_embed_composition` | **partial: inert `srcdoc` source tranche implemented** |
-| Iframe pixel oracle | `_paint_layout.spl` (`_web_render_child_pixels`, `_web_blit_child`, `_web_paint_iframes`) | **RED: five callers await parity/migration** |
+| HTML parse | `parse_html` (L724), tag/attr scan (L132-611), entity decode (L611-724) | ~600 |
+| CSS extract + cascade | `extract_css_vw` (L4309), selector match (L4386-5383), specificity/order (L5387-5627), `apply_decls` (L2150-3896, the single largest function — CSS property application), `tag_defaults` (L3896) | ~3,700 |
+| Style resolution (orchestrator) | `compute_styles` (L5663) | ~60 |
+| Layout (box model / flex / text-wrap) | `_layout` (L7492-8308, 800+ lines), `layout_document` (L8328) | ~950 |
+| **Path A: direct pixel paint** | `paint` (L8483-8846) + ~40 `fb_*` pixel primitives (rects, rounded rects, gradients, shadows, borders, glyphs, scrollbars) at L5720-8465 | ~3,100 |
+| **Path B: Draw IR emission** | `_html_draw_ir_commands` (L9048), `_html_draw_ir_command` (L9001), `_html_draw_ir_style_props` (L8862) | ~220 |
+| Iframe embedding | `_web_paint_iframes` (L9169) — **Path A only, Path B does not call it** | ~90 |
 
-The active content-frame cache is `ui/web_render_pixel_backend.spl` backed by
-`SimpleWebEngine2DStaticPixelCache` in `simple_web_engine2d_renderer.spl`.
-It keys exact HTML, render mode, and content revision; it is not yet a
-node-level DrawIR-diff cache.
+Public entry points: `simple_web_layout_render_html_software_pixels` (L9259,
+Path A), `simple_web_layout_render_html_draw_ir` (L9203, Path B — **already
+exists**), `simple_web_layout_render_html_gpu_frame` (L9408, solid-fill op list
++ CPU residual), `simple_web_layout_render_html_software_pixels_at_scroll`
+(L9434). All four re-run `parse_html → extract_css_vw → compute_styles →
+layout_document` independently — the styled/laid-out tree is never named or
+shared as a first-class value.
 
 ### 1.2 What already exists vs. what's missing
 
 **Already exists (verified by reading the code, not assumed):**
-- `simple_web_layout_render_html_draw_ir` in `simple_web_html_layout_renderer.spl` converts HTML → `DrawIrComposition` through the same private semantic/layout stages as Path A.
-- `simple_web_layout_engine2d_fast.spl` chains HTML → DrawIR → `Engine2D.create_with_backend_fast()` → shared DrawIR execution → one-shot readback. The CPU benchmark adapter uses the same executor with `gpu_available=false`; it has no private style, border, gradient, text, or clip painter.
-- The fast path is wired into the WM chrome scene. `render_scene_to_backend()` chooses the DrawIR+Engine2D-fast path when its Metal gate is available; its non-CSS fallback skips text and is not a web-content replacement.
-- `engine2d_draw_ir_adv.spl` owns border-radius, linear-gradient background, box-shadow, text, and clip execution from `DrawIrCommand.computed_style`. Supported command accounting remains in that shared executor.
-- `DrawIrSourceInfo` in `draw_ir.spl` carries HTML/CSS provenance and is used by the public DrawIR entry.
-- `draw_ir_diff_compositions` exists and is spec-tested; it has no production incremental paint caller.
-- `widget_draw_ir.spl` remains the precedent for layout directly to DrawIR with no intermediate pixel painter.
-- `window_scene_draw_ir.spl` carries content revision provenance; it remains the cache-key precedent.
+- `simple_web_layout_render_html_draw_ir` (L9203) already converts HTML → `DrawIrComposition` via the SAME web semantic/layout stages as Path A; the lowering is thin and incomplete (§1.3).
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl:27` `simple_web_layout_render_html_pixels_engine2d` already chains HTML → `simple_web_layout_render_html_draw_ir` → `Engine2D.create_with_backend_fast()` (no-mirror GPU mode) → `engine2d_draw_ir_adv_composition` (`draw_ir_adv.spl:422`) → one-shot GPU readback. Comment there cites this as the fix for the interpreted per-op framebuffer mirror being the dominant cost.
+- This fast path is **already wired into production**, but only for the WM chrome scene: `src/os/compositor/wm_scene.spl:462-487` `render_scene_to_backend()` uses the full CSS pixel path below `WM_SCENE_CSS_RENDER_PIXEL_CAP=10000px`, else the DrawIR+Engine2D-fast path if Metal is available (`engine2d_fast_metal_available()`, L479), else a non-CSS themed rect rasterizer (`wm_scene_direct_rect_pixels`, L489) that **skips text entirely** (L500-501).
+- `engine2d_draw_ir_adv.spl` already re-derives border-radius, linear-gradient background, and box-shadow from `DrawIrCommand.computed_style` text props (`_engine2d_draw_ir_render_box`, L188) and calls real Engine2D primitives (`draw_rounded_rect`, `draw_gradient_rect`, `draw_shadow_rect`). Only `RECT`/`TEXT`/`IMAGE` command kinds are executed (`_engine2d_draw_ir_supported_command`, L82); others are tracked as skipped/unsupported.
+- `DrawIrSourceInfo` (`draw_ir.spl:78-86`) already carries `html_tag`/`html_node_id`/`css_selector`/`css_class`/`style_key`/`style_revision` — built by `draw_ir_source_html_ast` (L385) and used today by `simple_web_layout_render_html_draw_ir` (L9213: `source_kind="html_ast"`).
+- `draw_ir_diff.spl:219` `draw_ir_diff_compositions` — a working node-level diff (added/removed/changed by `component_id`, with geometry/color/text/style/border/hit-rect change flags) — exists and is spec-tested.
+- Precedent for "layout tree → DrawIR directly, no intermediate pixel path": `widget_draw_ir.spl:217` `widget_tree_to_draw_ir` walks a laid-out `WidgetNode` tree and emits `DrawIrCommand`s with no separate pixel-paint code path at all.
+- `window_scene_draw_ir.spl` (1,086 lines) already threads a revision string into `DrawIrSourceInfo` as a cache key precedent: `"rev={frame.content_revision}"` (`_wm_draw_ir_child_content_frame_batch`) — the seed of exactly the IR-level cache this plan proposes.
 
 **Missing / gaps:**
-- The window content-frame path in `simple_web_window_renderer.spl` calls `WebRenderPixelArtifactCache.request_to_pixel_artifact[_at_time]`; that cache routes static frames through the retained Engine2D DrawIR result. Dynamic regions retain their explicit fallback branch and require separate evidence.
+- **The window content-frame path — the one users actually type into — does not use Path B or the fast GPU path at all.** `src/os/compositor/simple_web_window_renderer.spl:158-164` `simple_web_content_frame_cached_from_request` calls `cache.request_to_pixel_artifact` → `web_render_pixel_software_backend.spl:129` → `_software_pixels` → `simple_web_layout_render_html_software_pixels` (Path A, full pixel paint, interpreted, measured 55-60x slower than the deprecated tag-strip fallback — `web_render_full_engine_content_frame_reroute_perf_2026-07-12.md`).
 - `draw_ir_diff_compositions` has **zero production render-loop callers** — its only caller outside its own spec is `src/app/ui.test_api/handler.spl` (a test API), not any paint path.
-- `SimpleWebEngine2DStaticPixelCache` still caches whole-document identity, so one changed character invalidates the frame; no node-level invalidation exists.
-- Main DrawIR commands retain parent IDs and image lowering. The bounded inert
-  `srcdoc` embedded-batch source tranche is implemented; legacy pixel blitting
-  remains the oracle and stays RED until qualified exact parity permits caller
-  migration.
-- `DrawIrComposition`/`DrawIrEmbeddingConfig` carry no DPI field; `dpi_scale_milli` is passed by the scene owner and baked into pixel coordinates before DrawIR is built.
+- `WebRenderPixelArtifactCache` (`web_render_pixel_software_backend.spl:97`) caches on **whole-HTML-string equality** (`self.last_html == full_html`, L119) — one changed character invalidates the entire cache; there is no node-level cache.
+- Path B (`_html_draw_ir_commands`) never sets `parent_id` on emitted commands — every call site of `draw_ir_box_with_style`/`draw_ir_text_styled` (`draw_ir.spl:241-260`, `217-239`) hardcodes `parent_id: ""`, even though `HNode` already carries a `parent` field (`mk_node(tag, parent: i64)`, L172). Tree structure is discarded exactly where a future diff/subtree-invalidation would need it.
+- Path B never emits `<img>` as `DRAW_IR_COMMAND_IMAGE`, and never calls `_web_paint_iframes` — iframe/image content silently renders as an empty box in the DrawIR path today (untested — no parity spec covers it).
+- `DrawIrComposition`/`DrawIrEmbeddingConfig` carry no DPI field; `dpi_scale_milli` is a bare function parameter in `window_scene_draw_ir.spl` (e.g. `shared_wm_scene_draw_ir_composition`, L623), baked into pixel coordinates before any IR is built.
 - **Open correctness bug that blocks any pixel-parity gate**: `doc/08_tracking/bug/web_render_full_engine_call_order_nondeterminism_2026-07-12.md` — the full engine produces different checksums for byte-identical input depending on call order/count within a process (suspected process-lifetime cache/arena state).
 
 ## 2. Target Architecture
@@ -212,18 +163,19 @@ checksums.
 **Phase 1 — Share the existing web semantic/layout lowering (pure refactor).**
 Keep nodes/styles/boxes private to the web renderer and extract only the
 smallest internal helper needed to remove duplicated parse→style→layout call
-sequences. Do not expose or name a new IR type.
+sequences at L9203/9220/9259/9408/9434. Do not expose or name a new IR type.
 *Acceptance:* existing spec suite (`simple_web_renderer_spec.spl` and friends,
 ~800 lines) green, byte-identical output — no behavior change.
 
-**Phase 2 — Close web semantic/layout→DrawIR coverage gaps (source tranche
-implemented; execution/parity held).** `parent_id`, `<img>` lowering, and inert
-`srcdoc` flattening through `draw_ir_embed_composition` are present. Do not
-model iframe content as an IMAGE or a nested executor. *Acceptance:* the
-existing static spec/manual plus a qualified pixel-parity run — Path B (via
+**Phase 2 — Close web semantic/layout→DrawIR coverage gaps.**
+Set `parent_id` from `HNode.parent`; emit `<img>` as `DRAW_IR_COMMAND_IMAGE`;
+emit iframe content as a nested embedded `DrawIrBatch` (reuse the depth-3
+embedded-surface mechanism already in `draw_ir_adv.spl:336`
+`_engine2d_draw_ir_render_batch_embedded`) instead of leaving iframes
+unimplemented in Path B. *Acceptance:* new pixel-parity spec — Path B (via
 `engine2d_draw_ir_adv_composition`) byte-matches Path A
 (`simple_web_layout_render_html_software_pixels`) over a corpus that includes
-images and iframes — before migrating each legacy caller.
+images and iframes (currently untested since Path B silently drops both).
 
 **Phase 3 — Route content-frame rendering through the fast path, flag-gated.**
 Add `WebRenderPixelArtifactCache.request_to_pixel_artifact_via_draw_ir`
@@ -262,7 +214,7 @@ audit, don't assume duplication.
 2. **Text fidelity.** `draw_ir_adv.spl:93-107` re-derives font size by
    re-parsing the `font-size` string out of `computed_style` rather than
    reusing a value the web semantic/layout stage already computed — any encoding
-   drift (for example, font-shorthand edge cases) could
+   drift (e.g., `parse_font_shorthand_size_px`, L1827, edge cases) could
    silently diverge between Path A and Path B without tripping a
    geometry-only parity check. Needs its own text-fidelity corpus.
 3. **Interpreted vs. compiled perf.** Every cost number cited in the driving

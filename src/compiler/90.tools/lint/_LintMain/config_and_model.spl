@@ -22,6 +22,8 @@ use compiler.common.assurance.policy_names.{normalize_profile_name, deprecated_p
 use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value,
     warning_phase_env_var_name, downgrade_severity_rank,
     severity_rank_warn, severity_rank_deny}
+use compiler.common.assurance.mc_exceptions.{McException, parse_mc_exceptions,
+    mc_exception_reason_for}
 use compiler.semantics.lint.option_me_call.{OptionMeCallWarning}
 
 extern fn rt_env_get(key: text) -> text
@@ -515,6 +517,12 @@ class LintConfig:
     # switch. Default false, so a config that never sets it behaves byte-identically
     # to before. See compiler.common.assurance.warning_phase.
     warning_phase: bool
+    # MISSION-CRITICAL EXCEPTIONS (2026-08-28): repo-relative path scopes that
+    # are NOT held to the critical tier yet, each with a reason. A file inside
+    # one is linted at `strict` and the skip is REPORTED. Parsed from the
+    # `mc_exceptions:` key under `lints:`; see
+    # compiler.common.assurance.mc_exceptions for the grammar.
+    mc_exceptions: [McException]
 
     # Create a default config (all defaults, no overrides).
 impl LintConfig:
@@ -527,7 +535,8 @@ impl LintConfig:
         LintConfig(levels: {}, effective_defaults: build_default_levels(),
                    source_path: "", profile: nil, error: "",
                    warning_phase: warning_phase_enabled_for_value(
-                       rt_env_get(warning_phase_env_var_name()) ?? ""))
+                       rt_env_get(warning_phase_env_var_name()) ?? ""),
+                   mc_exceptions: [])
 
     # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
@@ -599,6 +608,11 @@ impl LintConfig:
                     # separate key fails CLOSED where a name suffix fails OPEN.
                     if lint_name == "warning_phase":
                         config.set_warning_phase_from_value(level_str)
+                    elif lint_name == "mc_exceptions":
+                        # Flat scalar on purpose: the typed ProjectContext loader
+                        # reads the same key and must never see a shape it
+                        # rejects (a parse error there drops the whole manifest).
+                        config.mc_exceptions = parse_mc_exceptions(level_str)
                     elif lint_name == "profile":
                         if parse_lint_profile(level_str).?:
                             config.set_profile_from_string(level_str)
@@ -653,6 +667,11 @@ impl LintConfig:
     # the environment; this stays a pure function of its argument.
     me set_warning_phase_from_value(raw: String):
         self.warning_phase = warning_phase_enabled_for_value(raw)
+
+    # The mission-critical exception reason covering `path`, or "" when the
+    # file is held to the configured profile. Pure lookup; the caller reports.
+    fn mc_exception_reason(path: String) -> String:
+        mc_exception_reason_for(self.mc_exceptions, path)
 
     me set_error_once(message: String):
         if self.error == "":
@@ -769,7 +788,8 @@ impl LintConfig:
                    effective_defaults: self.effective_defaults,
                    source_path: self.source_path,
                    profile: self.profile, error: self.error,
-                   warning_phase: self.warning_phase)
+                   warning_phase: self.warning_phase,
+                   mc_exceptions: self.mc_exceptions)
 
 fn resolve_lint_config(base: LintConfig, path: String, content: String) -> LintConfig:
     resolve_lint_config_with_lines(base, path, content.split("\n"))

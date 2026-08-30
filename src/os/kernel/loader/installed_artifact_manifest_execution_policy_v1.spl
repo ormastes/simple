@@ -13,7 +13,8 @@ use std.common.contracts.execution.simpleos_executable_v1.{
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.mod.{get_arch}
 use os.kernel.loader.artifact_manifest.{
-    manifest_format_version, manifest_kind_elf, manifest_validate_for_target
+    manifest_format_version, manifest_kind_elf,
+    manifest_elf_abi_features_match_target, manifest_validate_for_target
 }
 use os.kernel.loader.executable_target_dispatch_v1.{
     executable_target_process_image_ready_v1
@@ -101,21 +102,17 @@ pub fn installed_artifact_trust_binding_check_v1(
         proof_signer_identity == record.signer_identity and
         admission_trust_root_sha256 == record.expected_trust_root_sha256
 
-fn _policy_abi_features_admitted_v1(manifest: SimpleArtifactManifest) -> bool:
-    # The current ELF process-image owner proves exactly these two features.
+fn _policy_abi_features_admitted_v1(
+    manifest: SimpleArtifactManifest,
+    target: ManifestTarget
+) -> bool:
+    # The target's process-image owner proves exactly one ELF class plus W^X.
     # Unknown, duplicate, or absent requirements fail closed rather than being
     # silently treated as compatible.
-    if manifest.required_abi_features.len() != 2: return false
-    var elf64_count = 0
-    var wx_count = 0
-    for feature in manifest.required_abi_features:
-        if feature == "elf64":
-            elf64_count = elf64_count + 1
-        else if feature == "w_xor_x":
-            wx_count = wx_count + 1
-        else:
-            return false
-    elf64_count == 1 and wx_count == 1
+    # The shared scalar matcher avoids allocating/copying the builder's
+    # two-element feature array on every launch.
+    manifest_elf_abi_features_match_target(
+        manifest.required_abi_features, target)
 
 fn _policy_resources_admitted_v1(limits: ManifestResourceLimits) -> bool:
     if limits.max_memory_bytes < 0 or limits.max_open_handles < 0 or
@@ -138,15 +135,16 @@ pub fn installed_artifact_manifest_policy_check_for_target_v1(
         return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.FormatVersionDenied)
     if manifest.artifact_kind != manifest_kind_elf():
         return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.ArtifactKindDenied)
-    if not _policy_target_equal_v1(manifest.target, target) or
-        not executable_target_process_image_ready_v1(target) or
-        not manifest_validate_for_target(manifest, target).ok:
+    if (not _policy_target_equal_v1(manifest.target, target) or
+        not executable_target_process_image_ready_v1(target)):
+        return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.TargetDenied)
+    if not _policy_abi_features_admitted_v1(manifest, target):
+        return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.AbiFeatureDenied)
+    if not manifest_validate_for_target(manifest, target).ok:
         return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.TargetDenied)
     if (manifest.required_capabilities & child_capabilities) !=
         manifest.required_capabilities:
         return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.CapabilityDenied)
-    if not _policy_abi_features_admitted_v1(manifest):
-        return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.AbiFeatureDenied)
     if manifest.required_services.len() != 0:
         return _policy_result_v1(false, InstalledArtifactManifestPolicyErrorV1.ServicePolicyUnavailable)
     if not _policy_resources_admitted_v1(manifest.resource_limits):

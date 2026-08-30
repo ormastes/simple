@@ -37,9 +37,6 @@ handles the string/slice relationship without mismatches or panics.
 
 #### infers sliced string as text
 
-- infers sliced string as text
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -61,10 +58,6 @@ expect(result.len()).to_be_greater_than(0)
 
 #### allows method calls on sliced strings
 
-- allows method calls on sliced strings
-   - Expected: features.len() equals `3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -85,10 +78,6 @@ expect(features.len()).to_equal(3)
 </details>
 
 #### infers mid-range slice as text
-
-- infers mid-range slice as text
-   - Expected: upper equals `CDEF`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -167,9 +156,6 @@ for arg in args:
 
 #### doesn't confuse string slice with enum
 
-- doesn't confuse string slice with enum
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -194,10 +180,6 @@ for arg in args:
 </details>
 
 #### handles multiple string operations after slice
-
-- handles multiple string operations after slice
-   - Expected: joined equals `a;b;c`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -225,10 +207,6 @@ expect(joined).to_equal("a;b;c")
 ### Type annotation workaround
 
 #### works with explicit type annotation
-
-- works with explicit type annotation
-   - Expected: features.len() equals `3`
-
 
 <details>
 <summary>Executable SSpec</summary>

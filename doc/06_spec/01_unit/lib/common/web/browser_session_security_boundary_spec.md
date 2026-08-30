@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 43 | 43 | 0 | 0 |
+| 41 | 41 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,23 +17,20 @@
 
 #### bounds hostile do-while script execution
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- bounds hostile do-while script execution
 - Run a nonterminating do-while script in a browser session
+- var session = BrowserSession new
+- "var iterations = 0; do { iterations = iterations + 1; } while
+- Ok
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds hostile do-while script execution")
 step("Run a nonterminating do-while script in a browser session")
 var session = BrowserSession.new()
 val opened = session.open_html(
@@ -57,20 +54,21 @@ match session.eval_script("iterations"):
 
 #### bounds hostile recursive script execution
 
-- bounds hostile recursive script execution
 - Run an unbounded recursive script in a browser session
+- var session = BrowserSession new
+- "var depth = 0; function recurse
+- Ok
    - Expected: depth equals `256.0`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds hostile recursive script execution")
 step("Run an unbounded recursive script in a browser session")
 var session = BrowserSession.new()
 val opened = session.open_html(
@@ -94,21 +92,24 @@ match session.eval_script(
 
 #### shares one execution budget across nested script loops
 
-- shares one execution budget across nested script loops
 - Run nested loops and then advance the queued timer task
+- var session = BrowserSession new
+- "var timerRan = 0; setTimeout
    - Expected: session.advance_time(0) equals `1`
+- Ok
    - Expected: timer_ran equals `1.0`
+- fail
+- Ok
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("shares one execution budget across nested script loops")
 step("Run nested loops and then advance the queued timer task")
 var session = BrowserSession.new()
 val opened = session.open_html(
@@ -141,8 +142,8 @@ match session.eval_script("iterations"):
 
 #### rejects direct file navigation before reading the host filesystem
 
-- rejects direct file navigation before reading the host filesystem
 - Navigate directly to a local file URL
+- var session = BrowserSession new
    - Expected: result.is_err() is true
    - Expected: session.current_url equals `about:blank`
    - Expected: session.has_pending_requests() is false
@@ -151,12 +152,10 @@ match session.eval_script("iterations"):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects direct file navigation before reading the host filesystem")
 step("Navigate directly to a local file URL")
 var session = BrowserSession.new()
 val result = session.begin_network_navigation("file:///etc/passwd", "GET", "", "", "")
@@ -169,8 +168,8 @@ expect(session.has_pending_requests()).to_equal(false)
 
 #### rejects request-line injection in the central subresource pump
 
-- rejects request-line injection in the central subresource pump
 - Queue a subresource URL containing an injected request line
+- var session = BrowserSession new
    - Expected: session.take_pending_request().is_none() is true
    - Expected: session.has_pending_requests() is false
 
@@ -178,12 +177,10 @@ expect(session.has_pending_requests()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects request-line injection in the central subresource pump")
 step("Queue a subresource URL containing an injected request line")
 var session = BrowserSession.new()
 session.open_html(
@@ -206,8 +203,8 @@ expect(session.warnings).to_contain(
 
 #### rejects direct file open and file home navigation
 
-- rejects direct file open and file home navigation
 - Open and assign a local file URL through browser navigation APIs
+- var session = BrowserSession new
    - Expected: session.open_url("file:///etc/hosts").is_err() is true
    - Expected: session.try_set_home_url("file:///etc/hosts") is false
    - Expected: session.home_url equals `about:blank`
@@ -217,12 +214,10 @@ expect(session.warnings).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects direct file open and file home navigation")
 step("Open and assign a local file URL through browser navigation APIs")
 var session = BrowserSession.new()
 expect(session.open_url("file:///etc/hosts").is_err()).to_equal(true)
@@ -235,8 +230,8 @@ expect(session.current_url).to_equal("about:blank")
 
 #### rejects executable and unknown top-level navigation schemes
 
-- rejects executable and unknown top-level navigation schemes
 - Navigate to executable and inline-data URL schemes
+- var session = BrowserSession new
    - Expected: session.begin_network_navigation("javascript:alert(1)", "GET", "", "", "").is_err() is true
    - Expected: session.begin_network_navigation("data:text/html,<script>alert(1)</script>", "GET", "", "", "").is_err() is true
    - Expected: session.has_pending_requests() is false
@@ -245,12 +240,10 @@ expect(session.current_url).to_equal("about:blank")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects executable and unknown top-level navigation schemes")
 step("Navigate to executable and inline-data URL schemes")
 var session = BrowserSession.new()
 expect(session.begin_network_navigation("javascript:alert(1)", "GET", "", "", "").is_err()).to_equal(true)
@@ -262,8 +255,8 @@ expect(session.has_pending_requests()).to_equal(false)
 
 #### keeps storage and cookies bound to the active document after a cross-origin location write
 
-- keeps storage and cookies bound to the active document after a cross-origin location write
 - Write cross-origin location, storage, and cookie state from the active document
+- var session = BrowserSession new
    - Expected: session.current_url equals `https://evil.test/landing`
    - Expected: session.document_url equals `https://bank.test/app`
    - Expected: session.document_cookie() equals ``
@@ -274,12 +267,10 @@ expect(session.has_pending_requests()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps storage and cookies bound to the active document after a cross-origin location write")
 step("Write cross-origin location, storage, and cookie state from the active document")
 var session = BrowserSession.new()
 val opened = session.open_html(
@@ -315,8 +306,9 @@ expect(session.document_cookie()).to_contain("planted=yes")
 
 #### rejects cross-origin history state URLs without changing the document principal
 
-- rejects cross-origin history state URLs without changing the document principal
 - Push a cross-origin URL into same-document history
+- var session = BrowserSession new
+- "history pushState
    - Expected: session.current_url equals `https://bank.test/app`
    - Expected: session.document_url equals `https://bank.test/app`
    - Expected: session.history.len() equals `1`
@@ -325,12 +317,10 @@ expect(session.document_cookie()).to_contain("planted=yes")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects cross-origin history state URLs without changing the document principal")
 step("Push a cross-origin URL into same-document history")
 var session = BrowserSession.new()
 val opened = session.open_html(
@@ -354,8 +344,8 @@ expect(session.warnings).to_contain(
 
 #### blocks mixed-content and unvalidated cross-origin executable resources
 
-- blocks mixed-content and unvalidated cross-origin executable resources
 - Open an HTTPS page containing mixed and cross-origin executable resources
+- var session = BrowserSession new
    - Expected: opened.is_ok() is true
    - Expected: session.take_pending_request().is_none() is true
    - Expected: session.has_pending_requests() is false
@@ -364,12 +354,10 @@ expect(session.warnings).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("blocks mixed-content and unvalidated cross-origin executable resources")
 step("Open an HTTPS page containing mixed and cross-origin executable resources")
 var session = BrowserSession.new()
 val opened = session.open_html(
@@ -389,8 +377,9 @@ expect(warnings).to_contain("module load error: cross-origin:")
 
 #### allows registered HTTPS resources without host filesystem access
 
-- allows registered HTTPS resources without host filesystem access
 - Register and navigate to an in-memory HTTPS resource
+- var session = BrowserSession new
+- session register resource
    - Expected: result.is_ok() is true
    - Expected: session.current_url equals `https://example.test/page`
 
@@ -398,12 +387,10 @@ expect(warnings).to_contain("module load error: cross-origin:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("allows registered HTTPS resources without host filesystem access")
 step("Register and navigate to an in-memory HTTPS resource")
 var session = BrowserSession.new()
 session.register_resource("https://example.test/page", "<html><body>safe</body></html>")
@@ -416,53 +403,52 @@ expect(session.current_url).to_equal("https://example.test/page")
 
 #### escapes page-controlled title text before rebuilding render HTML
 
-- escapes page-controlled title text before rebuilding render HTML
 - Render a document after assigning markup-shaped title text
+- var session = BrowserSession new
    - Expected: rendered does not contain `</title><style>`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("escapes page-controlled title text before rebuilding render HTML")
 step("Render a document after assigning markup-shaped title text")
 var session = BrowserSession.new()
 session.open_html(
     "https://safe.test/app", "<html><head><title>Safe</title></head><body>Body</body></html>"
 )
-session.current_title = "</title><style>body{{display:none}}</style>"
+session.current_title = "</title><style>body{display:none}</style>"
 
 val rendered = session.render_html_document()
 
 expect(rendered.contains("</title><style>")).to_equal(false)
-expect(rendered).to_contain("&lt;/title&gt;&lt;style&gt;body{{display:none}}&lt;/style&gt;")
+expect(rendered).to_contain("&lt;/title&gt;&lt;style&gt;body{display:none}&lt;/style&gt;")
 ```
 
 </details>
 
 #### rejects a response whose URL differs from its inflight request
 
-- rejects a response whose URL differs from its inflight request
 - Commit a network response from a URL different from its request
+- var session = BrowserSession new
    - Expected: started.is_ok() is true
+- Some
+- Ok
    - Expected: session.current_url equals `about:blank`
    - Expected: session.cookies.count() equals `0`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects a response whose URL differs from its inflight request")
 step("Commit a network response from a URL different from its request")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation("https://example.test/page", "GET", "", "", "")
@@ -504,21 +490,26 @@ match session.take_pending_request():
 
 #### blocks cross-origin page fetches before they reach the host network
 
-- blocks cross-origin page fetches before they reach the host network
 - Issue repeated cross-origin fetches from page script
+- var session = BrowserSession new
+- "<html><body><script>var outcome = 'pending'; fetch
    - Expected: session.take_pending_request().is_none() is true
+- "fetch
    - Expected: session.warnings.len() equals `1`
+- Ok
+- JsValue String
+- fail
+- Err
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("blocks cross-origin page fetches before they reach the host network")
 step("Issue repeated cross-origin fetches from page script")
 var session = BrowserSession.new()
 session.open_html(
@@ -548,130 +539,27 @@ match session.eval_script("outcome"):
 
 </details>
 
-#### admits only credentialless direct-host CORS fetches
-
-- admits only credentialless direct-host CORS fetches
-- Enable the audited direct-host CORS policy for an HTTPS page
-- Observe one cookie-free cross-origin request
-   - Expected: request.kind equals `fetch`
-   - Expected: request.credentials equals `omit`
-- Keep credentialed cross-origin fetches blocked
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 34 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("admits only credentialless direct-host CORS fetches")
-step("Enable the audited direct-host CORS policy for an HTTPS page")
-var session = BrowserSession.new()
-session.direct_hosted_cors_fetch_policy = true
-expect(session.open_html(
-    "https://safe.test/app",
-    "<html><body><script>" +
-    "fetch('https://api.test/data', {credentials:'omit'})" +
-    "</script></body></html>"
-).is_ok()).to_be(true)
-
-step("Observe one cookie-free cross-origin request")
-match session.take_pending_request():
-    nil:
-        fail("Expected credentialless direct-host CORS request")
-    Some(request):
-        expect(request.kind).to_equal("fetch")
-        expect(request.initiator_origin).to_equal(
-            "https://safe.test"
-        )
-        expect(request.credentials).to_equal("omit")
-        expect(request.headers.to_lower().contains(
-            "cookie:"
-        )).to_be(false)
-
-step("Keep credentialed cross-origin fetches blocked")
-expect(session.eval_script(
-    "fetch('https://api.test/private', {credentials:'include'})"
-).is_ok()).to_be(true)
-expect(session.take_pending_request()).to_be_nil()
-expect(session.warnings).to_contain(
-    "cross-origin fetch blocked: https://api.test/private"
-)
-```
-
-</details>
-
-#### preserves native fetch credentials through the BrowserSession queue
-
-- preserves native fetch credentials through the BrowserSession queue
-- Enable the broker boundary so every credential mode is observable
-- Queue omit same-origin and include without downgrading
-   - Expected: request.credentials equals `credentials`
-- Normalize an unsupported credential token to the current default
-   - Expected: request.credentials equals `same-origin`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 30 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-LIB
-step("preserves native fetch credentials through the BrowserSession queue")
-step("Enable the broker boundary so every credential mode is observable")
-var session = BrowserSession.new()
-session.broker_network_policy = true
-expect(session.open_html(
-    "https://safe.test/app", "<html><body>safe</body></html>"
-).is_ok()).to_be(true)
-
-step("Queue omit same-origin and include without downgrading")
-for credentials in ["omit", "same-origin", "include"]:
-    expect(session.eval_script(
-        "fetch('https://api.test/{credentials}', " +
-        "{{credentials:'{credentials}'}})"
-    ).is_ok()).to_be(true)
-    match session.take_pending_request():
-        nil:
-            fail("Expected native {credentials} fetch request")
-        Some(request):
-            expect(request.credentials).to_equal(credentials)
-
-step("Normalize an unsupported credential token to the current default")
-expect(session.eval_script(
-    "fetch('https://api.test/default', {credentials:'invalid'})"
-).is_ok()).to_be(true)
-match session.take_pending_request():
-    nil:
-        fail("Expected default-credential fetch request")
-    Some(request):
-        expect(request.credentials).to_equal("same-origin")
-```
-
-</details>
-
 #### bounds and deduplicates retained browser warnings
 
-- bounds and deduplicates retained browser warnings
 - Append duplicate, excessive, and oversized browser warnings
+- var session = BrowserSession new
+- session  append warning
+- session  append warning
    - Expected: session.warnings.len() equals `1`
+- session  append warning
    - Expected: session.warnings.len() equals `128`
+- var oversized = BrowserSession new
+- oversized  append warning
    - Expected: oversized.warnings[0].len() equals `4096`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds and deduplicates retained browser warnings")
 step("Append duplicate, excessive, and oversized browser warnings")
 var session = BrowserSession.new()
 session._append_warning("duplicate")
@@ -698,20 +586,22 @@ expect(oversized.warnings[0].len()).to_equal(4096)
 
 #### bounds active-load warnings before finalization
 
-- bounds active-load warnings before finalization
 - Fail enough active subresource loads to exceed warning limits
+- var session = BrowserSession new
+- Some
+- fail
+- Some
    - Expected: load.warnings.len() equals `128`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds active-load warnings before finalization")
 step("Fail enough active subresource loads to exceed warning limits")
 var html = "<html><body>"
 var index = 0
@@ -757,21 +647,22 @@ match session.active_load:
 
 #### still exports same-origin page fetches
 
-- still exports same-origin page fetches
 - Issue a relative same-origin fetch from page script
+- var session = BrowserSession new
+- "<html><body><script>fetch
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://safe.test/ok`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("still exports same-origin page fetches")
 step("Issue a relative same-origin fetch from page script")
 var session = BrowserSession.new()
 session.open_html(
@@ -791,10 +682,13 @@ match session.take_pending_request():
 
 #### enforces document CSP before style script and fetch dispatch
 
-- enforces document CSP before style script and fetch dispatch
 - Load a document whose CSP blocks style, script, and fetch dispatch
+- var session = BrowserSession new
    - Expected: started.is_ok() is true
+- Some
+- body: "<html><head><style>body{background:#f00}</style><link rel='stylesheet' href='/theme css'></head><body><script>document title='inline allowed'; fetch
    - Expected: committed.is_ok() is true
+- fail
    - Expected: session.take_pending_request().is_none() is true
    - Expected: session.current_title equals `inline allowed`
    - Expected: session.current_style_html equals ``
@@ -803,12 +697,10 @@ match session.take_pending_request():
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("enforces document CSP before style script and fetch dispatch")
 step("Load a document whose CSP blocks style, script, and fetch dispatch")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -824,7 +716,7 @@ match session.take_pending_request():
                 url: request.url,
                 status: 200,
                 headers: "Content-Security-Policy: style-src 'none'; style-src *; script-src 'unsafe-inline'; connect-src *\nContent-Security-Policy: connect-src 'none'",
-                body: "<html><head><style>body{{background:#f00}}</style><link rel='stylesheet' href='/theme.css'></head><body><script>document.title='inline allowed'; fetch('/private')</script><script src='/app.js'></script></body></html>",
+                body: "<html><head><style>body{background:#f00}</style><link rel='stylesheet' href='/theme.css'></head><body><script>document.title='inline allowed'; fetch('/private')</script><script src='/app.js'></script></body></html>",
                 error: ""
             )
         )
@@ -846,7 +738,6 @@ expect(warnings).to_contain("CSP blocked fetch: https://safe.test/private")
 
 #### intersects bounded header sandbox capabilities and ignores meta sandbox
 
-- intersects bounded header sandbox capabilities and ignores meta sandbox
 - Parse intersecting header sandboxes alongside a meta sandbox
    - Expected: meta equals `script-src 'unsafe-inline'`
 
@@ -854,12 +745,10 @@ expect(warnings).to_contain("CSP blocked fetch: https://safe.test/private")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("intersects bounded header sandbox capabilities and ignores meta sandbox")
 step("Parse intersecting header sandboxes alongside a meta sandbox")
 val bare = browser_csp_header_sandbox("sandbox")
 val allow_scripts = browser_csp_header_sandbox(
@@ -894,20 +783,20 @@ expect(meta).to_equal("script-src 'unsafe-inline'")
 
 #### blocks scripts under intersected header sandbox policies
 
-- blocks scripts under intersected header sandbox policies
 - Load script content under intersected header sandbox policies
+- var session = BrowserSession new
+- Some
+- fail
    - Expected: session.document_cookie() equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("blocks scripts under intersected header sandbox policies")
 step("Load script content under intersected header sandbox policies")
 var session = BrowserSession.new()
 expect(session.begin_network_navigation(
@@ -953,11 +842,17 @@ expect(session.warnings.join("|")).to_contain(
 
 #### allows scripts without restoring sandboxed origin storage or navigation
 
-- allows scripts without restoring sandboxed origin storage or navigation
 - Run allowed script inside an opaque-origin sandbox
+- var session = BrowserSession new
+- Some
+- fail
    - Expected: session.current_title equals `script-ran`
+- Ok
    - Expected: origin equals `null`
+- fail
+- Ok
    - Expected: kind equals `undefined`
+- fail
    - Expected: session.document_cookie() equals ``
    - Expected: session.current_url equals `https://safe.test/sandbox`
 
@@ -965,12 +860,10 @@ expect(session.warnings.join("|")).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("allows scripts without restoring sandboxed origin storage or navigation")
 step("Run allowed script inside an opaque-origin sandbox")
 var session = BrowserSession.new()
 expect(session.begin_network_navigation(
@@ -1020,20 +913,18 @@ expect(session.has_pending_requests()).to_be(false)
 
 #### blocks inline DOM handlers when sandbox does not allow scripts
 
-- blocks inline DOM handlers when sandbox does not allow scripts
 - Dispatch an inline DOM handler in a script-blocked sandbox
+- var session = BrowserSession new
    - Expected: dispatch.actions.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("blocks inline DOM handlers when sandbox does not allow scripts")
 step("Dispatch an inline DOM handler in a script-blocked sandbox")
 var session = BrowserSession.new()
 expect(session.begin_network_navigation(
@@ -1048,10 +939,9 @@ expect(session.commit_network_response(BrowserResponse.create(
     ""
 )).is_ok()).to_be(true)
 
-val dispatch = session.dispatch_dom_event_route(
-    _security_browser_route(session, "go"),
-    "click", true, true
-).unwrap()
+val dispatch = session.dispatch_dom_event(
+    "go", "click", true, true
+)
 expect(dispatch.actions.len()).to_equal(0)
 expect(session.render_html_document().contains(
     "data-fired=\"yes\""
@@ -1065,8 +955,9 @@ expect(session.warnings.join("|")).to_contain(
 
 #### carries an opaque cookie-free initiator on sandboxed fetch
 
-- carries an opaque cookie-free initiator on sandboxed fetch
 - Issue a fetch from an opaque-origin sandbox with ambient cookies
+- var session = BrowserSession new
+- "fetch
    - Expected: fetch.kind equals `fetch`
    - Expected: fetch.initiator_origin equals `null`
    - Expected: fetch.site_for_cookies_url equals ``
@@ -1077,12 +968,10 @@ expect(session.warnings.join("|")).to_contain(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("carries an opaque cookie-free initiator on sandboxed fetch")
 step("Issue a fetch from an opaque-origin sandbox with ambient cookies")
 var session = BrowserSession.new()
 expect(session.open_html(
@@ -1117,21 +1006,21 @@ expect(fetch.script_cookie_writes.len()).to_equal(0)
 
 #### ignores meta sandbox while retaining its source directives
 
-- ignores meta sandbox while retaining its source directives
 - Parse a meta CSP containing sandbox and source directives
+- var session = BrowserSession new
    - Expected: session.current_title equals `meta-ran`
+- Ok
    - Expected: origin equals `https://safe.test`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("ignores meta sandbox while retaining its source directives")
 step("Parse a meta CSP containing sandbox and source directives")
 var session = BrowserSession.new()
 expect(session.open_html(
@@ -1152,21 +1041,25 @@ match session.eval_script("location.origin"):
 
 #### rechecks CSP before following style and script redirects
 
-- rechecks CSP before following style and script redirects
 - Redirect admitted style and script requests to CSP-blocked URLs
+- var session = BrowserSession new
+- Some
+- fail
+- Some
    - Expected: style_request.kind equals `style`
+- fail
+- Some
    - Expected: script_request.kind equals `script`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rechecks CSP before following style and script redirects")
 step("Redirect admitted style and script requests to CSP-blocked URLs")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1246,20 +1139,22 @@ expect(warnings).to_contain(
 
 #### enforces CSP host-source paths before script dispatch
 
-- enforces CSP host-source paths before script dispatch
 - Dispatch scripts against matching and nonmatching CSP host paths
+- var session = BrowserSession new
+- Some
+- fail
+- Some
    - Expected: script_request.kind equals `script`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 114 lines folded for reproduction.
+Runnable source: 112 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("enforces CSP host-source paths before script dispatch")
 step("Dispatch scripts against matching and nonmatching CSP host paths")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1378,26 +1273,33 @@ expect(browser_csp_allows_after_redirect(
 
 #### upgrades HSTS hosts and subdomains until max-age expires
 
-- upgrades HSTS hosts and subdomains until max-age expires
 - Record HSTS and navigate through covered hosts before and after expiry
+- var session = BrowserSession new
    - Expected: started.is_ok() is true
+- Some
    - Expected: committed.is_ok() is true
+- fail
    - Expected: upgraded.is_ok() is true
+- Some
    - Expected: request.url equals `https://sub.secure.test/next`
+- fail
+- Ok
    - Expected: target equals `https://secure.test/reload`
+- Err
+- fail
    - Expected: expired.is_ok() is true
+- Some
    - Expected: request.url equals `http://secure.test/after-expiry`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("upgrades HSTS hosts and subdomains until max-age expires")
 step("Record HSTS and navigate through covered hosts before and after expiry")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1476,20 +1378,26 @@ match session.take_pending_request():
 
 #### ignores signed HSTS max-age but accepts zero clearing
 
-- ignores signed HSTS max-age but accepts zero clearing
 - Apply signed, clearing, and malformed HSTS max-age directives
+- var session = BrowserSession new
+- Some
+- fail
+- Some
+- fail
+- Some
    - Expected: request.url equals `https://secure.test/next`
+- fail
+- Some
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 79 lines folded for reproduction.
+Runnable source: 77 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("ignores signed HSTS max-age but accepts zero clearing")
 step("Apply signed, clearing, and malformed HSTS max-age directives")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1573,27 +1481,30 @@ match session.take_pending_request():
 
 #### restores only valid unexpired HSTS state across sessions
 
-- restores only valid unexpired HSTS state across sessions
 - Restore persisted HSTS entries with mixed validity and expiry
+- var session = BrowserSession new
+- BrowserHstsSnapshot create
    - Expected: accepted equals `1`
    - Expected: saved.entries.len() equals `1`
    - Expected: saved.entries[0].host equals `secure.test`
    - Expected: saved.entries[0].expires_at_unix_ms equals `101000`
    - Expected: upgraded.is_ok() is true
+- Some
    - Expected: request.url equals `https://sub.secure.test/next`
+- fail
    - Expected: expired.is_ok() is true
+- Some
    - Expected: request.url equals `http://secure.test/after-expiry`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("restores only valid unexpired HSTS state across sessions")
 step("Restore persisted HSTS entries with mixed validity and expiry")
 var entries: [BrowserHstsSnapshotEntry] = []
 entries.push(BrowserHstsSnapshotEntry(
@@ -1673,21 +1584,26 @@ match session.take_pending_request():
 
 #### rejects JavaScript fetches after the document request budget is spent
 
-- rejects JavaScript fetches after the document request budget is spent
 - Issue JavaScript fetches after exhausting the document request budget
+- var session = BrowserSession new
+- session open html
+- "var outcome = 'pending'; fetch
    - Expected: queued.is_ok() is true
    - Expected: session.take_pending_request().is_none() is true
+- Ok
+- JsValue String
+- fail
+- Err
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects JavaScript fetches after the document request budget is spent")
 step("Issue JavaScript fetches after exhausting the document request budget")
 var session = BrowserSession.new()
 session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
@@ -1714,23 +1630,35 @@ match session.eval_script("outcome"):
 
 #### keeps HttpOnly and transport cookie state outside page-visible JS
 
-- keeps HttpOnly and transport cookie state outside page-visible JS
 - Store transport and HttpOnly cookies, then inspect page-visible state
+- var session = BrowserSession new
+- Some
+- fail
    - Expected: session.document_cookie() equals `public=yes`
+- Ok
+- JsValue String
    - Expected: cookie_text equals `public=yes`
+- fail
+- Err
+- fail
+- Ok
+- JsValue String
    - Expected: kind equals `undefined`
+- fail
+- Err
+- fail
+- Some
    - Expected: request.url equals `https://safe.test/next`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps HttpOnly and transport cookie state outside page-visible JS")
 step("Store transport and HttpOnly cookies, then inspect page-visible state")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1790,20 +1718,22 @@ match session.take_pending_request():
 
 #### rejects cookie source controls and delegates serialized byte limits
 
-- rejects cookie source controls and delegates serialized byte limits
 - Set cookies containing source controls and boundary-sized serialized values
+- var session = BrowserSession new
+- "long=accepted; ignored=" + "x" repeat
+- session apply set cookie header
+- session apply set cookie header
+- session apply set cookie header
    - Expected: session.document_cookie() equals `long=accepted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects cookie source controls and delegates serialized byte limits")
 step("Set cookies containing source controls and boundary-sized serialized values")
 var session = BrowserSession.new()
 session.open_html(
@@ -1826,19 +1756,19 @@ expect(session.cookie_header_for_request(
 
 #### defaults cookie Path to the response URL directory
 
-- defaults cookie Path to the response URL directory
 - Store a response cookie without an explicit Path
+- var session = BrowserSession new
+- Some
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("defaults cookie Path to the response URL directory")
 step("Store a response cookie without an explicit Path")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1874,21 +1804,27 @@ expect(session.cookie_header_for_request(
 
 #### rejects a fetch redirect that crosses the page origin
 
-- rejects a fetch redirect that crosses the page origin
 - Redirect a same-origin page fetch across origins
+- var session = BrowserSession new
+- "<html><body><script>var outcome = 'pending'; fetch
+- Some
    - Expected: redirected.is_ok() is true
+- fail
    - Expected: session.take_pending_request().is_none() is true
+- Ok
+- JsValue String
+- fail
+- Err
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rejects a fetch redirect that crosses the page origin")
 step("Redirect a same-origin page fetch across origins")
 var session = BrowserSession.new()
 session.open_html(
@@ -1926,8 +1862,9 @@ match session.eval_script("outcome"):
 
 #### bounds recursive microtask work in one browser flush
 
-- bounds recursive microtask work in one browser flush
 - Run a recursively replenished microtask queue
+- var session = BrowserSession new
+- "var hits = 0; function again
    - Expected: result.is_ok() is true
    - Expected: session.current_title equals `8000`
 
@@ -1935,12 +1872,10 @@ match session.eval_script("outcome"):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("bounds recursive microtask work in one browser flush")
 step("Run a recursively replenished microtask queue")
 var session = BrowserSession.new()
 session.open_html(
@@ -1960,20 +1895,20 @@ expect(session.current_title).to_equal("8000")
 
 #### strips forbidden and CR-injected request headers
 
-- strips forbidden and CR-injected request headers
 - Issue a fetch with forbidden and CR-injected request headers
+- var session = BrowserSession new
+- Some
    - Expected: request.headers equals `X-Trace: kept`
+- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("strips forbidden and CR-injected request headers")
 step("Issue a fetch with forbidden and CR-injected request headers")
 var session = BrowserSession.new()
 val started = session.begin_network_navigation(
@@ -1993,19 +1928,22 @@ match session.take_pending_request():
 
 #### leaves hosted cookie attachment to the broker
 
-- leaves hosted cookie attachment to the broker
 - Export a hosted request while page cookies are present
+- var session = BrowserSession new
+- session open html
+- session apply set cookie header
+- Some
+- fail
+- nil: fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("leaves hosted cookie attachment to the broker")
 step("Export a hosted request while page cookies are present")
 var session = BrowserSession.new()
 session.broker_network_policy = true
@@ -2035,8 +1973,8 @@ match session.take_pending_request():
 
 #### retains admitted hosted script cookie setters in order
 
-- retains admitted hosted script cookie setters in order
 - Run multiple admitted hosted script cookie assignments
+- var session = BrowserSession new
    - Expected: writes.len() equals `2`
    - Expected: writes[0] equals `first=one; Path=/`
    - Expected: writes[1] equals `second=two; Path=/`
@@ -2046,12 +1984,10 @@ match session.take_pending_request():
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("retains admitted hosted script cookie setters in order")
 step("Run multiple admitted hosted script cookie assignments")
 var session = BrowserSession.new()
 session.broker_network_policy = true
@@ -2079,19 +2015,21 @@ expect(session.document_cookie().contains("hidden=no")).to_be(false)
 
 #### keeps hosted cookie setters ordered around fetch calls
 
-- keeps hosted cookie setters ordered around fetch calls
 - Set hosted cookies before and after a scripted fetch
+- var session = BrowserSession new
+- "fetch
+- "fetch
+- nil: fail
+- nil: fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps hosted cookie setters ordered around fetch calls")
 step("Set hosted cookies before and after a scripted fetch")
 var session = BrowserSession.new()
 session.broker_network_policy = true
@@ -2122,8 +2060,8 @@ match second:
 
 #### surfaces hosted script cookie setter overflow
 
-- surfaces hosted script cookie setter overflow
 - Exceed the hosted script cookie setter queue limit
+- var session = BrowserSession new
    - Expected: writes.len() equals `32`
    - Expected: writes[0] equals `queued0=yes; Path=/`
    - Expected: writes[31] equals `queued31=yes; Path=/`
@@ -2132,12 +2070,10 @@ match second:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("surfaces hosted script cookie setter overflow")
 step("Exceed the hosted script cookie setter queue limit")
 var session = BrowserSession.new()
 session.broker_network_policy = true
@@ -2163,8 +2099,10 @@ expect(session.script_cookie_write_overflow).to_be(true)
 
 #### prevents script from replacing an HttpOnly cookie
 
-- prevents script from replacing an HttpOnly cookie
 - Attempt to replace an HttpOnly cookie from page script
+- var session = BrowserSession new
+- session open html
+- session apply set cookie header
    - Expected: session.document_cookie() equals ``
    - Expected: session.cookie_header_for_request("https://safe.test/") equals `sid=secret`
 
@@ -2172,12 +2110,10 @@ expect(session.script_cookie_write_overflow).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("prevents script from replacing an HttpOnly cookie")
 step("Attempt to replace an HttpOnly cookie from page script")
 var session = BrowserSession.new()
 session.open_html("https://safe.test/", "<html><body>safe</body></html>")
@@ -2196,7 +2132,7 @@ expect(session.cookie_header_for_request("https://safe.test/")).to_equal("sid=se
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -2208,62 +2144,11 @@ Tests covering BrowserSession production security boundary.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 43 |
-| Active scenarios | 43 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d5152e5904187d56dbcf471cf09352dfb875d2676f30d279874623ad93faee6f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d5152e5904187d56dbcf471cf09352dfb875d2676f30d279874623ad93faee6f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d5152e5904187d56dbcf471cf09352dfb875d2676f30d279874623ad93faee6f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/web/browser_session_security_boundary_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/web/browser_session_security_boundary_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/web/browser_session_security_boundary_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bounds hostile do-while script execution' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bounds hostile recursive script execution' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/web/browser_session_security_boundary_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shares one execution budget across nested script loops' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

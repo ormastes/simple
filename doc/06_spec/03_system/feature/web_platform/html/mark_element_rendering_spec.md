@@ -27,7 +27,21 @@ Selected `<mark>` UA highlighting through Web semantics, Draw IR, and Engine2D.
 
 Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
 
-## Scenarios
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{
+    system_dom_identity_index, system_dom_route
+}
 
 ### Production mark element rendering
 
@@ -148,39 +162,21 @@ expect(override.hit_index.styles[override_index].fg).to_equal(
     0xFFFFFFFFu32
 )
 
-step("Lower mark and following text to exact inline Draw IR geometry")
-val mark_term = _mark_command(mark.composition, "term")
-val span_term = _mark_command(styled_span.composition, "term")
-val block_term = _mark_command(block.composition, "term")
-val mark_mid = _mark_text_command(mark.composition, "MID")
-val span_mid = _mark_text_command(styled_span.composition, "MID")
-val mark_right = _mark_text_command(mark.composition, "RIGHT")
-val span_right = _mark_text_command(styled_span.composition, "RIGHT")
-val block_right = _mark_text_command(block.composition, "RIGHT")
-expect(_mark_geometry(mark_term)).to_equal([32, 8, 24, 16])
-expect(_mark_geometry(mark_mid)).to_equal([32, 8, 24, 16])
-expect(_mark_geometry(mark_right)).to_equal([56, 8, 40, 16])
-expect(_mark_geometry(mark_term)).to_equal(
-    _mark_geometry(span_term)
-)
-expect(_mark_geometry(mark_mid)).to_equal(_mark_geometry(span_mid))
-expect(_mark_geometry(mark_right)).to_equal(
-    _mark_geometry(span_right)
-)
-expect(mark_mid.advance_widths).to_equal(span_mid.advance_widths)
-expect(mark_right.advance_widths).to_equal(
-    span_right.advance_widths
-)
-expect(_mark_geometry(mark_term)).not.to_equal(
-    _mark_geometry(block_term)
-)
-expect(_mark_geometry(mark_right)).not.to_equal(
-    _mark_geometry(block_right)
-)
-expect(_mark_style(mark_term, "display")).to_equal("inline")
-expect(_mark_style(mark_term, "background-color")).to_equal(
-    "{YELLOW}"
-)
+        step("Parse mark with the row as its immediate parent")
+        val root = html_tree_builder_build(mark_html)
+        val identity_index = system_dom_identity_index(root)
+        val row_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "row")
+        )
+        val mark_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "term")
+        )
+        expect(mark_path.len()).to_be_greater_than(1)
+        expect(row_path.len()).to_be_greater_than(0)
+        expect(be_dom_get_tag(mark_path[mark_path.len() - 1])).to_equal("mark")
+        expect(mark_path[mark_path.len() - 2].node_id).to_equal(
+            row_path[row_path.len() - 1].node_id
+        )
 
 step("Rasterize the exact mark highlight and discriminating controls")
 val mark_pixels = _mark_pixels(mark.composition)

@@ -1,6 +1,6 @@
 # Bootstrap Build Policy
 
-Status: current policy, updated 2026-07-06.
+Status: current policy, updated 2026-08-16.
 
 ## Scope
 
@@ -17,14 +17,8 @@ Simple bootstrap has two public pure-Simple build modes:
 - `one-binary` is the conservative monolithic mode. It clears the native cache
   and rebuilds a single native executable.
 
-No third mode should be added without a separate requirements decision.
-
-## Backend Selection
-
-LLVM is the default bootstrap backend. `llvm`, `llvm-lib`, and `cranelift` are
-supported explicit selections, and every retained stage must use the same
-selection. Missing LLVM is a setup error; the wrapper must not silently change
-an LLVM request to Cranelift.
+No third code-generation mode should be added without a separate requirements
+decision. Bootstrap scheduling strategy is orthogonal to this mode.
 
 ## Rust Seed Boundary
 
@@ -62,6 +56,16 @@ source import edge, so cache reuse is allowed only when those inputs match.
 
 ## Acceptance
 
+- REQ-BOOT-STRATEGY-001: omitted strategy selects `normal`; invalid strategies
+  fail before a compiler starts; `--mode` remains orthogonal.
+- REQ-BOOT-STRATEGY-002: normal verification uses isolated incremental caches,
+  immutable admitted compilers, and never permits concurrent writers to one
+  cache/output.
+- REQ-BOOT-STRATEGY-003: full strategy records exit/signal/timeout for every
+  runnable task, records blocked descendants, continues independent tasks, and
+  reaches a complete terminal summary before returning aggregate failure.
+- REQ-BOOT-STRATEGY-004: a normal receipt may satisfy a full task only when its
+  compiler, runtime, source, command, and artifact hashes match exactly.
 - `scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload` performs a
   pure-Simple rebuild and does not run cargo.
 - `scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary` performs a
@@ -70,27 +74,3 @@ source import edge, so cache reuse is allowed only when those inputs match.
   the Rust seed/runtime before pure-Simple stages.
 - Direct execution of the Rust seed prints the seed warning outside bootstrap
   mode.
-- REQ-BOOT-BACKEND-001: Bootstrap defaults to LLVM, honors explicit LLVM or
-  Cranelift selection through every stage, and fails rather than silently
-  changing the requested backend.
-- REQ-BOOT-BACKEND-002: Native platform CI must exercise LLVM on Linux and
-  Apple Silicon, Cranelift on Intel macOS and Windows, run the canonical Stage
-  2/Stage 3 sanity, and publish only the pure-Simple stage artifacts.
-- REQ-BOOT-ARCH-001: The Linux Stage 3 pure-Simple LLVM artifact must build and
-  execute the canonical exact-output SIMD row probe for x86_64, AArch64, and
-  RISC-V under native/QEMU execution, including target instruction checks.
-- REQ-BOOT-STAGE-001: Every retained Stage 2 and Stage 3 pure-Simple compiler
-  must start, compile the canonical tiny redeploy fixture with stub fallback
-  disabled, run the produced native binary successfully, and reject unsupported
-  commands without misrouting them to `native-build`.
-- REQ-MCP-CMD-001: The exact cached native Simple MCP server built by fresh
-  pure Stage 2 at `build/bootstrap/mcp-package/simple_mcp_server` must answer
-  `initialize`, `notifications/initialized`, and `tools/list`, then serve
-  representative `simple_pipe` and `simple_search` calls without runtime stubs,
-  source-mode fallback, or Rust-seed fallback.
-- REQ-MCP-CMD-002: Every bootstrap route that reaches the full server-producing
-  Stage 5 must delete and rebuild the exact cached native MCP/LSP pair, with
-  runtime stub fallback disabled, before deployment. Both servers must answer
-  `initialize`, `notifications/initialized`, and `tools/list`; the MCP server
-  must serve `simple_status` and the LSP server must serve `lsp_symbols`, with
-  correlated string response IDs and no source-mode or Rust-seed fallback.

@@ -7,6 +7,59 @@ traits (`DebugTarget`, `ProfileTarget`) plus their group (`DebugProfiler`),
 implemented by the host, the reference VM, and the CUDA/Vulkan/Metal GPU lanes,
 and surfaced through DAP, the Lab HTTP API, and `debug-doctor`.
 
+The 2026-08-14 research extends this landed capability layer toward one
+session-owning `DebugServiceV1`; it does not replace the traits or authorize a
+third mutable stack. See
+`doc/01_research/app/tools/simple_unified_debugging_evidence_2026-08-14.md`.
+
+## Evidence-driven investigation
+
+Use SPipe D0–D12: intake; preserve; live doctor; classify; set privacy,
+perturbation, downtime, retention, and token budgets; take the cheapest decisive
+observation; reproduce the same mechanism; state a falsifiable hypothesis;
+receipt every probe/attach; assign the real owner; select only justified test
+levels; fix/verify once; then clean up and extract reusable knowledge.
+
+Preserve raw evidence and exact build/symbol identity. Keep Observe, Control,
+and Policy separate. Support (`Native | Emulated | Unavailable`), verification
+(`LiveVerified | FixtureVerified | Unverified | Blocked`), and perturbation
+(`Passive | Cooperative | Stopping | Mutating`) are independent facts.
+Unavailable is never PASS. AOP debugging is read-only and receipt-bearing by
+default. Do not retain SQL bind values or unredacted browser/mobile/memory
+payloads by default.
+
+Every debugged defect needs one bug-database row and a completion token receipt
+using provider-reported input/output/cache token fields or `unavailable`. Compare
+the total with the rolling average of comparable completed bug fixes. Above 2×
+average, record the reusable cause, decisive observation, false leads, and
+cheapest reproducer here or in the owning feature/layer expert, then link it
+from the bug investigation log. Never store prompts, secrets, or unrelated
+conversation text.
+
+Reproduction proceeds System → Integration → Unit/property when the defect is
+externally visible. Each level must prove the same failure mechanism. Failure
+to obtain System reproduction returns to target/environment/evidence debugging;
+failure to obtain Integration reproduction returns to boundary and hypothesis
+debugging. More unrelated tests are not progress. Once both are faithful,
+adjacent cases may discover the extent of the shared owner defect.
+
+For Simple test helpers that forward a fallible operation, declare
+`-> Result<Nil, text>` and return the underlying `Result` as the tail
+expression. Applying `?` inside an unannotated helper unwraps the value and can
+make the helper infer `nil`; a caller that then uses `?` fails before the real
+integration scenario executes. Treat this as a harness defect, correct the
+boundary type, and rerun the same reproducer rather than adding another test.
+
+Unification means adapting landed tools, never building parallel mechanisms.
+Keep DAP and MCP as stable front doors; keep mcpgdb's GDB/LLDB process/FIFO,
+the canonical remote backend catalog, TRACE32 sessions/PRACTICE/window access,
+OpenOCD/GDB-RSP/JTAG, and DbgEng dump access as mechanism owners. Bind their
+private resource handles to one public `DebugSessionId`, classify and receipt
+their actions, and project their state into the target graph. Feature bitmaps
+do not prove live capability. Do not add another transport, registry, backend
+catalog, window-capture path, or native dump parser while one of these owners
+already exists.
+
 **The single most important thing to know before touching this area:** classes
 are value types, and every mis-shaped handle in this feature fails *silently*.
 There is no diagnostic. See "The one hazard" below.
@@ -80,6 +133,20 @@ Bugs: `capability_group_from_unsound_under_value_semantics_2026-08-09.md`,
 
 ## What is real, and what is not
 
+- **Doctor registration is executable ownership, not discovery.** A landed
+  `HostDebugTarget` was still reported as pending because the CLI constructed
+  an empty `CapabilityRegistry`. Register a capability through the doctor's
+  canonical registry factory and cover both the Integration row and the full
+  `simple debug doctor` output. Source presence alone proves neither available
+  nor unavailable; an accidentally empty registry is also not truthful live
+  evidence.
+- **Adapters must not import an executable module with a top-level server
+  call.** `HostDebugTarget` imported `SimpleDapSession` selectively, but the
+  module still executed `simple_dap_server_main()` and polluted/hijacked doctor
+  runs. Keep executable startup behind `fn main`; verify the Integration
+  reproducer has no server-start side effect before accepting a live adapter
+  probe.
+
 - **All evidence is from the Rust seed.** Nothing here is self-hosted evidence.
 - **CUDA and Vulkan genuinely run on device** — 20 launches each, field diffs
   clean.
@@ -116,6 +183,48 @@ Bugs: `capability_group_from_unsound_under_value_semantics_2026-08-09.md`,
 - **A green spec says nothing about reachability.** Three landed mechanisms
   have no caller: `desugar_traits`, `svmg_lowering`, `action_key`/
   `interface_digest`. Grep for callers before claiming end-to-end.
+- **Treat evidence databases as checksummed artifacts.** Never repair their
+  formatting by editing or trimming the serialized body: that invalidates the
+  fail-closed CRC. Fix the owning serializer, make empty terminal fields
+  explicit (`""`), then persist through the database owner and prove both
+  whitespace cleanliness and checksum-based reload in System and Integration
+  reproducers.
+- **Offline inspection still owns a live service resource.** If an evidence
+  command opens a temporary central session, record the operation outcome and
+  close that session on both allowed and denied paths. A valid manifest and an
+  authorization receipt do not prove lifecycle cleanup; compare active-session
+  count before and after the production inspection path.
+- **Cross-process probe bindings outlive in-memory service objects.** A CLI
+  invocation must not recreate a probe merely to obtain an ID for removal:
+  the new service instance can issue a different ID and leave the real backend
+  breakpoint installed. Persist the original service-issued ID together with
+  the adapter-native anchor, re-verify the durable adapter owner, authorize the
+  removal in a fresh central context, remove the native probe, receipt the
+  outcome, and clear the durable binding. Acceptance requires both the live
+  backend apply/list/remove sequence and a zero-byte/absent binding afterward.
+- **Interpreter adapters must call the landed debug facade, not redeclare
+  externs.** The runtime-facing names are owned by
+  `std.nogc_async_mut.io.debug_stubs` and may differ from an older backend's
+  guessed `rt_debug_*` surface. Adapt semantic breakpoints, stack/locals, and
+  cleanup through that facade; an unknown-extern failure is an adapter-owner
+  defect, not evidence that interpreter debugging is unavailable. Also
+  propagate a failed program run—receipts alone must not turn a non-executed
+  fixture into a live-debug PASS.
+- **Do not name a debug-test helper `context` when importing `std.spec.*`.**
+  The SPipe/SSpec DSL exports its own `context`; ambiguous resolution can call
+  that block helper and pass `nil` into a typed authorization path. Use a
+  domain name such as `authorization_context` and retain the exact temporal
+  policy spec so environment, privilege, and timestamp fields are exercised.
+- **Never pass evidence-controlled paths through a shell.** Validate a bundle
+  path as relative, bind it to an exact digest, and read bytes through the
+  filesystem owner before decoding. Semantic replay may prove deterministic
+  reproduction, but its receipt must keep the original defect status separate;
+  successful parsing or replay is not evidence that the defect was fixed.
+- **Keep each negative-path assertion with the scenario that produces it.** A
+  misplaced assertion can make a valid rejection appear broken while leaving
+  the intended invalid-input scenario oracle-free. For token receipts, assert
+  negative-number rejection in the token case and calendar-shape rejection in
+  the date case, then run the real CLI Integration boundary.
 
 ## Landed streams
 

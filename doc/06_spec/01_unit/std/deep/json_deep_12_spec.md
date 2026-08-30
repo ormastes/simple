@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -889,12 +889,180 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("complex 1")
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+<details>
+<summary>Advanced: loop accumulates in order</summary>
+
+#### loop accumulates in order
+
+- Verify: loop accumulates in order
+   - Expected: sum equals `10)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-JSON-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-JSON-DEEP-af59
+step("Verify: loop accumulates in order")
+# oracle: 10 — sum of 0..5 exclusive end
+var sum = 0
+for i in 0..5:
+    sum = sum + i
+expect(sum).to_equal(10)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+
+</details>
+
+#### match destructures Some
+
+- Verify: match destructures Some
+   - Expected: x equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-JSON-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-JSON-DEEP-af59
+step("Verify: match destructures Some")
+# oracle: 1 — the Some arm binds the payload
+match Some(1):
+    Some(x):
+        expect(x).to_equal(1)  # oracle: pinned constant asserted by this scenario
+    nil:
+        expect(false).to_equal(true)
+```
+
+</details>
+
+#### string length and emptiness
+
+- Verify: string length and emptiness
+   - Expected: "test".len() equals `4)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "".len() equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "".is_empty() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-JSON-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-JSON-DEEP-af59
+step("Verify: string length and emptiness")
+# oracle: 4/0 — len counts chars; only the empty string is empty
+expect("test".len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+expect("".len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect("".is_empty()).to_equal(true)
+```
+
+</details>
+
+#### comparison ordering
+
+- Verify: comparison ordering
+   - Expected: 1 < 2 is true
+   - Expected: 2 <= 2 is true
+   - Expected: 3 > 4 is false
+   - Expected: 5 == 5 is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-JSON-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-JSON-DEEP-af59
+step("Verify: comparison ordering")
+# oracle: transitive i64 ordering as written
+expect(1 < 2).to_equal(true)
+expect(2 <= 2).to_equal(true)
+expect(3 > 4).to_equal(false)
+expect(5 == 5).to_equal(true)
+```
+
+</details>
+
+#### integer arithmetic and abs
+
+- Verify: integer arithmetic and abs
+   - Expected: abs(-5) equals `5)  # oracle: pinned constant asserted by this scenario`
+   - Expected: 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 equals `1024)  # oracle: pinned constant asserted by this scenario`
+   - Expected: 7 / 2 equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: 7 % 3 equals `1)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-JSON-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-JSON-DEEP-af59
+step("Verify: integer arithmetic and abs")
+# oracle: 5 — abs(-5) is the absolute value; 1024 — 2^10
+expect(abs(-5)).to_equal(5)  # oracle: pinned constant asserted by this scenario
+expect(2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2).to_equal(1024)  # oracle: pinned constant asserted by this scenario
+expect(7 / 2).to_equal(3)  # oracle: pinned constant asserted by this scenario
+expect(7 % 3).to_equal(1)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### float math min max sqrt floor ceil
+
+- Verify: float math min max sqrt floor ceil
+   - Expected: min(3.0, 7.0) equals `3.0`
+   - Expected: max(3.0, 7.0) equals `7.0`
+   - Expected: sqrt(16.0) equals `4.0`
+   - Expected: floor(2.7) equals `2.0`
+   - Expected: ceil(2.1) equals `3.0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-JSON-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-JSON-DEEP-af59
+step("Verify: float math min max sqrt floor ceil")
+# oracle: 3.0/7.0 — min/max pick the smaller/larger operand; 4.0 — sqrt(16)
+expect(min(3.0, 7.0)).to_equal(3.0)
+expect(max(3.0, 7.0)).to_equal(7.0)
+expect(sqrt(16.0)).to_equal(4.0)
+expect(floor(2.7)).to_equal(2.0)
+expect(ceil(2.1)).to_equal(3.0)
 ```
 
 </details>

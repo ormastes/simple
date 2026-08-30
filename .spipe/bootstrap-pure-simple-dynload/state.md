@@ -47,10 +47,39 @@ verify-warn
 - verify: `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-driver` passed after fixing the existing unconditional `RefCell` import; existing runtime extern signature warnings remain.
 - verify: `bin/simple spipe-docgen test/03_system/feature/app/native_build_smf_spec.spl --output doc/06_spec --no-index` generated 0 stubs; duplicate generated path was discarded in favor of the existing canonical manual path.
 - blocked: `bin/simple check src/app/io/_CliCompile/compile_targets.spl` terminated twice with exit 143 during dependency loading; not re-run to avoid a runaway loop.
-- deploy (2026-08-25 05:16 UTC, seed-sibling refresh, NOT self-hosted): `bin/release/x86_64-unknown-linux-gnu/simple` pre `f6521b60b67d38944016b82451ac60c522375410c60dec7178d5c06bd063bde7` (2026-08-23 04:47) -> post `706fa63677e053add9e09b8a2238dbece43019ce43cdaca5e95bc30be53689d6` (Rust seed, cargo from CLEAN worktree at origin/main `e8db788629b`, `cp -> .new && mv`). Smoke: arithmetic `5`; value-bound `unsafe(...)` probe `V=/home/ormastes` (bug `deployed_seed_cannot_parse_value_bound_unsafe_2026-08-25.md` -> FIXED). Regression guard on the new binary, brackets stable at `706fa636…`: agent_workspace_spec 6/6, workspace_cli_system_spec 4/4, infra_tools_spec 17/17, check-llm-caret-infra-live `PASS — 2 live row(s)`. Rollback receipt: `/mnt/data/tmp/claude-1000/seed-rollback/RECEIPT.md`.
-- blocked (2026-08-25): the 5 llm_caret cached/closure/phase specs still need a genuine Stage 4 (`runtime=pure-simple-self-hosted`, `--version` without `bootstrap|seed`) plus a hand-written `build/bootstrap/caret-package/caret.provenance` and a CLEAN tree (the cached checkers fail closed on a dirty tree, so they can never pass on the shared tree). Stage 3 self-host is not converging on this box: lane simple-work-20260824 `abnormality-source-stage26` failed 05:17 UTC with `10.frontend/core/__init__.spl: timeout (600s)`; earlier stage3 attempts there stall at seq=685. Own attempt: `caret-clean` (origin/main e8db788629b) `bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --output=build/bootstrap/caret-redeploy --mode=dynload --backend=cranelift --jobs=8`, SIMPLE_CACHE_SCOPE=caret-redeploy — see the Phase log below for the outcome.
-- finding (2026-08-25 05:45, Stage 2 admission is load-flaky): the pinned-clean-worktree Stage 2 BUILT fine — `Build complete: 757 compiled, 0 cached, 0 failed`, 28409 KB linked — but the wrapper rejected it at sanity: `error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)` / `bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.0-RC unsupported_status=1 frontend_status=1 candidate_unchanged=true`, binary preserved as `stage2/x86_64-unknown-linux-gnu/simple.rejected`, wrapper exit 1, and the failure-diagnosis helper reported `UNDIAGNOSABLE: the stage failed with no error message of any kind`. Replaying that exact smoke by hand against `simple.rejected` (`candidate_frontend_smoke` argv from `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs`: `native-build --backend cranelift --runtime-bundle core-c-bootstrap --entry-closure --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl`) SUCCEEDS: exit 0, `Build complete: 1 compiled, 0 cached, 0 failed`, 39 KB binary, 8.5s. So the candidate is good and the rejection was a budget miss, not a product defect: `COMPILER_BUILD_TIMEOUT_SECONDS=60` is set UNCONDITIONALLY at `scripts/bootstrap/bootstrap-from-scratch.sh:1103` (the admission helper itself honours the env at `candidate_frontend_admission.shs:4`, but the wrapper overwrites it), and 60s is not survivable on a box at load ~39 with 3 concurrent agent lanes. Suggested fix (NOT applied — outside this session's scope): make line 1103 `COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}` so a loaded host can raise it, and make the sanity failure path print the smoke's captured stderr instead of `UNDIAGNOSABLE`.
-- verdicts (2026-08-25 05:5x, deployed binary sha `706fa636…`, brackets identical pre/post on every run): llm_caret_cli_cached `Results: 3 total, 0 passed, 3 failed` (`failure_reason=cached_caret_artifact_missing`); llm_caret_cli_hidden_cached `Results: 5 total, 0 passed, 5 failed` (same prerequisite); llm_caret_native_closure `Results: 2 total, 0 passed, 2 failed` (`failure_reason=simple_core_archive_not_supplied`, and behind it `bootstrap_or_seed_runtime_rejected` — the deployed runtime is a seed by banner); llm_caret_tui_pty `Results: 10 total, 0 passed, 10 failed`; llm_caret_messaging_phase_cli `Results: 3 total, 0 passed, 3 failed` (Stage 3 half is satisfiable — `unknown command 'caret'` is the EXPECTED negative — but no Stage 4 binary exists to set `SIMPLE_STAGE4_BINARY`). Unblock condition for all five: a genuine Stage 4 pure-Simple full CLI deployed at `bin/release/x86_64-unknown-linux-gnu/simple` whose `--version` contains neither `bootstrap` nor `seed`.
+
+## Findings 2026-08-23
+
+- Mach-O weak definitions misread as STRONG (stage-2 blocker, fixed): stage2
+  native-build exit 1 with "Stage4 runtime capsule defines owner-provided
+  runtime symbols STRONGLY ... _rt_heap_live_bytes, _rt_heap_peak_bytes". Apple
+  llvm-nm prints weak *definitions* as `T` in POSIX `-g -p` output; the weakness
+  only appears in the `-m` flag field as `weak external`. The seed's
+  `archive_weak_global_symbols`
+  (src/compiler_rust/compiler/src/pipeline/native_project/tools.rs) and
+  `read_global_symbol_types`
+  (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs) accepted
+  only GNU/ELF `W`/`V`, so every `__attribute__((weak))` C fallback looked
+  STRONG and the stage-4 runtime capsule gate refused the link. Fix: pass `-m`
+  to nm on macOS hosts and normalize `weak external`/`weak reference` lines to
+  weak in both parsers. Verify: `nm -m` shows `weak external _f` where
+  `nm -g -p` shows `T _f` for the same weak definition.
+- Per-file 300s timeout is a hard default, not tunable: `file_timeout: 300` in
+  src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:537 (config
+  builder `.timeout(secs)`); no env var or CLI flag override exists. The
+  `--timeout` flag of `simple native-build` is the *worker subprocess* timeout
+  (default 7200), owned by src/app/cli/native_build_main.spl — a different knob.
+  On a saturated 10-core/24GB host (`--jobs=full`, ~950% CPU) big files (e.g.
+  src/compiler/10.frontend/core/__init__.spl) can exceed 300s; retry with
+  `--jobs=half` — the native cache resumes and only failed/uncached files
+  recompile. Same file passing with fewer jobs = contention, not a hang.
+- Fresh-seed requirement for current source: current `src/` uses `unsafe(...)`;
+  seeds/deployed binaries older than ~2026-08-19 fail with `error[E1002]:
+  function 'unsafe' not found`. A `--full-bootstrap` rebuild of the Rust seed
+  from current `src/compiler_rust` is the only way to compile current source;
+  there is no working prebuilt compiler for a red/green loop on this host right
+  now.
+
 - handoff (2026-08-25 ~06:20, session d495243d — READ THIS FIRST, nothing below needs re-deriving):
   - **Timeout fix ALREADY LANDED — do not redo.** PR #24, branch `caret-devtools-2026-08-25`, commit `991c88e543c`. Origin's `scripts/bootstrap/bootstrap-from-scratch.sh` has TWO timeout blocks (3740-3743 and 5118-5121, the second inside the folded `resume-stage3` function) plus `scripts/check/lib/bootstrap-stage3/sanity.shs:369-372`; all are now `${VAR:-N}` with defaults unchanged (5/60/5/1). Guard: `scripts/check/check-bootstrap-timeout-env-overridable.shs` (`PASS — 13 assertion(s) across 3 site(s)` on branch content; fatal `--selftest`, 5 fixtures; sabotage FAIL / restore PASS verified). Bug record: `doc/08_tracking/bug/bootstrap_build_timeout_not_env_overridable_2026-08-25.md`. NOTE: the shared tree `/mnt/data/worktrees/simple-main` carries another session's UN-FOLDED WIP copy of `bootstrap-from-scratch.sh` (-3847 lines vs origin) and an untracked `scripts/bootstrap/resume-stage3-from-admitted.sh` — **never `git checkout` or commit those paths in the shared tree**, it would destroy that WIP.
   - **Private worktree:** `/mnt/data/tmp/claude-1000/s4-chain`, `git worktree add --detach` at origin tip **a3bda7bfc2175239aa0ca7a53fbe95cfade825c0** (origin moved past e8db788629b). Timeout fix applied locally there via sed; warm cache seeded before first build (`build/native_cache`, 183 `.o` copied from the shared tree). Tree is otherwise clean.

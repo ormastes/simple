@@ -1,6 +1,29 @@
 # NDArray SIMD Operations Specification
 
-> Purpose: add on 6-element F64 arrays produces correct chunk+tail results
+> Smoke tests for the SIMD-accelerated paths in NDArray elementwise operations. These tests verify that the ndarray public API produces numerically correct results when arrays are long enough to exercise the SIMD chunking + scalar tail dispatch path (i.e., len > 4).
+
+<!-- sdn-diagram:id=ndarray_simd_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ndarray_simd_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ndarray_simd_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ndarray_simd_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +34,7 @@
 
 # NDArray SIMD Operations Specification
 
-Purpose: add on 6-element F64 arrays produces correct chunk+tail results
+Smoke tests for the SIMD-accelerated paths in NDArray elementwise operations. These tests verify that the ndarray public API produces numerically correct results when arrays are long enough to exercise the SIMD chunking + scalar tail dispatch path (i.e., len > 4).
 
 ## At a Glance
 
@@ -24,21 +47,8 @@ Purpose: add on 6-element F64 arrays produces correct chunk+tail results
 | Plan | doc/03_plan/agent_tasks/scilib_port_ndarray.md |
 | Design | doc/05_design/scilib_port_architecture.md |
 | Source | `test/03_system/feature/scilib/ndarray_simd_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Purpose: add on 6-element F64 arrays produces correct chunk+tail results
-Audience: compiler and tooling engineers who maintain this spec
-
-# NDArray SIMD Operations Specification
-
-**Feature IDs:** scilib-ndarray-simd
-**Category:** Stdlib
-**Difficulty:** 3/5
-**Status:** Draft
-**Plan:** doc/03_plan/agent_tasks/scilib_port_ndarray.md
-**Design:** doc/05_design/scilib_port_architecture.md
 
 ## Overview
 
@@ -75,8 +85,8 @@ No skip(), no weakened assertions.
 
 #### add on 6-element F64 arrays produces correct chunk+tail results
 
-- add on 6-element F64 arrays produces correct chunk+tail results
-- Verify: add on 6-element F64 arrays produces correct chunk+tail results
+1. Float64 new
+2. Float64 new
    - Expected: r.shape equals `Shape.new([Index.new(6)])`
    - Expected: r.get(Index.new(0)) equals `Float64.new(11.0)`
    - Expected: r.get(Index.new(3)) equals `Float64.new(44.0)`
@@ -87,14 +97,10 @@ No skip(), no weakened assertions.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("add on 6-element F64 arrays produces correct chunk+tail results")
-step("Verify: add on 6-element F64 arrays produces correct chunk+tail results")
-# @req: REQ-FEATURE-NdarSimd-001
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
                Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
 val b = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0),
@@ -111,8 +117,8 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(66.0))
 
 #### mul on 6-element F64 arrays produces correct chunk+tail results
 
-- mul on 6-element F64 arrays produces correct chunk+tail results
-- Verify: mul on 6-element F64 arrays produces correct chunk+tail results
+1. Float64 new
+2. Float64 new
    - Expected: r.get(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: r.get(Index.new(4)) equals `Float64.new(10.0)`
    - Expected: r.get(Index.new(5)) equals `Float64.new(12.0)`
@@ -121,14 +127,10 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(66.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mul on 6-element F64 arrays produces correct chunk+tail results")
-step("Verify: mul on 6-element F64 arrays produces correct chunk+tail results")
-# @req: REQ-FEATURE-NdarSimd-001
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
                Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
 val b = array([Float64.new(2.0), Float64.new(2.0), Float64.new(2.0),
@@ -143,8 +145,7 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(12.0))
 
 #### mul_scalar on 6-element F64 array uses SIMD broadcast path
 
-- mul_scalar on 6-element F64 array uses SIMD broadcast path
-- Verify: mul_scalar on 6-element F64 array uses SIMD broadcast path
+1. Float64 new
    - Expected: r.get(Index.new(0)) equals `Float64.new(6.0)`
    - Expected: r.get(Index.new(4)) equals `Float64.new(30.0)`
    - Expected: r.get(Index.new(5)) equals `Float64.new(36.0)`
@@ -153,14 +154,10 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(12.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mul_scalar on 6-element F64 array uses SIMD broadcast path")
-step("Verify: mul_scalar on 6-element F64 array uses SIMD broadcast path")
-# @req: REQ-FEATURE-NdarSimd-001
 val a = array([Float64.new(2.0), Float64.new(4.0), Float64.new(6.0),
                Float64.new(8.0), Float64.new(10.0), Float64.new(12.0)])
 val r = a.mul_scalar(Float64.new(3.0))
@@ -175,8 +172,8 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(36.0))
 
 #### add on 6-element F32 arrays produces correct results
 
-- add on 6-element F32 arrays produces correct results
-- Verify: add on 6-element F32 arrays produces correct results
+1. Float32 new
+2. Float32 new
    - Expected: r.dtype equals `DType.F32`
    - Expected: r.shape equals `Shape.new([Index.new(6)])`
    - Expected: r.get(Index.new(0)) equals `Float32.new(11.0)`
@@ -187,14 +184,10 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(36.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("add on 6-element F32 arrays produces correct results")
-step("Verify: add on 6-element F32 arrays produces correct results")
-# @req: REQ-FEATURE-NdarSimd-001
 val a = array_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0),
                    Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)])
 val b = array_f32([Float32.new(10.0), Float32.new(20.0), Float32.new(30.0),
@@ -211,8 +204,8 @@ expect(r.get(Index.new(5))).to_equal(Float32.new(66.0))
 
 #### mul on 6-element F32 arrays produces correct results
 
-- mul on 6-element F32 arrays produces correct results
-- Verify: mul on 6-element F32 arrays produces correct results
+1. Float32 new
+2. Float32 new
    - Expected: r.dtype equals `DType.F32`
    - Expected: r.get(Index.new(0)) equals `Float32.new(2.0)`
    - Expected: r.get(Index.new(5)) equals `Float32.new(12.0)`
@@ -221,14 +214,10 @@ expect(r.get(Index.new(5))).to_equal(Float32.new(66.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mul on 6-element F32 arrays produces correct results")
-step("Verify: mul on 6-element F32 arrays produces correct results")
-# @req: REQ-FEATURE-NdarSimd-001
 val a = array_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0),
                    Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)])
 val b = array_f32([Float32.new(2.0), Float32.new(2.0), Float32.new(2.0),
@@ -245,22 +234,20 @@ expect(r.get(Index.new(5))).to_equal(Float32.new(12.0))
 
 #### dot on 6-element F64 vectors produces correct result
 
-- dot on 6-element F64 vectors produces correct result
-- Verify: dot on 6-element F64 vectors produces correct result
+1. vector from
+2. Float64 new
+3. vector from
+4. Float64 new
    - Expected: result.value equals `910.0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dot on 6-element F64 vectors produces correct result")
-step("Verify: dot on 6-element F64 vectors produces correct result")
-# @req: REQ-FEATURE-NdarSimd-001
 val result = dot(
     vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
                  Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]),
@@ -274,8 +261,11 @@ expect(result.value).to_equal(910.0)
 
 #### try_axpy on 6-element F64 vectors produces correct result
 
-- try_axpy on 6-element F64 vectors produces correct result
-- Verify: try_axpy on 6-element F64 vectors produces correct result
+1. Float64 new
+2. vector from
+3. Float64 new
+4. vector from
+5. Float64 new
    - Expected: result.shape equals `Shape.new([Index.new(6)])`
    - Expected: result.get_f64(Index.new(0)).value equals `12.0`
    - Expected: result.get_f64(Index.new(3)).value equals `48.0`
@@ -285,14 +275,10 @@ expect(result.value).to_equal(910.0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("try_axpy on 6-element F64 vectors produces correct result")
-step("Verify: try_axpy on 6-element F64 vectors produces correct result")
-# @req: REQ-FEATURE-NdarSimd-001
 val result = try_axpy(
     Float64.new(2.0),
     vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
@@ -310,22 +296,20 @@ expect(result.get_f64(Index.new(5)).value).to_equal(72.0)
 
 #### dot_f32 on 6-element F32 vectors produces correct result
 
-- dot_f32 on 6-element F32 vectors produces correct result
-- Verify: dot_f32 on 6-element F32 vectors produces correct result
+1. vector from f32
+2. Float32 new
+3. vector from f32
+4. Float32 new
    - Expected: result.value equals `910.0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dot_f32 on 6-element F32 vectors produces correct result")
-step("Verify: dot_f32 on 6-element F32 vectors produces correct result")
-# @req: REQ-FEATURE-NdarSimd-001
 val result = dot_f32(
     vector_from_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0),
                      Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)]),
@@ -350,60 +334,8 @@ expect(result.value).to_equal(910.0)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/scilib_port_ndarray.md`
-- **Design:** `doc/05_design/scilib_port_architecture.md`
+- **Plan:** [doc/03_plan/agent_tasks/scilib_port_ndarray.md](doc/03_plan/agent_tasks/scilib_port_ndarray.md)
+- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-FEATURE-NdarSimd-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7ce64b58cfaaa10e5ebf633d5cda0da0810e0826fc4ec26098c8159fda84be37`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7ce64b58cfaaa10e5ebf633d5cda0da0810e0826fc4ec26098c8159fda84be37`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7ce64b58cfaaa10e5ebf633d5cda0da0810e0826fc4ec26098c8159fda84be37`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/feature/scilib/ndarray_simd_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/ndarray_simd_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/ndarray_simd_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/ndarray_simd_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/ndarray_simd_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/scilib/ndarray_simd_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'add on 6-element F64 arrays produces correct chunk+tail results' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/ndarray_simd_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mul on 6-element F64 arrays produces correct chunk+tail results' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/ndarray_simd_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mul_scalar on 6-element F64 array uses SIMD broadcast path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

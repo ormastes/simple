@@ -91,8 +91,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("as_is_kernel false for nonzero root")
 val space = AddressSpace(phys_root: 0x3000, id: 1)
 expect as_is_kernel(space) == false
 ```
@@ -107,7 +105,7 @@ expect as_is_kernel(space) == false
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -130,12 +128,10 @@ expect sentinel.id == 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("as_switch_to updates current root")
 as_switch_to(0x4000)
 expect as_current_phys_root() == 0x4000
 ```
@@ -150,7 +146,7 @@ expect as_current_phys_root() == 0x4000
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -454,8 +450,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("pt_ext_spawn returns a positive pid")
 val pid = pt_ext_spawn()
 expect pid > 0
 ```
@@ -470,7 +464,7 @@ expect pid > 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

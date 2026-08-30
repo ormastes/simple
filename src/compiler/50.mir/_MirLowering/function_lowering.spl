@@ -2,6 +2,7 @@
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
+use std.nogc_sync_mut.sffi.system.{env_get}
 # MIR Lowering - HIR to MIR Transformation
 #
 # This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
@@ -697,6 +698,18 @@ impl MirLowering:
             result.pipeline_ii = fa.pipeline_ii
         if fa.memory_banks > 0:
             result.memory_banks = fa.memory_banks
+        # Asm-embedding contract (design A.2): placement + naked flags.
+        if fa.is_naked:
+            result.is_naked = true
+        match fa.section:
+            Some(section_name):
+                result.section = section_name
+            nil:
+                ()
+        if fa.align > 0:
+            result.align = fa.align
+        if fa.is_global:
+            result.is_global = true
         result
 
     me lower_const(const_: HirConst):
@@ -781,6 +794,7 @@ impl MirLowering:
         if _sffi_hir_type_discriminant(type_.kind) == named_type_disc:
             match type_.kind:
                 case HirTypeKind.Named(symbol, _):
+                    self.record_external_layout_reference(symbol)
                     val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                     if underlying == TYPE_BOOL:
                         return MirType(kind: MirTypeKind.Bool)
@@ -892,6 +906,7 @@ impl MirLowering:
                     mir_members = mir_members.push(self.lower_type(m))
                 MirType(kind: MirTypeKind.Union(mir_members))
             case HirTypeKind.Named(symbol, _):
+                self.record_external_layout_reference(symbol)
                 val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                 if underlying == TYPE_BOOL:
                     return MirType(kind: MirTypeKind.Bool)
@@ -1308,7 +1323,7 @@ impl MirLowering:
                         return named_idx
                     named_idx = named_idx + 1
 
-        if (rt_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+        if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
         0  # Default fallback when type is unknown
 

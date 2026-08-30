@@ -77,6 +77,7 @@ WASM-originated Simple2D fill payload bytes into a WebGPU compute pass.
 
 - navigator gpu metadata is exposed to secure JavaScript pages
    - Expected: _display_js(value) equals `true:object:true`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -113,6 +114,7 @@ match result:
 
 - should hide navigator gpu from insecure JavaScript pages
    - Expected: _display_js(value) equals `false:undefined`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -142,6 +144,7 @@ match result:
 
 - should expose requestAdapter as a JavaScript function shape
    - Expected: _display_js(value) equals `available:function`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -431,6 +434,7 @@ expect(cp.valid).to_equal(true)
    - Expected: ctx.configure() is true
    - Expected: cp.valid is true
    - Expected: gpu_ctx.queue_write_buffer(buffer.id, 0, 32) is true
+- var encoder = gpu ctx create command encoder
    - Expected: encoder.begin_compute_pass() is true
    - Expected: encoder.set_pipeline(cp.id) is true
    - Expected: encoder.dispatch_workgroups(4, 1, 1) is true
@@ -516,6 +520,7 @@ expect(gpu_ctx.last_error).to_contain("does not exist")
 - should reject command submission after device loss
    - Expected: ctx.request_device() is true
    - Expected: lost.lost is true
+- var encoder = ctx gpu create command encoder
    - Expected: ctx.gpu.queue_submit([command_buffer]) is false
 
 
@@ -547,6 +552,7 @@ expect(ctx.gpu.last_error).to_contain("device is lost")
 
 - should run ordinary JavaScript beside WebGPU globals
    - Expected: _display_js(value) equals `42:bgra8unorm`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -579,7 +585,9 @@ match result:
    - Expected: session.current_body_html equals `simple script beside js`
    - Expected: session.warnings.len() equals `0`
    - Expected: "unexpected load error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `object:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -753,6 +761,7 @@ expect(adapter.supports_target(CodegenTarget.X86_64)).to_equal(false)
 
 - should expose the browser WebAssembly host object beside WebGPU
    - Expected: _display_js(value) equals `object:function:function:function:available:bgra8unorm`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -781,6 +790,7 @@ match result:
 
 - should validate and instantiate WASM inputs through the hardened JS host
    - Expected: _display_js(value) equals `true:false:false:instantiated:invalid`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -809,6 +819,7 @@ match result:
 
 - should validate and instantiate byte-array WASM inputs through the JS host
    - Expected: _display_js(value) equals `true:false:instantiated`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -837,6 +848,7 @@ match result:
 
 - should validate Uint8Array WASM inputs through BrowserSession
    - Expected: _display_js(value) equals `function:function:true:8`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -865,6 +877,7 @@ match result:
 
 - should validate TextEncoder-produced WASM bytes through BrowserSession
    - Expected: _display_js(value) equals `function:function:wasm:true`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -893,6 +906,7 @@ match result:
 
 - should validate TextEncoder encodeInto WASM bytes through BrowserSession
    - Expected: _display_js(value) equals `8:8:true`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -921,6 +935,7 @@ match result:
 
 - should expose bounded WASM section metadata through BrowserSession
    - Expected: _display_js(value) equals `1:true:invalid-wasm-section`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -949,6 +964,7 @@ match result:
 
 - should expose bounded Module and Instance constructors through BrowserSession
    - Expected: _display_js(value) equals `1:true:instantiated:object`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -977,6 +993,7 @@ match result:
 
 - should expose thenable WebAssembly.instantiate result shape through BrowserSession
    - Expected: _display_js(value) equals `function:function:instantiated:1:object`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1005,6 +1022,7 @@ match result:
 
 - should resolve WebAssembly.instantiate then callbacks through BrowserSession
    - Expected: _display_js(value) equals `instantiated:1:object`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1033,13 +1051,21 @@ match result:
 
 - should chain fetch arrayBuffer bytes into WebAssembly.instantiate through BrowserSession
    - Expected: _display_js(value) equals `queued`
+- Err
    - Expected: "unexpected queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals ``
+- Err
    - Expected: "unexpected pre-commit js error: {err}" equals ``
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://example.com/mod.wasm`
+- Ok
+- Ok
    - Expected: _display_js(value) equals `fetch>arrayBuffer:11>instantiate:instantiated:11:1:object`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
+- Err
    - Expected: "unexpected commit error: {err}" equals ``
    - Expected: "missing fetch request" equals ``
 
@@ -1100,17 +1126,29 @@ match session.take_pending_request():
 
 - should chain fetched WASM instantiation into JS WebGPU globals through BrowserSession
    - Expected: _display_js(value) equals `queued`
+- Err
    - Expected: "unexpected queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals ``
+- Err
    - Expected: "unexpected pre-commit js error: {err}" equals ``
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://example.com/mod.wasm`
+- Ok
+- Ok
    - Expected: _display_js(value) equals `instantiated:11:true:bgra8unorm:function`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals ``
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `Simple WebGPU Software Adapter:true:function`
+- Err
    - Expected: "unexpected adapter js error: {err}" equals ``
+- Err
    - Expected: "unexpected commit error: {err}" equals ``
    - Expected: "missing fetch request" equals ``
 
@@ -1181,13 +1219,21 @@ match session.take_pending_request():
 
 - should assimilate nested WebGPU promises returned from fetched WASM instantiation callbacks
    - Expected: _display_js(value) equals `queued`
+- Err
    - Expected: "unexpected queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals ``
+- Err
    - Expected: "unexpected pre-commit js error: {err}" equals ``
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://example.com/mod.wasm`
+- Ok
+- Ok
    - Expected: _display_js(value) equals `Simple WebGPU Software Adapter:true:available`
+- Err
    - Expected: "unexpected adapter js error: {err}" equals ``
+- Err
    - Expected: "unexpected commit error: {err}" equals ``
    - Expected: "missing fetch request" equals ``
 
@@ -1247,10 +1293,15 @@ match session.take_pending_request():
 
 - should create a bounded WebGPU buffer and record queue writes through BrowserSession
    - Expected: _display_js(value) equals `adapter-queued`
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `device-queued`
+- Err
    - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `function:6:6:8:1:1:3:24:0,6,8,10,0,0:1:1:3:24`
+- Err
    - Expected: "unexpected writeBuffer js error: {err}" equals ``
 
 
@@ -1289,10 +1340,15 @@ match result:
 
 - should upload exported WASM memory bytes through a WebGPU device queue
    - Expected: _display_js(value) equals `adapter-queued`
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `device-queued`
+- Err
    - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `3:1:1:4:3:39:0,0,0,0,12,13,14,0:1:4:3:39`
+- Err
    - Expected: "unexpected WASM queue writeBuffer js error: {err}" equals ``
 
 
@@ -1331,10 +1387,15 @@ match result:
 
 - should encode and submit a bounded WebGPU compute dispatch through BrowserSession
    - Expected: _display_js(value) equals `adapter-queued`
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `device-queued`
+- Err
    - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `function:function:function:true:wgsl:true:main:true:1:24:true:1:1:24:1:1:1:1:24`
+- Err
    - Expected: "unexpected compute dispatch js error: {err}" equals ``
 
 
@@ -1373,10 +1434,15 @@ match result:
 
 - should aggregate WebGPU compute counters and ignore invalid active-pass command buffers
    - Expected: _display_js(value) equals `adapter-queued`
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `device-queued`
+- Err
    - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `2:2:5:false:0:0:0:2:0:0:0:0:2:5`
+- Err
    - Expected: "unexpected compute aggregate js error: {err}" equals ``
 
 
@@ -1415,10 +1481,15 @@ match result:
 
 - should drive a WebGPU compute pass with WASM-originated dispatch dimensions
    - Expected: _display_js(value) equals `adapter-queued`
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `device-queued`
+- Err
    - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `instantiated:1:1:2x3x4:1:24:1:1:24:1:1:1:1:24`
+- Err
    - Expected: "unexpected WASM compute dispatch js error: {err}" equals ``
 
 
@@ -1457,10 +1528,15 @@ match result:
 
 - should drive a Simple2D fill compute pass from WASM payload bytes
    - Expected: _display_js(value) equals `adapter-queued`
+- Err
    - Expected: "unexpected Simple2D fill adapter queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `device-queued`
+- Err
    - Expected: "unexpected Simple2D fill device queue error: {err}" equals ``
+- Ok
    - Expected: _display_js(value) equals `instantiated:1242:1:webgpu:writeBuffer:8,0,0,0,210,4,0,0:8:1234:222:true:simp... (full value in folded executable source)`
+- Err
    - Expected: "unexpected WASM Simple2D fill compute js error: {err}" equals ``
 
 
@@ -1499,6 +1575,7 @@ match result:
 
 - should expose thenable WebAssembly.compile result shape through BrowserSession
    - Expected: _display_js(value) equals `function:function:compiled:1:true`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1527,6 +1604,7 @@ match result:
 
 - should fail closed on invalid WebAssembly.compile bytes through BrowserSession
    - Expected: _display_js(value) equals `invalid:invalid-wasm-header`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1555,6 +1633,7 @@ match result:
 
 - should expose bounded memory exports through BrowserSession
    - Expected: _display_js(value) equals `true:1:1:memory:memory:65536`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1583,6 +1662,7 @@ match result:
 
 - should expose bounded callable function exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:run:1:function:undefined`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1611,6 +1691,7 @@ match result:
 
 - should expose all bounded callable function exports through BrowserSession
    - Expected: _display_js(value) equals `2:init:render:function:function:undefined:undefined`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1639,6 +1720,7 @@ match result:
 
 - should execute a bounded i32.const WASM function export through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1667,6 +1749,7 @@ match result:
 
 - should execute a bounded signed i32.const WASM function export through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1695,6 +1778,7 @@ match result:
 
 - should execute a bounded i32.add WASM function export through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1723,6 +1807,7 @@ match result:
 
 - should execute bounded WASM function exports with call arguments through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1751,6 +1836,7 @@ match result:
 
 - should execute bounded i32 local.set WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1779,6 +1865,7 @@ match result:
 
 - should execute bounded i32 local.tee WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1807,6 +1894,7 @@ match result:
 
 - should execute bounded i32 global.get WASM exports through BrowserSession
    - Expected: _display_js(value) equals `40:run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1835,6 +1923,7 @@ match result:
 
 - should execute bounded signed i32 global.get WASM exports through BrowserSession
    - Expected: _display_js(value) equals `-1:run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1863,6 +1952,7 @@ match result:
 
 - should execute bounded mutable i32 global.set WASM exports through BrowserSession
    - Expected: _display_js(value) equals `42:44:44`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1891,6 +1981,7 @@ match result:
 
 - should execute bounded memory.grow and memory.size WASM exports through BrowserSession
    - Expected: _display_js(value) equals `2:3:3`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1919,6 +2010,7 @@ match result:
 
 - should reject WASM memory.grow beyond declared maximum through BrowserSession
    - Expected: _display_js(value) equals `-1:1:2`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1947,6 +2039,7 @@ match result:
 
 - should execute bounded memory.fill WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -1975,6 +2068,7 @@ match result:
 
 - should fail closed on bounded memory.fill traps through BrowserSession
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2003,6 +2097,7 @@ match result:
 
 - should execute bounded memory.copy WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2031,6 +2126,7 @@ match result:
 
 - should fail closed on bounded memory.copy traps through BrowserSession
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2059,6 +2155,7 @@ match result:
 
 - should execute bounded memory.init WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2087,6 +2184,7 @@ match result:
 
 - should fail closed on bounded memory.init traps through BrowserSession
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2115,6 +2213,7 @@ match result:
 
 - should execute bounded data.drop zero-length memory.init through BrowserSession
    - Expected: _display_js(value) equals `42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2143,6 +2242,7 @@ match result:
 
 - should fail closed on memory.init after data.drop through BrowserSession
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2171,6 +2271,7 @@ match result:
 
 - should execute bounded i32.store and i32.load WASM exports through BrowserSession
    - Expected: _display_js(value) equals `true:run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2199,6 +2300,7 @@ match result:
 
 - should fail closed on WASM out-of-bounds memory traps through BrowserSession
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access:wasm-trap:out-of-bounds-memory-access`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2227,6 +2329,7 @@ match result:
 
 - should execute bounded i32.store8 and i32.load8_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `true:run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2255,6 +2358,7 @@ match result:
 
 - should execute bounded i32.load8_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `true:run:function:-86`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2283,6 +2387,7 @@ match result:
 
 - should execute bounded i32.store16 and i32.load16_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `true:run:function:4660`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2311,6 +2416,7 @@ match result:
 
 - should execute bounded i32.load16_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `true:run:function:-128`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2339,6 +2445,7 @@ match result:
 
 - should execute bounded internal function call WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2367,6 +2474,7 @@ match result:
 
 - should execute bounded internal function call WASM exports with arguments through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2395,6 +2503,7 @@ match result:
 
 - should execute bounded early return WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2423,6 +2532,7 @@ match result:
 
 - should execute bounded drop WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2451,6 +2561,7 @@ match result:
 
 - should execute bounded select WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2479,6 +2590,7 @@ match result:
 
 - should execute bounded if else WASM exports through BrowserSession
    - Expected: _display_js(value) equals `42:7`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2507,6 +2619,7 @@ match result:
 
 - should execute bounded br_if block WASM exports through BrowserSession
    - Expected: _display_js(value) equals `42:7`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2538,6 +2651,7 @@ match result:
 
 - should execute bounded loop br_if WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2569,6 +2683,7 @@ match result:
 
 - should execute bounded i32.mul and i32.sub WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2597,6 +2712,7 @@ match result:
 
 - should wrap bounded i32 arithmetic overflow through BrowserSession
    - Expected: _display_js(value) equals `-2147483648:2147483647:0`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2625,6 +2741,7 @@ match result:
 
 - should execute bounded i32.div_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2653,6 +2770,7 @@ match result:
 
 - should execute bounded i32.rem_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:2`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2681,6 +2799,7 @@ match result:
 
 - should execute bounded i32.rem_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:2`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2709,6 +2828,7 @@ match result:
 
 - should fail closed on WASM divide by zero traps through BrowserSession
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-divide-by-zero`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2737,6 +2857,7 @@ match result:
 
 - should fail closed on WASM signed division overflow traps through BrowserSession
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-overflow`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2765,6 +2886,7 @@ match result:
 
 - should fail closed on WASM remainder divide by zero traps through BrowserSession
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-divide-by-zero`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2793,6 +2915,7 @@ match result:
 
 - should fail closed on WASM unsigned remainder divide by zero traps through BrowserSession
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-divide-by-zero`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2821,6 +2944,7 @@ match result:
 
 - should fail closed on WASM unreachable traps through BrowserSession
    - Expected: _display_js(value) equals `run:function:wasm-trap:unreachable`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2849,6 +2973,7 @@ match result:
 
 - should execute bounded i32 bitwise WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2877,6 +3002,7 @@ match result:
 
 - should execute bounded i32.shl WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:40`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2905,6 +3031,7 @@ match result:
 
 - should execute bounded i32.shr_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:5`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2933,6 +3060,7 @@ match result:
 
 - should execute bounded i32.shr_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:5`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2961,6 +3089,7 @@ match result:
 
 - should execute bounded i32 sign-extension WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:-1:-1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -2989,6 +3118,7 @@ match result:
 
 - should execute bounded i32.eqz WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3017,6 +3147,7 @@ match result:
 
 - should execute bounded i32.eq WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3045,6 +3176,7 @@ match result:
 
 - should execute bounded i32.ne WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3073,6 +3205,7 @@ match result:
 
 - should execute bounded i32.lt_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3101,6 +3234,7 @@ match result:
 
 - should execute bounded i32.gt_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3129,6 +3263,7 @@ match result:
 
 - should execute bounded i32.le_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3157,6 +3292,7 @@ match result:
 
 - should execute bounded i32.ge_s WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3185,6 +3321,7 @@ match result:
 
 - should execute bounded i32.lt_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3213,6 +3350,7 @@ match result:
 
 - should execute bounded i32.gt_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3241,6 +3379,7 @@ match result:
 
 - should execute bounded i32.le_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3269,6 +3408,7 @@ match result:
 
 - should execute bounded i32.ge_u WASM exports through BrowserSession
    - Expected: _display_js(value) equals `run:function:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3297,6 +3437,7 @@ match result:
 
 - should execute bounded i32 div_u and unsigned-order comparisons through BrowserSession
    - Expected: _display_js(value) equals `2147483647:0:1:1:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3325,6 +3466,7 @@ match result:
 
 - should execute bounded i32 clz ctz and popcnt WASM exports through BrowserSession
    - Expected: _display_js(value) equals `27:4:3`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3353,6 +3495,7 @@ match result:
 
 - should execute bounded i32 rotate WASM exports through BrowserSession
    - Expected: _display_js(value) equals `8:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3381,6 +3524,7 @@ match result:
 
 - should wrap bounded i32 shift and rotate overflow through BrowserSession
    - Expected: _display_js(value) equals `-2147483648:-2147483648`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3409,6 +3553,7 @@ match result:
 
 - should expose bounded table and global exports through BrowserSession
    - Expected: _display_js(value) equals `table:tbl:1:answer:42:table:1:global:42`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3437,6 +3582,7 @@ match result:
 
 - should expose bounded signed global exports through BrowserSession
    - Expected: _display_js(value) equals `answer:-1:global:-1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3465,6 +3611,7 @@ match result:
 
 - should fail closed on unsupported WASM imports through BrowserSession
    - Expected: _display_js(value) equals `true:invalid:unsupported-wasm-imports:invalid:unsupported-wasm-imports`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3493,6 +3640,7 @@ match result:
 
 - should invoke a declared WebGPU host import from WASM through BrowserSession
    - Expected: _display_js(value) equals `true:webgpu:requestAdapter:function:instantiated:0:7:1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3521,6 +3669,7 @@ match result:
 
 - should invoke a declared WebGPU dispatch host import from WASM through BrowserSession
    - Expected: _display_js(value) equals `true:webgpu:dispatch:function:instantiated:0:9:1:9`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3549,6 +3698,7 @@ match result:
 
 - should pass WASM workgroup dimensions into a declared WebGPU dispatch import
    - Expected: _display_js(value) equals `true:webgpu:dispatch:instantiated:0:234:1:2x3x4`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3577,6 +3727,7 @@ match result:
 
 - should pass WASM workgroup dimensions into a void WebGPU dispatch import
    - Expected: _display_js(value) equals `true:webgpu:dispatch:instantiated:0:1:1:2x3x4`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3605,6 +3756,7 @@ match result:
 
 - should pass a WASM memory payload into a declared WebGPU writeBuffer import
    - Expected: _display_js(value) equals `true:webgpu:writeBuffer:instantiated:0:23:1:0:3:5,7,11`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3633,6 +3785,7 @@ match result:
 
 - should mirror WASM halfword and word stores into a WebGPU writeBuffer import
    - Expected: _display_js(value) equals `true:webgpu:writeBuffer:instantiated:0:7:1:0:6:1,2,4,0,0,0`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3661,6 +3814,7 @@ match result:
 
 - should pass a WASM Simple2D rectangle payload into a WebGPU writeBuffer import
    - Expected: _display_js(value) equals `true:webgpu:writeBuffer:instantiated:0:645:1:0:8:rect:8,12,40,24:rgba:51,102,... (full value in folded executable source)`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3689,6 +3843,7 @@ match result:
 
 - should expose WASM memory stores to a WebGPU writeBuffer import through exported Memory
    - Expected: _display_js(value) equals `true:webgpu:writeBuffer:instantiated:0:33:1:0:3:9,10,11:65536`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3717,6 +3872,7 @@ match result:
 
 - should construct bounded WebAssembly.Memory through BrowserSession
    - Expected: _display_js(value) equals `function:1:2:131072:-1`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3745,6 +3901,7 @@ match result:
 
 - should share WebAssembly.Memory bytes with BrowserSession Uint8Array views
    - Expected: _display_js(value) equals `4:4:255:7:65536:65536`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3773,6 +3930,7 @@ match result:
 
 - should window WebAssembly.Memory bytes with BrowserSession Uint8Array subarray views
    - Expected: _display_js(value) equals `1:2:42:77`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3801,6 +3959,7 @@ match result:
 
 - should set WebAssembly.Memory bytes from BrowserSession Uint8Array views
    - Expected: _display_js(value) equals `7:8`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3829,6 +3988,7 @@ match result:
 
 - should set WebAssembly.Memory bytes from computed Uint8Array set calls
    - Expected: _display_js(value) equals `9`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3857,6 +4017,7 @@ match result:
 
 - should set WebAssembly.Memory bytes from Uint8Array prototype set call dispatch
    - Expected: _display_js(value) equals `11:12`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3885,6 +4046,7 @@ match result:
 
 - should set WebAssembly.Memory bytes from Uint8Array prototype set apply dispatch
    - Expected: _display_js(value) equals `21:22`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3913,6 +4075,7 @@ match result:
 
 - should read and write WebAssembly.Memory bytes from DataView glue methods
    - Expected: _display_js(value) equals `4:3:2:1:16909060:772:-2`
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
@@ -3950,10 +4113,10 @@ match result:
 
 ## Related Documentation
 
-- **Requirements:** `.spipe/browser-wasm-webgpu-infra/state.md`
-- **Plan:** `doc/03_plan/platform/webgpu_js_wasm_simple.md`
-- **Design:** `doc/05_design/browser_wasm_webgpu_infra.md`
-- **Research:** `doc/01_research/local/browser_wasm_webgpu_infra.md`
+- **Requirements:** [.spipe/browser-wasm-webgpu-infra/state.md](.spipe/browser-wasm-webgpu-infra/state.md)
+- **Plan:** [doc/03_plan/platform/webgpu_js_wasm_simple.md](doc/03_plan/platform/webgpu_js_wasm_simple.md)
+- **Design:** [doc/05_design/browser_wasm_webgpu_infra.md](doc/05_design/browser_wasm_webgpu_infra.md)
+- **Research:** [doc/01_research/local/browser_wasm_webgpu_infra.md](doc/01_research/local/browser_wasm_webgpu_infra.md)
 
 
 </details>

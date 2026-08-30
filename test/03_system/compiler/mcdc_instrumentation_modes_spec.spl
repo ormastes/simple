@@ -1,0 +1,62 @@
+# codex-system-test
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-001 REQ-002 REQ-006 REQ-007 REQ-008 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-009
+# @evidence-class host-fixture
+
+use std.spec.*
+use std.io_runtime.{file_read_text, shell}
+use compiler.common.config.{McdcPolicy}
+
+describe "MC/DC instrumentation modes and external evidence admission":
+    it "should keep static-off free of manifests probes patchpoints and payload links":
+        step("Build the controlled fixture")
+        val policy = McdcPolicy.StaticOff
+        expect(policy.emits_manifest()).to_be(false)
+        expect(policy.emits_direct_probes()).to_be(false)
+        expect(policy.emits_dynamic_patchpoints()).to_be(false)
+        expect(policy.links_static_payload()).to_be(false)
+
+    it "should select direct bounded probes only for static-on":
+        val policy = McdcPolicy.StaticOn
+        expect(policy.emits_manifest()).to_be(true)
+        expect(policy.emits_direct_probes()).to_be(true)
+        expect(policy.emits_dynamic_patchpoints()).to_be(false)
+        expect(policy.links_static_payload()).to_be(true)
+
+    it "should select disarmable patchpoints without static payload linkage":
+        val policy = McdcPolicy.Dynamic
+        expect(policy.emits_manifest()).to_be(true)
+        expect(policy.emits_direct_probes()).to_be(false)
+        expect(policy.emits_dynamic_patchpoints()).to_be(true)
+        expect(policy.links_static_payload()).to_be(false)
+
+    it "should fail closed when controlled binaries or compiler identity are absent":
+        step("Capture the durable receipt")
+        val result = shell("env -u MCDC_CONTROL_BIN -u MCDC_STATIC_OFF_BIN -u MCDC_STATIC_ON_BIN -u MCDC_DYNAMIC_IDLE_BIN -u MCDC_DYNAMIC_ARMED_BIN -u MCDC_COMPILER_BIN sh scripts/check/check-mcdc-performance-gate.shs 2>&1")
+        step("Verify fail-closed evidence")
+        expect(result.exit_code).to_equal(2)
+        expect(result.stdout).to_contain("ERROR nothing-checked")
+        expect(result.stdout).to_contain("compiler-binary-not-set")
+
+    it "should retain every latency RSS allocation log and section threshold in the canonical gate":
+        step("Compare the bounded oracle")
+        val gate = file_read_text("scripts/check/check-mcdc-performance-gate.shs")
+        expect(gate).to_contain("static-off-hot-text-differs")
+        expect(gate).to_contain("static-off-section-layout-differs")
+        expect(gate).to_contain("post_seal_alloc_count")
+        expect(gate).to_contain("total_capacity=$((event_capacity_bytes + log_capacity_bytes))")
+        expect(gate).to_contain("within static_on median_slowdown_bp 200")
+        expect(gate).to_contain("within static_on p95_slowdown_bp 500")
+        expect(gate).to_contain("within static_on peak_rss_increase_bp 200")
+        expect(gate).to_contain("within dynamic_idle median_slowdown_bp 50")
+        expect(gate).to_contain("within dynamic_idle p95_slowdown_bp 50")
+        expect(gate).to_contain("within dynamic_idle peak_rss_increase_bp 50")
+        expect(gate).to_contain("within dynamic_armed median_slowdown_bp 1000")
+        expect(gate).to_contain("within dynamic_armed p95_slowdown_bp 1500")
+        expect(gate).to_contain("within dynamic_armed peak_rss_increase_bp 500")
+
+    it "should reject insufficient samples before accepting performance evidence":
+        val result = shell("MCDC_PERF_SAMPLES=29 sh scripts/check/check-mcdc-performance-gate.shs 2>&1")
+        expect(result.exit_code).to_equal(2)
+        expect(result.stdout).to_contain("ERROR nothing-checked")
+        expect(result.stdout).to_contain("samples-less-than-30")

@@ -1,0 +1,175 @@
+"""Typed workload launch must remain on the live SpawnSpec/CSpace seam."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.loader.managed_workload_launch.{launch_compiled_workload_into_scheduler}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_grants, spawn_recipe_seed_parent_caps}
+use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.security.execution_context.{kernel_call_context_from_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{BlockReason, TaskId, TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.arch.arch_context.{Architecture}
+use os.services.workload.workload_manifest.{
+    WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
+    ResourceBudget, LifecyclePolicy, ObservabilityPolicy, WorkloadManifest,
+    compile_workload_manifest
+}
+
+fn _push_u16(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out = _push_u32(out, value & 0xFFFFFFFF)
+    out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _minimal_x86_64_elf() -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16(bytes, 2)
+    bytes = _push_u16(bytes, 62)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 64)
+    bytes = _push_u64(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 64)
+    bytes = _push_u16(bytes, 56)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 5)
+    bytes = _push_u64(bytes, 0x80)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 0x400000)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 4)
+    bytes = _push_u64(bytes, 0x1000)
+    while bytes.len() < 0x80:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+fn _policy_with_limit(bytes: [u8], process_limit: u64) -> WorkloadManifest:
+    val digest = workload_image_blake3_hash(bytes)
+    WorkloadManifest(
+        identity: WorkloadIdentitySpec(
+            principal_id: "service:test", tenant_id: "system", image_hash: digest,
+            signer: "test", parent_principal: "pid1", expires_at_ms: 1u64
+        ),
+        image: ImageSpec(executable_path: "/sys/apps/live-worker", content_hash: digest, signer: "test"),
+        authority: AuthorityRequest(grants: spawn_recipe_grants(SPAWN_RECIPE_APP_LAUNCHER)),
+        isolation: IsolationSpec(
+            filesystem_view: "/", process_view: "private", ipc_view: "private",
+            network_view: "none", syscall_allowlist: [4u64]
+        ),
+        resources: ResourceBudget(
+            cpu_weight: 1u64, memory_pages: 1u64, process_limit: process_limit,
+            io_weight: 1u64, network_bytes: 0u64, wall_time_ms: 1u64
+        ),
+        lifecycle: LifecyclePolicy(restart_policy: "never", max_restarts: 0u64, watchdog_timeout_ms: 0u64),
+        observability: ObservabilityPolicy(audit_required: false, log_retention_ms: 0u64)
+    )
+
+fn _policy(bytes: [u8]) -> WorkloadManifest:
+    _policy_with_limit(bytes, 2u64)
+
+fn _live_parent_scheduler() -> Scheduler:
+    var scheduler = Scheduler.new()
+    scheduler.create_task(
+        0x1000, TaskPriority.High,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_APP_LAUNCHER, 0u64))
+    scheduler.schedule()
+    scheduler
+
+describe "managed workload launch":
+    it "creates a managed child from a compiled policy in the live scheduler":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = compile_workload_manifest(_policy(bytes))
+        expect(compiled.is_ok()).to_equal(true)
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val prepared = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(prepared.pid).to_be_greater_than(0)
+            val child = prepared.scheduler.get_task(TaskId(id: prepared.pid as u64))
+            if child != nil:
+                expect(child.capabilities.is_pledged).to_equal(true)
+                expect(child.security.job_id).to_equal(child.id.id)
+                expect(child.security.parent_job_id).to_equal(parent.security.job_id)
+                expect(child.security.process_limit).to_equal(2u64)
+                expect(child.security.resource_limits_bound).to_equal(true)
+                expect(child.security.cpu_weight_bound).to_equal(true)
+                expect(child.schedule.weight).to_equal(1i64)
+                expect(child.isolation.sandboxed).to_equal(true)
+                expect(child.isolation.max_memory_pages).to_equal(1u64)
+                expect(child.isolation.filesystem_view_bound).to_equal(true)
+                expect(child.isolation.filesystem_root).to_equal("/")
+
+    it "rejects a policy whose binding is changed after compilation":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = compile_workload_manifest(_policy(bytes))
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            var policy = compiled.unwrap()
+            policy.spawn_spec.image_hash = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+            val prepared = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(parent), policy, bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(prepared.pid).to_equal(-13)
+
+    it "charges descendants against the managed workload process limit":
+        val bytes = _minimal_x86_64_elf()
+        val compiled = compile_workload_manifest(_policy_with_limit(bytes, 1u64))
+        var scheduler = _live_parent_scheduler()
+        val root_id = scheduler.get_current()
+        val root = scheduler.get_task(root_id)
+        if root != nil and compiled.is_ok():
+            val first = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(root), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.High, scheduler)
+            expect(first.pid).to_be_greater_than(0)
+            var child_scheduler = first.scheduler
+            child_scheduler.block_task(root_id, BlockReason.Sleep(until_ns: 99u64))
+            child_scheduler.schedule()
+            val child = child_scheduler.get_task(child_scheduler.get_current())
+            if child != nil:
+                expect(child.id.id).to_equal(first.pid as u64)
+                val one = launch_compiled_workload_into_scheduler(
+                    kernel_call_context_from_task(child), compiled.unwrap(), bytes,
+                    Architecture.X86_64, [], [], TaskPriority.Normal, child_scheduler)
+                expect(one.pid).to_be_greater_than(0)
+                val two = launch_compiled_workload_into_scheduler(
+                    kernel_call_context_from_task(child), compiled.unwrap(), bytes,
+                    Architecture.X86_64, [], [], TaskPriority.Normal, one.scheduler)
+                expect(two.pid).to_equal(-11)

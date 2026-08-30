@@ -2,6 +2,9 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "cosmos_runtime_core.h"
+#include "cosmos_runtime_core_oracle.h"
+
 typedef unsigned int cosmos_size_t;
 
 void *memcpy(void *dst, const void *src, cosmos_size_t n);
@@ -50,6 +53,7 @@ unsigned long long __aeabi_idivmod(int numerator, int denominator);
 
 static unsigned int idiv0_calls;
 static int idiv0_argument;
+static unsigned int oracle_cases;
 
 int __aeabi_idiv0(int return_value) {
     idiv0_calls++;
@@ -72,6 +76,20 @@ static int bytes_equal(const unsigned char *actual,
         }
     }
     return 1;
+}
+
+static void initialize_bytes(unsigned char *bytes, unsigned int size,
+                             unsigned int salt) {
+    unsigned int index;
+
+    for (index = 0U; index < size; ++index) {
+        bytes[index] = (unsigned char)((index * 37U + salt) & 0xFFU);
+    }
+}
+
+static uint32_t oracle_next_u32(uint32_t *state) {
+    *state = *state * UINT32_C(1664525) + UINT32_C(1013904223);
+    return *state;
 }
 
 static int test_memory_and_aliases(void) {
@@ -204,10 +222,226 @@ static int test_division(void) {
     return 0;
 }
 
+static int check_unsigned_oracle_case(uint32_t numerator,
+                                      uint32_t denominator) {
+    const struct cosmos_runtime_oracle_division expected =
+        cosmos_runtime_oracle_udivmod(numerator, denominator);
+    uint32_t quotient = UINT32_C(0xA5A5A5A5);
+    uint32_t remainder = UINT32_C(0x5A5A5A5A);
+    uint64_t packed;
+    uint32_t scalar;
+
+    reset_idiv0();
+    scalar = __aeabi_uidiv(numerator, denominator);
+    CHECK(scalar == (expected.success != 0
+                         ? expected.quotient
+                         : cosmos_runtime_oracle_unsigned_div0_value(
+                               numerator)));
+    CHECK(idiv0_calls == (denominator == 0U ? 1U : 0U));
+    if (denominator == 0U) {
+        CHECK((uint32_t)idiv0_argument ==
+              cosmos_runtime_oracle_unsigned_div0_value(numerator));
+    }
+
+    reset_idiv0();
+    packed = __aeabi_uidivmod(numerator, denominator);
+    CHECK(packed == cosmos_runtime_oracle_uidivmod(numerator, denominator));
+    CHECK(idiv0_calls == (denominator == 0U ? 1U : 0U));
+    if (denominator == 0U) {
+        CHECK((uint32_t)idiv0_argument ==
+              cosmos_runtime_oracle_unsigned_div0_value(numerator));
+    }
+
+    CHECK(cosmos_runtime_core_udivmod(numerator, denominator,
+                                      &quotient, &remainder) ==
+          expected.success);
+    if (expected.success != 0) {
+        CHECK(quotient == expected.quotient);
+        CHECK(remainder == expected.remainder);
+    } else {
+        CHECK(quotient == UINT32_C(0xA5A5A5A5));
+        CHECK(remainder == UINT32_C(0x5A5A5A5A));
+    }
+    ++oracle_cases;
+    return 0;
+}
+
+static int check_signed_oracle_case(int32_t numerator, int32_t denominator) {
+    uint64_t packed;
+    int32_t scalar;
+
+    reset_idiv0();
+    scalar = __aeabi_idiv(numerator, denominator);
+    CHECK(scalar == cosmos_runtime_oracle_idiv(numerator, denominator));
+    CHECK(idiv0_calls == (denominator == 0 ? 1U : 0U));
+    if (denominator == 0) {
+        CHECK(idiv0_argument ==
+              cosmos_runtime_oracle_signed_div0_value(numerator));
+    }
+
+    reset_idiv0();
+    packed = __aeabi_idivmod(numerator, denominator);
+    CHECK(packed == cosmos_runtime_oracle_idivmod(numerator, denominator));
+    CHECK(idiv0_calls == (denominator == 0 ? 1U : 0U));
+    if (denominator == 0) {
+        CHECK(idiv0_argument ==
+              cosmos_runtime_oracle_signed_div0_value(numerator));
+    }
+    ++oracle_cases;
+    return 0;
+}
+
+static int test_memory_oracle_parity(void) {
+    unsigned char source[96];
+    unsigned char actual[96];
+    unsigned char expected[96];
+    unsigned int size;
+
+    initialize_bytes(source, 96U, 11U);
+    for (size = 0U; size <= 64U; ++size) {
+        initialize_bytes(actual, 96U, 29U);
+        initialize_bytes(expected, 96U, 29U);
+        CHECK(cosmos_runtime_oracle_copy(expected, source, size) == expected);
+        CHECK(memcpy(actual, source, size) == actual);
+        CHECK(bytes_equal(actual, expected, 96U));
+        ++oracle_cases;
+
+        initialize_bytes(actual, 96U, 47U);
+        initialize_bytes(expected, 96U, 47U);
+        CHECK(cosmos_runtime_oracle_fill(expected, (int)(0x120U + size),
+                                         size) == expected);
+        CHECK(memset(actual, (int)(0x120U + size), size) == actual);
+        CHECK(bytes_equal(actual, expected, 96U));
+        ++oracle_cases;
+    }
+
+    initialize_bytes(actual, 96U, 61U);
+    initialize_bytes(expected, 96U, 61U);
+    CHECK(memcpy(NULL, source, 4U) == NULL);
+    ++oracle_cases;
+    CHECK(memcpy(actual, NULL, 4U) == actual);
+    CHECK(bytes_equal(actual, expected, 96U));
+    ++oracle_cases;
+    CHECK(memcpy(actual, source, 0U) == actual);
+    CHECK(bytes_equal(actual, expected, 96U));
+    ++oracle_cases;
+    CHECK(memset(NULL, 0xA5, 4U) == NULL);
+    ++oracle_cases;
+    CHECK(memset(actual, 0xA5, (0U)) == actual);
+    CHECK(bytes_equal(actual, expected, 96U));
+    ++oracle_cases;
+    return 0;
+}
+
+static int test_division_oracle_parity(void) {
+    static const uint32_t unsigned_values[] = {
+        0U, 1U, 2U, 3U, 4U, 5U, 7U, 8U,
+        15U, 16U, 31U, 37U, UINT32_C(0x7FFFFFFF),
+        UINT32_C(0x80000000), UINT32_C(0xFFFFFFFE), UINT32_MAX
+    };
+    static const int32_t signed_values[] = {
+        INT32_MIN, INT32_MIN + 1, -65537, -37, -5, -2, -1, 0,
+        1, 2, 5, 37, 65537, INT32_MAX - 1, INT32_MAX
+    };
+    uint32_t state = UINT32_C(0xC05A05F1);
+    unsigned int left;
+    unsigned int right;
+    unsigned int iteration;
+    uint32_t remainder = 0U;
+
+    for (left = 0U; left < sizeof(unsigned_values) / sizeof(unsigned_values[0]);
+         ++left) {
+        for (right = 0U;
+             right < sizeof(unsigned_values) / sizeof(unsigned_values[0]);
+             ++right) {
+            CHECK(check_unsigned_oracle_case(unsigned_values[left],
+                                              unsigned_values[right]) == 0);
+        }
+    }
+    for (left = 0U; left < sizeof(signed_values) / sizeof(signed_values[0]);
+         ++left) {
+        for (right = 0U;
+             right < sizeof(signed_values) / sizeof(signed_values[0]);
+             ++right) {
+            CHECK(check_signed_oracle_case(signed_values[left],
+                                            signed_values[right]) == 0);
+        }
+    }
+
+    for (iteration = 0U; iteration < 4096U; ++iteration) {
+        const uint32_t unsigned_numerator = oracle_next_u32(&state);
+        const uint32_t unsigned_denominator = oracle_next_u32(&state);
+        const int32_t signed_numerator = (int32_t)oracle_next_u32(&state);
+        const int32_t signed_denominator = (int32_t)oracle_next_u32(&state);
+
+        CHECK(check_unsigned_oracle_case(unsigned_numerator,
+                                          unsigned_denominator) == 0);
+        CHECK(check_signed_oracle_case(signed_numerator,
+                                       signed_denominator) == 0);
+    }
+
+    CHECK(cosmos_runtime_core_udivmod(1U, 1U, NULL, &remainder) == 0);
+    ++oracle_cases;
+    CHECK(cosmos_runtime_core_udivmod(1U, 1U, &remainder, NULL) == 0);
+    ++oracle_cases;
+
+    CHECK(cosmos_runtime_core_unsigned_div0_value(0U) ==
+          cosmos_runtime_oracle_unsigned_div0_value(0U));
+    ++oracle_cases;
+    CHECK(cosmos_runtime_core_unsigned_div0_value(1U) ==
+          cosmos_runtime_oracle_unsigned_div0_value(1U));
+    ++oracle_cases;
+    CHECK(cosmos_runtime_core_unsigned_div0_value(UINT32_MAX) ==
+          cosmos_runtime_oracle_unsigned_div0_value(UINT32_MAX));
+    ++oracle_cases;
+    CHECK(cosmos_runtime_core_signed_div0_value(-1) ==
+          cosmos_runtime_oracle_signed_div0_value(-1));
+    ++oracle_cases;
+    CHECK(cosmos_runtime_core_signed_div0_value(0) ==
+          cosmos_runtime_oracle_signed_div0_value(0));
+    ++oracle_cases;
+    CHECK(cosmos_runtime_core_signed_div0_value(1) ==
+          cosmos_runtime_oracle_signed_div0_value(1));
+    ++oracle_cases;
+    return 0;
+}
+
+static unsigned int count_outcomes(uint64_t mask) {
+    unsigned int count = 0U;
+
+    while (mask != 0U) {
+        count += (unsigned int)(mask & UINT64_C(1));
+        mask >>= 1U;
+    }
+    return count;
+}
+
+static int test_runtime_core_decision_manifest(void) {
+    const uint64_t mask = cosmos_runtime_core_coverage_mask();
+    const uint64_t required = cosmos_runtime_core_coverage_required();
+    const uint64_t decisions = cosmos_runtime_core_coverage_decisions();
+    const unsigned int outcomes = count_outcomes(mask & required);
+
+    CHECK(decisions == UINT64_C(13));
+    CHECK(required == UINT64_C(0x03FFFFFF));
+    CHECK(mask == required);
+    CHECK(outcomes == 26U);
+    CHECK(oracle_cases == 8816U);
+    printf("COSMOS_RUNTIME_CORE_ORACLE_CASES %u\n", oracle_cases);
+    printf("COSMOS_RUNTIME_CORE_SIMPLE_DECISIONS %llu/13\n",
+           (unsigned long long)decisions);
+    printf("COSMOS_RUNTIME_CORE_SIMPLE_OUTCOMES %u/26\n", outcomes);
+    return 0;
+}
+
 int main(void) {
+    cosmos_runtime_core_coverage_reset();
     CHECK(test_memory_and_aliases() == 0);
     CHECK(test_strings() == 0);
     CHECK(test_division() == 0);
+    CHECK(test_memory_oracle_parity() == 0);
+    CHECK(test_division_oracle_parity() == 0);
+    CHECK(test_runtime_core_decision_manifest() == 0);
     puts("cosmos runtime contract: PASS");
     return 0;
 }

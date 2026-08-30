@@ -1,0 +1,33 @@
+"""Contract for the compiled scalar channel ABI.
+
+The `rt_channel_send` entrypoint accepts only Simple's classified one-word
+`Any` values. Explicitly typed i64 callers use the encode/decode helpers so a
+raw pointer or unboxed register cannot be mistaken for an `Any` payload.
+"""
+
+use std.spec.*
+use std.io.file_read_text
+
+describe "compiled scalar channel ABI":
+    it "keeps the C classifier closed over Simple scalar tags":
+        val source = file_read_text("src/runtime/runtime_native.c")
+        expect(source).to_contain("rt_channel_classify_any")
+        expect(source).to_contain("RT_SIMPLE_TAG_INT")
+        expect(source).to_contain("RT_SIMPLE_TAG_SPECIAL")
+        expect(source).to_contain("RT_SIMPLE_SPECIAL_FALSE")
+        expect(source).to_contain("if (!rt_channel_classify_any(value)) return 0")
+
+    it "routes typed i64 sends through an explicit scalar ABI":
+        val source = file_read_text("src/lib/nogc_sync_mut/concurrent/channel.spl")
+        expect(source).to_contain("extern fn rt_channel_send_i64(channel_id: i64, value: i64) -> i64")
+        expect(source).to_contain("extern fn rt_channel_try_recv_i64(channel_id: i64) -> i64")
+        expect(source).to_contain("rt_channel_send_i64(id, value)")
+        expect(source).to_contain("rt_channel_try_recv_i64(id)")
+
+    it "declares the same result shape for native and pure providers":
+        val source = file_read_text("src/compiler_rust/compiler/src/concurrent_providers/mod.rs")
+        expect(source).to_contain("fn channel_send(&self, handle: Handle, value: Value) -> Result<bool, CompileError>")
+        val native = file_read_text("src/compiler_rust/compiler/src/concurrent_providers/native_impl.rs")
+        expect(native).to_contain("Ok(false)")
+        val pure = file_read_text("src/compiler_rust/compiler/src/concurrent_providers/std_impl.rs")
+        expect(pure).to_contain("Ok(status == 1)")

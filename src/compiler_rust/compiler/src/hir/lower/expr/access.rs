@@ -338,6 +338,7 @@ impl Lowerer {
                     }
                     if let Some(field_index) = self.try_resolve_global_field_index_by_name(candidate_struct_name, field)
                     {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] CAND-BYNAME/{field} idx={field_index} in {fpath}"); }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -358,6 +359,7 @@ impl Lowerer {
                 // because `candidate_struct_names` was empty.
                 if candidate_struct_names.is_empty() && !self.is_ambiguous_global_field(field) {
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] CLASS2-GLOBAL/{field} idx={field_index} in {fpath}"); }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -384,6 +386,7 @@ impl Lowerer {
                     // dispatch stays bare and tag-dispatches at runtime.
                     let ambiguous_field = self.is_ambiguous_global_field(field);
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}"); }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -406,6 +409,7 @@ impl Lowerer {
                         }
                     }
                     if let Some((field_index, field_ty, _)) = best {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] NKM-LOCALBEST/{field} idx={field_index} in {fpath}"); }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,

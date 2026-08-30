@@ -13,6 +13,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.hir.hir_symbol_table_methods.*
+use std.string_core.{char_code}
 
 # ============================================================================
 # HIR Module Structure
@@ -109,6 +110,25 @@ struct HirSymbol:
     is_public: bool
     is_mutable: bool
     defining_module: text?   # Which module defined this symbol (for visibility checking)
+    builtin_method_tag: i64  # 0=None, 1=StrStrip, 2=StrLines
+
+val BUILTIN_METHOD_NONE = 0
+val BUILTIN_METHOD_STR_STRIP = 1
+val BUILTIN_METHOD_STR_LINES = 2
+
+fn hir_builtin_method_tag(qualified_name: text) -> i64:
+    # This classifier runs while building the compiler itself. Keep it wholly
+    # scalar: staged text equality would admit a frozen Rust runtime CGU and a
+    # second LLVM option registry into the successor.
+    if qualified_name.len() != 9:
+        return BUILTIN_METHOD_NONE
+    if char_code(qualified_name[0]) != 115 or char_code(qualified_name[1]) != 116 or char_code(qualified_name[2]) != 114 or char_code(qualified_name[3]) != 46:
+        return BUILTIN_METHOD_NONE
+    if char_code(qualified_name[4]) == 115 and char_code(qualified_name[5]) == 116 and char_code(qualified_name[6]) == 114 and char_code(qualified_name[7]) == 105 and char_code(qualified_name[8]) == 112:
+        return BUILTIN_METHOD_STR_STRIP
+    if char_code(qualified_name[4]) == 108 and char_code(qualified_name[5]) == 105 and char_code(qualified_name[6]) == 110 and char_code(qualified_name[7]) == 101 and char_code(qualified_name[8]) == 115:
+        return BUILTIN_METHOD_STR_LINES
+    BUILTIN_METHOD_NONE
 
 fn hir_symbol_visibility_or_private(visibility: Visibility) -> Visibility:
     # Streaming transfer in older self-host compilers can zero a non-optional
@@ -389,7 +409,8 @@ impl SymbolTable:
             visibility: retained_visibility,
             is_public: retained_visibility == Visibility.Public,
             is_mutable: is_mutable,
-            defining_module: defining_module
+            defining_module: defining_module,
+            builtin_method_tag: hir_builtin_method_tag(name)
         )
 
         self.symbols[raw_id] = symbol

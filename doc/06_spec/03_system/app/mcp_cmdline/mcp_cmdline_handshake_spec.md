@@ -1,17 +1,40 @@
 # MCP Command-Line Handshake
 
-> Build and launch the pure-Simple MCP server, send real MCP `initialize`, `notifications/initialized`, and `tools/list` JSONL frames, and require a bounded response. Then call `simple_pipe` and `simple_search`.
+> System tests for every Simple-created local MCP command wrapper. Each scenario
+
+<!-- sdn-diagram:id=mcp_cmdline_handshake_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mcp_cmdline_handshake_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mcp_cmdline_handshake_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mcp_cmdline_handshake_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # MCP Command-Line Handshake
 
-Build and launch the pure-Simple MCP server, send real MCP `initialize`, `notifications/initialized`, and `tools/list` JSONL frames, and require a bounded response. Then call `simple_pipe` and `simple_search`.
+System tests for every Simple-created local MCP command wrapper. Each scenario
 
 ## At a Glance
 
@@ -19,32 +42,21 @@ Build and launch the pure-Simple MCP server, send real MCP `initialize`, `notifi
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | doc/02_requirements/app/build/bootstrap.md |
-| Plan | doc/03_plan/sys_test/mcp_cmdline_handshake.md |
-| Design | N/A |
-| Research | N/A |
 | Source | `test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl` |
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-Build and launch the pure-Simple MCP server, send real MCP
-`initialize`, `notifications/initialized`, and `tools/list` JSONL frames,
-and require a bounded response. Then call `simple_pipe` and `simple_search`.
-
-## Examples
-
-`simple_mcp_server` must identify `Simple MCP Server`, list `simple_pipe`,
-report `spipe: linked`, and return a bounded no-match search result.
+System tests for every Simple-created local MCP command wrapper. Each scenario
+launches the server by command line, sends real MCP `initialize` and
+`tools/list` frames over stdin, and requires a bounded response time.
 
 ## Scenarios
 
-### Pure-Simple MCP Launch and Handshake
+### MCP Command-Line Handshake
 
-### REQ-MCP-CMD-001: pure-Simple MCP answers real stdio handshakes
+### REQ-MCP-CMD-001: local MCP wrappers answer real stdio handshakes
 
-#### build the exact MCP artifact with pure Stage 2
+#### should launch simple_mcp_server and list Simple tools within the time limit
 
 - build the exact MCP artifact with pure Stage 2
 - Strictly native-build src/app/mcp/main.spl with pure Stage 2
@@ -104,7 +116,7 @@ expect(probe.stdout).to_contain("simple_pipe")
 
 </details>
 
-#### run core Simple MCP features without source or Rust fallback
+#### should fail closed when t32_mcp_server native artifact is missing
 
 - run core Simple MCP features without source or Rust fallback
 - Launch the cached native Simple MCP artifact
@@ -117,7 +129,7 @@ expect(probe.stdout).to_contain("simple_pipe")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,17 +156,11 @@ expect(probe.stderr.contains("mode=source")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** `doc/02_requirements/app/build/bootstrap.md`
-- **Plan:** `doc/03_plan/sys_test/mcp_cmdline_handshake.md`
 
 
 </details>

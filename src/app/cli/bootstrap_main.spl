@@ -14,6 +14,8 @@ use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use app.cli.bootstrap_identity.{bootstrap_version}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage4_focused_capsule}
+use app.cli.native_build_main.{run_native_build_worker}
+use app.io._CliCompile.compile_targets.{cli_native_build}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
 use std.nogc_sync_mut.io.file_ops.{file_append}
 
@@ -78,6 +80,8 @@ fn native_build_flag_needs_value(flag: text) -> i64:
         1
     elif flag == "--backend":
         1
+    elif flag == "--backend-plugin":
+        1
     elif flag == "--runtime-bundle":
         1
     elif flag == "--runtime-path":
@@ -108,6 +112,68 @@ fn native_build_has_entry_closure(args: [text]) -> i64:
         if arg == "--entry-closure":
             return 1
     0
+
+fn bootstrap_native_build_thread_count(args: [text]) -> i64:
+    var threads: i64 = 0
+    var index: i64 = 0
+    while index < args.len():
+        val arg = args[index]
+        if (arg == "--threads" or arg == "--jobs" or arg == "-j")
+                and index + 1 < args.len():
+            threads = args[index + 1].to_i64() ?? 0
+            index = index + 2
+            continue
+        if arg.starts_with("--threads="):
+            threads = arg.substring(10).to_i64() ?? 0
+        elif arg.starts_with("--jobs="):
+            threads = arg.substring(7).to_i64() ?? 0
+        index = index + 1
+    threads
+
+pub fn bootstrap_stage3_process_route_requested(
+    args: [text], stage4_marker: text, worker_marker: text
+) -> bool:
+    stage4_marker != "1" and worker_marker != "1"
+        and bootstrap_native_build_thread_count(args) > 1
+
+pub fn bootstrap_native_build_worker_args(args: [text]) -> [text]:
+    var result: [text] = []
+    var copying = false
+    for arg in args:
+        if copying:
+            result.push(arg)
+        elif arg == "native-build":
+            copying = true
+    result
+
+fn bootstrap_internal_native_build_args(args: [text], entry_index: i64) -> [text]:
+    var result: [text] = []
+    var index = entry_index + 1
+    while index < args.len():
+        result.push(args[index])
+        index = index + 1
+    result
+
+pub fn bootstrap_internal_native_build_entry(path: text) -> bool:
+    path.ends_with("src/app/cli/parse_shard_main.spl") or
+        path.ends_with("src/app/cli/native_build_worker.spl")
+
+pub fn bootstrap_internal_native_build_run_requested(
+    args: [text], worker_marker: text
+) -> bool:
+    worker_marker == "1" and args.len() >= 3 and args[1] == "run" and
+        bootstrap_internal_native_build_entry(args[2])
+
+fn run_bootstrap_stage3_process_route(args: [text]) -> i64:
+    val worker_args = bootstrap_native_build_worker_args(args)
+    if worker_args.len() == 0:
+        return 1
+    val marker = "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING"
+    val old_marker = env_get(marker) ?? ""
+    env_set(marker, "1")
+    val result = run_native_build_worker(worker_args)
+    env_set(marker, old_marker)
+    result
 
 fn native_build_runtime_bundle_is_removed(bundle: text) -> i64:
     if bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted":
@@ -236,6 +302,16 @@ fn native_build_backend_from_args(args: [text], i: i64) -> text:
     else:
         native_build_backend_from_args(args, i + 1)
 
+fn native_build_backend_plugin_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        ""
+    elif args[i] == "--backend-plugin" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--backend-plugin="):
+        args[i].substring(17)
+    else:
+        native_build_backend_plugin_from_args(args, i + 1)
+
 fn native_build_mode_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
         ""
@@ -316,6 +392,15 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
         return run_rt_native_build(args)
+    # Stage3's admitted bootstrap binary is not a general `simple run` host,
+    # but it can safely route the coordinator's two exact internal children
+    # below. The coordinator owns process/cache sharding, failure fallback, and
+    # MemAvailable fanout clamping; the real build remains the sole mutable
+    # CompileContext owner.
+    if bootstrap_stage3_process_route_requested(
+            args, env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+            env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""):
+        return run_bootstrap_stage3_process_route(args)
     val output_arg = bootstrap_output_from_args(args, 0)
     val output = if output_arg != "": output_arg else: "build/native/{_bootstrap_default_stem(entry_path)}"
     # rfind + `> 0` (not path.dirname/Option-match on rfind): rfind returns a
@@ -351,6 +436,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     options.output_file = Some(output)
     options.output_format = driver_output_format_native()
     options.backend = backend
+    options.backend_plugin_path = native_build_backend_plugin_from_args(args, 0)
     options.release = true
     options.opt_level = 3
     options.no_borrow_check = native_build_no_borrow_check_from_args(args, 0)
@@ -465,6 +551,7 @@ fn run_compile_bootstrap(args: [text]) -> i64:
     options.output_file = Some(output)
     options.output_format = driver_output_format_smf()
     options.backend = backend
+    options.backend_plugin_path = native_build_backend_plugin_from_args(args, 0)
     options = compileoptions_normalize_mir_optimization(options)
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
@@ -499,6 +586,20 @@ fn main() -> i64:
         print "       simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
         return 0
     val first = all_args[1]
+    val native_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    if bootstrap_internal_native_build_run_requested(
+            all_args, native_worker_marker):
+        # Deliberately not a general bootstrap `run` command. Only children
+        # spawned by native_build_main's admitted coordinator may enter, and
+        # only its two fixed internal entrypoints are accepted.
+        return cli_native_build(
+            bootstrap_internal_native_build_args(all_args, 2))
+    if first == "run" and native_worker_marker == "1" and argc >= 3:
+        # A marked coordinator child may never escape the internal allowlist
+        # into ordinary command handling. Unmarked `run` is not internal and
+        # deliberately falls through to the canonical unknown-command path.
+        print "error: unsupported bootstrap internal entry '{all_args[2]}'"
+        return 1
     if first == "native-build":
         return run_native_build_bootstrap(all_args)
     if first.len() == 9 and first.starts_with("--version"):

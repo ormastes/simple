@@ -3,6 +3,8 @@ use crate::error::CompileError;
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
+#[cfg(feature = "llvm")]
+use inkwell::values::BasicValue;
 
 impl LlvmBackend {
     // ============================================================================
@@ -39,7 +41,15 @@ impl LlvmBackend {
         let loaded = builder
             .build_load(self.llvm_type(ty)?, ptr, "load")
             .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+        if self.mem_access_is_volatile() {
+            // `@volatile` / `@no_reorder` fn: never elided, merged or widened.
+            if let Some(inst) = loaded.as_instruction_value() {
+                inst.set_volatile(true)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("load_volatile", e))?;
+            }
+        }
         vreg_map.insert(dest, loaded);
+        self.emit_no_reorder_fence(builder)?;
         Ok(())
     }
 
@@ -68,9 +78,15 @@ impl LlvmBackend {
         };
 
         let stored = self.coerce_value_to_type(value_val, Some(self.llvm_type(ty)?), builder)?;
-        builder
+        let store = builder
             .build_store(ptr, stored)
             .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        if self.mem_access_is_volatile() {
+            store
+                .set_volatile(true)
+                .map_err(|e| crate::error::factory::llvm_build_failed("store_volatile", e))?;
+        }
+        self.emit_no_reorder_fence(builder)?;
         Ok(())
     }
 

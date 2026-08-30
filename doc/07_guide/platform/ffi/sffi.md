@@ -108,6 +108,25 @@ hot-path dispatch. Otherwise leave the boundary explicitly unsafe and record a
 migration task. In particular, never auto-convert a nullable/sentinel result
 to `nil`, zero, `false`, or empty data.
 
+The current approved rename set is deliberately small and exact: process
+tuple transport (`rt_process_run` → `process_run`), environment mutation
+(`rt_env_set` → `env_set`), exact one-call file/directory status operations
+(`rt_file_delete`, `rt_file_copy`, `rt_file_write_text` → `file_write_exact`,
+`rt_file_write_bytes`, `rt_file_append_text`, `rt_dir_create_all`,
+`rt_dir_remove_all`, `rt_dir_exists`, `rt_file_rename`, `rt_file_move`), and
+exact scalar/unit transport (`rt_process_run_timeout`, `rt_thread_sleep`,
+`rt_hash_text`, `rt_time_now_monotonic_ms`). The linter applies one of these
+renames only for a direct call whose target wrapper is already selectively
+imported from the exact reviewed module
+`std.nogc_sync_mut.io_runtime`; it does not add imports or alter declarations.
+Same-named `app.io.mod` and `std.io_runtime` exports remain warning-only: a
+facade can add preflight, process-slot, timeout, temp-file, retry, or other
+behavior that changes the raw contract or its cost. `rt_file_read_text`,
+`rt_env_get`, `rt_file_size`, and `rt_dir_list` also remain warnings because
+their nullable/sentinel contracts need human review. These mappings are source
+policy only and do not assert ABI compatibility, null safety, ownership,
+provider verification, artifact identity, or signature admission.
+
 ### Return representation is part of the ABI
 
 Names do not authorize a conversion between integer and floating-point return
@@ -216,22 +235,9 @@ and `examples/10_tooling/libraries/external_compression/`.
 > missing returns, null violations, or bridge failures must never be interpreted
 > as ordinary nil/zero/empty values.
 
-The PR-75 source-authority tranche is enforced as one fail-closed aggregate:
-
-```bash
-sh scripts/check/check-sffi-v2-authority.shs
-```
-
-The aggregate runs all 46 named guards, requires the exact count, and fails if
-any child is missing or red. It is a blocking push-tier entry in
-`config/check/must_check_gates.sdn` and an independent non-advisory step in the
-repo-hygiene CI workflow; adding an opt-out or unwired baseline is not an
-accepted substitute.
-
 ### Opaque Handle Pattern
 
-Legacy external objects are commonly represented as `i64` handles in Simple.
-This is migration syntax, not the SFFI v2 safe boundary:
+External objects are represented as `i64` handles in Simple:
 
 ```simple
 extern fn spl_db_open(path: text) -> i64      # Returns handle
@@ -557,15 +563,13 @@ src/runtime/           # C implementations
 
 ## Best Practices
 
-1. **Prefer pure Simple** -- Search `src/lib/**` and `src/os/**` before adding a provider
-2. **Wrap every raw call** -- Raw declarations remain internal and `unsafe(ffi)`
-3. **Use typed contracts** -- Declare ABI, status/null/sentinel, bounds, and unwind semantics
-4. **Lift before use** -- Unvalidated pointers, handles, and descriptors cannot escape safely
-5. **Encode ownership** -- Bind allocator, borrow scope, retain/release, and destructor
-6. **Fail closed** -- Missing symbols and unsupported conversion are errors, never defaults
-7. **Keep checks hot** -- Status/null/descriptor checks stay enabled by default
-8. **Keep glue minimal** -- C/C++ glue converts layouts and exceptions, not application logic
-9. **Verify every lane** -- Interpreter/JIT/native/dynload/SimpleOS must agree by contract category
+1. **Always wrap raw FFI** -- Never use `extern fn` directly in application code
+2. **Use opaque handles** -- Represent C objects as `i64`, not raw pointers
+3. **Check availability** -- Use feature detection before calling optional FFI
+4. **Handle errors** -- Return `Result<T, E>` from wrappers, not raw error codes
+5. **Document ownership** -- Clearly state who frees handles (Simple or C)
+6. **Prefix conventions** -- `rt_` for runtime, `spl_` for external library glue
+7. **Keep glue minimal** -- C/C++ glue should only convert types, not implement logic
 
 ---
 
@@ -763,3 +767,33 @@ try {
 - Interop support matrix: `doc/06_spec/app/compiler/sffi_interop_support_matrix.md`
 - Bidirectional interop design: `doc/05_design/sffi_bidirectional_interop.md`
 - **Hardware SFFI (VHDL):** `doc/07_guide/hardware/misc/sffi_vhdl_guide.md` — Simple-to-VHDL compilation, GHDL/Yosys tool bindings, FPGA synthesis workflow
+
+## Verification and signing contract (measured 2026-08-23)
+
+**There is no signing, attestation, or provenance check for SFFI bindings —
+cryptographic or otherwise.** "Signature" everywhere in this tree means an ABI
+arity/type signature, never a cryptographic one. Loader admission, where such a
+gate would live, is still *planned* (`doc/00_llm_process/layer_expert/sffi_boundary/skill.md`,
+P3/P4). Do not describe a binding as "signed" or "verified"; it is at best
+*backed* (a defined symbol in a real link artifact).
+
+What actually exists:
+
+| mechanism | where | state |
+|---|---|---|
+| `@unsafe(reason: ..., capabilities: [ffi])` boundary tag | HIR `UnsafeCapability.Ffi`; 112 files | live, but voluntary |
+| `raw_sffi_call` / RAW-RT-001 lint (requires that tag on raw extern calls) | `35.semantics/lint/raw_sffi_call.spl` | wired, **`allow` by default** (`_LintMain/config_and_model.spl:230`); `deny` only under Robust/Critical |
+| `FfiManifest` / `validate_library` arity check for `dlopen`'d providers | `src/lib/nogc_sync_mut/ffi/ffi_signature.spl` | implemented and tested, **zero production callers** |
+| unbacked-extern ratchet + `rt_*` call ratchet + unresolved-symbol guard | `scripts/check/` | live, but they FREEZE debt; they verify nothing |
+
+Consequence: **an extern with no runtime backing silently returns nil instead
+of failing** (`doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).
+As of 2026-08-23, 1,501 of 3,959 distinct extern symbols (37.9%) are neither
+backed nor `@unsafe`-tagged. Audit and full list:
+`doc/09_report/sffi_signing_audit_2026-08-23.md`; open items:
+`doc/08_tracking/bug/sffi_no_signing_raw_sffi_call_default_allow_2026-08-23.md`.
+
+When adding a binding: put the raw call in the smallest function carrying an
+explicit `@unsafe(reason: "...", capabilities: [ffi])`, and confirm it is backed
+with `sh scripts/check/extern-backing-census.shs` — the single source of truth,
+which reads `nm` off real link artifacts rather than grepping text.

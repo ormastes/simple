@@ -20,6 +20,7 @@ mod casts;
 mod collections;
 mod consts;
 mod memory;
+mod inline_asm;
 mod objects;
 
 /// Type alias for vreg map
@@ -436,6 +437,105 @@ impl LlvmBackend {
             .into_float_value())
     }
 
+    /// Emit one raw `asm { }` block as an LLVM inline-asm call
+    /// (design A.3 text contract + A.4 clobber lowering, see `raw_asm.rs`).
+    #[cfg(feature = "llvm")]
+    fn emit_raw_asm_block(
+        &self,
+        instructions: &[String],
+        constraints: &str,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let fn_type = self.context_ref().void_type().fn_type(&[], false);
+        let asm = self.context_ref().create_inline_asm(
+            fn_type,
+            super::raw_asm::raw_asm_template(instructions),
+            constraints.to_string(),
+            true,
+            false,
+            Some(InlineAsmDialect::ATT),
+            false,
+        );
+        builder
+            .build_indirect_call(fn_type, asm, &[], "")
+            .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+        Ok(())
+    }
+
+    /// Design A.2 `@naked`: the body MUST be exactly one raw `asm { }` block.
+    /// Nothing else is materialised — no vreg/local allocas, no parameter
+    /// spills, no `ret`; the block is followed by `unreachable` so LLVM
+    /// synthesises no epilogue (the survey measured a trailing `c3` + `int3`
+    /// padding with the plain path, fatal for stubs ending in jmp/iret/mret).
+    #[cfg(feature = "llvm")]
+    fn compile_naked_function(
+        &self,
+        func: &MirFunction,
+        function: inkwell::values::FunctionValue<'static>,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let entry = self.context_ref().append_basic_block(function, "naked_entry");
+        builder.position_at_end(entry);
+        let mut asm_blocks = 0usize;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    crate::mir::MirInst::InlineAsm {
+                        instructions,
+                        constraints,
+                        inputs,
+                        outputs,
+                        ..
+                    } => {
+                        // A `@naked` body owns the whole register file, so it
+                        // must not bind operands or declare clobbers. Under
+                        // the landed MIR shape the clobber list has already
+                        // been folded into the constraint string, so anything
+                        // beyond the implicit `~{memory}` is a violation.
+                        let declared: Vec<&str> = constraints
+                            .split(',')
+                            .filter(|c| !c.is_empty() && *c != "~{memory}")
+                            .collect();
+                        if !declared.is_empty() || !inputs.is_empty() || !outputs.is_empty() {
+                            return Err(CompileError::Codegen(format!(
+                                "E-NAKED-CLOBBER: `{}` is @naked; its raw asm block must not carry clobbers(...) \
+                                 or bound operands (the whole register file belongs to the author), found `{}`",
+                                func.name, constraints
+                            )));
+                        }
+                        self.emit_raw_asm_block(instructions, "~{memory}", builder)?;
+                        asm_blocks += 1;
+                    }
+                    other => {
+                        return Err(CompileError::Codegen(format!(
+                            "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {:?}",
+                            func.name, other
+                        )));
+                    }
+                }
+            }
+            match &block.terminator {
+                crate::mir::Terminator::Return(None) | crate::mir::Terminator::Unreachable => {}
+                other => {
+                    return Err(CompileError::Codegen(format!(
+                        "E-NAKED-BODY: `{}` is @naked; control flow other than fall-through is not allowed, found {:?}",
+                        func.name, other
+                    )));
+                }
+            }
+        }
+        if asm_blocks != 1 {
+            return Err(CompileError::Codegen(format!(
+                "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}",
+                func.name
+            )));
+        }
+        builder
+            .build_unreachable()
+            .map_err(|e| crate::error::factory::llvm_build_failed("naked_unreachable", &e))?;
+        Ok(())
+    }
+
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
@@ -449,6 +549,11 @@ impl LlvmBackend {
                 .as_deref()
                 .map(|needle| func.name.contains(needle))
                 .unwrap_or_else(|| func.name.contains("native_build"));
+
+        // `@volatile` / `@no_reorder` memory-order mode for this function
+        // (read by compile_load / compile_store / compile_inline_asm).
+        self.mem_order_mode
+            .set(inline_asm::mem_order_mode_for(&func.attributes));
 
         // Debug: dump MIR for selected functions when SIMPLE_DUMP_IR is set.
         if should_dump {
@@ -504,6 +609,11 @@ impl LlvmBackend {
             module.add_function(resolved_name, fn_type, None)
         });
 
+        // Design A.2 `@naked`: no allocas, no prologue, no epilogue, no `ret`.
+        if func.attributes.iter().any(|attr| attr == "naked") {
+            return self.compile_naked_function(func, function, builder);
+        }
+
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
         for block in &func.blocks {
@@ -533,7 +643,7 @@ impl LlvmBackend {
         }
         for block in &func.blocks {
             for inst in &block.instructions {
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     all_vregs.insert(d);
                 }
                 for u in inst.uses() {
@@ -722,7 +832,7 @@ impl LlvmBackend {
                             live_in.insert(u);
                         }
                     }
-                    if let Some(d) = inst.dest() {
+                    for d in inst.defs() {
                         seen_defs.insert(d);
                     }
                 }
@@ -778,7 +888,7 @@ impl LlvmBackend {
                 self.compile_instruction(inst, &mut vreg_map, &local_allocas, &vreg_types, builder, module)?;
 
                 // Store any newly defined vreg to its alloca (for cross-block access)
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
                         let rv_type = self.runtime_int_type();
                         let i64_val = self
@@ -986,20 +1096,15 @@ impl LlvmBackend {
             MirInst::Call { dest, target, args } => {
                 self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
-            MirInst::InlineAsm { instructions, .. } => {
-                let fn_type = self.context_ref().void_type().fn_type(&[], false);
-                let asm = self.context_ref().create_inline_asm(
-                    fn_type,
-                    instructions.join("\n"),
-                    String::new(),
-                    true,
-                    false,
-                    Some(InlineAsmDialect::ATT),
-                    false,
-                );
-                builder
-                    .build_indirect_call(fn_type, asm, &[], "")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+            MirInst::InlineAsm {
+                instructions,
+                volatile,
+                constraints,
+                inputs,
+                outputs,
+            } => {
+                self.compile_inline_asm(instructions, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
+                self.emit_no_reorder_fence(builder)?;
             }
             MirInst::IndirectCall {
                 dest,

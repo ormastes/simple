@@ -1,5 +1,20 @@
 # DAP Debugging Quick Reference
 
+## Start with evidence
+
+DAP is an IDE client of `DebugServiceV1`; the service owns mutable state and the
+client uses `DebugSessionId`. Preserve the original log/dump/trace, then run
+`simple debug doctor [profile.sdn]`. Blocked, unverified, and unavailable rows
+are not passes even when adapter source exists.
+
+Use D0–D12: intake → preserve → doctor → classify → budgets → cheapest decisive
+observation → reproduce → hypothesis → receipted probe/attach → root-cause
+owner → test decision → fix/verify → cleanup/knowledge. Reproduce external
+behavior at System SSpec level, narrow the owning boundary with Integration
+SSpec, and add Unit/property coverage only when justified. If either required
+reproducer is unfaithful, resume debugging at that boundary; add adjacent
+tests only after both are faithful.
+
 ## Keyboard Shortcuts
 
 | Action | Windows/Linux | macOS | Description |
@@ -155,12 +170,18 @@ val future = async {
 - Remove breakpoints when not needed
 - Use "Continue" instead of stepping through long sections
 - Set breakpoints close to the issue
+- Prefer passive evidence or a log/trace/count probe before stopping execution
 
 ❌ **DON'T:**
 - Leave breakpoints in tight loops (use conditions!)
 - Step through library code unnecessarily
 - Keep debug mode on in production
 - Set too many breakpoints (slows down)
+
+Every attach, probe, capture, control, and cleanup should emit a
+`DebugReceiptV1` bound to the exact build. On completion record provider token
+fields (or `unavailable`) per bug in the bug database. Usage above 2× the documented comparable bug-fix
+average requires a linked reusable knowledge/skill/tool update before closure.
 
 ## Troubleshooting
 

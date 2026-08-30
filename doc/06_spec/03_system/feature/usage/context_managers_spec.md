@@ -2,6 +2,29 @@
 
 > with resource as alias:
 
+<!-- sdn-diagram:id=context_managers_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=context_managers_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+context_managers_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=context_managers_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -21,7 +44,7 @@ with resource as alias:
 | Category | Language |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/context_managers_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -48,18 +71,18 @@ with resource as alias:
 
 #### calls __enter__ and binds result to alias
 
-- calls __enter__ and binds result to alias
+1. fn   enter
+2. fn   exit
+3. with Resource
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls __enter__ and binds result to alias")
 class Resource:
     value: i64
 
@@ -80,18 +103,17 @@ expect captured == 15
 
 #### calls __exit__ after block completes
 
-- calls __exit__ after block completes
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls __exit__ after block completes")
 class Resource:
     value: i64
     exited: bool = false
@@ -115,18 +137,18 @@ expect resource.exited == true
 
 #### reuses identifier when parser sees cast-style syntax
 
-- reuses identifier when parser sees cast-style syntax
+1. fn   enter
+2. fn   exit
+3. with Resource
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reuses identifier when parser sees cast-style syntax")
 class Resource:
     value: i64
 
@@ -148,18 +170,22 @@ expect result == 3
 
 #### properly binds alias in nested contexts
 
-- properly binds alias in nested contexts
+1. fn   enter
+2. fn   exit
+3. with Resource
+4. results push
+5. with Resource
+6. results push
+7. results push
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("properly binds alias in nested contexts")
 class Resource:
     value: i64
 
@@ -185,18 +211,17 @@ expect results == [10, 6, 10]
 
 #### runs cleanup code after block
 
-- runs cleanup code after block
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("runs cleanup code after block")
 class Resource:
     cleanup_count: i64 = 0
 
@@ -217,18 +242,17 @@ expect resource.cleanup_count == 1
 
 #### runs cleanup even after multiple operations
 
-- runs cleanup even after multiple operations
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("runs cleanup even after multiple operations")
 class Resource:
     operations: i64 = 0
     exit_called: bool = false
@@ -255,18 +279,18 @@ expect resource.exit_called == true
 
 #### can use alias from __enter__ return value
 
-- can use alias from __enter__ return value
+1. fn   enter
+2. fn   exit
+3. with Config
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can use alias from __enter__ return value")
 class Config:
     filename: text
     content: text = ""
@@ -288,18 +312,20 @@ expect loaded == "loaded content"
 
 #### can call methods on alias
 
-- can call methods on alias
+1. fn   enter
+2. fn   exit
+3. fn process
+4. with Handler
+5. result = handler process
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can call methods on alias")
 class Handler:
     fn __enter__() -> Handler:
         self
@@ -323,18 +349,17 @@ expect result == 42
 
 #### passes exception info to __exit__
 
-- passes exception info to __exit__
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("passes exception info to __exit__")
 class Resource:
     exception_passed: bool = false
 
@@ -357,18 +382,17 @@ expect resource.exception_passed == false
 
 #### always calls __exit__ for resource cleanup
 
-- always calls __exit__ for resource cleanup
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("always calls __exit__ for resource cleanup")
 class Resource:
     exit_was_called: bool = false
 
@@ -393,18 +417,19 @@ expect resource.exit_was_called == true
 
 #### can nest multiple context managers
 
-- can nest multiple context managers
+1. fn   enter
+2. fn   exit
+3. results push
+4. results push
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can nest multiple context managers")
 class Resource:
     id: i64
     exited: bool = false
@@ -433,18 +458,17 @@ expect r2.exited == true
 
 #### cleans up in reverse order
 
-- cleans up in reverse order
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("cleans up in reverse order")
 class Resource:
     id: i64
     exit_order: List<i64> = []
@@ -466,18 +490,17 @@ class Resource:
 
 #### implements file-like resource pattern
 
-- implements file-like resource pattern
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("implements file-like resource pattern")
 class File:
     filename: text
     is_open: bool = false
@@ -504,18 +527,17 @@ expect content == "file content"
 
 #### ensures state is restored on exit
 
-- ensures state is restored on exit
+1. fn   enter
+2. fn   exit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ensures state is restored on exit")
 class StateManager:
     state: text = "initial"
 
@@ -550,60 +572,3 @@ expect manager.state == "cleaned"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `95c5206bff7a95541c33a4040957c10b31b230737629a07bfcda80c13af98a34`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `95c5206bff7a95541c33a4040957c10b31b230737629a07bfcda80c13af98a34`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `95c5206bff7a95541c33a4040957c10b31b230737629a07bfcda80c13af98a34`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/feature/usage/context_managers_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/context_managers_spec.md (current)
-findings: 8 blockers: 0
-  narrative=100 structure=85 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/context_managers_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/context_managers_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/context_managers_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls __enter__ and binds result to alias' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/context_managers_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls __exit__ after block completes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/context_managers_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reuses identifier when parser sees cast-style syntax' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/context_managers_spec.spl:164:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can use alias from __enter__ return value' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/feature/usage/context_managers_spec.spl:183:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can call methods on alias' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/feature/usage/context_managers_spec.spl:244:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can nest multiple context managers' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

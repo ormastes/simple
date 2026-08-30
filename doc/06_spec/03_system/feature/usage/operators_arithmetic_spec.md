@@ -2,6 +2,29 @@
 
 > Arithmetic operators in Simple provide standard mathematical operations on numeric types (Int and Float). The language supports binary operators (+, -, *, /, %, **, //), unary negation (-), automatic type coercion between Int and Float, and special behaviors for strings and arrays.
 
+<!-- sdn-diagram:id=operators_arithmetic_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=operators_arithmetic_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+operators_arithmetic_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=operators_arithmetic_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 59 | 59 | 0 | 0 |
@@ -22,7 +45,7 @@ Arithmetic operators in Simple provide standard mathematical operations on numer
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/operators_arithmetic_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -37,8 +60,6 @@ strings and arrays.
 ### Binary Operators
 
 ```simple
-use std.spec.step
-
 val sum = 2 + 3           # Addition: 5
 val diff = 10 - 4         # Subtraction: 6
 val product = 4 * 5       # Multiplication: 20
@@ -133,19 +154,13 @@ val cubed = 2 ** 3       # 8
 
 #### adds positive integers
 
-- adds positive integers
-   - Expected: result equals `5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds positive integers")
 val result = 2 + 3
 expect(result).to_equal(5)
 ```
@@ -154,19 +169,13 @@ expect(result).to_equal(5)
 
 #### adds negative integers
 
-- adds negative integers
-   - Expected: result equals `-8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds negative integers")
 val result = -5 + (-3)
 expect(result).to_equal(-8)
 ```
@@ -175,19 +184,13 @@ expect(result).to_equal(-8)
 
 #### adds zero
 
-- adds zero
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds zero")
 val result = 42 + 0
 expect(result).to_equal(42)
 ```
@@ -196,19 +199,13 @@ expect(result).to_equal(42)
 
 #### adds large integers
 
-- adds large integers
-   - Expected: result equals `3000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds large integers")
 val result = 1000 + 2000
 expect(result).to_equal(3000)
 ```
@@ -219,19 +216,13 @@ expect(result).to_equal(3000)
 
 #### adds positive floats
 
-- adds positive floats
-   - Expected: result equals `6.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds positive floats")
 val result = 2.5 + 3.5
 expect(result).to_equal(6.0)
 ```
@@ -240,19 +231,13 @@ expect(result).to_equal(6.0)
 
 #### adds negative floats
 
-- adds negative floats
-   - Expected: result equals `-4.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds negative floats")
 val result = -1.5 + (-2.5)
 expect(result).to_equal(-4.0)
 ```
@@ -263,19 +248,13 @@ expect(result).to_equal(-4.0)
 
 #### promotes int to float (int + float)
 
-- promotes int to float (int + float)
-   - Expected: result equals `13.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (int + float)")
 val result = 10 + 3.5
 expect(result).to_equal(13.5)
 ```
@@ -284,19 +263,13 @@ expect(result).to_equal(13.5)
 
 #### promotes int to float (float + int)
 
-- promotes int to float (float + int)
-   - Expected: result equals `9.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (float + int)")
 val result = 2.5 + 7
 expect(result).to_equal(9.5)
 ```
@@ -309,19 +282,13 @@ expect(result).to_equal(9.5)
 
 #### subtracts positive integers
 
-- subtracts positive integers
-   - Expected: result equals `7`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("subtracts positive integers")
 val result = 10 - 3
 expect(result).to_equal(7)
 ```
@@ -330,19 +297,13 @@ expect(result).to_equal(7)
 
 #### subtracts resulting in negative
 
-- subtracts resulting in negative
-   - Expected: result equals `-7`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("subtracts resulting in negative")
 val result = 3 - 10
 expect(result).to_equal(-7)
 ```
@@ -351,19 +312,13 @@ expect(result).to_equal(-7)
 
 #### subtracts zero
 
-- subtracts zero
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("subtracts zero")
 val result = 42 - 0
 expect(result).to_equal(42)
 ```
@@ -374,19 +329,13 @@ expect(result).to_equal(42)
 
 #### subtracts positive floats
 
-- subtracts positive floats
-   - Expected: result equals `7.3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("subtracts positive floats")
 val result = 10.5 - 3.2
 expect(result).to_equal(7.3)
 ```
@@ -397,19 +346,13 @@ expect(result).to_equal(7.3)
 
 #### promotes int to float (int - float)
 
-- promotes int to float (int - float)
-   - Expected: result equals `7.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (int - float)")
 val result = 10 - 2.5
 expect(result).to_equal(7.5)
 ```
@@ -418,19 +361,13 @@ expect(result).to_equal(7.5)
 
 #### promotes int to float (float - int)
 
-- promotes int to float (float - int)
-   - Expected: result equals `7.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (float - int)")
 val result = 10.5 - 3
 expect(result).to_equal(7.5)
 ```
@@ -443,19 +380,13 @@ expect(result).to_equal(7.5)
 
 #### multiplies positive integers
 
-- multiplies positive integers
-   - Expected: result equals `20`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies positive integers")
 val result = 4 * 5
 expect(result).to_equal(20)
 ```
@@ -464,40 +395,28 @@ expect(result).to_equal(20)
 
 #### multiplies by zero
 
-- multiplies by zero
-   - Expected: result equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies by zero")
 val result = 42 * 0
-expect(result).to_equal(0)
+expect(result == 0).to_equal(true)
 ```
 
 </details>
 
 #### multiplies by one
 
-- multiplies by one
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies by one")
 val result = 42 * 1
 expect(result).to_equal(42)
 ```
@@ -506,19 +425,13 @@ expect(result).to_equal(42)
 
 #### multiplies negative numbers
 
-- multiplies negative numbers
-   - Expected: result equals `-12`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies negative numbers")
 val result = -3 * 4
 expect(result).to_equal(-12)
 ```
@@ -527,19 +440,13 @@ expect(result).to_equal(-12)
 
 #### multiplies two negatives
 
-- multiplies two negatives
-   - Expected: result equals `12`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies two negatives")
 val result = -3 * -4
 expect(result).to_equal(12)
 ```
@@ -550,19 +457,13 @@ expect(result).to_equal(12)
 
 #### multiplies positive floats
 
-- multiplies positive floats
-   - Expected: result equals `10.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies positive floats")
 val result = 2.5 * 4.0
 expect(result).to_equal(10.0)
 ```
@@ -573,19 +474,13 @@ expect(result).to_equal(10.0)
 
 #### promotes int to float (int * float)
 
-- promotes int to float (int * float)
-   - Expected: result equals `12.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (int * float)")
 val result = 5 * 2.5
 expect(result).to_equal(12.5)
 ```
@@ -594,19 +489,13 @@ expect(result).to_equal(12.5)
 
 #### promotes int to float (float * int)
 
-- promotes int to float (float * int)
-   - Expected: result equals `7.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (float * int)")
 val result = 3.5 * 2
 expect(result).to_equal(7.0)
 ```
@@ -619,19 +508,13 @@ expect(result).to_equal(7.0)
 
 #### divides evenly
 
-- divides evenly
-   - Expected: result equals `5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("divides evenly")
 val result = 20 / 4
 expect(result).to_equal(5)
 ```
@@ -640,19 +523,13 @@ expect(result).to_equal(5)
 
 #### divides with remainder
 
-- divides with remainder
-   - Expected: result equals `3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("divides with remainder")
 val result = 17 / 5
 expect(result).to_equal(3)
 ```
@@ -661,19 +538,13 @@ expect(result).to_equal(3)
 
 #### divides one by itself
 
-- divides one by itself
-   - Expected: result equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("divides one by itself")
 val result = 42 / 42
 expect(result).to_equal(1)
 ```
@@ -684,19 +555,13 @@ expect(result).to_equal(1)
 
 #### divides floats
 
-- divides floats
-   - Expected: result equals `2.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("divides floats")
 val result = 10.0 / 4.0
 expect(result).to_equal(2.5)
 ```
@@ -707,19 +572,13 @@ expect(result).to_equal(2.5)
 
 #### promotes int to float (int / float)
 
-- promotes int to float (int / float)
-   - Expected: result equals `2.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (int / float)")
 val result = 10 / 4.0
 expect(result).to_equal(2.5)
 ```
@@ -728,19 +587,13 @@ expect(result).to_equal(2.5)
 
 #### promotes int to float (float / int)
 
-- promotes int to float (float / int)
-   - Expected: result equals `2.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes int to float (float / int)")
 val result = 10.0 / 4
 expect(result).to_equal(2.5)
 ```
@@ -753,19 +606,13 @@ expect(result).to_equal(2.5)
 
 #### computes remainder
 
-- computes remainder
-   - Expected: result equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes remainder")
 val result = 17 % 5
 expect(result).to_equal(2)
 ```
@@ -774,40 +621,28 @@ expect(result).to_equal(2)
 
 #### returns zero for even division
 
-- returns zero for even division
-   - Expected: result equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns zero for even division")
 val result = 20 % 4
-expect(result).to_equal(0)
+expect(result == 0).to_equal(true)
 ```
 
 </details>
 
 #### returns operand when divisor is larger
 
-- returns operand when divisor is larger
-   - Expected: result equals `3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns operand when divisor is larger")
 val result = 3 % 5
 expect(result).to_equal(3)
 ```
@@ -818,19 +653,13 @@ expect(result).to_equal(3)
 
 #### handles negative dividend
 
-- handles negative dividend
-   - Expected: result equals `-2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles negative dividend")
 val result = -17 % 5
 expect(result).to_equal(-2)
 ```
@@ -839,19 +668,13 @@ expect(result).to_equal(-2)
 
 #### handles negative divisor
 
-- handles negative divisor
-   - Expected: result equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles negative divisor")
 val result = 17 % -5
 expect(result).to_equal(2)
 ```
@@ -864,19 +687,13 @@ expect(result).to_equal(2)
 
 #### computes square
 
-- computes square
-   - Expected: result equals `25`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes square")
 val result = 5 ** 2
 expect(result).to_equal(25)
 ```
@@ -885,19 +702,13 @@ expect(result).to_equal(25)
 
 #### computes cube
 
-- computes cube
-   - Expected: result equals `8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes cube")
 val result = 2 ** 3
 expect(result).to_equal(8)
 ```
@@ -906,19 +717,13 @@ expect(result).to_equal(8)
 
 #### computes power of zero
 
-- computes power of zero
-   - Expected: result equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes power of zero")
 val result = 42 ** 0
 expect(result).to_equal(1)
 ```
@@ -927,19 +732,13 @@ expect(result).to_equal(1)
 
 #### computes power of one
 
-- computes power of one
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes power of one")
 val result = 42 ** 1
 expect(result).to_equal(42)
 ```
@@ -950,19 +749,13 @@ expect(result).to_equal(42)
 
 #### computes float power
 
-- computes float power
-   - Expected: result equals `8.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes float power")
 val result = 2.0 ** 3.0
 expect(result).to_equal(8.0)
 ```
@@ -973,19 +766,13 @@ expect(result).to_equal(8.0)
 
 #### evaluates right to left
 
-- evaluates right to left
-   - Expected: result equals `512`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates right to left")
 val result = 2 ** 3 ** 2
 expect(result).to_equal(512)
 ```
@@ -998,19 +785,13 @@ expect(result).to_equal(512)
 
 #### divides and floors
 
-- divides and floors
-   - Expected: result equals `3`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("divides and floors")
 val result = 17.fdiv(5)
 expect(result).to_equal(3)
 ```
@@ -1019,19 +800,13 @@ expect(result).to_equal(3)
 
 #### returns exact result for even division
 
-- returns exact result for even division
-   - Expected: result equals `5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns exact result for even division")
 val result = 20.fdiv(4)
 expect(result).to_equal(5)
 ```
@@ -1044,19 +819,13 @@ expect(result).to_equal(5)
 
 #### negates positive integer
 
-- negates positive integer
-   - Expected: result equals `-42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("negates positive integer")
 val result = -42
 expect(result).to_equal(-42)
 ```
@@ -1065,19 +834,13 @@ expect(result).to_equal(-42)
 
 #### negates negative integer
 
-- negates negative integer
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("negates negative integer")
 val x = -42
 val result = -x
 expect(result).to_equal(42)
@@ -1087,21 +850,15 @@ expect(result).to_equal(42)
 
 #### negates zero
 
-- negates zero
-   - Expected: result equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("negates zero")
 val result = -0
-expect(result).to_equal(0)
+expect(result == 0).to_equal(true)
 ```
 
 </details>
@@ -1110,19 +867,13 @@ expect(result).to_equal(0)
 
 #### negates positive float
 
-- negates positive float
-   - Expected: result equals `-3.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("negates positive float")
 val result = -3.5
 expect(result).to_equal(-3.5)
 ```
@@ -1133,19 +884,13 @@ expect(result).to_equal(-3.5)
 
 #### negates expression result
 
-- negates expression result
-   - Expected: result equals `-8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("negates expression result")
 val result = -(5 + 3)
 expect(result).to_equal(-8)
 ```
@@ -1158,19 +903,13 @@ expect(result).to_equal(-8)
 
 #### evaluates multiplication first
 
-- evaluates multiplication first
-   - Expected: result equals `14`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates multiplication first")
 val result = 2 + 3 * 4
 expect(result).to_equal(14)
 ```
@@ -1179,19 +918,13 @@ expect(result).to_equal(14)
 
 #### uses parentheses to override
 
-- uses parentheses to override
-   - Expected: result equals `20`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses parentheses to override")
 val result = (2 + 3) * 4
 expect(result).to_equal(20)
 ```
@@ -1202,19 +935,13 @@ expect(result).to_equal(20)
 
 #### evaluates exponentiation first
 
-- evaluates exponentiation first
-   - Expected: result equals `18`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates exponentiation first")
 val result = 2 * 3 ** 2
 expect(result).to_equal(18)
 ```
@@ -1223,19 +950,13 @@ expect(result).to_equal(18)
 
 #### uses parentheses to override
 
-- uses parentheses to override
-   - Expected: result equals `36`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses parentheses to override")
 val result = (2 * 3) ** 2
 expect(result).to_equal(36)
 ```
@@ -1246,19 +967,13 @@ expect(result).to_equal(36)
 
 #### evaluates complex expression correctly
 
-- evaluates complex expression correctly
-   - Expected: result equals `9`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates complex expression correctly")
 val result = 2 + 3 * 4 - 5
 expect(result).to_equal(9)
 ```
@@ -1267,19 +982,13 @@ expect(result).to_equal(9)
 
 #### evaluates with division
 
-- evaluates with division
-   - Expected: result equals `11`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates with division")
 val result = 20 / 4 + 3 * 2
 expect(result).to_equal(11)
 ```
@@ -1292,19 +1001,13 @@ expect(result).to_equal(11)
 
 #### promotes in nested expressions
 
-- promotes in nested expressions
-   - Expected: result equals `20.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes in nested expressions")
 val result = 10 + 5 * 2.0
 expect(result).to_equal(20.0)
 ```
@@ -1313,19 +1016,13 @@ expect(result).to_equal(20.0)
 
 #### promotes across multiple operations
 
-- promotes across multiple operations
-   - Expected: result equals `6.0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes across multiple operations")
 val result = 1 + 2 + 3.0
 expect(result).to_equal(6.0)
 ```
@@ -1338,40 +1035,28 @@ expect(result).to_equal(6.0)
 
 #### multiplies by zero
 
-- multiplies by zero
-   - Expected: result equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies by zero")
 val result = 42 * 0
-expect(result).to_equal(0)
+expect(result == 0).to_equal(true)
 ```
 
 </details>
 
 #### adds zero (identity)
 
-- adds zero (identity)
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds zero (identity)")
 val result = 42 + 0
 expect(result).to_equal(42)
 ```
@@ -1382,19 +1067,13 @@ expect(result).to_equal(42)
 
 #### multiplies by one
 
-- multiplies by one
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiplies by one")
 val result = 42 * 1
 expect(result).to_equal(42)
 ```
@@ -1403,19 +1082,13 @@ expect(result).to_equal(42)
 
 #### divides by one
 
-- divides by one
-   - Expected: result equals `42`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("divides by one")
 val result = 42 / 1
 expect(result).to_equal(42)
 ```
@@ -1424,19 +1097,13 @@ expect(result).to_equal(42)
 
 #### raises to power of zero
 
-- raises to power of zero
-   - Expected: result equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("raises to power of zero")
 val result = 42 ** 0
 expect(result).to_equal(1)
 ```
@@ -1455,54 +1122,3 @@ expect(result).to_equal(1)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `6799b714f812ac97885a8773776e4e2229fead9a9ea4b1ea189ebc2f76721ff0`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `6799b714f812ac97885a8773776e4e2229fead9a9ea4b1ea189ebc2f76721ff0`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `6799b714f812ac97885a8773776e4e2229fead9a9ea4b1ea189ebc2f76721ff0`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/feature/usage/operators_arithmetic_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/operators_arithmetic_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/operators_arithmetic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/operators_arithmetic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/operators_arithmetic_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 59 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/usage/operators_arithmetic_spec.spl:137:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds positive integers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/operators_arithmetic_spec.spl:143:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds negative integers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/operators_arithmetic_spec.spl:149:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds zero' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

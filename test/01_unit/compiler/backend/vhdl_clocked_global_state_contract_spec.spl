@@ -1,4 +1,13 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use compiler.backend.backend.vhdl_backend.VhdlBackend
 use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
 use compiler.common.attributes.{VhdlClockedMetadata, VhdlResetPolarity, VhdlResetSynchrony, vhdl_hardware_metadata_default}
@@ -12,6 +21,7 @@ use compiler.mir.mir_lowering.MirLowering
 use compiler.driver.driver_api_codegen_backends.aot_vhdl_file
 use std.io.{file_read_text, file_delete}
 use std.env.variables.{env_get, env_set, env_unset, env_has}
+
 
 fn span() -> Span:
     Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
@@ -111,10 +121,10 @@ fn clocked_state_module(state_type: MirType, mode: i64) -> MirModule:
     )
     var statics: Dict<SymbolId, MirStatic> = {}
     statics[global_symbol] = MirStatic(symbol: global_symbol, name: "state",
-        type_: state_type, init: nil, is_mutable: true)
+        type_: state_type, init: nil, is_mutable: true, is_rt_struct_alloc_registered: false)
     val unused_symbol = SymbolId(id: 703)
     statics[unused_symbol] = MirStatic(symbol: unused_symbol,
-        name: "unused_state", type_: i32_type(), init: nil, is_mutable: true)
+        name: "unused_state", type_: i32_type(), init: nil, is_mutable: true, is_rt_struct_alloc_registered: false)
     MirModule(name: "clocked_state_contract", functions: functions,
         statics: statics, constants: {}, types: {})
 
@@ -135,7 +145,10 @@ fn compile_frontend_source(src: text, module_name: text):
     backend().compile(mir_lowering.lower_module(hir))
 
 describe "VHDL clocked global state":
+    # @manual scenario evidence
     it "flattens annotated struct outputs and honors field bit widths":
+        # @req REQ-SSPEC-UNIT
+        step("flattens annotated struct outputs and honors field bit widths")
         val result = compile_frontend_source("""
 struct FormalPorts:
     mode: u32 @bits(2)
@@ -157,6 +170,8 @@ fn formal_ports(mode: u32, addr: u32, mask: u32, data: u32) -> FormalPorts:
         expect(vhdl.contains("result_out : out")).to_equal(false)
 
     it "lowers an RV32 product entry through frontend MIR and VHDL":
+        # @req REQ-SSPEC-UNIT
+        step("lowers an RV32 product entry through frontend MIR and VHDL")
         val result = compile_frontend_source("""
 var product_state: u32 = 0u32
 
@@ -177,6 +192,8 @@ fn core32_product_contract(clk: bool, reset_n: bool, reset_vec: u32) -> u32:
         expect(vhdl.contains("p_clk: process(clk)")).to_equal(true)
 
     it "resolves and emits the checked-in qualified RV64IMAC entry closure":
+        # @req REQ-SSPEC-UNIT
+        step("resolves and emits the checked-in qualified RV64IMAC entry closure")
         val entry = "src/lib/hardware/rv64gc_rtl/imac_entry.spl"
         val output = "/tmp/simple-rv64-imac-entry-contract.vhd"
         val manifest_path = output + ".gen.json"
@@ -253,6 +270,8 @@ fn core32_product_contract(clk: bool, reset_n: bool, reset_vec: u32) -> u32:
         file_delete(manifest_path)
 
     it "resolves and emits the checked-in qualified RV32 product entry closure":
+        # @req REQ-SSPEC-UNIT
+        step("resolves and emits the checked-in qualified RV32 product entry closure")
         val entry = "src/lib/hardware/rv32i_rtl/protected_entry.spl"
         val output = "/tmp/simple-rv32-protected-entry-contract.vhd"
         val manifest_path = output + ".gen.json"
@@ -330,6 +349,8 @@ fn core32_product_contract(clk: bool, reset_n: bool, reset_vec: u32) -> u32:
         file_delete(manifest_path)
 
     it "emits a same-edge reset and feedback process":
+        # @req REQ-SSPEC-UNIT
+        step("emits a same-edge reset and feedback process")
         val result = backend().compile(clocked_state_module(i32_type(), 0))
         expect(result.is_ok()).to_equal(true)
         val vhdl = result.unwrap().vhdl
@@ -342,27 +363,37 @@ fn core32_product_contract(clk: bool, reset_n: bool, reset_vec: u32) -> u32:
         expect(vhdl.contains("__module_init_contract_dynamic")).to_equal(false)
 
     it "rejects dynamic module state":
+        # @req REQ-SSPEC-UNIT
+        step("rejects dynamic module state")
         val dynamic_type = MirType(kind: MirTypeKind.Array(i32_type(), 2))
         val result = backend().compile(clocked_state_module(dynamic_type, 0))
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err().message.contains("fixed scalar or transitive record")).to_equal(true)
 
     it "rejects a reset guard that does not dominate initialization":
+        # @req REQ-SSPEC-UNIT
+        step("rejects a reset guard that does not dominate initialization")
         val result = backend().compile(clocked_state_module(i32_type(), 1))
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err().message.contains("if not reset_n")).to_equal(true)
 
     it "rejects loading old state in the reset branch":
+        # @req REQ-SSPEC-UNIT
+        step("rejects loading old state in the reset branch")
         val result = backend().compile(clocked_state_module(i32_type(), 2))
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err().message.contains("without loading prior state")).to_equal(true)
 
     it "rejects same-edge store then load":
+        # @req REQ-SSPEC-UNIT
+        step("rejects same-edge store then load")
         val result = backend().compile(clocked_state_module(i32_type(), 3))
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err().message.contains("store-then-load")).to_equal(true)
 
     it "rejects loading state before the reset split":
+        # @req REQ-SSPEC-UNIT
+        step("rejects loading state before the reset split")
         val result = backend().compile(clocked_state_module(i32_type(), 4))
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err().message.contains("before the reset/feedback branch")).to_equal(true)

@@ -139,6 +139,13 @@ tool.clang.version=<version>
 tool.clang.sha256=<hash>
 tool.lld.version=<version>
 tool.lld.sha256=<hash>
+tool.simple.path=<canonical-stage4-path>
+tool.simple.version=<version>
+tool.simple.sha256=<hash>
+tool.simple.provenance.path=<path>
+tool.simple.provenance.sha256=<hash>
+object.fsbl.sha256=<hash>
+object.fsbl.target=armv7-unknown-none-eabihf
 tool.bootgen.version=<version>
 tool.bootgen.sha256=<hash>
 ```
@@ -193,7 +200,8 @@ admission attempt; complete it before using `bin/release/simple`.
 From the repository root:
 
 ```sh
-COSMOS_BUILD_MODE=qemu sh src/os/kernel/arch/arm32/cosmos/build.shs --run
+SIMPLE_BINARY=/absolute/path/to/admitted-stage4/simple \
+  COSMOS_BUILD_MODE=qemu sh src/os/kernel/arch/arm32/cosmos/build.shs --run
 readelf -hW build/os/simpleos_cosmos_openssd.elf
 test -z "$(nm -u build/os/simpleos_cosmos_openssd.elf)"
 ```
@@ -221,7 +229,10 @@ different status, missing PENDING marker, or any FAIL/abort marker fails.
 Build the unbound silicon artifact without executing it:
 
 ```sh
-COSMOS_BUILD_MODE=silicon sh src/os/kernel/arch/arm32/cosmos/build.shs
+SIMPLE_BINARY=/absolute/path/to/admitted-stage4/simple \
+  COSMOS_BUILD_MODE=silicon \
+  COSMOS_SILICON_PROFILE=openssd2-8ch8way-v3.0.0 \
+  sh src/os/kernel/arch/arm32/cosmos/build.shs
 readelf -hW build/os/simpleos_cosmos_openssd_silicon.elf
 test -z "$(nm -u build/os/simpleos_cosmos_openssd_silicon.elf)"
 ```
@@ -233,11 +244,14 @@ This proves compilation only. It is not a flash-ready bound image.
 Run:
 
 ```sh
-bin/release/simple test \
+SIMPLE_BINARY=/absolute/path/to/admitted-stage4/simple
+export SIMPLE_BINARY
+"$SIMPLE_BINARY" test \
   test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl \
   --mode=interpreter
 
-sh src/os/kernel/arch/arm32/cosmos/package_boot.shs --self-test
+SIMPLE_BINARY=/absolute/path/to/admitted-stage4/simple \
+  sh src/os/kernel/arch/arm32/cosmos/package_boot.shs --self-test
 ```
 
 The package provenance self-test ends with:
@@ -336,14 +350,14 @@ Before production can move from **BLOCKED/FAIL**, complete:
 After the runner blocker is solved, execute the consolidated host gate:
 
 ```sh
-SIMPLE_BINARY=bin/release/simple \
+SIMPLE_BINARY=/absolute/path/to/admitted-stage4/simple \
   sh scripts/check/check-nvme-firmware-remaining-gates.shs --post-bootstrap
 ```
 
 An optional UNO Q portability build is supplementary only:
 
 ```sh
-SIMPLE_BINARY=bin/release/simple \
+SIMPLE_BINARY=/absolute/path/to/admitted-stage4/simple \
   sh scripts/check/check-nvme-firmware-remaining-gates.shs --uno-q-build
 ```
 
@@ -667,3 +681,52 @@ Current report:
 > Cosmos+ software integration and a pinned FSBL/real package are present, but
 > production is BLOCKED/FAIL pending fresh pure-Simple SSpec/docgen and retained
 > board evidence.
+
+## PCIe/NVMe Pure-Policy Host Gate
+
+Run `sh scripts/check/check-cosmos-nvme-pcie-policy.shs`. A pass requires exact
+parity between the pure-Simple status/SQ/CQ policy and the independent
+pre-migration C oracle, complete LLVM branch outcomes in the pointer ABI
+bridge, and both outcomes for every named Simple production predicate. Raw
+reports and a source-hash-bound receipt are written under
+`build/coverage/cosmos-nvme-pcie-policy/`.
+
+This is host evidence for one migrated policy slice. It does not exercise
+volatile PCIe MMIO or final FIFO/register publication and cannot be cited as
+QEMU or physical Cosmos+ board evidence. Use `build.shs --run` for the separate
+QEMU gate. Board validation stays unavailable until the pinned OpenSSD2
+8Ch8Way v3.0.0 fixture is attached.
+
+The 2026-08-19 host run passed 5,724 C-oracle parity vectors, all 16 LLVM
+branches in the C ABI bridge, and all 15 named Simple decisions. The focused
+queue host/ARM runner and the broader PCIe transport contract also passed.
+The one QEMU build attempt stopped before compilation because `bin/simple`
+could not be resolved as a provenance-qualified Stage-4 compiler. No seed
+fallback was used. This is a toolchain blocker, not QEMU or board PASS.
+
+## Residual Runtime Policy Gate
+
+Run `sh scripts/check/check-cosmos-runtime-residual-policy.shs --source-only`
+for the independent legacy-C and static ABI check. It proves 40 frozen rows,
+68/68 oracle LLVM branch edges, and the exact eleven-symbol C dependency
+closure. Run the command without `--source-only` only when a provenance-
+qualified Stage-4 compiler is admitted; that mode must prove C-vs-Simple
+parity and all 27 decisions/54 outcomes. A BLOCKED result is not a parity,
+firmware-build, QEMU, or board PASS.
+
+## Host NFC ECC Policy Gate
+
+After an admitted Stage-4 self-host compiler is installed, run exactly once:
+
+```sh
+sh scripts/check/check-cosmos-nfc-ecc-link-wiring.shs
+sh scripts/check/check-cosmos-nfc-ecc-bridge-coverage.shs
+sh scripts/check/check-cosmos-nfc-ecc-policy.shs
+```
+
+The first command rejects any production/focused `cosmos_nfc.c` link that omits
+the pure-Simple ECC object or volatile acquisition bridge. The second compares
+6,144 inputs with the pre-migration C oracle and writes source-bound branch and
+decision evidence under `build/coverage/cosmos-nfc-ecc/`. Its receipt always
+marks board evidence separate; do not use it for NAND correction strength,
+reserved-block safety, power-loss, or silicon acceptance.

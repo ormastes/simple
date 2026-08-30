@@ -325,6 +325,47 @@ fn is_project_stdlib_import(parts: &[String]) -> bool {
         .unwrap_or(false)
 }
 
+/// Nearest ancestor of `path` (inclusive) that looks like a project root:
+/// it holds a `src/` directory or a `Cargo.toml`. Same rule as
+/// `pipeline::execution::find_project_root_hint` and the interpreter's
+/// `interpreter_module::path_resolution::find_project_root`.
+fn project_root_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut current = path.to_path_buf();
+    loop {
+        if p_is_dir(&current.join("src")) || p_is_file(&current.join("Cargo.toml")) {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Last-resort resolution of a NON-stdlib import against an explicit project
+/// root (its `src/` first, then the root itself), for an importer that has no
+/// project root of its own. Stdlib imports are never resolved here — they have
+/// their own project-rooted search (see `is_project_stdlib_import`).
+fn resolve_parts_from_project_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    if is_project_stdlib_import(parts) {
+        return None;
+    }
+    let src = root.join("src");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if p_is_dir(&src) {
+        candidates.push(src);
+    }
+    candidates.push(root.to_path_buf());
+    for candidate in &candidates {
+        if let Some(resolved) = resolve_parts_from_root(candidate, parts, use_stmt) {
+            return Some(resolved);
+        }
+        if let Some(resolved) = resolve_numbered_parts_from_root(candidate, parts, use_stmt) {
+            return Some(resolved);
+        }
+    }
+    None
+}
+
 fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
     // Stdlib imports never resolve relative to the importing file — see
     // is_project_stdlib_import. The caller falls through to the project-rooted
@@ -438,11 +479,16 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        let stdlib_parts: Vec<String> = if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib") {
-            parts[1..].to_vec()
-        } else {
-            parts.to_vec()
-        };
+        // `lib.x` is the same stdlib root as `std.x` (module_resolver/resolution.rs
+        // and the interpreter's path_resolution.rs both strip it); without this
+        // the 109 `use lib.common...` sites resolve to a non-existent
+        // `src/lib/lib/...` under `compile` and surface as undefined identifiers.
+        let stdlib_parts: Vec<String> =
+            if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib" || parts[0] == "lib") {
+                parts[1..].to_vec()
+            } else {
+                parts.to_vec()
+            };
 
         if stdlib_parts.is_empty() {
             continue;
@@ -626,6 +672,7 @@ fn append_flattened_import_binding_markers(
             ty: None,
             value: Expr::Nil,
             visibility: Visibility::Private,
+            attributes: vec![],
         }));
     };
     match &use_stmt.target {
@@ -720,6 +767,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         ty: None,
                         value: Expr::Nil,
                         visibility: Visibility::Private,
+                        attributes: vec![],
                     }));
                 }
                 items.push(declaration);
@@ -2544,12 +2592,27 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             current = parent.to_path_buf();
         }
 
-        resolve_from_stdlib_fallbacks(
+        if let Some(resolved) = resolve_from_stdlib_fallbacks(
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             Path::new(env!("CARGO_MANIFEST_DIR")),
             parts,
             use_stmt,
-        )
+        ) {
+            return Some(resolved);
+        }
+
+        // Importer outside any project tree (a test-runner wrapper written to
+        // $TMPDIR is the live case): every strategy above is importer-relative
+        // or stdlib-only, so a project import such as `compiler.x.y` had no
+        // root to resolve against at all. The interpreter already falls back to
+        // the cwd's project root for exactly this (interpreter_module/
+        // path_resolution.rs); mirror it so `compile` and `run` agree.
+        if project_root_ancestor(base).is_none() {
+            if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
+                return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
+            }
+        }
+        None
     };
 
     if let Some(resolved) = resolve_parts(&parts) {
@@ -2793,6 +2856,61 @@ mod tests {
             is_type_only: false,
             is_lazy: false,
         }
+    }
+
+    /// Replays the MC/DC test lane: the runner writes a wrapped spec to $TMPDIR
+    /// (no `src/` ancestor) whose `use compiler.common.diagnostics.span.{Span}`
+    /// must resolve against the cwd project, including a numbered layer dir.
+    #[test]
+    fn project_import_from_importer_outside_any_project_resolves_via_cwd_project_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        let span_file = project.join("src/compiler/00.common/diagnostics/span.spl");
+        fs::create_dir_all(span_file.parent().unwrap()).unwrap();
+        fs::write(&span_file, "struct Span:\n    line: i64\n").unwrap();
+        let scratch = temp.path().join("scratch/tmp");
+        fs::create_dir_all(&scratch).unwrap();
+
+        // The importer's own tree has no project root at all.
+        assert_eq!(project_root_ancestor(&scratch), None);
+        assert_eq!(project_root_ancestor(&project.join("src/compiler")), Some(project.clone()));
+
+        let parts: Vec<String> = ["compiler", "common", "diagnostics", "span"].iter().map(|s| s.to_string()).collect();
+        let import = use_stmt(
+            &["compiler", "common", "diagnostics", "span"],
+            ImportTarget::Group(vec![ImportTarget::Single("Span".to_string())]),
+        );
+        assert_eq!(resolve_parts_from_project_root(&project, &parts, &import), Some(span_file));
+
+        // Stdlib imports keep their own project-rooted search; never served here.
+        let std_parts: Vec<String> = ["std", "io"].iter().map(|s| s.to_string()).collect();
+        let std_import = use_stmt(&["std", "io"], ImportTarget::Glob);
+        fs::create_dir_all(project.join("src/std")).unwrap();
+        fs::write(project.join("src/std/io.spl"), "fn x():\n    1\n").unwrap();
+        assert_eq!(resolve_parts_from_project_root(&project, &std_parts, &std_import), None);
+    }
+
+    /// `use lib.common.env_access.model.{...}` (109 sites in src/) names the
+    /// same stdlib root as `std.`; the loader used to keep the `lib` segment
+    /// and probe `src/lib/lib/common/...`, so the import silently vanished.
+    #[test]
+    fn lib_prefixed_import_resolves_from_stdlib_root_like_std() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("proj");
+        let model = root.join("src/lib/common/env_access/model.spl");
+        fs::create_dir_all(model.parent().unwrap()).unwrap();
+        fs::write(&model, "fn env_scenario_selection_error() -> i64:\n    1\n").unwrap();
+
+        let lib_parts: Vec<String> = ["lib", "common", "env_access", "model"].iter().map(|s| s.to_string()).collect();
+        let lib_import = use_stmt(
+            &["lib", "common", "env_access", "model"],
+            ImportTarget::Group(vec![ImportTarget::Single("env_scenario_selection_error".to_string())]),
+        );
+        assert_eq!(resolve_from_stdlib_root(&root, &lib_parts, &lib_import), Some(model.clone()));
+
+        let std_parts: Vec<String> = ["std", "common", "env_access", "model"].iter().map(|s| s.to_string()).collect();
+        let std_import = use_stmt(&["std", "common", "env_access", "model"], ImportTarget::Glob);
+        assert_eq!(resolve_from_stdlib_root(&root, &std_parts, &std_import), Some(model));
     }
 
     #[test]

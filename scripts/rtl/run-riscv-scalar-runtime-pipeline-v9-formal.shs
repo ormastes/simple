@@ -1,0 +1,117 @@
+#!/usr/bin/env sh
+# Run an already-generated sealed V9 RVFI formal bundle.  The generator writes
+# a pending manifest; only this runner can replace it with an evidence receipt.
+set -eu
+
+is_sha256() {
+    case "$1" in ""|*[!0-9a-f]*) return 1;; esac
+    [ "${#1}" -eq 64 ]
+}
+
+safe_module() {
+    case "$1" in ""|*[!A-Za-z0-9_]*) return 1;; esac
+}
+
+status_is() {
+    [ -f "$1" ] && [ "$(tr -d '\r\n[:space:]' <"$1")" = "$2" ]
+}
+
+mutant_counterexample_log() {
+    [ -f "$1" ] && grep -Eiq \
+        'counterexample|assert(ion)?[^[:alnum:]]*(failed|violated)|failed[[:space:]]+assert(ion)?' \
+        "$1"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_dir="$(mktemp -d)"
+    trap 'rm -rf "$self_dir"' EXIT
+    printf '%s\n' PASS >"$self_dir/pass"
+    printf '%s\n' FAIL >"$self_dir/fail"
+    printf '%s\n' 'Counterexample found for assertion' >"$self_dir/counterexample.log"
+    printf '%s\n' 'ERROR: solver executable missing' >"$self_dir/tool-error.log"
+    status_is "$self_dir/pass" PASS
+    status_is "$self_dir/fail" FAIL
+    is_sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    safe_module v9_rvfi_32
+    ! safe_module '../bad'
+    ! is_sha256 ABCD
+    mutant_counterexample_log "$self_dir/counterexample.log"
+    ! mutant_counterexample_log "$self_dir/tool-error.log"
+    echo "STATUS: PASS riscv-v9-formal runner self-test"
+    exit 0
+fi
+
+bundle_dir="${1:-}"
+module_name="${2:-}"
+profile="${3:-}"
+[ -n "$bundle_dir" ] && [ -d "$bundle_dir" ] || { echo "FAIL: generated V9 formal bundle directory is required" >&2; exit 2; }
+safe_module "$module_name" || { echo "FAIL: module name must contain only letters, digits, or underscore" >&2; exit 2; }
+case "$profile" in
+    rv32im_zicsr_zifencei) expected_xlen=32 ;;
+    rv64im_zicsr_zifencei) expected_xlen=64 ;;
+    *) echo "FAIL: V9 formal profile must be an exact RV32IM/RV64IM Zicsr+Zifencei profile" >&2; exit 2 ;;
+esac
+
+for tool in sby yosys ghdl boolector sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: required formal tool missing: $tool" >&2; exit 1; }
+done
+
+core="${module_name}.vhd"
+harness="${module_name}_formal.vhd"
+mutant_harness="${module_name}_mutant_formal.vhd"
+prove_job="${module_name}_prove.sby"
+cover_job="${module_name}_cover.sby"
+mutant_job="${module_name}_mutant.sby"
+manifest="${module_name}_formal_manifest.sdn"
+for file in "$core" "$harness" "$mutant_harness" "$prove_job" "$cover_job" "$mutant_job" "$manifest"; do
+    [ -f "$bundle_dir/$file" ] && [ -s "$bundle_dir/$file" ] || { echo "FAIL: missing or empty generated artifact: $file" >&2; exit 1; }
+    [ ! -L "$bundle_dir/$file" ] || { echo "FAIL: generated formal input cannot be a symlink: $file" >&2; exit 1; }
+done
+
+manifest_value() {
+    key="$1"
+    count="$(grep -c "^${key}=" "$bundle_dir/$manifest" || true)"
+    [ "$count" -eq 1 ] || { echo "FAIL: manifest key must occur exactly once: $key" >&2; exit 1; }
+    sed -n "s/^${key}=//p" "$bundle_dir/$manifest"
+}
+manifest_key_count="$(grep -Ec '^[a-z_]+=' "$bundle_dir/$manifest" || true)"
+[ "$manifest_key_count" -eq 9 ] || { echo "FAIL: pending manifest schema has unexpected fields" >&2; exit 1; }
+[ "$(manifest_value schema)" = "simple-riscv-v9-rvfi-formal-manifest-v1" ] || { echo "FAIL: manifest schema differs" >&2; exit 1; }
+[ "$(manifest_value proved_property_ids)" = "v9.rvfi.non-control-pc-plus-four,v9.rvfi.retirement-order,v9.rvfi.non-interrupt-retirement,v9.runtime.fault-fail-closed" ] || { echo "FAIL: manifest proved-property scope differs" >&2; exit 1; }
+[ "$(manifest_value product_profile)" = "$profile" ] || { echo "FAIL: manifest product profile differs" >&2; exit 1; }
+[ "$(manifest_value xlen)" = "$expected_xlen" ] || { echo "FAIL: manifest XLEN differs" >&2; exit 1; }
+[ "$(manifest_value expected_results)" = "prove:proved,cover:covered,mutant:counterexample" ] || { echo "FAIL: manifest result policy differs" >&2; exit 1; }
+hwir_hash="$(manifest_value hwir_sha256)"
+rtl_hash="$(manifest_value rtl_sha256)"
+rvfi_hash="$(manifest_value rvfi_contract_sha256)"
+assumption_hash="$(manifest_value assumption_manifest_sha256)"
+for identity in "$hwir_hash" "$rtl_hash" "$rvfi_hash" "$assumption_hash"; do is_sha256 "$identity" || { echo "FAIL: malformed V9 semantic identity" >&2; exit 1; }; done
+grep -Eq '^mode[[:space:]]+prove$' "$bundle_dir/$prove_job" || { echo "FAIL: prove job must use prove mode" >&2; exit 1; }
+grep -Eq '^mode[[:space:]]+cover$' "$bundle_dir/$cover_job" || { echo "FAIL: cover job must use cover mode" >&2; exit 1; }
+grep -Eq '^mode[[:space:]]+prove$' "$bundle_dir/$mutant_job" || { echo "FAIL: mutant job must use prove mode" >&2; exit 1; }
+if grep -Eq 'GENERATED_RTL_NOT_IMPLEMENTED|placeholder-core-no-semantic-rvfi' "$bundle_dir/$core"; then echo "FAIL: placeholder RTL cannot enter V9 formal execution" >&2; exit 1; fi
+
+prove_out="${module_name}_prove_out"; cover_out="${module_name}_cover_out"; mutant_out="${module_name}_mutant_out"
+for out in "$prove_out" "$cover_out" "$mutant_out"; do [ ! -L "$bundle_dir/$out" ] || { echo "FAIL: formal output path cannot be a symlink: $out" >&2; exit 1; }; done
+(cd "$bundle_dir" && sby -f -d "$prove_out" "$prove_job" >"$prove_out.log" 2>&1)
+status_is "$bundle_dir/$prove_out/status" PASS || { echo "FAIL: V9 proof did not pass" >&2; exit 1; }
+(cd "$bundle_dir" && sby -f -d "$cover_out" "$cover_job" >"$cover_out.log" 2>&1)
+status_is "$bundle_dir/$cover_out/status" PASS || { echo "FAIL: V9 reachability cover did not pass" >&2; exit 1; }
+if (cd "$bundle_dir" && sby -f -d "$mutant_out" "$mutant_job" >"$mutant_out.log" 2>&1); then echo "FAIL: V9 order-increment mutant unexpectedly proved" >&2; exit 1; fi
+status_is "$bundle_dir/$mutant_out/status" FAIL || { echo "FAIL: V9 mutant did not yield counterexample" >&2; exit 1; }
+mutant_counterexample_log "$bundle_dir/$mutant_out.log" || { echo "FAIL: V9 mutant failure lacks counterexample evidence" >&2; exit 1; }
+
+receipt_tmp="$(mktemp "$bundle_dir/.${module_name}.receipt.XXXXXX")"
+trap 'rm -f "$receipt_tmp"' EXIT
+{
+    echo "schema simple-riscv-v9-rvfi-formal-receipt-v1"
+    echo "module $module_name"; echo "product_profile $profile"; echo "xlen $expected_xlen"
+    echo "hwir_sha256 $hwir_hash"; echo "rtl_sha256 $rtl_hash"; echo "rvfi_contract_sha256 $rvfi_hash"; echo "assumption_manifest_sha256 $assumption_hash"
+    for file in "$core" "$harness" "$mutant_harness" "$prove_job" "$cover_job" "$mutant_job"; do echo "input_sha256 $file $(sha256sum "$bundle_dir/$file" | cut -d ' ' -f 1)"; done
+    echo "prove_status proved"; echo "cover_status covered"; echo "mutant_status counterexample"
+    echo "prove_output_sha256 $(sha256sum "$bundle_dir/$prove_out.log" | cut -d ' ' -f 1)"; echo "cover_output_sha256 $(sha256sum "$bundle_dir/$cover_out.log" | cut -d ' ' -f 1)"; echo "mutant_output_sha256 $(sha256sum "$bundle_dir/$mutant_out.log" | cut -d ' ' -f 1)"
+    echo "sby_version_sha256 $(sby --version 2>&1 | sha256sum | cut -d ' ' -f 1)"; echo "yosys_version_sha256 $(yosys -V 2>&1 | sha256sum | cut -d ' ' -f 1)"; echo "ghdl_version_sha256 $(ghdl --version 2>&1 | sha256sum | cut -d ' ' -f 1)"; echo "boolector_version_sha256 $(boolector --version 2>&1 | sha256sum | cut -d ' ' -f 1)"
+} >"$receipt_tmp"
+mv "$receipt_tmp" "$bundle_dir/$manifest"
+trap - EXIT
+echo "STATUS: PASS riscv-v9-formal receipt=$bundle_dir/$manifest"

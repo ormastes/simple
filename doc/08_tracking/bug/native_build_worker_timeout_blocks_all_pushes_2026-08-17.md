@@ -1,49 +1,5 @@
 # `native-build` worker times out, making a mandatory pre-push guard permanently RED
 
-**RESOLVED 2026-08-18** (verified at `ce396605fef`, pristine `origin/main`).
-Status was OPEN; it is now closed by `e78c7bf3779` ("fix(desugar): break an
-unbounded global-array push loop that OOMed native-build", landed 2026-08-18
-08:56 -- three commits before the verification tip). This record was filed
-BEFORE that commit, so its OPEN status was simply stale, not wrong.
-
-The control fixture was never the defect and neither was the guard: plain
-`native-build` genuinely could not build ANY program, the trivial control
-included. The underlying fault is an interpreter defect -- on a MODULE-GLOBAL
-array, `.push()` grows a live copy while `.len()` in a `while` condition still
-reads the stale global, so
-`transform_placeholder_call_args_after_interpolation`
-(`src/compiler/10.frontend/desugar/placeholder_lambda.spl:342`) never
-terminates and pushes until the worker is killed. That single loop explains
-BOTH recorded shapes: the 7200s `worker timed out` in this record and the
-rc=143/134 >24 GB SIGKILL in
-`prepush_hook_unpassable_native_build_oom_2026-08-17.md`.
-
-Evidence at `ce396605fef`, `bin/simple` = the shared Rust seed
-(`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
-59546088 bytes, mtime 2026-08-18 07:53:39):
-
-- The guard's own control invocation, run by hand, exit status captured on its
-  own line (never through a pipe): `CTRL_RC=0`, binary produced, and it runs
-  `stdout=[ctrl-ok] exit=7` -- exactly what the guard asserts. ~4 min wall,
-  worker peak ~2.88 GB RSS, CPU/elapsed ~1:1 (compute-bound, not blocked).
-- `sh scripts/check/check-native-extern-fabrication.shs --selftest` ->
-  `PASS — selftest: 19 fixture assertion(s) checked, 0 failed` (exit 0).
-- Full guard run -> exit 0, verdict line:
-  `PASS — native-build extern fabrication: control unaffected, known-open gap unchanged`
-  with no `FAIL — control fixture` line anywhere in the output.
-
-Nothing in the guard was weakened, relaxed, or deleted to reach green; the
-control fixture is untouched and still fails the gate if native-build breaks
-again. The extern-fabrication gap the guard actually fences is still OPEN and
-still reported as KNOWN-OPEN (nm class `T`, 3-byte defined symbol
-`lane_definitely_absent_probe`, program runs to completion printing `r=0`) on
-BOTH the `[default]` and `SIMPLE_NO_STUB_FALLBACK=1` `[strict]` lanes -- so
-this closure is about the infrastructure outage only, not about that gap.
-
----
-
-
-**Filed** 2026-08-17. **Status** RESOLVED 2026-08-18 (see note above). **Impact** blocks EVERY guarded push on
 **Filed** 2026-08-17. **Status** OPEN. **Impact** blocks EVERY guarded push on
 this host, for every lane.
 
@@ -85,14 +41,6 @@ vacuously green because native-build itself is broken". It is reporting real
 infrastructure breakage, not a fabrication finding. **Do not "fix" this by
 deleting or relaxing the control.**
 
-## Why the verdict line is still a defect
-
-`check-native-extern-fabrication.shs:71-75` runs the control build inside an
-`if !`, discards its log, and prints only "no longer builds". The 255 and the
-timeout text are captured to `$ctrl_log` but never surfaced on failure, so the
-operator sees a fabrication-shaped verdict for a timeout. Suggested minimal
-fix: echo the last few lines of `$ctrl_log` on that failure path, the way the
-`[default]`/`[strict]` branches already do for their own logs.
 ## Why the verdict line is still a defect — FIXED 2026-08-18
 
 `check-native-extern-fabrication.shs:71-75` ran the control build inside an

@@ -1,8 +1,10 @@
 """Linux ABI capability matrix for SimpleOS game compatibility.
 
 Covers ELF loading, dynamic linking, mmap/mprotect, futex, clone,
-signal, epoll, eventfd, timerfd, signalfd, ioctl, procfs, sysfs, devfs.
+signal, epoll, eventfd, timerfd, signalfd, ioctl, procfs, and sysfs.
 """
+
+use os.linux_personality.syscall_contract.{LinuxPersonalityContract}
 
 class LinuxCapability:
     cap_name: text
@@ -18,6 +20,9 @@ class LinuxCapability:
 
     static fn missing(name: text, sub: text, note: text) -> LinuxCapability:
         LinuxCapability(cap_name: name, subsystem: sub, status: "missing", blocker: note)
+
+    static fn stub(name: text, sub: text, note: text) -> LinuxCapability:
+        LinuxCapability(cap_name: name, subsystem: sub, status: "stub", blocker: note)
 
     me is_ready() -> bool:
         self.status == "ready"
@@ -81,6 +86,11 @@ class LinuxCapabilityMatrix:
         )
 
     me add(cap: LinuxCapability) -> i64:
+        # The v1 matrix has exactly fourteen persisted slots. Do not advance
+        # the count beyond its storage schema and make a caller mistake look
+        # like a failed admission instead of a fabricated larger matrix.
+        if self.count >= 14:
+            return self.count
         if self.count == 0:
             self.c0_name = cap.cap_name
             self.c0_status = cap.status
@@ -168,7 +178,9 @@ class LinuxCapabilityMatrix:
         (self.ready_count() * 100) / self.count
 
     me all_ready() -> bool:
-        self.missing_count() == 0
+        # Partial support is useful for reporting, but must never satisfy an
+        # API named `all_ready`: callers use this as an admission predicate.
+        self.count > 0 and self.ready_count() == self.count
 
     me report() -> text:
         "linux_abi: total=" + self.count.to_text() +
@@ -177,20 +189,35 @@ class LinuxCapabilityMatrix:
             " coverage=" + self.coverage_percent().to_text() + "%"
 
 
-fn build_simpleos_linux_capability_matrix() -> LinuxCapabilityMatrix:
+fn _capability_from_contract(contract: LinuxPersonalityContract, name: text, subsystem: text) -> LinuxCapability:
+    val status = contract.capability_status(name)
+    val note = contract.capability_note(name)
+    if status == "ready": return LinuxCapability.ready(name, subsystem)
+    if status == "partial": return LinuxCapability.partial(name, subsystem, note)
+    if status == "stub": return LinuxCapability.stub(name, subsystem, note)
+    LinuxCapability.missing(name, subsystem, note)
+
+
+fn build_linux_capability_matrix_from_contract(contract: LinuxPersonalityContract) -> LinuxCapabilityMatrix:
     var m = LinuxCapabilityMatrix.create()
-    m.add(LinuxCapability.ready("elf_load", "loader"))
-    m.add(LinuxCapability.partial("dynlink", "loader", "plt-stub only"))
-    m.add(LinuxCapability.partial("mmap", "mm", "anonymous only"))
-    m.add(LinuxCapability.missing("mprotect", "mm", "no page permission API"))
-    m.add(LinuxCapability.ready("futex", "sync"))
-    m.add(LinuxCapability.partial("clone", "proc", "no namespaces"))
-    m.add(LinuxCapability.partial("signal", "proc", "SIGKILL/SIGTERM only"))
-    m.add(LinuxCapability.missing("epoll", "io", "not implemented"))
-    m.add(LinuxCapability.missing("eventfd", "io", "not implemented"))
-    m.add(LinuxCapability.missing("timerfd", "io", "not implemented"))
-    m.add(LinuxCapability.missing("signalfd", "io", "not implemented"))
-    m.add(LinuxCapability.partial("ioctl", "dev", "TCGETS/TCSETS only"))
+    m.add(_capability_from_contract(contract, "elf_load", "loader"))
+    m.add(_capability_from_contract(contract, "dynlink", "loader"))
+    m.add(_capability_from_contract(contract, "mmap", "mm"))
+    m.add(_capability_from_contract(contract, "mprotect", "mm"))
+    m.add(_capability_from_contract(contract, "futex", "sync"))
+    m.add(_capability_from_contract(contract, "clone", "proc"))
+    m.add(_capability_from_contract(contract, "signal", "proc"))
+    m.add(_capability_from_contract(contract, "epoll", "io"))
+    m.add(_capability_from_contract(contract, "eventfd", "io"))
+    m.add(_capability_from_contract(contract, "timerfd", "io"))
+    m.add(_capability_from_contract(contract, "signalfd", "io"))
+    m.add(_capability_from_contract(contract, "ioctl", "dev"))
     m.add(LinuxCapability.missing("procfs", "vfs", "stub only"))
     m.add(LinuxCapability.missing("sysfs", "vfs", "not implemented"))
     m
+
+
+fn build_simpleos_linux_capability_matrix() -> LinuxCapabilityMatrix:
+    val contract = LinuxPersonalityContract.create()
+    contract.evaluate_from_posix()
+    build_linux_capability_matrix_from_contract(contract)

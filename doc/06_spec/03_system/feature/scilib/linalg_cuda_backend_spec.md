@@ -2,6 +2,29 @@
 
 > Validates the explicit CUDA dynamic linalg adapter. The default scalar `dot`
 
+<!-- sdn-diagram:id=linalg_cuda_backend_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=linalg_cuda_backend_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+linalg_cuda_backend_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=linalg_cuda_backend_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 25 | 25 | 0 | 0 |
@@ -21,7 +44,7 @@ Validates the explicit CUDA dynamic linalg adapter. The default scalar `dot`
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/scilib/linalg_cuda_backend_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates the explicit CUDA dynamic linalg adapter. The default scalar `dot`
@@ -34,25 +57,16 @@ when the dynamic scilib CUDA shim is unavailable.
 
 #### reports either an available CUDA backend or a typed unavailable error
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- reports either an available CUDA backend or a typed unavailable error
-   - Expected: status.selected equals `cuda`
-   - Expected: status.available is true
-   - Expected: name equals `cuda`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reports either an available CUDA backend or a typed unavailable error")
 val required = require_linalg_backend("cuda")
 match required:
     case Ok(status):
@@ -68,20 +82,16 @@ match required:
 
 #### matches scalar dot when the CUDA shim is available
 
-- matches scalar dot when the CUDA shim is available
-   - Expected: value equals `dot(left, right).unwrap()`
-   - Expected: name equals `cuda`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar dot when the CUDA shim is available")
 val left = vector_from([Float64.new(1.5), Float64.new(-2.0), Float64.new(3.25), Float64.new(4.0)])
 val right = vector_from([Float64.new(2.0), Float64.new(5.0), Float64.new(-1.0), Float64.new(0.5)])
 val result = cuda_dot(left, right)
@@ -98,14 +108,19 @@ match result:
 
 #### keeps public dot, gemv, gemm, solve, and inv scalar-compatible when CUDA is configured
 
-- keeps public dot, gemv, gemm, solve, and inv scalar-compatible when CUDA is configured
-   - Expected: dot(left, right).unwrap() equals `Float64.new(32.0)`
+1. [Float64 new
+2. [Float64 new
    - Expected: gemv_result.get_f64(Index.new(0)) equals `Float64.new(32.0)`
    - Expected: gemv_result.get_f64(Index.new(1)) equals `Float64.new(77.0)`
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: gemm_result.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(58.0)`
    - Expected: gemm_result.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(64.0)`
    - Expected: gemm_result.get_at([Index.new(1), Index.new(0)]) equals `Float64.new(139.0)`
    - Expected: gemm_result.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(154.0)`
+6. [Float64 new
+7. [Float64 new
    - Expected: solve_result.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: solve_result.get_f64(Index.new(1)) equals `Float64.new(3.0)`
    - Expected: inv_result.rows() equals `Index.new(16)`
@@ -118,12 +133,10 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps public dot, gemv, gemm, solve, and inv scalar-compatible when CUDA is configured")
 val left = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
 val right = vector_from([Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
 expect(dot(left, right).unwrap()).to_equal(Float64.new(32.0))
@@ -167,18 +180,16 @@ expect(inv_result.get_f64_at([Index.new(0), Index.new(15)])).to_equal(Float64.ne
 
 #### returns a typed error for shape mismatches before backend execution
 
-- returns a typed error for shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for shape mismatches before backend execution")
 val result = cuda_dot_values([Float64.new(1.0)], [Float64.new(1.0), Float64.new(2.0)])
 match result:
     case Err(BackendError.BackendExecutionFailed(message)):
@@ -191,23 +202,26 @@ match result:
 
 #### matches scalar gemm when the CUDA shim is available
 
-- matches scalar gemm when the CUDA shim is available
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: value.get_at([Index.new(0), Index.new(0)]) equals `scalar.get_at([Index.new(0), Index.new(0)])`
    - Expected: value.get_at([Index.new(0), Index.new(1)]) equals `scalar.get_at([Index.new(0), Index.new(1)])`
    - Expected: value.get_at([Index.new(1), Index.new(0)]) equals `scalar.get_at([Index.new(1), Index.new(0)])`
    - Expected: value.get_at([Index.new(1), Index.new(1)]) equals `scalar.get_at([Index.new(1), Index.new(1)])`
    - Expected: name equals `cuda`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar gemm when the CUDA shim is available")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -234,18 +248,16 @@ match result:
 
 #### returns a typed error for gemm shape mismatches before backend execution
 
-- returns a typed error for gemm shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for gemm shape mismatches before backend execution")
 val a = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val b = matrix_from_rows([[Float64.new(3.0), Float64.new(4.0)]])
 val c_in = zeros_matrix(Index.new(1), Index.new(2))
@@ -261,21 +273,21 @@ match result:
 
 #### matches scalar gemv when the CUDA shim is available
 
-- matches scalar gemv when the CUDA shim is available
+1. [Float64 new
+2. [Float64 new
    - Expected: value.get_f64(Index.new(0)) equals `scalar.get_f64(Index.new(0))`
    - Expected: value.get_f64(Index.new(1)) equals `scalar.get_f64(Index.new(1))`
    - Expected: name equals `cuda`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar gemv when the CUDA shim is available")
 val matrix = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -297,18 +309,16 @@ match result:
 
 #### returns a typed error for gemv shape mismatches before backend execution
 
-- returns a typed error for gemv shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for gemv shape mismatches before backend execution")
 val matrix = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val vector = vector_from([Float64.new(3.0)])
 val y_in = vector_from([Float64.new(0.0)])
@@ -324,21 +334,21 @@ match result:
 
 #### matches scalar solve when the CUDA shim is available
 
-- matches scalar solve when the CUDA shim is available
+1. [Float64 new
+2. [Float64 new
    - Expected: value.get_f64(Index.new(0)) equals `scalar.get_f64(Index.new(0))`
    - Expected: value.get_f64(Index.new(1)) equals `scalar.get_f64(Index.new(1))`
    - Expected: name equals `cuda`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar solve when the CUDA shim is available")
 val a = matrix_from_rows([
     [Float64.new(3.0), Float64.new(1.0)],
     [Float64.new(1.0), Float64.new(2.0)]])
@@ -359,18 +369,16 @@ match result:
 
 #### returns a typed error for solve shape mismatches before backend execution
 
-- returns a typed error for solve shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for solve shape mismatches before backend execution")
 val a = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val b = vector_from([Float64.new(3.0)])
 val result = cuda_solve(a, b)
@@ -385,19 +393,19 @@ match result:
 
 #### matches scalar inverse when the CUDA shim is available
 
-- matches scalar inverse when the CUDA shim is available
+1. [Float64 new
+2. [Float64 new
    - Expected: name equals `cuda`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar inverse when the CUDA shim is available")
 val a = matrix_from_rows([
     [Float64.new(4.0), Float64.new(7.0)],
     [Float64.new(2.0), Float64.new(6.0)]])
@@ -426,18 +434,16 @@ match result:
 
 #### returns a typed error for inverse shape mismatches before backend execution
 
-- returns a typed error for inverse shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for inverse shape mismatches before backend execution")
 val a = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val result = cuda_inv(a)
 match result:
@@ -453,19 +459,13 @@ match result:
 
 #### LP64 integer width is 8 bytes
 
-- LP64 integer width is 8 bytes
-   - Expected: lp64_bytes equals `8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("LP64 integer width is 8 bytes")
 # The scilib shim uses int64_t for all index/info arguments.
 # This constant must equal 8 for the LP64 ABI contract to hold.
 val lp64_bytes: i64 = 8
@@ -476,20 +476,13 @@ expect(lp64_bytes).to_equal(8)
 
 #### row-major to column-major index conversion is correct
 
-- row-major to column-major index conversion is correct
-   - Expected: rm_idx equals `6`
-   - Expected: cm_idx equals `7`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("row-major to column-major index conversion is correct")
 # For a 3×4 matrix stored row-major:
 #   element (row=1, col=2) is at flat offset row*cols + col = 1*4 + 2 = 6
 # The same element in column-major (lda = nrows = 3) is at col*lda + row = 2*3 + 1 = 7
@@ -507,22 +500,13 @@ expect(cm_idx).to_equal(7)
 
 #### operand-swap identity: (A*B)^T = B^T * A^T for 2x2 case
 
-- operand-swap identity: (A*B)^T = B^T * A^T for 2x2 case
-   - Expected: ct_00 equals `btat_00`
-   - Expected: ct_01 equals `btat_01`
-   - Expected: ct_10 equals `btat_10`
-   - Expected: ct_11 equals `btat_11`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("operand-swap identity: (A*B)^T = B^T * A^T for 2x2 case")
 # Verify the Layer B operand-swap trick arithmetically:
 # A = [[1,2],[3,4]], B = [[5,6],[7,8]]
 # C = A*B:
@@ -565,18 +549,13 @@ expect(ct_11).to_equal(btat_11)
 
 #### blas symbol names follow rt_blas_ prefix convention
 
-- blas symbol names follow rt_blas_ prefix convention
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("blas symbol names follow rt_blas_ prefix convention")
 # Canonical names as returned by the shim — no trailing underscore.
 val dgemm = "rt_blas_dgemm"
 val ddot = "rt_blas_ddot"
@@ -594,18 +573,13 @@ expect(ddot).to_end_with("dot")
 
 #### lapack symbol names follow rt_lapack_d prefix convention
 
-- lapack symbol names follow rt_lapack_d prefix convention
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lapack symbol names follow rt_lapack_d prefix convention")
 val dgesv = "rt_lapack_dgesv"
 val dgetrf = "rt_lapack_dgetrf"
 val dgetrs = "rt_lapack_dgetrs"
@@ -618,20 +592,13 @@ expect(dgetrs).to_start_with("rt_lapack_d")
 
 #### pivot index conversion: 1-based to 0-based is correct
 
-- pivot index conversion: 1-based to 0-based is correct
-   - Expected: simple_pivot equals `2`
-   - Expected: back_to_lapack equals `lapack_pivot`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("pivot index conversion: 1-based to 0-based is correct")
 # LAPACK/cuSOLVER return 1-based IPIV; Simple uses 0-based.
 val lapack_pivot: i64 = 3
 val simple_pivot = lapack_pivot - 1
@@ -645,21 +612,13 @@ expect(back_to_lapack).to_equal(lapack_pivot)
 
 #### BLAS transpose flags match scilib shim contract
 
-- BLAS transpose flags match scilib shim contract
-   - Expected: op_n equals `0`
-   - Expected: op_t equals `1`
-   - Expected: op_c equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("BLAS transpose flags match scilib shim contract")
 # scilib shim: 0 = no-transpose, 1 = transpose, 2 = conjugate-transpose
 val op_n: i64 = 0
 val op_t: i64 = 1
@@ -677,19 +636,13 @@ expect(op_c).to_be_greater_than(op_t - 1)
 
 #### selects mock when requested explicitly regardless of availability
 
-- selects mock when requested explicitly regardless of availability
-   - Expected: selected equals `mock`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("selects mock when requested explicitly regardless of availability")
 # Mock is always available.
 val requested = "mock"
 var selected = "mock"
@@ -704,19 +657,13 @@ expect(selected).to_equal("mock")
 
 #### selects mock fallback when cuda requested but unavailable
 
-- selects mock fallback when cuda requested but unavailable
-   - Expected: selected equals `mock`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("selects mock fallback when cuda requested but unavailable")
 val requested = "cuda"
 val cuda_available: bool = false
 var selected = "mock"
@@ -729,19 +676,13 @@ expect(selected).to_equal("mock")
 
 #### selects cuda when requested and available
 
-- selects cuda when requested and available
-   - Expected: selected equals `cuda`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("selects cuda when requested and available")
 val requested = "cuda"
 val cuda_available: bool = true
 var selected = "mock"
@@ -754,19 +695,13 @@ expect(selected).to_equal("cuda")
 
 #### auto-selects cuda over openblas when both available
 
-- auto-selects cuda over openblas when both available
-   - Expected: selected equals `cuda`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("auto-selects cuda over openblas when both available")
 val cuda_available: bool = true
 val openblas_available: bool = true
 var selected = "mock"
@@ -782,19 +717,13 @@ expect(selected).to_equal("cuda")
 
 #### auto-selects openblas when cuda unavailable but openblas available
 
-- auto-selects openblas when cuda unavailable but openblas available
-   - Expected: selected equals `openblas`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("auto-selects openblas when cuda unavailable but openblas available")
 val cuda_available: bool = false
 val openblas_available: bool = true
 var selected = "mock"
@@ -810,19 +739,13 @@ expect(selected).to_equal("openblas")
 
 #### auto-selects mock when neither cuda nor openblas available
 
-- auto-selects mock when neither cuda nor openblas available
-   - Expected: selected equals `mock`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("auto-selects mock when neither cuda nor openblas available")
 val cuda_available: bool = false
 val openblas_available: bool = false
 var selected = "mock"
@@ -848,57 +771,3 @@ expect(selected).to_equal("mock")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-SCILIB-C-002`
-- `REQ-SCILIB-C-004`
-- `REQ-SCILIB-C-005`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e8a3e90b24adf5bf07d844bfbb9a38e96fdbd715dc1015bd1a8aef4650119cae`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e8a3e90b24adf5bf07d844bfbb9a38e96fdbd715dc1015bd1a8aef4650119cae`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e8a3e90b24adf5bf07d844bfbb9a38e96fdbd715dc1015bd1a8aef4650119cae`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/feature/scilib/linalg_cuda_backend_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/linalg_cuda_backend_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/linalg_cuda_backend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/linalg_cuda_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/linalg_cuda_backend_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/scilib/linalg_cuda_backend_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports either an available CUDA backend or a typed unavailable error' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/linalg_cuda_backend_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches scalar dot when the CUDA shim is available' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/linalg_cuda_backend_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps public dot, gemv, gemm, solve, and inv scalar-compatible when CUDA is configured' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

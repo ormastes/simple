@@ -188,7 +188,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 6. Ensure TODOs are either implemented or left as TODO (never converted to NOTE)
 7. Run the SPipe doc/wiki refactor support skill (`.claude/skills/spipe_doc_wiki_refactor.md`) for docs, wiki-style process knowledge, feature/layer expert links, stale command names, and stale file paths affected by the implementation
 8. Run numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs --working` and `sh scripts/audit/numbered-artifact-guard.shs --staged`
-9. Run the Simple linter: `bin/simple lint <changed .spl files>`
+9. Run linter if available: `bin/simple build lint`
 
 **Exit Criteria:**
 - No file exceeds 800 lines
@@ -244,25 +244,6 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - Cooperative sidecar review is complete or explicitly `N/A`; incomplete
   lower-model merge/review or unreviewed done marks block PASS
 - If any AC cannot be verified, it is documented with a clear reason
-
-### Robust-SW / mission-critical lane
-
-> For flight-level / mission-critical SimpleOS lanes, Phase 7 exit is gated by
-> `doc/07_guide/app/spipe/mission_critical_robust_sw.md`, not by the hardening
-> matrix alone. Run the single release gate:
-> `sh scripts/check/check-simpleos-mission-critical-release.shs`
-> Acceptance = `matrix_status=pass release_status=pass release_blockers=none
-> prereq_status=ready prereq_missing=none` (exit 0). The hardening matrix
-> (`check-simpleos-hardening-evidence-matrix.shs`) is subordinate evidence
-> consumed by this gate — never accept it alone. If the matrix reports
-> `reason=stale-static-reports`, refresh the named reports until
-> `simpleos_hardening_stale_reports=none`. Formal proofs need the
-> SymbiYosys/SMT toolchain (`sby`, `yosys`, `boolector`/`z3`; see
-> `scripts/setup/setup-simpleos-formal-env.shs --print-install`) — without it,
-> prereqs report `missing=sby,yosys,smt-solver` and the release gate is
-> BLOCKED. Concurrency claims need `check-simpleos-critical-formal-proofs.shs`
-> plus `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`, not a
-> single-interleaving test. Run all gates on the self-hosted `bin/simple`.
 
 ---
 

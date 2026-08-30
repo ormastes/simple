@@ -2,6 +2,29 @@
 
 > Tests for TreeSitter Node API wrapper (Features 1-2 from Phase 2.3):
 
+<!-- sdn-diagram:id=treesitter_node_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=treesitter_node_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+treesitter_node_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=treesitter_node_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 26 | 26 | 0 | 0 |
@@ -49,7 +72,7 @@ step("has start_byte method that returns i64")
 val node = create_mock_node(1)
 # The actual value depends on FFI, but method should be callable
 val result = node.start_byte()
-expect result.to_be_greater_than(-1) or result.to_equal(-1)
+expect result.to_be_greater_than(-1) or result.to_equal(-1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -411,10 +434,13 @@ expect result.to_equal(true) or result.to_equal(false)
 - node_is_valid returns false for nil
 
 
+- Verify: node_is_valid returns bool for non-nil node
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

@@ -1,6 +1,29 @@
 # Attach Session Specification
 
-> Tests covering Chromium DevTools DOM mirror — basics, Chromium DevTools CSS inspector — computed styles, Chromium DevTools attach session — FSM, Chromium DevTools attach session — panel read path.
+> _Live DOM mirror surfaced by M10 — push / find / flatten semantics.""_
+
+<!-- sdn-diagram:id=attach_session_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=attach_session_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+attach_session_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=attach_session_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -14,22 +37,17 @@
 ## Scenarios
 
 ### Chromium DevTools DOM mirror — basics
+_Live DOM mirror surfaced by M10 — push / find / flatten semantics.""_
 
 #### starts empty with root id -1
-
-- starts empty with root id -1
-
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts empty with root id -1")
-"""A fresh mirror has zero nodes and a sentinel root id."""
 val mirror = DevToolsDomMirror.new()
 expect(mirror.is_empty()).to_be_true()
 expect(mirror.count() == 0).to_be_true()
@@ -40,18 +58,16 @@ expect(mirror.root_id_of() == -1).to_be_true()
 
 #### push_element makes the first node the root
 
-- push_element makes the first node the root
+- var mirror = DevToolsDomMirror new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("push_element makes the first node the root")
 var mirror = DevToolsDomMirror.new()
 val html_id = mirror.push_element("html", 0)
 expect(mirror.count() == 1).to_be_true()
@@ -63,18 +79,16 @@ expect(mirror.has_node(html_id)).to_be_true()
 
 #### attach_child records parent/child links in order
 
-- attach_child records parent/child links in order
+- var mirror = DevToolsDomMirror new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("attach_child records parent/child links in order")
 var mirror = DevToolsDomMirror.new()
 val root = mirror.push_element("html", 0)
 val body = mirror.push_element("body", 1)
@@ -93,18 +107,16 @@ expect(root_node.child_count() == 1).to_be_true()
 
 #### set_bounds stores geometry on the target node
 
-- set_bounds stores geometry on the target node
+- var mirror = DevToolsDomMirror new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_bounds stores geometry on the target node")
 var mirror = DevToolsDomMirror.new()
 val div = mirror.push_element("div", 0)
 val ok = mirror.set_bounds(div, 12, 34, 56, 78)
@@ -121,18 +133,17 @@ expect(node.height == 78).to_be_true()
 
 #### push_text stores a text-node marker
 
-- push_text stores a text-node marker
+- var mirror = DevToolsDomMirror new
+- mirror push element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("push_text stores a text-node marker")
 var mirror = DevToolsDomMirror.new()
 mirror.push_element("p", 0)
 val tid = mirror.push_text("hello", 1)
@@ -146,18 +157,20 @@ expect(n.is_text()).to_be_true()
 
 #### max_depth reports the deepest depth
 
-- max_depth reports the deepest depth
+- var mirror = DevToolsDomMirror new
+- mirror push element
+- mirror push element
+- mirror push element
+- mirror push element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("max_depth reports the deepest depth")
 var mirror = DevToolsDomMirror.new()
 mirror.push_element("html", 0)
 mirror.push_element("body", 1)
@@ -170,18 +183,18 @@ expect(mirror.max_depth() == 3).to_be_true()
 
 #### flattened_labels returns one label per node
 
-- flattened_labels returns one label per node
+- var mirror = DevToolsDomMirror new
+- mirror push element
+- mirror push element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("flattened_labels returns one label per node")
 var mirror = DevToolsDomMirror.new()
 mirror.push_element("html", 0)
 mirror.push_element("body", 1)
@@ -193,18 +206,19 @@ expect(labels.len() == 2).to_be_true()
 
 #### clear resets the mirror to empty
 
-- clear resets the mirror to empty
+- var mirror = DevToolsDomMirror new
+- mirror push element
+- mirror push element
+- mirror clear
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clear resets the mirror to empty")
 var mirror = DevToolsDomMirror.new()
 mirror.push_element("html", 0)
 mirror.push_element("body", 1)
@@ -219,18 +233,13 @@ expect(mirror.root_id_of() == -1).to_be_true()
 
 #### starts empty with no selection
 
-- starts empty with no selection
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts empty with no selection")
 val css = DevToolsCssInspector.new()
 expect(css.is_empty()).to_be_true()
 expect(not css.has_selection()).to_be_true()
@@ -241,18 +250,17 @@ expect(css.selected_id_of() == -1).to_be_true()
 
 #### set_property lazily creates a block and stores the value
 
-- set_property lazily creates a block and stores the value
+- var css = DevToolsCssInspector new
+- css set property
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_property lazily creates a block and stores the value")
 var css = DevToolsCssInspector.new()
 css.set_property(7, "color", "rgb(255,0,0)")
 expect(css.has_block(7)).to_be_true()
@@ -265,18 +273,19 @@ expect(block.value_of("color") == "rgb(255,0,0)").to_be_true()
 
 #### set_property keeps insertion order when updating
 
-- set_property keeps insertion order when updating
+- var css = DevToolsCssInspector new
+- css set property
+- css set property
+- css set property
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_property keeps insertion order when updating")
 var css = DevToolsCssInspector.new()
 css.set_property(1, "color", "red")
 css.set_property(1, "background", "blue")
@@ -291,18 +300,16 @@ expect(block.value_of("background") == "blue").to_be_true()
 
 #### select returns false for nodes without a block
 
-- select returns false for nodes without a block
+- var css = DevToolsCssInspector new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("select returns false for nodes without a block")
 var css = DevToolsCssInspector.new()
 val ok = css.select(42)
 expect(not ok).to_be_true()
@@ -313,18 +320,18 @@ expect(not css.has_selection()).to_be_true()
 
 #### selected_lines returns the formatted property list
 
-- selected_lines returns the formatted property list
+- var css = DevToolsCssInspector new
+- css set property
+- css set property
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("selected_lines returns the formatted property list")
 var css = DevToolsCssInspector.new()
 css.set_property(3, "color", "red")
 css.set_property(3, "margin", "4px")
@@ -338,18 +345,19 @@ expect(lines.len() == 2).to_be_true()
 
 #### clear drops blocks and selection
 
-- clear drops blocks and selection
+- var css = DevToolsCssInspector new
+- css set property
+- css select
+- css clear
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clear drops blocks and selection")
 var css = DevToolsCssInspector.new()
 css.set_property(1, "color", "red")
 css.select(1)
@@ -364,18 +372,13 @@ expect(not css.has_selection()).to_be_true()
 
 #### starts detached with no window
 
-- starts detached with no window
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("starts detached with no window")
 val s = DevToolsAttachSession.new()
 expect(s.is_detached()).to_be_true()
 expect(s.window_id_of() == -1).to_be_true()
@@ -386,18 +389,16 @@ expect(s.snapshot_epoch_of() == 0).to_be_true()
 
 #### attach flips the status to ATTACHED
 
-- attach flips the status to ATTACHED
+- var s = DevToolsAttachSession new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("attach flips the status to ATTACHED")
 var s = DevToolsAttachSession.new()
 val ok = s.attach(11)
 expect(ok).to_be_true()
@@ -410,18 +411,16 @@ expect(s.status().label() == "attached").to_be_true()
 
 #### attach rejects negative window ids
 
-- attach rejects negative window ids
+- var s = DevToolsAttachSession new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("attach rejects negative window ids")
 var s = DevToolsAttachSession.new()
 val ok = s.attach(-5)
 expect(not ok).to_be_true()
@@ -432,18 +431,19 @@ expect(s.is_detached()).to_be_true()
 
 #### begin_snapshot + end_snapshot bumps the epoch
 
-- begin_snapshot + end_snapshot bumps the epoch
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("begin_snapshot + end_snapshot bumps the epoch")
 var s = DevToolsAttachSession.new()
 s.attach(3)
 s.begin_snapshot()
@@ -458,18 +458,22 @@ expect(s.snapshot_epoch_of() == 1).to_be_true()
 
 #### detach clears the DOM mirror and CSS view
 
-- detach clears the DOM mirror and CSS view
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
+- s set style property
+- s end snapshot
+- s detach
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detach clears the DOM mirror and CSS view")
 var s = DevToolsAttachSession.new()
 s.attach(5)
 s.begin_snapshot()
@@ -486,18 +490,16 @@ expect(s.css().is_empty()).to_be_true()
 
 #### push_element on a detached session returns -1
 
-- push_element on a detached session returns -1
+- var s = DevToolsAttachSession new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("push_element on a detached session returns -1")
 var s = DevToolsAttachSession.new()
 val id = s.push_element("html", 0)
 expect(id == -1).to_be_true()
@@ -507,18 +509,16 @@ expect(id == -1).to_be_true()
 
 #### begin_snapshot on a detached session returns false
 
-- begin_snapshot on a detached session returns false
+- var s = DevToolsAttachSession new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("begin_snapshot on a detached session returns false")
 var s = DevToolsAttachSession.new()
 val ok = s.begin_snapshot()
 expect(not ok).to_be_true()
@@ -530,18 +530,22 @@ expect(not ok).to_be_true()
 
 #### dom_labels exposes one label per pushed node
 
-- dom_labels exposes one label per pushed node
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
+- s push element
+- s push text
+- s end snapshot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("dom_labels exposes one label per pushed node")
 var s = DevToolsAttachSession.new()
 s.attach(1)
 s.begin_snapshot()
@@ -558,18 +562,22 @@ expect(s.dom_root_id() > 0).to_be_true()
 
 #### set_style_property + select_node feeds the inspector
 
-- set_style_property + select_node feeds the inspector
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s set node bounds
+- s set style property
+- s set style property
+- s end snapshot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_style_property + select_node feeds the inspector")
 var s = DevToolsAttachSession.new()
 s.attach(1)
 s.begin_snapshot()
@@ -591,18 +599,16 @@ expect(node.width == 140).to_be_true()
 
 #### set_node_bounds returns false while detached
 
-- set_node_bounds returns false while detached
+- var s = DevToolsAttachSession new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("set_node_bounds returns false while detached")
 var s = DevToolsAttachSession.new()
 val ok = s.set_node_bounds(1, 0, 0, 10, 10)
 expect(not ok).to_be_true()
@@ -612,18 +618,20 @@ expect(not ok).to_be_true()
 
 #### status label reports the current FSM state
 
-- status label reports the current FSM state
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
+- s end snapshot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("status label reports the current FSM state")
 var s = DevToolsAttachSession.new()
 expect(s.status().label() == "detached").to_be_true()
 s.attach(2)
@@ -638,18 +646,13 @@ expect(s.status().label() == "rendering").to_be_true()
 
 #### DevToolsAttachStatus exposes rendering / attached / detached
 
-- DevToolsAttachStatus exposes rendering / attached / detached
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("DevToolsAttachStatus exposes rendering / attached / detached")
 val d = DevToolsAttachStatus.detached()
 val a = DevToolsAttachStatus.attached()
 val r = DevToolsAttachStatus.rendering()
@@ -667,12 +670,12 @@ expect(r.is_rendering()).to_be_true()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Chromium DevTools DOM mirror — basics, Chromium DevTools CSS inspector — computed styles, Chromium DevTools attach session — FSM, Chromium DevTools attach session — panel read path.
+Tests covering:
 - Chromium DevTools DOM mirror — basics
 - Chromium DevTools CSS inspector — computed styles
 - Chromium DevTools attach session — FSM
@@ -690,51 +693,3 @@ Tests covering Chromium DevTools DOM mirror — basics, Chromium DevTools CSS in
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `3b6428561cf1ff7cc380f79857d11635ca17591975795071cc64b37ff730f9c8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `3b6428561cf1ff7cc380f79857d11635ca17591975795071cc64b37ff730f9c8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `3b6428561cf1ff7cc380f79857d11635ca17591975795071cc64b37ff730f9c8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl
-mirror: doc/06_spec/01_unit/app/ui.chromium.devtools/attach_session_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui.chromium.devtools/attach_session_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui.chromium.devtools/attach_session_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts empty with root id -1' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'push_element makes the first node the root' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'attach_child records parent/child links in order' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

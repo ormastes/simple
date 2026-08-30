@@ -643,7 +643,11 @@ impl Lowerer {
                     }
                 }
             }
-            if let Some((idx, ty, _)) = best {
+            if let Some((idx, ty, count)) = best {
+                if crate::hir::lower::trace_field_get_enabled() {
+                    let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                    eprintln!("[FIELD-TRACE] ANY/{field} -> LOCAL-BEST idx={idx} count={count} in {fpath}");
+                }
                 return Ok((idx, ty));
             }
             // Search global struct definitions from other compilation units.
@@ -658,7 +662,7 @@ impl Lowerer {
                 });
             }
             if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                if crate::hir::lower::trace_field_get_enabled() {
                     let fpath = self
                         .current_file
                         .as_ref()
@@ -694,7 +698,11 @@ impl Lowerer {
                             }
                         }
                     }
-                    if let Some((idx, ty, _)) = best {
+                    if let Some((idx, ty, count)) = best {
+                        if crate::hir::lower::trace_field_get_enabled() {
+                            let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                            eprintln!("[FIELD-TRACE] AnyTy/{field} -> LOCAL-BEST idx={idx} count={count} in {fpath}");
+                        }
                         return Ok((idx, ty));
                     }
                     if !self.is_ambiguous_global_field(field) {
@@ -727,17 +735,21 @@ impl Lowerer {
                     // different fields than the one actually in scope.
                     if let Some((global_idx, global_field_ty)) = self.try_resolve_global_field_for_struct(&name, field)
                     {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] S-GLOBAL/{field} struct={name} idx={global_idx} in {fpath}"); }
                         return Ok((global_idx, global_field_ty));
                     }
                     if let Some((variant_idx, variant_field_ty)) =
                         self.try_resolve_registered_same_name_field_variant(&name, field)
                     {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] S-SAMENAME/{field} struct={name} idx={variant_idx} in {fpath}"); }
                         return Ok((variant_idx, variant_field_ty));
                     }
                     if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] S-OWNER/{field} struct={name} idx={idx} in {fpath}"); }
                         return Ok((idx, owner_field_ty));
                     }
                     if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] S-GLOBALINFO/{field} struct={name} idx={idx} in {fpath}"); }
                         return Ok((idx, field_ty));
                     }
                     let mut best: Option<(usize, TypeId, usize)> = None;
@@ -757,6 +769,7 @@ impl Lowerer {
                         }
                     }
                     if let Some((idx, field_ty, _)) = best {
+                        if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] S-BEST/{field} struct={name} idx={idx} in {fpath}"); }
                         return Ok((idx, field_ty));
                     }
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
@@ -867,7 +880,7 @@ impl Lowerer {
                             });
                         }
                         if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                            if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                            if crate::hir::lower::trace_field_get_enabled() {
                                 let fpath = self
                                     .current_file
                                     .as_ref()

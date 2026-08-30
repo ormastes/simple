@@ -25,6 +25,12 @@
    - Expected: optimization_rule_provider_is_runtime_hotspot(provider) is true
 
 
+- Verify: should expose JIT hotspot as a first-class built-in provider
+   - Expected: provider.kind equals `OptimizerProviderKind.JitHotspot`
+   - Expected: provider.hot_path is true
+   - Expected: optimization_rule_provider_is_runtime_hotspot(provider) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -76,10 +82,15 @@ expect(optimization_rule_provider_is_runtime_hotspot(provider)).to_equal(true)
    - Expected: plan.eligible is true
 
 
+- Verify: should apply the provider only after runtime hotspot facts are available
+   - Expected: optimization_rule_provider_can_run(provider, plan.facts) is true
+   - Expected: plan.eligible is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -111,10 +122,16 @@ expect(plan.facts).to_contain("profile.hot_count")
    - Expected: decision.reason equals `jit.hotspot_specialized_source accepted`
 
 
+- Verify: should replace compile source only when semantic proof exists
+   - Expected: decision.provider_used is true
+   - Expected: decision.compile_source equals `profile.hotspot_specialized_source`
+   - Expected: decision.reason equals `jit.hotspot_specialized_source accepted`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,10 +161,16 @@ expect(decision.reason).to_equal("jit.hotspot_specialized_source accepted")
    - Expected: decision.reason equals `missing semantic proof`
 
 
+- Verify: should preserve original source when semantic proof is missing
+   - Expected: decision.provider_used is false
+   - Expected: decision.compile_source equals `profile.source`
+   - Expected: decision.reason equals `missing semantic proof`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -171,7 +194,7 @@ expect(decision.reason).to_equal("missing semantic proof")
 
 ### REQ-OPJH-013 REQ-OPJH-015
 
-#### derive JIT var safety facts from MIR reassignment analysis
+#### should derive JIT var safety facts from MIR reassignment analysis
 
 - derive JIT var safety facts from MIR reassignment analysis
    - Expected: analysis.has_var_reassignment is true
@@ -182,7 +205,7 @@ expect(decision.reason).to_equal("missing semantic proof")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -194,7 +217,7 @@ val blocks = system_one_block(
         system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(1), MirType.i64())),
         system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(2), MirType.i64()))
     ],
-    MirTerminator.Ret(Some(system_copy(1)))
+    MirTerminator.Return(Some(system_copy(1)))
 )
 val analysis = analyze_var_reassign_blocks(blocks)
 val facts = var_reassign_analysis_to_jit_facts(analysis)
@@ -208,7 +231,7 @@ expect(plan.facts).to_contain("borrow.reassign_safe")
 
 </details>
 
-#### create a MIR analysis-backed specialization provider with proof facts
+#### should create a MIR analysis-backed specialization provider with proof facts
 
 - create a MIR analysis-backed specialization provider with proof facts
    - Expected: provider.semantic_proof is true
@@ -219,7 +242,7 @@ expect(plan.facts).to_contain("borrow.reassign_safe")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,7 +255,7 @@ val blocks = system_one_block(
         system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(2), MirType.i64())),
         system_inst(MirInstKind.BinOp(system_local(1), MirBinOp.Add, system_copy(0), system_int(1)))
     ],
-    MirTerminator.Ret(Some(system_copy(1)))
+    MirTerminator.Return(Some(system_copy(1)))
 )
 val provider = jit_hotspot_specialization_provider_from_var_reassign_analysis(
     "system.mir.var.hotspot",
@@ -260,10 +283,17 @@ expect(decision.compile_source).to_equal("fn system_hot_loop(x: i64) -> i64: x +
    - Expected: high.selected_backend equals `llvm`
 
 
+- Verify: should select Cranelift within medium budget and LLVM only for tier2 high budget
+   - Expected: medium.eligible is true
+   - Expected: medium.selected_backend equals `cranelift`
+   - Expected: high.eligible is true
+   - Expected: high.selected_backend equals `llvm`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -294,10 +324,20 @@ expect(high.selected_backend).to_equal("llvm")
    - Expected: materialized.phi_count equals `1`
 
 
+- Verify: should report, plan, and materialize phi nodes for branch reassignment
+   - Expected: transform.applied is true
+   - Expected: transform.reason equals `ready`
+   - Expected: plans.len() equals `1)  # oracle: pinned constant asserted by this scenario`
+   - Expected: plans[0].original_local_id equals `0)  # oracle: pinned constant asserted by this scenario`
+   - Expected: plans[0].join_block_id equals `3)  # oracle: pinned constant asserted by this scenario`
+   - Expected: materialized.applied is true
+   - Expected: materialized.phi_count equals `1)  # oracle: pinned constant asserted by this scenario`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -307,7 +347,7 @@ step("report, plan, and materialize phi nodes for branch reassignment")
 val entry = MirBlock(id: BlockId.new(0), label: "entry", instructions: [], terminator: MirTerminator.If(system_copy(9), BlockId.new(1), BlockId.new(2)))
 val then_block = MirBlock(id: BlockId.new(1), label: "then", instructions: [system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(1), MirType.i64()))], terminator: MirTerminator.Goto(BlockId.new(3)))
 val else_block = MirBlock(id: BlockId.new(2), label: "else", instructions: [system_inst(MirInstKind.Const(system_local(0), MirConstValue.Int(2), MirType.i64()))], terminator: MirTerminator.Goto(BlockId.new(3)))
-val join = MirBlock(id: BlockId.new(3), label: "join", instructions: [system_inst(MirInstKind.BinOp(system_local(1), MirBinOp.Add, system_copy(0), system_int(1)))], terminator: MirTerminator.Ret(Some(system_copy(1))))
+val join = MirBlock(id: BlockId.new(3), label: "join", instructions: [system_inst(MirInstKind.BinOp(system_local(1), MirBinOp.Add, system_copy(0), system_int(1)))], terminator: MirTerminator.Return(Some(system_copy(1))))
 val blocks = [entry, then_block, else_block, join]
 val transform = ssa_var_transform_blocks(blocks)
 expect(transform.applied).to_equal(true)
@@ -325,7 +365,7 @@ expect(materialized.phi_count).to_equal(1)  # oracle: materialized.phi_count mus
 
 ### REQ-OPJH-020
 
-#### interpret pseudo phi by predecessor block
+#### should interpret pseudo phi by predecessor block
 
 - interpret pseudo phi by predecessor block
    - Expected: err == nil is true
@@ -335,7 +375,7 @@ expect(materialized.phi_count).to_equal(1)  # oracle: materialized.phi_count mus
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

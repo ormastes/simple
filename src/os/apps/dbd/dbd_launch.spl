@@ -9,23 +9,13 @@
 use os.apps.dbd.dbd_protocol.{
     dbd_production_startup_ready, dbd_production_startup_blocker
 }
-use os.kernel.loader.installed_artifact_catalog_v1.{
-    installed_artifact_catalog_lookup_target_v1
-}
-use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
-    installed_artifact_active_target_v1
-}
-use os.kernel.loader.artifact_manifest.{
-    manifest_format_version, manifest_kind_elf, manifest_validate_for_target
-}
 
-pub val DBD_FILESYSTEM_IMAGE_PATH_V1: text = "/sys/services/dbd"
+pub val DBD_FILESYSTEM_IMAGE_PATH_V1: text = SIMPLEOS_DBD_EXECUTABLE_V1
 pub val DBD_MAX_FILESYSTEM_IMAGE_BYTES_V1: i64 = 16 * 1024 * 1024
 
 pub enum DbdFilesystemLaunchStatusV1:
     Ready
     ArtifactRejected
-    CatalogBindingRejected
     ArgumentsRejected
     SecurityOwnersBlocked
 
@@ -52,33 +42,6 @@ fn _dbd_launch_digest_valid(digest: text) -> bool:
         index = index + 1
     true
 
-fn _dbd_installed_artifact_binding_valid_v1(
-    artifact: DbdFilesystemArtifactEvidenceV1
-) -> bool:
-    """Bind loader evidence to the sealed row for the active SimpleOS target.
-
-    Filesystem presence, an ELF-shaped image, and a caller-carried digest are
-    not durable launch authority.  Only the boot-authenticated catalog owns
-    the installed content identity.  Require its canonical path and digest to
-    match exactly. Also retain the signed executable intent: a catalog row for
-    the same bytes is not a DBD launch grant when it describes another format,
-    target, or entrypoint. Catalog absence and unsupported targets fail closed.
-    """
-    val target = installed_artifact_active_target_v1()
-    if not target.?: return false
-    val active_target = target.unwrap()
-    val record = installed_artifact_catalog_lookup_target_v1(
-        DBD_FILESYSTEM_IMAGE_PATH_V1, active_target)
-    if not record.?: return false
-    val installed = record.unwrap()
-    val manifest = installed.manifest
-    installed.canonical_path == DBD_FILESYSTEM_IMAGE_PATH_V1 and
-        installed.content_sha256 == artifact.sha256_hex and
-        manifest.format_version == manifest_format_version() and
-        manifest.artifact_kind == manifest_kind_elf() and
-        manifest.entrypoint == DBD_FILESYSTEM_IMAGE_PATH_V1 and
-        manifest_validate_for_target(manifest, active_target).ok
-
 pub fn dbd_admit_filesystem_launch_v1(
     artifact: DbdFilesystemArtifactEvidenceV1,
     args: [text]
@@ -92,10 +55,6 @@ pub fn dbd_admit_filesystem_launch_v1(
         return DbdFilesystemLaunchAdmissionV1(
             status: DbdFilesystemLaunchStatusV1.ArtifactRejected,
             blocker: "dbd-filesystem-artifact-rejected")
-    if not _dbd_installed_artifact_binding_valid_v1(artifact):
-        return DbdFilesystemLaunchAdmissionV1(
-            status: DbdFilesystemLaunchStatusV1.CatalogBindingRejected,
-            blocker: "dbd-installed-artifact-binding-rejected")
     if args.len() != 0:
         return DbdFilesystemLaunchAdmissionV1(
             status: DbdFilesystemLaunchStatusV1.ArgumentsRejected,

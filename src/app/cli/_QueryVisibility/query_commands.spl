@@ -1,5 +1,6 @@
 # Query visibility — LSP query command entrypoints
 use app.cli._QueryVisibility.symbol_resolution.*
+use app.cli._QueryVisibility.feature_visibility.*
 # Query CLI - LSP visibility JSON adapters
 #
 # Wraps the existing text-oriented query commands and enriches them with
@@ -18,6 +19,33 @@ fn query_visibility_nonnegative_int_or_zero(value: text) -> i64:
             return 0
     trimmed.to_int() ?? 0
 
+# `--flag value` lookup; `default` when absent. Values are `file[:line]`
+# requester specs or plain words — never another flag.
+fn query_visibility_flag_value(args: [text], flag: text, default: text) -> text:
+    var j = 1
+    while j + 1 < args.len():
+        if args[j] == flag and not args[j + 1].starts_with("--"):
+            return args[j + 1]
+        j = j + 1
+    default
+
+# A requester location is `path` or `path:line`; the line is echoed back to the
+# caller (visibility is file-granular today) — never treated as part of the path.
+fn requester_file_part(spec: text) -> text:
+    val idx = spec.last_index_of(":")
+    if idx <= 0:
+        return spec
+    val tail = spec.substring(idx + 1)
+    if tail == "" or query_visibility_nonnegative_int_or_zero(tail) == 0 and tail != "0":
+        return spec
+    spec.substring(0, idx)
+
+fn requester_line_part(spec: text) -> i64:
+    val file = requester_file_part(spec)
+    if file == spec:
+        return 0
+    query_visibility_nonnegative_int_or_zero(spec.substring(query_text_len(file) + 1))
+
 fn query_visibility_main() -> i64:
     val all_args = query_cli_get_args()
     var args: [text] = []
@@ -35,14 +63,20 @@ fn query_visibility_main() -> i64:
         return 0
     val subcmd = args[0]
     if subcmd == "hover" and args.len() >= 4:
-        return query_visibility_hover(file: args[1], line_num: query_visibility_nonnegative_int_or_zero(args[2]), col: query_visibility_nonnegative_int_or_zero(args[3]))
+        return query_visibility_hover(file: args[1], line_num: query_visibility_nonnegative_int_or_zero(args[2]), col: query_visibility_nonnegative_int_or_zero(args[3]), requester_file: query_visibility_flag_value(args, "--requester", args[1]))
     if subcmd == "completions" and args.len() >= 4:
         return query_visibility_completions(file: args[1], line_num: query_visibility_nonnegative_int_or_zero(args[2]), col: query_visibility_nonnegative_int_or_zero(args[3]))
     if subcmd == "symbols" and args.len() >= 2:
-        var requester = args[1]
-        if args.len() >= 4 and args[2] == "--requester":
-            requester = args[3]
-        return query_visibility_symbols(file: args[1], requester_file: requester)
+        return query_visibility_symbols(file: args[1], requester_file: query_visibility_flag_value(args, "--requester", args[1]))
+    if subcmd == "visibility":
+        var file = ""
+        if args.len() >= 2 and not args[1].starts_with("--"):
+            file = args[1]
+        val requester = query_visibility_flag_value(args, "--requester", "")
+        var source = query_visibility_flag_value(args, "--requester-source", "")
+        if source == "":
+            source = if requester == "": "none" else: "explicit"
+        return query_visibility_sets(file: file, requester_spec: requester, requester_source: source)
     if subcmd == "workspace-symbols":
         var query = ""
         var requester = ""
@@ -67,7 +101,7 @@ fn query_visibility_main() -> i64:
         return query_visibility_semantic_tokens(file: args[1], start_line: start_line, end_line: end_line)
     1
 
-fn query_visibility_hover(file: text, line_num: i64, col: i64) -> i64:
+fn query_visibility_hover(file: text, line_num: i64, col: i64, requester_file: text) -> i64:
     val clean_file = sanitize_path(file)
     if clean_file == "":
         print "null"
@@ -78,7 +112,7 @@ fn query_visibility_hover(file: text, line_num: i64, col: i64) -> i64:
         return 1
     val resolved = resolve_symbol_file(current_file: clean_file, symbol: symbol)
     val hover = declaration_line(symbol: symbol, owner_file: resolved)
-    val vis = visibility_json(symbol: symbol, owner_file: resolved, requester_file: clean_file)
+    val vis = visibility_json(symbol: symbol, owner_file: resolved, requester_file: sanitize_path(requester_file_part(requester_file)))
     var lines: [text] = []
     if hover != "":
         lines = lines.push(hover)
@@ -131,7 +165,7 @@ fn query_visibility_completions(file: text, line_num: i64, col: i64) -> i64:
 
 fn query_visibility_symbols(file: text, requester_file: text) -> i64:
     val clean_file = sanitize_path(file)
-    val requester = sanitize_path(requester_file)
+    val requester = sanitize_path(requester_file_part(requester_file))
     if clean_file == "":
         print "[]"
         return 1
@@ -271,7 +305,74 @@ fn visibility_json(symbol: text, owner_file: text, requester_file: text) -> text
     if capsule != "":
         parts = parts.push("\"capsuleName\":" + json_text(capsule))
         parts = parts.push("\"capsuleVisibility\":\"internal\"")
+    val feature = feature_visibility_json(symbol, owner_file, requester_file, declared)
+    if feature != "":
+        parts = parts.push("\"featureVisibility\":" + feature)
     "{" + parts.join(",") + "}"
+
+# Why a layer-public symbol is visible from the requester (compact, one line).
+fn layer_visible_reason(symbol: text, owner_file: text, requester_file: text) -> text:
+    val declared = declared_visibility(symbol, owner_file)
+    val display = visibility_display(symbol, owner_file)
+    val module = boundary_module(owner_file)
+    if display == "public":
+        val exported = exported_by(symbol, owner_file)
+        if exported != "":
+            return "pub, re-exported by " + relative_to_src(exported)
+        return "pub in open module (no __init__.spl boundary)"
+    if display == "peer":
+        return "pub(peer): same peer path in a sibling layer"
+    if display == "up":
+        return "pub(up): requester is the parent facade"
+    if requester_file != "" and same_boundary(requester_file, owner_file):
+        return "pub inside shared boundary " + module
+    if declared == "package" or declared == "internal":
+        return "pub(" + declared + "): same package as requester"
+    "pub inside boundary " + module
+
+fn visibility_set_entry(symbol: text, kind: text, scope_key: text, scope: text, why: text) -> text:
+    "{\"symbol\":" + json_text(symbol) + ",\"kind\":" + json_text(kind) + ",\"" + scope_key + "\":" + json_text(scope) + ",\"why\":" + json_text(why) + "}"
+
+# `visibility [file] --requester path[:line] --requester-source explicit|last_read|none`
+# Two compact sets for the requester location: layer-public (MDSOC layer
+# boundary) and feature-public (MDSOC feature capsule). With NO requester the
+# sets hold only what crosses the boundary from anywhere — never "self".
+fn query_visibility_sets(file: text, requester_spec: text, requester_source: text) -> i64:
+    val requester = sanitize_path(requester_file_part(requester_spec))
+    val requester_line = requester_line_part(requester_spec)
+    val target = if file != "": sanitize_path(file) else: requester
+    if target == "":
+        print "{\"error\":\"visibility needs a target file or a requester location\"}"
+        return 1
+    var req_parts: [text] = []
+    req_parts = req_parts.push("\"file\":" + json_text(requester))
+    req_parts = req_parts.push("\"line\":" + str(requester_line))
+    req_parts = req_parts.push("\"source\":" + json_text(requester_source))
+    if requester == "":
+        req_parts = req_parts.push("\"note\":\"no requester: none given and no file was read/opened in this session; sets contain only symbols exported across their boundary (not the target's own view)\"")
+    val symbols = parse_symbols_in_file(file_path: target)
+    val layer_module = boundary_module(target)
+    val feature = feature_id_of(target)
+    val feature_dir = feature_dir_of(target)
+    var layer_items: [text] = []
+    var feature_items: [text] = []
+    for parsed in symbols:
+        val display = visibility_display(symbol: parsed.name, owner_file: target)
+        if display != "private":
+            val cross = if requester == "": display == "public" else: visibility_reachable(symbol: parsed.name, owner_file: target, requester_file: requester)
+            if cross:
+                layer_items = layer_items.push(visibility_set_entry(parsed.name, parsed.kind, "module", layer_module, layer_visible_reason(parsed.name, target, requester)))
+        if feature != "":
+            val declared = declared_visibility(symbol: parsed.name, owner_file: target)
+            val why = feature_export_reason(parsed.name, target, declared)
+            if why != "" or (requester != "" and feature_reachable(target, requester, false) and declared != "private"):
+                val reason = if why != "": why else: "same feature capsule as requester"
+                feature_items = feature_items.push(visibility_set_entry(parsed.name, parsed.kind, "feature", feature, reason))
+    if feature != "" and feature_file_exposed(feature_dir, target):
+        for name in feature_reexports_in_file(target):
+            feature_items = feature_items.push(visibility_set_entry(name, "reexport", "feature", feature, "re-exported by exposed port " + relative_to_src(target)))
+    print "{\"requester\":{" + req_parts.join(",") + "},\"target\":" + json_text(target) + ",\"layerModule\":" + json_text(layer_module) + ",\"feature\":" + json_text(feature) + ",\"layerPublic\":[" + layer_items.join(",") + "],\"featurePublic\":[" + feature_items.join(",") + "]}"
+    0
 
 fn grep_workspace_symbol_candidates(root: text, query: text) -> [ParsedSymbol]:
     val pattern = "^(pub\\(peer\\)|pub\\(up\\)|pub\\(friend\\)|pub\\(package\\)|pub|pri)?[[:space:]]*(fn|me|class|struct|enum|trait|val|var)[[:space:]]+.*" + query
@@ -427,8 +528,12 @@ fn visibility_display(symbol: text, owner_file: text) -> text:
     "boundary"
 
 fn visibility_reachable(symbol: text, owner_file: text, requester_file: text) -> bool:
-    if requester_file == "" or requester_file == owner_file:
+    if requester_file == owner_file:
         return true
+    # No requester location: only what crosses the boundary from anywhere
+    # counts — never the owner's own (self) view.
+    if requester_file == "":
+        return visibility_display(symbol, owner_file) == "public"
     val declared = declared_visibility(symbol, owner_file)
     if declared == "peer":
         return same_peer_path(requester_file, owner_file)
@@ -662,7 +767,8 @@ fn exported_by(symbol: text, owner_file: text) -> text:
     val lines = content.split("\n")
     for line in lines:
         val trimmed = line.trim()
-        if trimmed.starts_with("export use ") and contains_symbol_token(trimmed, symbol):
+        # Both manifest forms: `export use m.{A, B}` and bare `export A, B`.
+        if trimmed.starts_with("export ") and contains_symbol_token(trimmed, symbol):
             return manifest
     ""
 

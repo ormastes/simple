@@ -23,6 +23,7 @@ Regression guard for the Stage-1 HIR fatal
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 Regression guard for the Stage-1 HIR fatal
 
     HIR lowering error in src/compiler/driver/driver.spl:
@@ -46,6 +47,7 @@ also `bind_qualified_type`s, exactly as
 `materialize_imported_callable_declared_dependency` already did for signature
 dependencies.
 
+```
 ## Scenarios
 
 ### two distinct enums sharing one short name

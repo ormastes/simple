@@ -1,6 +1,19 @@
-# WM, GUI, Web, and 2D host-environment hardening
+# wm_gui_web_2d_host_env_hardening_spec
 
-> Runs the production hosted-window evidence lane. The retained receipt must correlate one screen-originated event through WM and semantic Web dispatch to an application mutation and the same canonical Engine2D framebuffer.
+## Overview
+
+Runs the production hosted-window evidence lane. One retained receipt must
+correlate a screen-originated event through WM and semantic Web dispatch to an
+application mutation and the same canonical Engine2D framebuffer. Native x86,
+ARM, RISC-V, Vulkan, and RenderDoc rows fail closed and retain their exact
+resume commands instead of becoming passes.
+
+Run this spec with `SIMPLE_BIN` set to the deployed pure-Simple runtime after
+the live-window and retained 4K evidence gates have populated their receipts.
+The primary scenario is production evidence; the owner check is supporting
+structural evidence only and cannot promote a host row.
+
+> use std.spec.*
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +22,9 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# WM, GUI, Web, and 2D host-environment hardening
+# wm_gui_web_2d_host_env_hardening_spec
 
-Runs the production hosted-window evidence lane. The retained receipt must correlate one screen-originated event through WM and semantic Web dispatch to an application mutation and the same canonical Engine2D framebuffer.
+use std.spec.*
 
 ## At a Glance
 
@@ -19,33 +32,20 @@ Runs the production hosted-window evidence lane. The retained receipt must corre
 |-------|-------|
 | Category | Other |
 | Status | Active |
-| Requirements | doc/02_requirements/feature/wm_gui_web_2d_host_env_hardening.md and doc/02_requirements/nfr/wm_gui_web_2d_host_env_hardening.md |
-| Plan | doc/03_plan/sys_test/wm_gui_web_2d_host_env_hardening.md |
-| Design | doc/05_design/wm_gui_web_2d_host_env_hardening.md |
-| Research | doc/01_research/local/wm_gui_web_2d_host_env_hardening.md and doc/01_research/domain/wm_gui_web_2d_host_env_hardening.md |
 | Source | `test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+use std.spec.*
+use std.io_runtime.{env_get, file_exists, file_read, process_run}
 
-Runs the production hosted-window evidence lane. The retained receipt must
-correlate one screen-originated event through WM and semantic Web dispatch to
-an application mutation and the same canonical Engine2D framebuffer.
+val WRAPPER = "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+val HOST_ENV_APP = "src/app/test/test_host_env.spl"
+val HOST_ENV_CONTRACT = "src/lib/common/ui/host_env_contract.spl"
+val LIVE_ENV = "build/linux-hosted-wm-live-window-evidence/evidence.env"
+val PERF_ENV = "build/widget-showcase-4k-200fps/status.env"
 
-Native x86, ARM, RISC-V, Vulkan, and RenderDoc rows are fail-closed. A blocked
-row names its missing host prerequisite and exact resume command; it is never
-reported as a pass.
-
-**Requirements:** doc/02_requirements/feature/wm_gui_web_2d_host_env_hardening.md and doc/02_requirements/nfr/wm_gui_web_2d_host_env_hardening.md
-**Plan:** doc/03_plan/sys_test/wm_gui_web_2d_host_env_hardening.md
-**Design:** doc/05_design/wm_gui_web_2d_host_env_hardening.md
-**Research:** doc/01_research/local/wm_gui_web_2d_host_env_hardening.md and doc/01_research/domain/wm_gui_web_2d_host_env_hardening.md
-
-## Syntax
-
-Run this spec with `SIMPLE_BIN` set to the deployed pure-Simple runtime after
-the live-window and retained 4K evidence gates have populated their receipts.
+describe "production host event and render evidence":
 
 ## Scenarios
 
@@ -53,8 +53,6 @@ the live-window and retained 4K evidence gates have populated their receipts.
 
 #### retains one correlated screen-to-Web-to-device frame receipt
 
-- retains one correlated screen-to-Web-to-device frame receipt
-   - Exec capture: after_step
 - Inspect the real host capabilities
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
@@ -76,12 +74,10 @@ the live-window and retained 4K evidence gates have populated their receipts.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 76 lines folded for reproduction.
+Runnable source: 74 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("retains one correlated screen-to-Web-to-device frame receipt")
 step("Inspect the real host capabilities")
 expect(file_exists(HOST_ENV_APP)).to_be(true)
 val simple_bin = env_get("SIMPLE_BIN") ?? ""
@@ -162,19 +158,20 @@ expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 
 #### keeps the wrapper and app on existing production owners
 
-- keeps the wrapper and app on existing production owners
-- Verify the retained contract binds a forward Vulkan revision
+This supporting structural check keeps the evidence app on the selected
+production owners. Live event and device proof belongs to the primary scenario.
 
+- Verify the retained contract binds a forward Vulkan revision
+  - Expected: the exact increasing-revision and Vulkan-backend guards remain at
+    the shared readback admission call site.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps the wrapper and app on existing production owners")
 step("Verify the retained contract binds a forward Vulkan revision")
 val wrapper = file_read(WRAPPER)
 val app = file_read(HOST_ENV_APP)
@@ -252,54 +249,4 @@ expect(contract).to_contain("val status = if evidence_present: \"fail\" else: \"
 | Pending scenarios | 0 |
 
 
-## Related Documentation
-
-- **Requirements:** `doc/02_requirements/feature/wm_gui_web_2d_host_env_hardening.md and doc/02_requirements/nfr/wm_gui_web_2d_host_env_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/wm_gui_web_2d_host_env_hardening.md`
-- **Design:** `doc/05_design/wm_gui_web_2d_host_env_hardening.md`
-- **Research:** `doc/01_research/local/wm_gui_web_2d_host_env_hardening.md and doc/01_research/domain/wm_gui_web_2d_host_env_hardening.md`
-
-
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `dca2baf8ba376c5b90d14d1796baed8bea820afde579b5db0a3a6f046baa431c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `dca2baf8ba376c5b90d14d1796baed8bea820afde579b5db0a3a6f046baa431c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `dca2baf8ba376c5b90d14d1796baed8bea820afde579b5db0a3a6f046baa431c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
-
-SSpec documentization score: 95/100
-source: test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl
-mirror: doc/06_spec/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.md (current)
-findings: 3 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-<!-- sspec-maintain:scorecard:end -->

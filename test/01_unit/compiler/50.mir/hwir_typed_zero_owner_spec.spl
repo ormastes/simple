@@ -1,0 +1,73 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.typed_zero_owner.{hw_typed_zero_owner_port_schema_sha256,
+    strict_hw_typed_zero_owner, strict_hw_typed_zero_owner_schema}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl}
+
+describe "generic typed zero HWIR owner":
+    it "emits one explicit literal-zero output per requested width":
+        val result = strict_hw_typed_zero_owner("disabled_capability_defaults",
+            CoreConfig.rv32(), [1, 32, 64])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val module = result.ok().unwrap()
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.ports[0].name).to_equal("zero_1")
+            expect(module.ports[1].name).to_equal("zero_32")
+            expect(module.ports[2].name).to_equal("zero_64")
+            expect(module.constants[0].value).to_equal(0)
+            expect(module.constants[1].bit_width).to_equal(32)
+            expect(module.comb_ops[2].result).to_equal("zero_64")
+
+    it "keeps the exact typed schema and graph hashes deterministic":
+        val first = strict_hw_typed_zero_owner("typed_zero_hash", CoreConfig.rv64(),
+            [1, 2, 4, 56, 64])
+        val second = strict_hw_typed_zero_owner("typed_zero_hash", CoreConfig.rv64(),
+            [1, 2, 4, 56, 64])
+        expect(first.is_ok()).to_be(true)
+        expect(second.is_ok()).to_be(true)
+        if first.is_ok() and second.is_ok():
+            val first_module = first.ok().unwrap()
+            val second_module = second.ok().unwrap()
+            expect(first_module.structural_sha256()).to_equal(
+                second_module.structural_sha256())
+            expect(first_module.structural_sha256().len()).to_equal(64)
+            expect(hw_typed_zero_owner_port_schema_sha256(first_module.ports)).to_equal(
+                hw_typed_zero_owner_port_schema_sha256(second_module.ports))
+            expect(hw_typed_zero_owner_port_schema_sha256(first_module.ports).len()).to_equal(64)
+
+    it "rejects duplicate widths and malformed exact schemas":
+        val duplicated = strict_hw_typed_zero_owner("typed_zero_duplicate",
+            CoreConfig.rv32(), [32, 32])
+        expect(duplicated.is_err()).to_be(true)
+        if duplicated.is_err():
+            expect(duplicated.err().unwrap()).to_equal(
+                "HWIR-E-TYPED-ZERO-PORT: zero owner widths and VHDL port names must be injective")
+        val malformed = strict_hw_typed_zero_owner_schema("typed_zero_bad_schema",
+            CoreConfig.rv32(), [HwPort.output("zero_xlen", "Bits", 32)])
+        expect(malformed.is_err()).to_be(true)
+        if malformed.is_err():
+            expect(malformed.err().unwrap()).to_equal(
+                "HWIR-E-TYPED-ZERO-PORT: zero owner ports require exact zero_<positive-width> output Bits schema")
+        val invalid_config = CoreConfig(xlen: 16, physical_address_bits: 0,
+            register_count: 0, profile: "invalid", isa_profile: "rv32i",
+            compressed_decode_profile: "none")
+        val rejected_config = strict_hw_typed_zero_owner("typed_zero_bad_config",
+            invalid_config, [1])
+        expect(rejected_config.is_err()).to_be(true)
+        if rejected_config.is_err():
+            expect(rejected_config.err().unwrap()).to_equal(
+                "HWIR-E-CONFIG-XLEN: strict RISC-V HWIR requires XLEN=32 or XLEN=64")
+
+    it "stays compatible with the fail-closed strict VHDL renderer":
+        val result = strict_hw_typed_zero_owner("typed_zero_vhdl", CoreConfig.rv32(),
+            [1, 32])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val module = result.ok().unwrap()
+            val rendered = render_strict_hwir_vhdl(module)
+            expect(rendered.is_success()).to_be(true)
+            expect(rendered.hwir_graph_sha256).to_equal(module.structural_sha256())
+            expect(rendered.vhdl).to_contain("zero_1 : out std_logic")
+            expect(rendered.vhdl).to_contain("zero_32 : out std_logic_vector(31 downto 0)")
+            expect(rendered.vhdl).to_contain("zero_32 <= literal_zero_32;")

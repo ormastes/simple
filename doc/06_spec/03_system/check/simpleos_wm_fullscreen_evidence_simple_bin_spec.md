@@ -1,13 +1,17 @@
-# SimpleOS WM Fullscreen Evidence Simple Binary Contract
+# SimpleOS WM Fullscreen Evidence Binary Contract
 
-> The live fullscreen check requires QEMU and a running SimpleOS `wm-simple-web` target, but its binary-selection and interaction contracts can be verified without launching either. Rust seed overrides must fail before launch artifacts are produced.
+> **Current result: BLOCKED / no live QEMU PASS (2026-07-24).**
+> Executable source:
+> `test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl`.
+> This manual is synchronized by hand because pure-Simple docgen was
+> unavailable; it does not claim generated zero-stub evidence.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+## Purpose
 
-<details>
-<summary>Full Scenario Manual</summary>
+This SSpec checks the fail-closed source and launcher contract around
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`. Static source
+assertions are supporting evidence. Only a fresh successful wrapper run can
+prove guest font pixels and correlated QEMU input.
 
 # SimpleOS WM Fullscreen Evidence Simple Binary Contract
 
@@ -24,7 +28,7 @@ The live fullscreen check requires QEMU and a running SimpleOS `wm-simple-web` t
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -86,22 +90,13 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_fullscreen_evide
 
 #### selects self hosted Simple and records launcher provenance
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- selects self hosted Simple and records launcher provenance
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("selects self hosted Simple and records launcher provenance")
 val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
 expect(script).to_contain("SIMPLE_BIN_SOURCE=")
 expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
@@ -129,21 +124,13 @@ expect(script.index_of("build/bootstrap/stage3/*/simple")).to_be_less_than(scrip
 
 #### bounds current-source kernel admission and preserves the native cache
 
-- bounds current-source kernel admission and preserves the native cache
-   - Expected: script.index_of("--opt-level=aggressive") equals `-1`
-   - Expected: code equals `0`
-   - Expected: files_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("bounds current-source kernel admission and preserves the native cache")
 val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
 expect(script).to_contain("SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS")
 expect(script).to_contain("SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS")
@@ -185,7 +172,8 @@ expect(files_code).to_equal(0)
 
 #### uses dynamic scanout and three correlated QMP captures
 
-- uses dynamic scanout and three correlated QMP captures
+- "pointer release serial offset = serial size
+- "wait pointer correlation
    - Expected: script.index_of("[wm-demo] fullscreen-enter") equals `-1`
    - Expected: script.index_of("[wm-demo] fullscreen-exit") equals `-1`
 
@@ -193,12 +181,10 @@ expect(files_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses dynamic scanout and three correlated QMP captures")
 val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
 expect(script).to_contain("[scanout-evidence]")
 expect(script).to_contain("scanout_size=$((scanout_stride * scanout_height))")
@@ -241,25 +227,128 @@ expect(script.index_of("[wm-demo] fullscreen-exit")).to_equal(-1)
 - Trace the production font and event boundary
 - Prepare one shared font batch for 2D and 3D
 - Emit the selected font composite program and plan compilation
-- Boot SimpleOS with the pinned font asset
 - Submit the boundary output to its canonical consumer
-- Deliver correlated focus keyboard and pointer events
 - Correlate visible pixels and input with one frame identity
    - Expected: script.index_of("window_id=.* status=engine2d_rendered") equals `-1`
 - Prove native submission and device readback
 - Reject disconnected stale or replayed evidence
-- Reject a bounded corrupt copy through the same font crop oracle
 
+## Primary flow
 
-<details>
-<summary>Executable SSpec</summary>
+1. Load the pinned multilingual font manifest.
+2. Require the deterministic guest path `/SYS/FONTS/NOTOSANS`, byte length
+   `1708408`, and SHA-256
+   `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
+3. Boot only the production x86_64 `gui_entry_desktop.spl` with an accepted
+   pure-Simple self-hosted binary. Its live `SharedWmScene` snapshot is rendered
+   through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
+   taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
+4. Derive framebuffer address, dimensions, pitch, format, and size only from
+   the guest `[scanout-evidence]` marker.
+5. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
+   extract the 8,064-byte taskbar-clock RGB crop from that device-origin
+   baseline.
+6. Correlate F11 maximize/restore through guest IRQ, WM state, and frame
+   generation with strictly increasing `input_seq` values.
+7. Move to the center of the guest-reported restored-window titlebar and press
+   the left button. Accept only `window_focus` or `window_drag_begin` when the
+   command window equals the positive focused window.
+8. Release the left button. Require a newer sequence, the same focused window,
+   `command=ignored`, `handled=false`, and a positive frame generation.
+9. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
+   its SHA-256 with the wrapper’s existing hash helper, and require the shared
+   crop oracle to reject it before PASS.
+10. Retain only valid PPM captures: maximize must change more than 4,096 scanout
+    bytes and restore must reproduce the baseline hash. The evidence record names
+    all three PPM magic statuses and the QMP `pmemsave` device origin.
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("pins the guest font source and correlates pointer IRQ state and frame markers")
+val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+expect(script).to_contain("[scanout-evidence]")
+expect(script).to_contain("scanout_size=$((scanout_stride * scanout_height))")
+expect(script).to_contain("baseline = pmem(f, baseline_ppm)")
+expect(script).to_contain("fullscreen = pmem(f, fullscreen_ppm)")
+expect(script).to_contain("restored = pmem(f, restored_ppm)")
+expect(script).to_contain("send_f11(f)")
+expect(script).to_contain("wait_press_correlation(baseline_seq, \"maximize\")")
+expect(script).to_contain("wait_press_correlation(max_release_seq, \"restore\", target_window)")
+expect(script).to_contain("wait_pointer_correlation(restore_release_seq, 1)")
+expect(script.contains(
+    "wait_pointer_correlation(restore_seq, 1)")).to_equal(false)
+expect(script).to_contain(
+    "pointer_release_serial_offset = serial_size()")
+expect(script).to_contain(
+    "wait_pointer_correlation(pointer_seq, 2, pointer_window, pointer_release_serial_offset)")
+expect(script.contains(
+    "wait_pointer_correlation(pointer_seq, 2, pointer_window)")).to_equal(false)
+expect(script).to_contain("\"type\":\"rel\"")
+expect(script).to_contain("\"type\":\"btn\"")
+expect(script).to_contain("ENTRY=\"examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl\"")
+expect(script).to_contain("host_nonce=%s baseline_seq=%d maximize_seq=%d maximize_release_seq=%d restore_seq=%d restore_release_seq=%d qcode=f11")
+expect(script).to_contain("maximize-semantic-hash-not-distinct")
+expect(script).to_contain("if restored_hash != base_hash")
+expect(script).to_contain("restore-semantic-hash-mismatch")
+expect(script).to_contain("simpleos_wm_fullscreen_baseline_ppm_magic_status=")
+expect(script).to_contain("simpleos_wm_fullscreen_maximized_ppm_magic_status=")
+expect(script).to_contain("simpleos_wm_fullscreen_restored_ppm_magic_status=")
+expect(script.index_of("[wm-demo] fullscreen-enter")).to_equal(-1)
+expect(script.index_of("[wm-demo] fullscreen-exit")).to_equal(-1)
+```
+
+</details>
+
+#### pins the guest font source and correlates pointer IRQ state and frame markers
+
+- Load the pinned multilingual font manifest
+- Accept exact-face-bound simple-script shaping
+- "[font-evidence] guest path=" + literal braces
+- " asset bytes=" + literal braces
+- Trace the production font and event boundary
+- Prepare one shared font batch for 2D and 3D
+- Emit the selected font composite program and plan compilation
+- Submit the boundary output to its canonical consumer
+- Correlate visible pixels and input with one frame identity
+- "remote browser window=\"$
+   - Expected: script.index_of("window_id=.* status=engine2d_rendered") equals `-1`
+- Prove native submission and device readback
+- Reject disconnected stale or replayed evidence
+
+## Primary flow
+
+1. Load the pinned multilingual font manifest.
+2. Require the deterministic guest path `/SYS/FONTS/NOTOSANS`, byte length
+   `1708408`, and SHA-256
+   `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
+3. Boot only the production x86_64 `gui_entry_desktop.spl` with an accepted
+   pure-Simple self-hosted binary. Its live `SharedWmScene` snapshot is rendered
+   through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
+   taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
+4. Derive framebuffer address, dimensions, pitch, format, and size only from
+   the guest `[scanout-evidence]` marker.
+5. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
+   extract the 8,064-byte taskbar-clock RGB crop from that device-origin
+   baseline.
+6. Correlate F11 maximize/restore through guest IRQ, WM state, and frame
+   generation with strictly increasing `input_seq` values.
+7. Move to the center of the guest-reported restored-window titlebar and press
+   the left button. Accept only `window_focus` or `window_drag_begin` when the
+   command window equals the positive focused window.
+8. Release the left button. Require a newer sequence, the same focused window,
+   `command=ignored`, `handled=false`, and a positive frame generation.
+9. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
+   its SHA-256 with the wrapper’s existing hash helper, and require the shared
+   crop oracle to reject it before PASS.
+10. Retain only valid PPM captures: maximize must change more than 4,096 scanout
+    bytes and restore must reproduce the baseline hash. The evidence record names
+    all three PPM magic statuses and the QMP `pmemsave` device origin.
+
+Runnable source: 56 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 step("Load the pinned multilingual font manifest")
 step("Accept exact-face-bound simple-script shaping")
 val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
@@ -274,66 +363,29 @@ expect(entry).to_contain(
     "[font-evidence] guest_path=" + literal_braces("font_guest_path") +
     " asset_bytes=" + literal_braces("font_blob.len()"))
 
-step("Trace the production font and event boundary")
-step("Prepare one shared font batch for 2D and 3D")
-step("Emit the selected font composite program and plan compilation")
-step("Boot SimpleOS with the pinned font asset")
-expect(entry).to_contain("route=shared-wm-draw-ir component_id=taskbar-clock")
-expect(shell).to_contain("Render one authoritative WM snapshot through Draw IR + Engine2D")
-expect(shell).to_contain("val scene = self.runtime_scene_snapshot()")
-expect(shell).to_contain("executor.render(scene, taskbar, content_frames")
-expect(shell).to_contain("fn runtime_scene_snapshot() -> SharedWmScene")
+## Current retained result
 
-step("Submit the boundary output to its canonical consumer")
-step("Deliver correlated focus keyboard and pointer events")
-expect(compositor).to_contain("if ((status as i32) & 0x20) != 0:")
-expect(shell).to_contain("[wm-pointer-irq] input_seq=")
-expect(shell).to_contain("[wm-pointer-state] input_seq=")
-expect(shell).to_contain("[wm-pointer-frame] input_seq=")
-expect(shell).to_contain("handled=" + literal_braces("handled_text"))
-expect(script).to_contain("guest-pointer-irq-state-frame-correlation-missing")
-expect(script).to_contain("window=([1-9]\\d*)")
-expect(script).to_contain("window_focus|window_drag_begin")
-expect(script).to_contain("window=\\1 handled=true")
-expect(script).to_contain("command=ignored target= app= window= handled=false")
-expect(script).to_contain("handled=true")
+Command attempted:
 
-step("Correlate visible pixels and input with one frame identity")
-expect(script).to_contain(
-    "remote_browser_window=\"$(marker_field \"$remote_browser_ready_marker\" window)\"")
-expect(script).to_contain("window_id=$remote_browser_window status=engine2d_rendered")
-expect(script).to_contain(
-    "content-presented scene_revision=$browser_content_presented_generation")
-expect(script.contains(
-    "content-presented scene_revision=[1-9][0-9]* path=")).to_equal(false)
-expect(script.index_of("window_id=.* status=engine2d_rendered")).to_equal(-1)
-expect(script).to_contain(
-    "simpleos_wm_fullscreen_remote_browser_window=$remote_browser_window")
-step("Prove native submission and device readback")
-step("Reject disconnected stale or replayed evidence")
-step("Reject a bounded corrupt copy through the same font crop oracle")
-expect(script).to_contain("corrupt_region[0] ^= 1")
-expect(script).to_contain("font_region_oracle_status \"$FONT_REGION_CORRUPT_COPY\"")
-expect(script).to_contain("font-region-corrupt-copy-calibration-failed")
-expect(script).to_contain("simpleos_wm_fullscreen_font_region_corrupt_rejection_status=")
+```sh
+sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 ```
 
-</details>
+Result: `simpleos_wm_fullscreen_reason=wm-simple-web-build-failed`.
+The self-hosted native build exceeded the requested 300-second timeout and was
+terminated after roughly 13 minutes. It produced no fresh kernel, QEMU launch,
+serial markers, framebuffer, font crop, pointer evidence, or corrupt-copy
+calibration.
 
-#### fails closed for disconnected QMP, replayed guest input, and corrupt visible evidence
-
-- fails closed for disconnected QMP, replayed guest input, and corrupt visible evidence
-
+Retained artifacts:
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fails closed for disconnected QMP, replayed guest input, and corrupt visible evidence")
 val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
 expect(script).to_contain("qmp-connection-closed")
 expect(script).to_contain("capture-input-or-guest-correlation-failed")
@@ -351,18 +403,13 @@ expect(script).to_contain("simpleos_wm_fullscreen_delta changed_bytes=")
 
 #### implements F11 sequence-correlated maximize and restore in the guest
 
-- implements F11 sequence-correlated maximize and restore in the guest
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("implements F11 sequence-correlated maximize and restore in the guest")
 val compositor = file_read("src/os/compositor/compositor.spl")
 val shell = file_read("src/os/desktop/shell.spl")
 expect(compositor).to_contain("elif sc == 0x57")
@@ -377,7 +424,7 @@ expect(shell).to_contain("[wm-frame] input_seq=")
 
 #### renders the production guest through shared MDI and authoritative pure Simple Web content
 
-- renders the production guest through shared MDI and authoritative pure Simple Web content
+- "theme, title, body html, width, full h) with pixel output
    - Expected: guest.index_of("render_simple_web_app_content(") equals `-1`
    - Expected: guest.index_of("self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)") equals `-1`
 
@@ -385,12 +432,10 @@ expect(shell).to_contain("[wm-frame] input_seq=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("renders the production guest through shared MDI and authoritative pure Simple Web content")
 val guest = file_read("src/os/compositor/compositor.spl")
 val host = file_read("src/os/compositor/host_compositor_core.spl")
 val web = file_read("src/os/compositor/simple_web_window_renderer.spl")
@@ -413,21 +458,13 @@ expect(guest.index_of("self.backend.fill_rect(s.x, s.y, s.width, 24, 0xFF4A90D9)
 
 #### rejects explicit Rust seed before SimpleOS QMP launch
 
-- rejects explicit Rust seed before SimpleOS QMP launch
-   - Expected: code equals `0`
-   - Expected: qemu_code equals `0`
-   - Expected: capture_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects explicit Rust seed before SimpleOS QMP launch")
 val root = "build/test-simpleos-wm-fullscreen-seed-forbidden"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -452,20 +489,13 @@ expect(capture_code).to_equal(0)
 
 #### rejects a symlink resolving to a Rust seed before SimpleOS QMP launch
 
-- rejects a symlink resolving to a Rust seed before SimpleOS QMP launch
-   - Expected: code equals `0`
-   - Expected: files_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects a symlink resolving to a Rust seed before SimpleOS QMP launch")
 val root = "build/test-simpleos-wm-fullscreen-seed-symlink-forbidden"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/src/compiler_rust/target/bootstrap && printf '%s\\n' '#!/bin/sh' 'echo should-not-run >&2' 'exit 99' > " + root + "/src/compiler_rust/target/bootstrap/simple && chmod +x " + root + "/src/compiler_rust/target/bootstrap/simple && ln -s \"$PWD/" + root + "/src/compiler_rust/target/bootstrap/simple\" " + root + "/simple-link && SIMPLE_BIN=$PWD/" + root + "/simple-link BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -482,20 +512,13 @@ expect(files_code).to_equal(0)
 
 #### rejects a binary identifying as a Rust seed before SimpleOS QMP launch
 
-- rejects a binary identifying as a Rust seed before SimpleOS QMP launch
-   - Expected: code equals `0`
-   - Expected: files_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects a binary identifying as a Rust seed before SimpleOS QMP launch")
 val root = "build/test-simpleos-wm-fullscreen-seed-version-forbidden"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then' 'echo \"WARNING: this Rust-built Simple binary is a bootstrap seed only\"' 'exit 0' 'fi' 'exit 99' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -512,22 +535,15 @@ expect(files_code).to_equal(0)
 
 #### rejects a failing version probe before SimpleOS QMP launch
 
-- rejects a failing version probe before SimpleOS QMP launch
-   - Expected: code equals `0`
-   - Expected: files_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects a failing version probe before SimpleOS QMP launch")
 val root = "build/test-simpleos-wm-fullscreen-version-probe-failed"
-val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'echo Simple v1.0.0-RC' 'exit 1' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'echo Simple v1.0.0-beta' 'exit 1' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -542,20 +558,13 @@ expect(files_code).to_equal(0)
 
 #### rejects invalid external kernel and disk overrides before QEMU
 
-- rejects invalid external kernel and disk overrides before QEMU
-   - Expected: code equals `0`
-   - Expected: files_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects invalid external kernel and disk overrides before QEMU")
 val root = "build/test-simpleos-wm-fullscreen-invalid-external-artifacts"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'exit 99' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && printf 'firmware\\n' > " + root + "/OVMF_CODE.fd && printf 'vars\\n' > " + root + "/OVMF_VARS.fd && { printf '\\177ELF\\002\\001'; dd if=/dev/zero bs=12 count=1 2>/dev/null; printf '\\076\\000'; } > " + root + "/kernel.elf && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=unused SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/missing.img BUILD_DIR=" + root + "/kernel-out REPORT_PATH=" + root + "/kernel-report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/kernel-stdout.txt 2> " + root + "/kernel-stderr.txt || true; { printf '\\177ELF\\001\\001'; dd if=/dev/zero bs=12 count=1 2>/dev/null; printf '\\003\\000'; } > " + root + "/kernel.elf; printf 'not-a-disk\\n' > " + root + "/disk.img; PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=unused SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/disk.img BUILD_DIR=" + root + "/disk-out REPORT_PATH=" + root + "/disk-report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/disk-stdout.txt 2> " + root + "/disk-stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -576,21 +585,13 @@ expect(files_code).to_equal(0)
 
 #### promotes one valid current-source ELF and rebuilds a mismatched admission
 
-- promotes one valid current-source ELF and rebuilds a mismatched admission
-   - Expected: code equals `0`
-   - Expected: count equals `xx`
-   - Expected: files_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("promotes one valid current-source ELF and rebuilds a mismatched admission")
 val root = "build/test-simpleos-wm-fullscreen-current-source-promotion"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'out=' 'while [ \"$#\" -gt 0 ]; do' 'if [ \"$1\" = \"-o\" ]; then shift; out=$1; fi' 'shift' 'done' 'printf x >> \"$FAKE_BUILD_COUNT\"' '{' 'printf \"\\177ELF\\001\\001\"' 'dd if=/dev/zero bs=12 count=1 2>/dev/null' 'printf \"\\003\\000\"' '} > \"$out\"' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' '--output=*) output=$(printf \"%s\" \"$arg\" | sed \"s/^--output=//\");;' 'esac' 'done' 'mkdir -p \"$(dirname \"$output\")\"' 'printf efi > \"$output\"' > " + root + "/bin/grub-mkstandalone && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' 'unix:*,server,nowait) socket=$(printf \"%s\" \"$arg\" | sed \"s/^unix://; s/,server,nowait$//\");;' 'esac' 'done' 'python3 -c \"import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()\" \"$socket\"' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/grub-mkstandalone " + root + "/bin/qemu-system-x86_64 && printf 'firmware\\n' > " + root + "/OVMF_CODE.fd && printf 'vars\\n' > " + root + "/OVMF_VARS.fd && PATH=$PWD/" + root + "/bin:$PATH FAKE_BUILD_COUNT=$PWD/" + root + "/build-count SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=$PWD/" + root + "/bin/grub-mkstandalone BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report-1.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout-1.txt 2> " + root + "/stderr-1.txt || true; sed -i 's/profile=.*/profile=stale/' " + root + "/out/simpleos_wm_production_desktop.elf.admission; PATH=$PWD/" + root + "/bin:$PATH FAKE_BUILD_COUNT=$PWD/" + root + "/build-count SIMPLE_BIN=$PWD/" + root + "/fake-simple OVMF_CODE=$PWD/" + root + "/OVMF_CODE.fd OVMF_VARS_SRC=$PWD/" + root + "/OVMF_VARS.fd GRUB_MKSTANDALONE=$PWD/" + root + "/bin/grub-mkstandalone BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report-2.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout-2.txt 2> " + root + "/stderr-2.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -617,22 +618,13 @@ expect(files_code).to_equal(0)
 
 #### reports actual external kernel and disk hashes without trusting caller digests
 
-- reports actual external kernel and disk hashes without trusting caller digests
-   - Expected: code equals `0`
-   - Expected: output.index_of("caller-kernel-digest") equals `-1`
-   - Expected: output.index_of("caller-disk-digest") equals `-1`
-   - Expected: capture_code equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reports actual external kernel and disk hashes without trusting caller digests")
 val root = "build/test-simpleos-wm-fullscreen-artifact-hashes"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/bin && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && printf '%s\\n' '#!/bin/sh' 'for arg do' 'case \"$arg\" in' 'unix:*,server,nowait) socket=$(printf \"%s\" \"$arg\" | sed \"s/^unix://; s/,server,nowait$//\");;' 'esac' 'done' 'python3 -c \"import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1]);s.close()\" \"$socket\"' > " + root + "/bin/qemu-system-x86_64 && chmod +x " + root + "/fake-simple " + root + "/bin/qemu-system-x86_64 && ( printf '\\177ELF\\001\\001'; dd if=/dev/zero bs=12 count=1 2>/dev/null; printf '\\003\\000'; ) > " + root + "/kernel.elf && dd if=/dev/zero of=" + root + "/disk.img bs=1M count=64 2>/dev/null && mkfs.fat -F 32 -n SIMPLEOS " + root + "/disk.img >/dev/null 2>&1 && printf 'SIMPLEOS' | dd of=" + root + "/disk.img bs=1 seek=3 conv=notrunc 2>/dev/null && printf 'simpleos_wm_fullscreen_kernel_sha256=%s\\n' \"$(sha256sum " + root + "/kernel.elf | cut -d' ' -f1)\" > " + root + "/kernel-expected.txt && printf 'simpleos_wm_fullscreen_disk_image_sha256=%s\\n' \"$(sha256sum " + root + "/disk.img | cut -d' ' -f1)\" > " + root + "/disk-expected.txt && PATH=$PWD/" + root + "/bin:$PATH SIMPLE_BIN=$PWD/" + root + "/fake-simple SIMPLEOS_WM_KERNEL_ARTIFACT=" + root + "/kernel.elf SIMPLEOS_WM_DISK_IMAGE=" + root + "/disk.img SIMPLEOS_WM_KERNEL_SHA256=caller-kernel-digest SIMPLEOS_WM_DISK_IMAGE_SHA256=caller-disk-digest BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -676,59 +668,3 @@ expect(capture_code).to_equal(0)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-SIMPLEOS-WM-FULLSCREEN-001:`
-- `REQ-SIMPLEOS-WM-FULLSCREEN-002:`
-- `REQ-SIMPLEOS-WM-FULLSCREEN-003:`
-- `REQ-SIMPLEOS-WM-FULLSCREEN-004:`
-- `REQ-SIMPLEOS-WM-FULLSCREEN-005:`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `bf0f028c018bb0e087601d077c84fe2542aa6caed113f0981d78032a3ac97c93`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `bf0f028c018bb0e087601d077c84fe2542aa6caed113f0981d78032a3ac97c93`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `bf0f028c018bb0e087601d077c84fe2542aa6caed113f0981d78032a3ac97c93`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl
-mirror: doc/06_spec/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 25 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'selects self hosted Simple and records launcher provenance' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bounds current-source kernel admission and preserves the native cache' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl:143:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses dynamic scanout and three correlated QMP captures' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,11 +1,8 @@
 # Audit public Simple API names for verbose naming patterns.
 
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_exit(code: i32) -> void
 
+use std.io.{exit_i32, file_read_text, file_write, process_run}
+use std.sffi.system.{args_get}
 struct NamingConfig:
     root: text
     lib_root: text
@@ -103,13 +100,13 @@ fn parse_args(args: [text]) -> NamingConfig:
 
 fn list_spl_files(lib_root: text) -> [text]:
     val command = "if [ -e " + shell_quote(lib_root) + " ]; then find " + shell_quote(lib_root) + " -type f -name '*.spl' | sort; fi"
-    val result = rt_process_run("/bin/sh", ["-c", command])
+    val result = process_run("/bin/sh", ["-c", command])
     if result.2 != 0:
         print("Naming Consistency Audit")
         print("========================")
         print("find failed:")
         print(result.1)
-        rt_exit(1)
+        exit_i32(1)
     var files: [text] = []
     for raw in result.0.split("\n"):
         val path = raw.trim()
@@ -119,7 +116,7 @@ fn list_spl_files(lib_root: text) -> [text]:
 
 fn list_dirs(path: text, depth: i64) -> [text]:
     val command = "if [ -e " + shell_quote(path) + " ]; then find " + shell_quote(path) + " -mindepth " + depth.to_string() + " -maxdepth " + depth.to_string() + " -type d | sort; fi"
-    val result = rt_process_run("/bin/sh", ["-c", command])
+    val result = process_run("/bin/sh", ["-c", command])
     if result.2 != 0:
         return []
     var dirs: [text] = []
@@ -182,7 +179,7 @@ fn hit(code: text, file: text, line: i64, current: text, suggested: text, messag
 fn check_n001(files: [text], root: text) -> [NamingHit]:
     var hits: [NamingHit] = []
     for path in files:
-        val source = rt_file_read_text(path) ?? ""
+        val source = file_read_text(path) ?? ""
         val lines = source.split("\n")
         var idx = 0
         while idx < lines.len():
@@ -235,7 +232,7 @@ fn check_n003(files: [text], root: text) -> [NamingHit]:
     var duplicates: [text] = []
 
     for path in files:
-        val source = rt_file_read_text(path) ?? ""
+        val source = file_read_text(path) ?? ""
         val lines = source.split("\n")
         var idx = 0
         while idx < lines.len():
@@ -275,7 +272,7 @@ fn check_n003(files: [text], root: text) -> [NamingHit]:
 fn check_n004(files: [text], root: text) -> [NamingHit]:
     var hits: [NamingHit] = []
     for path in files:
-        val source = rt_file_read_text(path) ?? ""
+        val source = file_read_text(path) ?? ""
         val lines = source.split("\n")
         var idx = 0
         while idx < lines.len():
@@ -340,7 +337,7 @@ fn write_fix_suggestions(path: text, hits: [NamingHit]):
         body = body + hit_to_json(hits[i])
         i = i + 1
     body = body + "\n  ]\n}\n"
-    val ok = rt_file_write_text(path, body)
+    val ok = file_write(path, body)
     if ok:
         print("Fix suggestions written to: " + path)
     else:
@@ -355,9 +352,9 @@ fn baseline_status(current: i64, baseline: i64) -> text:
         return " [IMPROVED]"
     ""
 
-val config = parse_args(normalize_args(rt_cli_get_args()))
+val config = parse_args(normalize_args(args_get()))
 val files = list_spl_files(config.lib_root)
-val baseline_source = rt_file_read_text(config.baseline_path) ?? ""
+val baseline_source = file_read_text(config.baseline_path) ?? ""
 
 val n001 = check_n001(files, config.root)
 val n002 = check_n002(config.lib_root, config.root)
@@ -427,5 +424,5 @@ if config.fix_suggestions_path != "":
     write_fix_suggestions(config.fix_suggestions_path, all_hits)
 
 if baseline_violations.len() > 0:
-    rt_exit(1)
-rt_exit(0)
+    exit_i32(1)
+exit_i32(0)

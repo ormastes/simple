@@ -51,16 +51,6 @@ historical evidence only.
 
 ## Executive Finding
 
-> **STALE IN PART — read with the 2026-07-27 audit.** The findings below are
-> accurate as of 2026-07-18 but the generated-core lane has since moved. The
-> pure-Simple `vhdl_gen` generator now emits all six rv32/rv64 variants
-> byte-identical to goldens, and the KV260 has booted SimpleOS from
-> generated-core bitstreams — so "emits empty VHDL CPU architectures and
-> testbenches that report PASS without executing instructions" no longer
-> describes the current generated-core path. The privilege/MMU/PMP gaps below
-> **do** still hold. Current state, with five blockers re-verified in-tree:
-> [`../domain/riscv_gen2_production_audit_2026-07-27.md`](../domain/riscv_gen2_production_audit_2026-07-27.md).
-
 The requested end state is not implemented.
 
 - Simple contains real behavioral RV32 and RV64 CPU/MMU/SoC models and a real
@@ -243,51 +233,3 @@ models, VHDL backend, manifests, and board wrappers. It removes the parallel
 empty/string-emitted CPU path and integrates one architecture capability at a
 time through the real compiler. An external core such as VexRiscv can remain a
 differential oracle, but cannot satisfy the final “Simple-generated CPU” row.
-
-<!-- codex-research -->
-## 2026-07-24 Stage4 VHDL Metadata Transport Analysis
-
-The canonical RV32 probe built by the pure-Simple compiler reached VHDL catalog
-construction with 139 metadata row identities intact, including exact
-`lib.hardware.rv32i_rtl.protected_entry` rows for
-`core32_protected_product_entry`, `core32_protected_clocked_entry`, and
-`core32_product_cycle`, but still reported no hardware entry. This rules out
-AST capture and `CompileContext` row-array loss: the driver only publishes rows
-after `parse_vhdl_hardware_attrs(...).is_hardware` is true.
-
-The remaining transport record still mixed ABI-sensitive `bool` and enum
-values with text and arrays. This repeats the repository's documented Stage3
-aggregate/enum-payload failure class in
-`doc/08_tracking/bug/stage3_freestanding_struct_by_value_corrupts_pmm_2026-07-11.md`.
-It also carried a redundant `is_hardware` value even though row presence already
-means `@hardware` in both AST and HIR producers.
-
-Selected implementation contract:
-
-- a sidecar row exists only for a hardware function, so the catalog restores
-  `is_hardware = true` from row presence;
-- all remaining flags and enum variants cross the Stage4 boundary as validated
-  `i64` values;
-- generic and return metadata remain parallel text arrays with strict length
-  checks;
-- duplicate exact/normalized identities fail closed;
-- nested compiler metadata is reconstructed only inside the catalog;
-- trace mode records the primitive row flags, match result, root membership,
-  and recovered hardware classification.
-
-<!-- codex-research 2026-07-24 -->
-## Current K26 DDR Reachability
-
-`generate_soc_top_vhdl_rv64_external_ddr()` exposes the canonical
-`0x80000000..0x87ffffff` window as a 64-bit Wishbone master, but the K26
-generator still instantiates the internal-RAM `soc_top_rv64`. The Vivado build
-has no Zynq PS block design, so no generated DDR signal reaches
-`S_AXI_HP0_FPD`.
-
-The prior `generate_axi_hp_bridge_sv()` is an unused VexRiscv AXI width adapter,
-not a Wishbone bridge; its Tcl names an `M_AXI` interface that the scalar RTL
-ports do not define. A new Simple-emitted one-outstanding WB64-to-AXI-HP bridge
-now supplies aligned single beats, independent AW/W backpressure, both
-128-bit lanes, error propagation, and release-before-reaccept behavior. It
-remains unqualified and disconnected until the generated external-DDR top is
-instantiated inside a PS/SmartConnect block design with initialized DDR.

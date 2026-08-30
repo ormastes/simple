@@ -1,8 +1,5 @@
 # Bootstrap MIR: string interpolation `{expr}` printed literally, not evaluated
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 **Date:** 2026-07-11 · **Status:** RESOLVED (root-cause gate fixed) 2026-07-17 — see
 "Fix landed" below. One unrelated pre-existing blocker remains for full E2E
 verification (documented, not fixed here — out of scope).
@@ -22,27 +19,6 @@ already built `interps` correctly by the time HIR lowering runs, regardless of
 when `interps.?` is true. Confirmed via `SIMPLE_BOOTSTRAP=1 native-build`
 debug trace (`eprint` instrumentation, since removed) that
 `lower_interpolation_list` is now invoked instead of being skipped.
-
-**Evidence correction 2026-08-01 — the bootstrap-env trace does not discriminate;
-the fix still stands.** The guard above is `interps.?`, and the confirming debug
-trace was taken *under `SIMPLE_BOOTSTRAP=1`*. Under exactly that env, `.?` (the
-TryOperator) has no native lowering and its hard error is downgraded to a
-warning, so `opt.?` yields the **nil sentinel `3`, which tests as TRUE** — see
-`doc/08_tracking/bug/native_emit_silent_empty_binary_2026-08-01.md` ("nil-receiver
-SIGILL — root cause"), where this same mechanism made every function look
-manifest-carrying. A trace showing `lower_interpolation_list` being invoked under
-`SIMPLE_BOOTSTRAP=1` is therefore consistent with **both** "the fix works" and
-"`interps.?` was unconditionally true regardless of `interps`". That one line of
-evidence falls.
-
-**What survives:** the fix itself (removing the branch that unconditionally wiped
-`hir_interps` to `nil`) and its conclusion are unaffected — the reasoning is
-source-level and the non-bootstrap confirmation is independent
-(`native-smoke-matrix.shs` 15/15, including `string_interp`, on the default
-non-bootstrap `native-build` path). Nothing here is retracted. To close the gap,
-re-take the trace **without** `SIMPLE_BOOTSTRAP=1`, or replace the `.?` guard
-with an `if val`-style presence check as was done for the five sites in
-`declaration_lowering.spl` / `compiler_sffi.spl`.
 
 **Verification caveat:** a *separate, pre-existing, unrelated* regression
 blocks full end-to-end binary+output verification under

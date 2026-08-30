@@ -2,14 +2,23 @@
 
 > Tests covering SFFI font liveness, font atlas composite program version, font atlas dependency generation, shared font renderer fallbacks.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 49 | 49 | 0 | 0 |
+Forty unit scenarios cover the canonical transient `FontRenderer` material.
+Architecture excludes producer-owned GUI/Web/WM/Draw IR/Engine2D/Engine3D
+atlas caches; this unit manual covers the renderer contract itself.
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Font Renderer Specification
+1. Load a live selected face and reject missing SFFI/font state.
+2. Prepare bitmap, vector, and shaped runs through one CPU rasterizer path;
+   forged environment glyph pixels must not change transient batch material.
+3. Accept atlas-composite program v1 with the identity transform.
+4. Report an unknown program version or nonidentity transform as unsupported
+   and keep their material identities distinct from the accepted v1/identity
+   batch.
+5. Prove face generation, configuration identity, glyph cache hits/misses,
+   dirty rectangles, fallback, shaping, and browser-facing material remain
+   coherent.
 
 ## Scenarios
 

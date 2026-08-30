@@ -1505,6 +1505,18 @@ mod imported_module_ast_memo_tests {
             "a failed import must be memoized, not retried per visit"
         );
 
+        std::fs::write(&m, "fn broken(\n").expect("mutate module");
+        crate::interpreter::clear_module_cache_selective();
+        assert!(parsed_imported_module(&m).is_none(), "edited module must be reparsed");
+
+        std::fs::remove_file(&m).expect("delete module");
+        crate::interpreter::clear_module_cache_selective();
+        assert!(parsed_imported_module(&m).is_none(), "deleted module must stay absent");
+
+        std::fs::write(&m, "pub struct Recreated:\n    id: i64\n").expect("recreate module");
+        crate::interpreter::clear_module_cache_selective();
+        assert!(parsed_imported_module(&m).is_some(), "recreated module must be reparsed");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

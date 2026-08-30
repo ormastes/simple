@@ -1,0 +1,157 @@
+# codex-system-test
+# @cover src/lib/common/spec/scenario_protocol_evidence.spl 80%
+"""
+# TLS Record Protocol Evidence Table
+
+## Overview
+
+Uses the production TLS 1.2 record layout owned by
+`src/os/tls12/tls12_record.spl`: content type, protocol version, big-endian
+fragment length, then fragment bytes. Exact wire bytes remain the primary
+oracle; typed rows make the important fields reviewable.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Run this spec and compare the exact encoded TLS record bytes with the typed
+content-type, version, length, and payload rows. Invalid masks, overlaps, and
+out-of-range fields must fail validation.
+"""
+
+use std.spec.*
+use std.common.spec.scenario_protocol_evidence.{
+    ScenarioProtocolFieldEvidence,
+    scenario_protocol_field_evidence_validate,
+    scenario_protocol_evidence_validate
+}
+use os.tls12.tls12_record.{TlsRecord12, encode_record}
+use std.spec.scenario_evidence_manifest_io.{
+    publish_scenario_evidence_status
+}
+
+fn protocol_field(
+    byte_offset: i64,
+    byte_length: i64,
+    bit_offset: i64,
+    bit_width: i64,
+    mask: text,
+    name: text,
+    actual: text,
+    expected: text,
+    importance: text
+) -> ScenarioProtocolFieldEvidence:
+    ScenarioProtocolFieldEvidence(
+        byte_offset: byte_offset,
+        byte_length: byte_length,
+        bit_offset: bit_offset,
+        bit_width: bit_width,
+        mask: mask,
+        endianness: "network",
+        name: name,
+        actual: actual,
+        expected: expected,
+        status: "pass",
+        importance: importance,
+        note: "TLS record header raw-byte range"
+    )
+
+describe "REQ-EVS-011: typed TLS protocol evidence":
+    it "keeps exact TLS wire bytes primary and publishes typed field rows":
+        step("Capture the feature evidence")
+        val wire = encode_record(TlsRecord12(
+            content_type: 0x17u8,
+            version_major: 0x03u8,
+            version_minor: 0x03u8,
+            fragment: [0xCAu8, 0xFEu8]
+        ))
+        expect(wire).to_equal([
+            0x17u8, 0x03u8, 0x03u8, 0x00u8, 0x02u8, 0xCAu8, 0xFEu8
+        ])
+
+        step("Verify the structured evidence")
+        val fields = [
+            protocol_field(0, 1, 0, 8, "0xff", "content_type", "0x17", "0x17", "critical"),
+            protocol_field(1, 2, 0, 16, "0xffff", "legacy_version", "0x0303", "0x0303", "important"),
+            protocol_field(3, 2, 0, 16, "0xffff", "fragment_length", "2", "2", "supporting")
+        ]
+        val result = scenario_protocol_evidence_validate(fields)
+        expect(result).to_equal("ok")
+
+        step("Render the evidence for review")
+        expect(fields[0].name).to_equal("content_type")
+        expect(fields[0].importance).to_equal("critical")
+        expect(fields[1].importance).to_equal("important")
+        expect(fields[2].endianness).to_equal("network")
+
+        step("Publish the showcase link")
+        expect(fields.len()).to_equal(3)
+        val publication = publish_scenario_evidence_status(
+            "protocol.crypto.fields",
+            ["REQ-EVS-011"],
+            "test/03_system/app/testing/feature/protocol_evidence_table_spec.spl",
+            "contract",
+            "typed wire evidence verified; artifact capture not configured",
+            "host-interpreter",
+            "tls12-record",
+            "bin/simple test test/03_system/app/testing/feature/" +
+            "protocol_evidence_table_spec.spl --mode=interpreter"
+        ).unwrap()
+        expect(publication).to_equal(
+            "build/test-artifacts/03_system/app/testing/feature/" +
+            "protocol_evidence_table/evidence.sdn"
+        )
+
+    it "rejects overlapping typed field rows":
+        step("Capture the feature evidence")
+        val fields = [
+            protocol_field(1, 2, 0, 16, "0xffff", "legacy_version", "0x0303", "0x0303", "critical"),
+            protocol_field(2, 1, 0, 8, "0xff", "version_minor", "0x03", "0x03", "important")
+        ]
+
+        step("Verify the structured evidence")
+        val result = scenario_protocol_evidence_validate(fields)
+        expect(result).to_equal("overlapping_fields")
+
+        step("Render the evidence for review")
+        expect(fields[0].byte_length).to_equal(2)
+
+        step("Publish the showcase link")
+        expect(fields[1].byte_offset).to_equal(2)
+
+    it "rejects a bit field outside its declared byte range":
+        step("Capture the feature evidence")
+        val field = protocol_field(
+            0, 1, 7, 2, "0x03", "content_type_overflow",
+            "0x03", "0x03", "critical"
+        )
+
+        step("Verify the structured evidence")
+        val result = scenario_protocol_field_evidence_validate(field)
+        expect(result).to_equal("invalid_bit_width")
+
+        step("Render the evidence for review")
+        expect(field.bit_offset).to_equal(7)
+
+        step("Publish the showcase link")
+        expect(field.bit_width).to_equal(2)
+
+    it "rejects mask metadata outside the required hexadecimal form":
+        step("Capture the feature evidence")
+        val field = protocol_field(
+            0, 1, 0, 8, "0b11111111", "content_type",
+            "0x17", "0x17", "important"
+        )
+
+        step("Verify the structured evidence")
+        val result = scenario_protocol_field_evidence_validate(field)
+        expect(result).to_equal("invalid_mask")
+
+        step("Render the evidence for review")
+        expect(field.mask).to_equal("0b11111111")
+
+        step("Publish the showcase link")
+        expect(field.importance).to_equal("important")

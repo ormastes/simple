@@ -1,7 +1,6 @@
 # Examples-check invalid options could report false success — 2026-07-23
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** SOURCE FIXED / FOCUSED BOOTSTRAP CONTRACT PASS / PURE-SIMPLE QUALIFICATION PENDING
 
 ## Reproduction
 

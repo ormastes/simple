@@ -27,7 +27,20 @@ Selected `<menu>` UA list spacing through Web semantics, Draw IR, and Engine2D.
 
 Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
 
-## Scenarios
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
 
 ### Production menu element rendering
 
@@ -56,8 +69,16 @@ Reproduction: this block contains the complete executable scenario source.
 step("should lower menu UA list spacing through Draw IR to pixels")
 val html = _menu_html()
 
-step("Parse menu as a body child")
-_check_menu_semantics(html)
+fn _check_menu_semantics(html: text):
+    val root = html_tree_builder_build(html)
+    val identity_index = system_dom_identity_index(root)
+    val menu_path = be_dom_path_for_route(root, identity_index, system_dom_route(identity_index, "menu"))
+    val body_path = be_dom_path_for_route(root, identity_index, system_dom_route(identity_index, "body"))
+    expect(menu_path.len()).to_be_greater_than(1)
+    expect(be_dom_get_tag(menu_path[menu_path.len() - 1])).to_equal("menu")
+    expect(menu_path[menu_path.len() - 2].node_id).to_equal(
+        body_path[body_path.len() - 1].node_id
+    )
 
 step("Apply selected menu user-agent list spacing")
 val result = simple_web_layout_render_html_draw_ir_result(

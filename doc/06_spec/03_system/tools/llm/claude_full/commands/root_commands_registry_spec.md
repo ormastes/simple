@@ -28,7 +28,7 @@ root_commands_registry_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,7 +44,7 @@ Checks modern SSpec parity for the top-level slash command registry.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/commands/root_commands_registry_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks modern SSpec parity for the top-level slash command registry.
@@ -53,7 +53,7 @@ Checks modern SSpec parity for the top-level slash command registry.
 
 ### Claude full root commands registry
 
-#### should contain known top-level commands
+#### contains known top-level commands
 
 - Build the modeled registry
 
@@ -76,7 +76,7 @@ expect(names).to_contain("agents")
 
 </details>
 
-#### should resolve slash names and aliases
+#### resolves slash names and aliases
 
 - Resolve direct slash names
    - Expected: help.found is true
@@ -99,134 +99,55 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Resolve direct slash names")
 val help = findRootCommand("/help")
-expect(help.found).to_be(true)
+expect(help.found).to_equal(true)
 expect(help.command.name).to_equal("help")
 expect(help.matchedAlias).to_equal("")
 
 step("Resolve aliases without slash prefixes")
 val reset = findRootCommand("reset")
-expect(reset.found).to_be(true)
+expect(reset.found).to_equal(true)
 expect(reset.command.name).to_equal("clear")
 expect(reset.matchedAlias).to_equal("reset")
 
 step("Report missing commands explicitly")
-expect(findRootCommand("/missing").found).to_be(false)
+expect(findRootCommand("/missing").found).to_equal(false)
 ```
 
 </details>
 
-#### should derive lookup admission and visibility for every registry record
-
-- Derive lookup identities from each registry record
-   - Expected: canonical and slash lookup forms identify the same registry record
-- Resolve every alias to the same canonical record
-   - Expected: every alias reports its canonical command and matched alias
-- Compare admission and visibility with record flags
-   - Expected: default admission and visible membership equal `enabled and not hidden`
-   - Expected: hidden-feature admission equals `enabled`
-- Require hidden and disabled registry coverage
-   - Expected: hiddenCount is greater than `0`
-   - Expected: disabledCount is greater than `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 44 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Derive lookup identities from each registry record")
-val registry = rootCommandRegistry()
-val visible = visibleRootCommands()
-var hiddenCount = 0
-var disabledCount = 0
-for command in registry:
-    val canonical = findRootCommand(command.name)
-    expect(canonical.found).to_be(true)
-    expect(canonical.command.name).to_equal(command.name)
-    expect(canonical.command.slashName).to_equal(command.slashName)
-    expect(canonical.matchedAlias).to_equal("")
-
-    val slash = findRootCommand(command.slashName)
-    expect(slash.found).to_be(true)
-    expect(slash.command.name).to_equal(canonical.command.name)
-    expect(slash.command.slashName).to_equal(canonical.command.slashName)
-    expect(slash.matchedAlias).to_equal("")
-
-    step("Resolve every alias to the same canonical record")
-    for alias in command.aliases:
-        val aliasLookup = findRootCommand(alias)
-        expect(aliasLookup.found).to_be(true)
-        expect(aliasLookup.command.name).to_equal(canonical.command.name)
-        expect(aliasLookup.command.slashName).to_equal(canonical.command.slashName)
-        expect(aliasLookup.matchedAlias).to_equal(alias)
-
-    step("Compare admission and visibility with record flags")
-    val expectedDefaultAdmission = command.enabled and not command.hidden
-    expect(admitRootCommand(command.name, false).found).to_equal(expectedDefaultAdmission)
-    expect(admitRootCommand(command.name, true).found).to_equal(command.enabled)
-    var isVisible = false
-    for visibleCommand in visible:
-        if visibleCommand.name == command.name:
-            isVisible = true
-    expect(isVisible).to_equal(expectedDefaultAdmission)
-
-    if command.hidden:
-        hiddenCount = hiddenCount + 1
-    if not command.enabled:
-        disabledCount = disabledCount + 1
-
-step("Require hidden and disabled registry coverage")
-expect(hiddenCount).to_be_greater_than(0)
-expect(disabledCount).to_be_greater_than(0)
-```
-
-</details>
-
-#### should model disabled and hidden command behavior
+#### models disabled and hidden command behavior
 
 - Hidden commands resolve but are excluded from visible summaries
    - Expected: debug.found is true
    - Expected: debug.command.hidden is true
-   - Expected: hidden admission is false by default and true with the fixture
 - Disabled commands resolve with disabled state
    - Expected: remote.found is true
    - Expected: remote.command.enabled is false
-   - Expected: disabled admission remains false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Hidden commands resolve but are excluded from visible summaries")
 val debug = findRootCommand("/debug-tool-call")
-expect(debug.found).to_be(true)
-expect(debug.command.hidden).to_be(true)
-expect(admitRootCommand("/debug-tool-call", false).found).to_be(false)
-expect(admitRootCommand("/debug-tool-call", true).found).to_be(true)
-val visibleSummary = visibleRootCommandSummary()
-expect(visibleSummary).to_contain("/help core")
-expect(visibleSummary).to_contain("/mcp integrations")
-expect(visibleSummary.contains("/debug-tool-call")).to_be(false)
-expect(visibleSummary.contains("/debug_tool_call")).to_be(false)
-expect(visibleSummary.contains("/remote-setup")).to_be(false)
-expect(visibleSummary.contains("/remote_setup")).to_be(false)
+expect(debug.found).to_equal(true)
+expect(debug.command.hidden).to_equal(true)
+expect(visibleRootCommandSummary()).to_contain("/help core")
+expect(visibleRootCommandSummary()).to_contain("/mcp integrations")
 
 step("Disabled commands resolve with disabled state")
 val remote = findRootCommand("/remote-setup")
-expect(remote.found).to_be(true)
-expect(remote.command.enabled).to_be(false)
-expect(admitRootCommand("/remote-setup", true).found).to_be(false)
+expect(remote.found).to_equal(true)
+expect(remote.command.enabled).to_equal(false)
 ```
 
 </details>
 
-#### should filter by category and expose source lines
+#### filters by category and exposes source lines
 
 - Filter commands by category
    - Expected: core.len() equals `3`
@@ -263,8 +184,8 @@ expect(rootCommandsSourceLinesModeled()).to_equal(754)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

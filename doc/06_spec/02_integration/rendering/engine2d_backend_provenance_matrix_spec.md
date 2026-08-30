@@ -1,4 +1,4 @@
-# Engine2D Backend Provenance Matrix
+# Engine2D Backend Provenance Matrix Specification
 
 > Keeps requested, actual, native, translated, emulated, and unavailable backend
 
@@ -43,6 +43,16 @@ states honest through the real Engine2D facade.
    - Expected: metal_readback.pixels equals `directx_pixels`
    - Expected: metal_readback.checksum equals `directx_checksum`
 
+#### keeps native Windows and macOS checkpoints honest on Linux
+
+On Linux, the DirectX request may only report
+`directx-software-emulation`; strict Metal must remain unavailable and retain
+the requested backend identity. Other hosts retain a nonempty platform name.
+
+#### rejects CPU fallback from a backend-specific pass
+
+An unknown strict backend must return a typed diagnostic whose requested name
+is unchanged and whose selected name is not `cpu`.
 
 <details>
 <summary>Executable SSpec</summary>
@@ -62,10 +72,7 @@ match Engine2D.create_requested_backend(8, 4, "directx-on-vulkan"):
         expect(directx.backend_name()).to_equal("directx-on-vulkan")
         directx.clear(0xff102030u32)
         directx.draw_rect_filled(2, 1, 4, 2, 0xffa0b0c0u32)
-        # Read BEFORE present(): the dirty-frame path downloads pixels
-        # straight from the device buffer (source=device_readback);
-        # present() refreshes the host cache and a later read would be
-        # honestly labeled host_cache_after_device_copy instead.
+        directx.present()
         val directx_readback = directx.read_pixels_with_source()
         expect(directx_readback.source).to_equal("device_readback")
         expect(directx_readback.backend_handle).to_be_greater_than(0)
@@ -81,8 +88,7 @@ match Engine2D.create_requested_backend(8, 4, "metal-on-vulkan"):
         expect(metal.backend_name()).to_equal("metal-on-vulkan")
         metal.clear(0xff102030u32)
         metal.draw_rect_filled(2, 1, 4, 2, 0xffa0b0c0u32)
-        # Read BEFORE present() — same device_readback provenance rule
-        # as the DirectX lane above.
+        metal.present()
         val metal_readback = metal.read_pixels_with_source()
         expect(metal_readback.source).to_equal("device_readback")
         expect(metal_readback.backend_handle).to_be_greater_than(0)
@@ -93,7 +99,6 @@ match Engine2D.create_requested_backend(8, 4, "metal-on-vulkan"):
             expect(metal_readback.pixels).to_equal(directx_pixels)
             expect(metal_readback.checksum).to_equal(directx_checksum)
         metal.shutdown()
-```
 
 </details>
 
@@ -129,7 +134,6 @@ if detect_os() == "linux":
     expect(metal.unwrap_err().requested_name).to_equal("metal")
 else:
     expect(detect_os().len()).to_be_greater_than(0)
-```
 
 </details>
 
@@ -163,10 +167,32 @@ expect(diagnostic.requested_name).to_equal("does-not-exist")
 expect(diagnostic.selected_name == "cpu").to_be(false)
 ```
 
+
+Reproduction: the executable source is
+`test/02_integration/rendering/engine2d_backend_provenance_matrix_spec.spl`.
+It uses only `Engine2D.create_requested_backend`,
+`Engine2D.create_with_backend_strict`, draw/present, and
+`read_pixels_with_source`; no fixture backend or middle mock is involved.
+
 </details>
 
+## At a Glance
 
-</details>
+| Field | Value |
+|-------|-------|
+| Category | Integration |
+| Status | Active |
+| Source | `test/02_integration/rendering/engine2d_backend_provenance_matrix_spec.spl` |
+| Updated | 2026-07-27 |
+| Generator | Manual synchronization while the self-hosted checker crash is open |
+
+## Coverage Boundary
+
+Physical NVIDIA/AMD/Intel versus lavapipe qualification requires separate
+ICD-selected external runs and is tracked in the external-host TODO. This
+integration spec validates translation, native/emulated naming, strict
+unavailability, and fallback rejection without pretending one process ran two
+devices.
 
 ## Scenario Summary
 
@@ -177,7 +203,6 @@ expect(diagnostic.selected_name == "cpu").to_be(false)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
 
 </details>
 

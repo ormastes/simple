@@ -23,6 +23,7 @@
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 `substitute_expr` used to substitute only an expression's OWN recorded type and
 never recursed into sub-expressions, and `substitute_function` never touched
 `func.body` at all. A specialization therefore had a CONCRETE signature and a
@@ -45,6 +46,7 @@ array elem type `T`, and the `T`-typed element expressions) and the count of
 surviving type params was non-zero. After it, it is zero while the signature
 assertions still hold.
 
+```
 ## Scenarios
 
 ### HIR monomorphization body substitution (#158 Phase B hole)

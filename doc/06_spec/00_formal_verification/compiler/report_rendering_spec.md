@@ -2,6 +2,30 @@
 
 > Tests that the VerificationReport renders correctly at all four levels (Project, File, Symbol, Theorem) and that admitted/trusted states are never confused with verified.
 
+<!-- sdn-diagram:id=report_rendering_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=report_rendering_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+report_rendering_spec -> std
+report_rendering_spec -> verification
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=report_rendering_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -22,7 +46,7 @@ Tests that the VerificationReport renders correctly at all four levels (Project,
 | Difficulty | 2/5 |
 | Status | In Progress |
 | Source | `test/00_formal_verification/compiler/report_rendering_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -37,22 +61,13 @@ never confused with verified.
 
 #### renders project summary with state counts
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- renders project summary with state counts
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("renders project summary with state counts")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "Test Report", "project", units, "2026-04-04T00:00:00Z"
@@ -67,18 +82,13 @@ expect(output).to_contain("failed")
 
 #### renders debt warning when admitted units exist
 
-- renders debt warning when admitted units exist
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("renders debt warning when admitted units exist")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "Test Report", "project", units, "2026-04-04T00:00:00Z"
@@ -92,18 +102,13 @@ expect(output).to_contain("sorry/assume")
 
 #### renders 0 total for empty units
 
-- renders 0 total for empty units
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("renders 0 total for empty units")
 val units = ProofUnitSet.empty()
 val report = VerificationReport.from_units(
     "Empty Report", "project", units, "2026-04-04T00:00:00Z"
@@ -119,18 +124,13 @@ expect(output).to_contain("Total: 0 proof units")
 
 #### shows per-file states
 
-- shows per-file states
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("shows per-file states")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "File Report", "project", units, "2026-04-04T00:00:00Z"
@@ -146,18 +146,13 @@ expect(output).to_contain("src/c.spl")
 
 #### shows admitted count prominently per file
 
-- shows admitted count prominently per file
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("shows admitted count prominently per file")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "File Report", "project", units, "2026-04-04T00:00:00Z"
@@ -171,18 +166,13 @@ expect(output).to_contain("sorry")
 
 #### shows trusted count prominently per file
 
-- shows trusted count prominently per file
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("shows trusted count prominently per file")
 val units = build_trusted_unit_set()
 val report = VerificationReport.from_units(
     "Trust Report", "project", units, "2026-04-04T00:00:00Z"
@@ -195,18 +185,13 @@ expect(output).to_contain("assume")
 
 #### never shows admitted as Verified
 
-- never shows admitted as Verified
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("never shows admitted as Verified")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "File Report", "project", units, "2026-04-04T00:00:00Z"
@@ -221,18 +206,13 @@ expect(output).to_contain("Admitted (sorry)")
 
 #### never shows trusted as Verified
 
-- never shows trusted as Verified
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("never shows trusted as Verified")
 val units = build_trusted_unit_set()
 val report = VerificationReport.from_units(
     "Trust Report", "project", units, "2026-04-04T00:00:00Z"
@@ -247,18 +227,13 @@ expect(output).to_contain("Trusted (assume)")
 
 #### shows per-symbol summaries
 
-- shows per-symbol summaries
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("shows per-symbol summaries")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "Symbol Report", "project", units, "2026-04-04T00:00:00Z"
@@ -274,18 +249,13 @@ expect(output).to_contain("fn_admitted")
 
 #### includes debt info in symbol summary
 
-- includes debt info in symbol summary
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("includes debt info in symbol summary")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "Symbol Report", "project", units, "2026-04-04T00:00:00Z"
@@ -300,18 +270,13 @@ expect(output).to_contain("sorry")
 
 #### shows individual theorem detail
 
-- shows individual theorem detail
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("shows individual theorem detail")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "Theorem Report", "project", units, "2026-04-04T00:00:00Z"
@@ -327,18 +292,16 @@ expect(output).to_contain("lean:")
 
 #### separates environment errors from proof errors
 
-- separates environment errors from proof errors
+1. error message=Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("separates environment errors from proof errors")
 val units = build_mixed_unit_set()
 var report = VerificationReport.from_units(
     "Theorem Report", "project", units, "2026-04-04T00:00:00Z"
@@ -365,18 +328,13 @@ expect(output).to_contain("ENV ERROR")
 
 #### produces parseable SDN format
 
-- produces parseable SDN format
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("produces parseable SDN format")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "SDN Report", "project", units, "2026-04-04T00:00:00Z"
@@ -392,18 +350,13 @@ expect(output).to_contain("theorems {")
 
 #### includes state counts in SDN
 
-- includes state counts in SDN
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("includes state counts in SDN")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "SDN Report", "project", units, "2026-04-04T00:00:00Z"
@@ -419,18 +372,13 @@ expect(output).to_contain("trusted:")
 
 #### includes file entries in SDN
 
-- includes file entries in SDN
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("includes file entries in SDN")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "SDN Report", "project", units, "2026-04-04T00:00:00Z"
@@ -444,18 +392,13 @@ expect(output).to_contain("path: \"src/a.spl\"")
 
 #### SDN never labels admitted as verified
 
-- SDN never labels admitted as verified
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("SDN never labels admitted as verified")
 val units = build_mixed_unit_set()
 val report = VerificationReport.from_units(
     "SDN Report", "project", units, "2026-04-04T00:00:00Z"
@@ -469,18 +412,13 @@ expect(output).to_contain("state: \"admitted\"")
 
 #### handles empty units in SDN
 
-- handles empty units in SDN
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("handles empty units in SDN")
 val units = ProofUnitSet.empty()
 val report = VerificationReport.from_units(
     "Empty SDN", "project", units, "2026-04-04T00:00:00Z"
@@ -495,22 +433,13 @@ expect(output).to_contain("total: 0")
 
 #### converts to string
 
-- converts to string
-   - Expected: ReportLevel.Project.to_string() equals `project`
-   - Expected: ReportLevel.File.to_string() equals `file`
-   - Expected: ReportLevel.Symbol.to_string() equals `symbol`
-   - Expected: ReportLevel.Theorem.to_string() equals `theorem`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("converts to string")
 expect(ReportLevel.Project.to_string()).to_equal("project")
 expect(ReportLevel.File.to_string()).to_equal("file")
 expect(ReportLevel.Symbol.to_string()).to_equal("symbol")
@@ -531,51 +460,3 @@ expect(ReportLevel.Theorem.to_string()).to_equal("theorem")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-FORMALVERIFI`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `43f404c9e11e81c9c0de0aebebfd778da06ab0b265626656a85aa88e0bd701c6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `43f404c9e11e81c9c0de0aebebfd778da06ab0b265626656a85aa88e0bd701c6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `43f404c9e11e81c9c0de0aebebfd778da06ab0b265626656a85aa88e0bd701c6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/00_formal_verification/compiler/report_rendering_spec.spl
-mirror: doc/06_spec/00_formal_verification/compiler/report_rendering_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/00_formal_verification/compiler/report_rendering_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/00_formal_verification/compiler/report_rendering_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/00_formal_verification/compiler/report_rendering_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders project summary with state counts' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/00_formal_verification/compiler/report_rendering_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders debt warning when admitted units exist' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/00_formal_verification/compiler/report_rendering_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders 0 total for empty units' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

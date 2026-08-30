@@ -83,3 +83,73 @@ resolve any residual callable-owner ambiguity and the profiler/global-static
 interaction. Rebuild and admit Stage 2 and run one canonical Stage-3
 continuation. The surface-freeze and nested-pattern failures are cleared; do
 not re-investigate them unless new evidence points there.
+
+## Reconfirmed 2026-08-27, and it now masks the 261/713 wall
+
+With `dynamic.spl` reverted so Stage 2 builds (see
+`sffi_out_param_capability_violation_blocks_stage2_2026-08-27.md`), the
+resulting Stage-2 binary dies EARLIER than the previously recorded wall:
+
+    [build] surface_freeze unknown/unknown step 1/6 +139641ms dt=621ms complete
+    [ERROR] phase 2 FAILED (1 recorded error(s))
+    Segmentation fault (core dumped)
+    rc=139
+
+**Zero** `ambiguous explicit callable dependency` errors and **no**
+`[build] hir N/713` line at all — it never reaches HIR. For comparison, two legs
+measured 2026-08-26 on an older tree both reached module **261/713** before
+failing.
+
+Consequence for anyone chasing the callable-dependency wall: it is currently
+**unreachable**, so a restore of that fix cannot be measured end-to-end until
+this phase-2 SEGV is fixed. The restore is content-verified only.
+
+Note the log prints `1 recorded error(s)` without the error text, then
+segfaults. The message is swallowed, which is its own defect — a phase that
+records an error should print it before dying.
+
+### Refined 2026-08-27 by a FAILED fix — the array itself is unreadable
+
+gdb names the faulting frame exactly:
+
+    Program received signal SIGSEGV
+    #0  compiler__driver__driver_types__CompileContext_dot_error_message_at ()
+    #1  compiler__driver__driver_orchestration__CompilerDriver_dot_compile ()
+    #2  compiler.driver.driver.compiler_driver_run_compile ()
+    rip 0xebe0d0 <...error_message_at+20>
+
+**The compiler crashes while REPORTING an error**, which is why the log prints
+`1 recorded error(s)` and dies without ever naming it. The underlying phase-2
+error has still never been seen.
+
+`error_message_at` is bounds-checked and looks correct:
+
+    fn error_message_at(index: i64) -> text:
+        if index < 0 or index >= self.errors.len():
+            return ""
+        self.errors[index]
+
+**Hypothesis tried and REFUTED:** that the loop in `driver_orchestration.spl:136`
+bounds on the scalar `self.ctx.error_count_value` while `error_message_at`
+bounds on `self.errors.len()`, so a desync (count=1, array empty) walked past
+the end. Fix applied: bound the walk by `self.ctx.errors.len()` and log when the
+two disagree.
+
+Result: **no change.** `Build complete: 770 compiled, 0 cached, 0 failed`, the
+new diagnostic string is present in the binary (`strings | grep -c
+'error-list desync'` = 1), and the run still ends `rc=139` — **with the new
+diagnostic line never printed.**
+
+That is the discriminating detail. The diagnostic executes BEFORE the loop and
+evaluates `self.ctx.errors.len()`. It never printed, so **`self.errors.len()`
+is itself the faulting read**. The array is not short or desynced — the field is
+unreadable at that point.
+
+**So the defect is one level down:** `CompileContext.errors` is corrupt or nil
+when phase 2 reports. A bounds fix cannot help, and neither can any change
+inside `error_message_at`. The next step is to find where the `CompileContext`
+that phase 2 reports through loses its `errors` field — the stale-snapshot /
+value-semantics class this record already names, not an indexing bug.
+
+The failed fix is deliberately NOT landed: it changes no behaviour and would
+imply the desync theory is live.

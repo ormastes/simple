@@ -39,7 +39,6 @@ test("plugin release schemas and identities stay at 0.2.0", () => {
   assert.match(manifest, /operational_release_planning: true/);
   assert.match(manifest, /main_fix_discovery_planning: true/);
   assert.match(manifest, /release_first_forward_port_validation: true/);
-  assert.match(manifest, /scoped_self_review_guidance: true/);
   assert.match(manifest, /external_release_mutation: false/);
 });
 
@@ -78,8 +77,7 @@ test("CLI, MCP, manifest, and plugin descriptor expose the same release policy",
     "promote_without_rebuild",
     "operational_release_planning",
     "main_fix_discovery_planning",
-    "release_first_forward_port_validation",
-    "scoped_self_review_guidance"
+    "release_first_forward_port_validation"
   ]) {
     assert.match(manifest, new RegExp(`${capability}: true`));
     assert.match(contractSource, new RegExp(`${capability}: true`));

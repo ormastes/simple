@@ -1,6 +1,30 @@
 # Key Update Specification
 
-> Tests covering parse_key_update, emit_key_update wire format, KeyUpdate round-trip, derive_next_traffic_secret.
+> 1. fail
+
+<!-- sdn-diagram:id=key_update_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=key_update_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+key_update_spec -> std
+key_update_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=key_update_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +41,16 @@
 
 #### returns UpdateNotRequested for byte value 0
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- returns UpdateNotRequested for byte value 0
-   - Expected: unused equals `0x00u8`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns UpdateNotRequested for byte value 0")
 val res = parse_key_update(_payload_not_requested())
 if val KeyUpdateRequest.UpdateNotRequested(unused) = res:
     expect(unused).to_equal(0x00u8)
@@ -45,19 +62,16 @@ else:
 
 #### returns UpdateRequested for byte value 1
 
-- returns UpdateRequested for byte value 1
-   - Expected: unused equals `0x00u8`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns UpdateRequested for byte value 1")
 val res = parse_key_update(_payload_requested())
 if val KeyUpdateRequest.UpdateRequested(unused) = res:
     expect(unused).to_equal(0x00u8)
@@ -69,19 +83,16 @@ else:
 
 #### returns Invalid for byte value 2
 
-- returns Invalid for byte value 2
-   - Expected: unused equals `0x02u8`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns Invalid for byte value 2")
 val res = parse_key_update(_payload_invalid())
 if val KeyUpdateRequest.Invalid(unused) = res:
     expect(unused).to_equal(0x02u8)
@@ -93,19 +104,16 @@ else:
 
 #### returns Invalid for empty payload
 
-- returns Invalid for empty payload
-   - Expected: unused equals `0x00u8`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns Invalid for empty payload")
 val res = parse_key_update(_payload_empty())
 if val KeyUpdateRequest.Invalid(unused) = res:
     expect(unused).to_equal(0x00u8)
@@ -119,19 +127,13 @@ else:
 
 #### emits exactly 5 bytes
 
-- emits exactly 5 bytes
-   - Expected: msg.len().to_u64() equals `5u64`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("emits exactly 5 bytes")
 val msg = emit_key_update(false)
 expect(msg.len().to_u64()).to_equal(5u64)
 ```
@@ -140,19 +142,13 @@ expect(msg.len().to_u64()).to_equal(5u64)
 
 #### first byte is HS_KEY_UPDATE (24 = 0x18)
 
-- first byte is HS_KEY_UPDATE (24 = 0x18)
-   - Expected: msg[0] equals `HS_KEY_UPDATE`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("first byte is HS_KEY_UPDATE (24 = 0x18)")
 val msg = emit_key_update(false)
 expect(msg[0]).to_equal(HS_KEY_UPDATE)
 ```
@@ -161,21 +157,13 @@ expect(msg[0]).to_equal(HS_KEY_UPDATE)
 
 #### length field is 0x000001 (bytes 1-3)
 
-- length field is 0x000001 (bytes 1-3)
-   - Expected: msg[1] equals `0x00u8`
-   - Expected: msg[2] equals `0x00u8`
-   - Expected: msg[3] equals `0x01u8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("length field is 0x000001 (bytes 1-3)")
 val msg = emit_key_update(false)
 expect(msg[1]).to_equal(0x00u8)
 expect(msg[2]).to_equal(0x00u8)
@@ -186,19 +174,13 @@ expect(msg[3]).to_equal(0x01u8)
 
 #### body byte is 0x00 for request_update=false
 
-- body byte is 0x00 for request_update=false
-   - Expected: msg[4] equals `0x00u8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("body byte is 0x00 for request_update=false")
 val msg = emit_key_update(false)
 expect(msg[4]).to_equal(0x00u8)
 ```
@@ -207,19 +189,13 @@ expect(msg[4]).to_equal(0x00u8)
 
 #### body byte is 0x01 for request_update=true
 
-- body byte is 0x01 for request_update=true
-   - Expected: msg[4] equals `0x01u8`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("body byte is 0x01 for request_update=true")
 val msg = emit_key_update(true)
 expect(msg[4]).to_equal(0x01u8)
 ```
@@ -230,19 +206,16 @@ expect(msg[4]).to_equal(0x01u8)
 
 #### emit(false) round-trips to UpdateNotRequested
 
-- emit(false) round-trips to UpdateNotRequested
-   - Expected: unused equals `0x00u8`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("emit(false) round-trips to UpdateNotRequested")
 val msg = emit_key_update(false)
 val body = _strip_header(msg)
 val res = parse_key_update(body)
@@ -256,19 +229,16 @@ else:
 
 #### emit(true) round-trips to UpdateRequested
 
-- emit(true) round-trips to UpdateRequested
-   - Expected: unused equals `0x00u8`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("emit(true) round-trips to UpdateRequested")
 val msg = emit_key_update(true)
 val body = _strip_header(msg)
 val res = parse_key_update(body)
@@ -284,19 +254,13 @@ else:
 
 #### SHA-256 path returns exactly 32 bytes
 
-- SHA-256 path returns exactly 32 bytes
-   - Expected: next.len().to_u64() equals `32u64`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("SHA-256 path returns exactly 32 bytes")
 val secret = _zeros_32()
 val next = derive_next_traffic_secret(secret, 32)
 expect(next.len().to_u64()).to_equal(32u64)
@@ -306,19 +270,13 @@ expect(next.len().to_u64()).to_equal(32u64)
 
 #### SHA-384 path returns exactly 48 bytes
 
-- SHA-384 path returns exactly 48 bytes
-   - Expected: next.len().to_u64() equals `48u64`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("SHA-384 path returns exactly 48 bytes")
 val secret = _zeros_48()
 val next = derive_next_traffic_secret(secret, 48)
 expect(next.len().to_u64()).to_equal(48u64)
@@ -328,21 +286,13 @@ expect(next.len().to_u64()).to_equal(48u64)
 
 #### SHA-256 path is deterministic (same input gives same output)
 
-- SHA-256 path is deterministic (same input gives same output)
-   - Expected: a.len().to_u64() equals `b.len().to_u64()`
-   - Expected: a[0] equals `b[0]`
-   - Expected: a[31] equals `b[31]`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("SHA-256 path is deterministic (same input gives same output)")
 val secret = _zeros_32()
 val a = derive_next_traffic_secret(secret, 32)
 val b = derive_next_traffic_secret(secret, 32)
@@ -355,19 +305,13 @@ expect(a[31]).to_equal(b[31])
 
 #### SHA-256 path output differs from all-zero input
 
-- SHA-256 path output differs from all-zero input
-   - Expected: _is_all_zero(next, 32u64) is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("SHA-256 path output differs from all-zero input")
 val secret = _zeros_32()
 val next = derive_next_traffic_secret(secret, 32)
 # The HKDF output is a pseudo-random function; all-zeros input won't
@@ -381,24 +325,19 @@ expect(_is_all_zero(next, 32u64)).to_equal(false)
 
 #### SHA-256 path: different secrets produce different outputs
 
-- SHA-256 path: different secrets produce different outputs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("SHA-256 path: different secrets produce different outputs")
 val s1 = _zeros_32()
 val s2 = _ones_32()
 val n1 = derive_next_traffic_secret(s1, 32)
 val n2 = derive_next_traffic_secret(s2, 32)
 # Check at least the first byte differs
-expect(n1[0]).to_not_equal(n2[0])
+expect(n1[0] == n2[0]).to_equal(false)
 ```
 
 </details>
@@ -410,12 +349,12 @@ expect(n1[0]).to_not_equal(n2[0])
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/key_update_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering parse_key_update, emit_key_update wire format, KeyUpdate round-trip, derive_next_traffic_secret.
+Tests covering:
 - parse_key_update
 - emit_key_update wire format
 - KeyUpdate round-trip
@@ -433,51 +372,3 @@ Tests covering parse_key_update, emit_key_update wire format, KeyUpdate round-tr
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `aa4a3b8c7f5707350c6002ea435a30c1c11f53d595c1aa38a31b573362ec5058`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `aa4a3b8c7f5707350c6002ea435a30c1c11f53d595c1aa38a31b573362ec5058`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `aa4a3b8c7f5707350c6002ea435a30c1c11f53d595c1aa38a31b573362ec5058`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/os/tls13/key_update_spec.spl
-mirror: doc/06_spec/01_unit/os/tls13/key_update_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/tls13/key_update_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/tls13/key_update_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/tls13/key_update_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns UpdateNotRequested for byte value 0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/tls13/key_update_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns UpdateRequested for byte value 1' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/tls13/key_update_spec.spl:113:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns Invalid for byte value 2' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

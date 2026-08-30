@@ -549,42 +549,168 @@ set. An absent plan accepts no attachments and returns the original composition
 with zero added ports. This is a pre-legalization contract, not RVFI or formal
 noninterference qualification.
 
-Compiler coverage authority uses a canonical flat-AST child-ownership layer.
-It tag-dispatches overloaded declaration, statement, expression, and match-arm
-arenas; parser and placeholder transforms preserve span-derived semantic keys.
-The compiler publishes one bounded, deduplicated zero-count inventory after the
-complete parse, while runtime probes contribute outcomes under identical keys.
+The scalar product now materializes the same boundary on its sole sequential
+retirement owner. Enabled observations become canonicalized typed top-level
+outputs and exact `retirement_owner.retire_* -> composition` bindings; the
+composition hash commits the outputs, bindings, lock receipt, and weave
+receipt. Only the checked plan+lock compile entrypoint can render an enabled
+weave. The ordinary scalar compile entrypoint remains aspect-absent and keeps
+the original netlist shape. This implementation remains unqualified until the
+focused product and VHDL/GHDL gates run with an admitted self-hosted compiler.
 
-## Canonical parcel/trap sequential lowering (2026-08-14)
+## Mission-critical scalar execution expansion
 
-The fixed parcel and trap frontend contracts remain product validators and
-typed port factories. After validation, emission constructs a child-bound
-`HwSequentialModuleDef` with the fixed plan, selected decoder entity, and the
-decoder's actual structural hash. The sole sequential serializer and graph
-owner is `render_strict_sequential_hwir`; decoder VHDL is prepended exactly
-once. The former stateful serializer/hash schema is not an alternate layer.
+The post-foundation scalar lane uses a frozen completion envelope between
+providers, trap normalization, and one sequential retirement owner. Stateless
+ALU/control providers enter through a one-entry skid; the LSU owns request and
+response identity plus its held completion. One arbitration node accepts one
+provider/decode/interrupt event, while one fault aggregator exposes every
+arbitration, skid, provider, and retirement protocol fault. Architectural order
+is generated only by the retirement owner. Child hashes, exact typed bindings,
+fanout, and top-level drivers are part of the product receipt.
 
-## Qualification evidence ownership
+M/Zmmul follows the same boundary as a separate provider lane. Its projection
+replays declarative dispatch during validation and binds configuration, provider,
+instruction, register fields, operation, operand width, RV64 W mode, and SHA-256
+identity. Zmmul cannot admit division. Iterative owners now exist; latency and
+behavior remain unqualified until generated-VHDL cycle evidence is executable.
 
-The POSIX runner owns only phase-one execution in a private staging directory:
-admitted CLI checks, measured coverage, fixed product generation, testbench
-binding, and isolated GHDL phases. The pure-Simple composer owns phase two. It
-accepts an exact-key v2 manifest, rehashes and copies every command/artifact,
-creates the previously absent final run, and writes the receipt last. Neither
-component may infer PASS from source tokens, filenames, or a GHDL marker.
+## Iterative M/Zmmul completion ownership (development status)
 
-## Related artifacts
+The scalar product now has a fourth compile-time provider class, `muldiv`.
+Its multiplier and restoring-divider implementations are concrete sequential
+HWIR modules, not combinational host-oracle substitutions. Both capture the
+frozen scalar completion envelope at dispatch and hold it atomically with the
+result until arbitration accepts it. The existing trap normalizer and sole
+retirement owner remain the only architectural commit path. M/Zmmul product
+emission uses `hwir-gen2-scalar-product-v2`; it is implemented but remains
+unqualified until the admitted self-hosted compiler can run the focused and
+GHDL gates.
 
-- Feature and NFR requirements:
-  `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md` and
-  `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
-- Parallel execution and qualification plans:
-  `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md` and
-  `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
-- Detail design: `doc/05_design/riscv_gen2_hwir_foundation.md`
-- System-scenario and receipt manuals:
-  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
-  and `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`
-- Current Stage-3 memory-lifecycle blocker:
-  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`
-- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`
+## System trap provider (development status)
+
+ECALL and EBREAK are now concrete scalar execution providers rather than
+decoder-only database rows. ECALL derives the architectural exception cause
+from the captured privilege level; EBREAK emits breakpoint cause 3. Both enter
+the registered completion skid and existing atomic trap/retirement chain, with
+all non-trap architectural effects normalized to zero. This does not yet claim
+Zicsr state, delegation, trap-vector state updates, or return instructions.
+
+## Shared scalar-I arithmetic expansion (development status)
+
+The combinational integer provider now covers the declared upper-immediate,
+comparison, shift, and RV64 word-result rows in addition to basic ADD/SUB and
+logic. It retains one monomorphized graph family: XLEN, instruction identity,
+shift width, and word mode are fixed before emission. Arithmetic right shift is
+a typed HWIR operation; VHDL converts only a bounded low shift-index slice to
+INTEGER and defines out-of-range behavior without host-width dependence.
+
+## Typed Zicsr access boundary (development status)
+
+The next scalar boundary is a stateless, monomorphized CSR access projection.
+One concrete Zicsr row and its twelve-bit CSR address are frozen by declarative
+dispatch. The graph validates current and address privilege classes, CSR-bank
+presence, read-only write exclusion, and register-source identity before it
+emits typed read/write intent. All six CSR operation forms share this graph;
+zero-source set/clear and `rd=x0` read/write suppression remain instruction
+semantics rather than runtime provider choices.
+
+The projection does not own state. A one-entry sequential CSR owner now captures
+its full completion and write intent, validates event/instruction/length/rd
+identity, holds both under backpressure, and asserts the captured write commit
+only when arbitration accepts the completion. The owner enters the existing
+trap/fault/sole-retirement chain without a second order source. Zicsr remains
+unadvertised until generated-VHDL cycle evidence runs on an admitted self-hosted
+compiler and proves pre-write value, single commit, reset, and fault behavior.
+
+## Typed accepted-effect fence boundary (development status)
+
+`FENCE` and `FENCE.I` use a separate one-entry stateful provider selected by
+exact declarative ISA identity. It captures complete event lineage and holds a
+typed ordering or instruction-stream-invalidation request until the external
+effect owner acknowledges it; only then does completion enter common
+arbitration, trap normalization, and the sole retirement owner. Reserved
+encodings and runtime illegal events produce precise illegal-instruction
+completion without issuing an effect. This prevents omission, duplication, and
+premature retirement from being disguised as a combinational no-op.
+
+## Evidence-referenced PPA pipeline planning (development status)
+
+The width, structural, resource, FSM, memory, and DSP accounting passes compose
+through one deterministic ordered pipeline receipt. Each pass consumes the
+prior pass cost state. Any structural change requires a SHA-256 reference to
+external structural-equivalence evidence; any latency delta or inserted stage
+additionally requires a retirement-equivalence evidence reference. These
+references are provenance pointers, not locally verified proof verdicts.
+Invalid counters, negative post-pass costs, and malformed references fail
+closed. The receipt deliberately sets `graph_rewrite_complete=false`: this is
+honest PPA planning, not evidence that a typed RTL rewrite or replay has run.
+
+## Declarative scalar decoder generation (development status)
+
+`RiscvScalarDecoderPlan` now lowers into a fixed-XLEN combinational HWIR
+decoder. The generated graph contains one typed masked comparison and stable
+origin per exact database row, produces an explicit legal bit and one-based row
+index, preserves the canonical 32-bit input for legal rows, and normalizes all
+illegal outputs to zero. It also exposes the raw instruction `[11:7]`,
+`[19:15]`, and `[24:20]` fields, gated by the same legality result; consumers
+must apply the selected row's operand semantics before calling them rd/rs1/rs2.
+The same selected row emits fixed numeric execution-class and architectural
+memory-effect codes, so provider routing does not repeat opcode matching.
+Core
+profile and XLEN must match the frozen plan; no
+runtime extension/provider/XLEN selector is emitted. This first generator is a
+decode identity boundary, not yet a full `DecodedUop` replacement or a claim
+that the scalar product frontend consumes the generated decoder.
+### Runtime scalar decode-dispatch boundary
+
+The declarative fixed-XLEN decoder now emits both a stable semantic opcode and
+an explicit declared-operand-width bit. The opcode uses a permanent explicit
+numeric assignment derived from the declared
+ISA semantic name; row index remains lineage only and is never execution
+semantics. A compiler-owned one-entry decoded-uop skid captures legality,
+semantic metadata, canonical/original instruction, register indices and
+values, PC, privilege, and event identities atomically. It holds the complete
+payload through downstream backpressure. While occupied it deasserts ready and
+ignores the upstream bus, following ordinary held-valid semantics.
+
+The skid is bound to the canonical reconstructed decoder graph, exact plan,
+complete CoreConfig, and frozen decoded-uop descriptor hash. This is the
+runtime boundary for future one-per-resource-family
+providers. It is not yet a full provider bank or a complete scalar core.
+
+The first runtime provider is one compiler-owned integer ALU graph shared by
+all admitted integer and RV64 integer-word rows. It cross-checks the
+permanent semantic opcode against canonical encoding, execution class,
+declared width, raw instruction fields, instruction length, and captured event
+identity. Runtime shifts truncate their count to five bits for RV32 and word
+forms or six bits for RV64 XLEN forms; arithmetic right shift uses the signed
+HWIR operation, and word results sign-extend exactly once. Original/canonical
+identity and wrapping `pc+4` fallthrough must agree, while reads of x0 are
+normalized to zero. Every mismatch produces no completion and an explicit
+protocol fault.
+
+The ALU remains a combinational projection. Mission-critical integration uses
+the decoded-uop skid, a typed atomic acceptance gate, a one-entry completion
+skid, and a reset-cleared sticky fault owner. A decoded uop may be consumed
+only when its completion is actually captured; mere downstream capacity is
+not acceptance. This pipeline is still development-stage until its combined
+clocked GHDL behavior and compiler-owned product receipt are retained.
+
+Runtime pipeline v2 adds a separate architectural illegal-instruction provider
+and a typed one-hot ALU/illegal completion selector. Illegal decode produces an
+execute-trap completion with cause 2 and the original instruction as `tval`;
+register, memory, and redirect effects are zero. The selector compares the
+active lane's privilege, instruction identity, length, PC/fallthrough, lineage,
+and both event IDs against the registered uop before it can advance. Overlap,
+missing legal-provider ownership, stale payload, or provider fault emits no
+completion and latches the protocol fault.
+
+The next runtime provider foundation is a shared typed control datapath. Unlike
+the older compile-time control projection, it reconstructs B-, J-, and
+I-immediates from the runtime canonical instruction, computes branch/JAL/JALR
+targets at the concrete XLEN, clears JALR bit zero, evaluates all six signed or
+unsigned branch predicates, and reports IALIGN misalignment fixed by
+CoreConfig. It deliberately owns no admission or completion yet: a separate
+plan-bound control provider must validate row, semantic code, encoding, raw
+fields, metadata and lineage before selecting these datapath results.

@@ -1,0 +1,207 @@
+# codex-system-test
+#
+# Intentional forward contract for V7's *single*, flat tag-2 M provider.  This
+# imports the owner by its agreed public name: until the owner exists this spec
+# must fail to compile rather than accidentally exercising V6's multiply-only
+# provider or a pipeline wrapper.
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, ghdl_run_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_m_provider.{strict_riscv_scalar_runtime_m_provider}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan, riscv_scalar_semantic_opcode}
+
+fn m_rv32() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "riscv-gen2-rv32im", isa_profile: "rv32im", compressed_decode_profile: "none")
+
+fn m_rv64() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "riscv-gen2-rv64im", isa_profile: "rv64im", compressed_decode_profile: "none")
+
+fn m_row(plan: RiscvScalarDecoderPlan, entry_id: text) -> i32:
+    var index = 0
+    for entry in plan.entries:
+        if entry.id == entry_id: return index + 1
+        index = index + 1
+    0
+
+fn m_row_width(plan: RiscvScalarDecoderPlan) -> i32:
+    var width = 1; var capacity = 2
+    while capacity <= plan.entries.len():
+        width = width + 1; capacity = capacity * 2
+    width
+
+fn m_provider_tb(entity_name: text, xlen: i32, row_width: i32, row: i32,
+    semantic: i32, declared_width_is_32: i32, instruction: text, lhs: text,
+    rhs: text, expected: text, expected_rd: text, expected_write: i32) -> text:
+    val write_bit = if expected_write == 1: "1" else: "0"
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+entity {entity_name}_tb is end entity;
+architecture sim of {entity_name}_tb is
+  signal clk, rst, request_valid, decode_legal, lineage_valid, illegal_valid, completion_ready : std_logic := '0';
+  signal request_provider_tag, decoded_execution_class, decoded_memory_effect : std_logic_vector(2 downto 0) := (others => '0');
+  signal decoded_row_index : std_logic_vector({row_width - 1} downto 0) := (others => '0');
+  signal decoded_semantic_opcode : std_logic_vector(5 downto 0) := (others => '0');
+  signal decoded_declared_operand_width_is_32 : std_logic := '0';
+  signal canonical_instruction, original_instruction : std_logic_vector(31 downto 0) := (others => '0');
+  signal instruction_length_bytes : std_logic_vector(2 downto 0) := "100";
+  signal instruction_rd_field, instruction_rs1_field, instruction_rs2_field : std_logic_vector(4 downto 0) := (others => '0');
+  signal rs1_value, rs2_value, pc_before, fallthrough_pc : std_logic_vector({xlen - 1} downto 0) := (others => '0');
+  signal privilege : std_logic_vector(1 downto 0) := "11";
+  signal provider_event_id, decode_event_id : std_logic_vector(63 downto 0) := (others => '0');
+  signal request_ready, request_accept, completion_valid, provider_protocol_fault : std_logic;
+  signal completion_provider_tag : std_logic_vector(2 downto 0);
+  signal completion_rd : std_logic_vector(4 downto 0);
+  signal completion_rd_write : std_logic;
+  signal completion_rd_value : std_logic_vector({xlen - 1} downto 0);
+  signal completion_provider_event_id, completion_decode_event_id : std_logic_vector(63 downto 0);
+  signal completion_privilege : std_logic_vector(1 downto 0);
+  signal completion_original_instruction, completion_canonical_instruction : std_logic_vector(31 downto 0);
+  signal completion_instruction_length_bytes : std_logic_vector(2 downto 0);
+  signal completion_pc_before, completion_pc_after, completion_memory_address, completion_memory_read_data, completion_memory_write_data : std_logic_vector({xlen - 1} downto 0);
+  signal completion_memory_read_mask, completion_memory_write_mask : std_logic_vector(31 downto 0);
+  signal completion_execute_trap_valid, completion_memory_trap_valid, completion_redirect_valid, completion_illegal_valid : std_logic;
+  signal completion_execute_trap_cause, completion_execute_trap_tval, completion_memory_trap_cause, completion_memory_trap_tval, completion_redirect_target : std_logic_vector({xlen - 1} downto 0);
+begin
+  dut: entity work.{entity_name} port map(
+    clk=>clk, rst=>rst, request_valid=>request_valid, request_provider_tag=>request_provider_tag,
+    decode_legal=>decode_legal, decoded_row_index=>decoded_row_index, decoded_execution_class=>decoded_execution_class,
+    decoded_memory_effect=>decoded_memory_effect, decoded_semantic_opcode=>decoded_semantic_opcode,
+    decoded_declared_operand_width_is_32=>decoded_declared_operand_width_is_32,
+    canonical_instruction=>canonical_instruction, original_instruction=>original_instruction,
+    instruction_length_bytes=>instruction_length_bytes, instruction_rd_field=>instruction_rd_field,
+    instruction_rs1_field=>instruction_rs1_field, instruction_rs2_field=>instruction_rs2_field,
+    rs1_value=>rs1_value, rs2_value=>rs2_value, pc_before=>pc_before, fallthrough_pc=>fallthrough_pc,
+    privilege=>privilege, provider_event_id=>provider_event_id, decode_event_id=>decode_event_id,
+    lineage_valid=>lineage_valid, illegal_valid=>illegal_valid, completion_ready=>completion_ready,
+    request_ready=>request_ready, request_accept=>request_accept, completion_valid=>completion_valid,
+    completion_provider_tag=>completion_provider_tag, provider_protocol_fault=>provider_protocol_fault,
+    completion_rd=>completion_rd, completion_rd_write=>completion_rd_write, completion_rd_value=>completion_rd_value,
+    completion_provider_event_id=>completion_provider_event_id, completion_decode_event_id=>completion_decode_event_id,
+    completion_privilege=>completion_privilege, completion_original_instruction=>completion_original_instruction,
+    completion_canonical_instruction=>completion_canonical_instruction,
+    completion_instruction_length_bytes=>completion_instruction_length_bytes, completion_pc_before=>completion_pc_before,
+    completion_pc_after=>completion_pc_after, completion_memory_address=>completion_memory_address,
+    completion_memory_read_mask=>completion_memory_read_mask, completion_memory_write_mask=>completion_memory_write_mask,
+    completion_memory_read_data=>completion_memory_read_data, completion_memory_write_data=>completion_memory_write_data,
+    completion_execute_trap_valid=>completion_execute_trap_valid, completion_execute_trap_cause=>completion_execute_trap_cause,
+    completion_execute_trap_tval=>completion_execute_trap_tval, completion_memory_trap_valid=>completion_memory_trap_valid,
+    completion_memory_trap_cause=>completion_memory_trap_cause, completion_memory_trap_tval=>completion_memory_trap_tval,
+    completion_redirect_valid=>completion_redirect_valid, completion_redirect_target=>completion_redirect_target,
+    completion_illegal_valid=>completion_illegal_valid);
+  process
+    procedure tick is begin wait for 1 ns; clk<='1'; wait for 1 ns; clk<='0'; wait for 1 ns; end procedure;
+    procedure reset_dut is begin
+      rst<='1'; tick; rst<='0'; wait for 1 ns;
+      assert provider_protocol_fault='0' and request_ready='1' and completion_valid='0'
+        report "reset did not recover V7 M provider" severity failure;
+    end procedure;
+    procedure drive(constant lineage : std_logic) is
+      variable insn : std_logic_vector(31 downto 0);
+    begin
+      insn:=x"{instruction}";
+      request_valid<='1'; request_provider_tag<="010"; decode_legal<='1';
+      decoded_row_index<=std_logic_vector(to_unsigned({row}, decoded_row_index'length));
+      decoded_execution_class<="100"; decoded_memory_effect<="000";
+      decoded_semantic_opcode<=std_logic_vector(to_unsigned({semantic},6));
+      decoded_declared_operand_width_is_32<='{declared_width_is_32}';
+      canonical_instruction<=insn; original_instruction<=insn;
+      instruction_rd_field<=insn(11 downto 7); instruction_rs1_field<=insn(19 downto 15); instruction_rs2_field<=insn(24 downto 20);
+      rs1_value<=x"{lhs}"; rs2_value<=x"{rhs}"; pc_before<=std_logic_vector(to_unsigned(64,{xlen})); fallthrough_pc<=std_logic_vector(to_unsigned(68,{xlen}));
+      provider_event_id<=x"00000000000000A7"; decode_event_id<=x"00000000000000A7"; lineage_valid<=lineage; illegal_valid<='0';
+    end procedure;
+    procedure await_completion(constant label_text : string) is begin
+      for n in 1 to {xlen + 8} loop if completion_valid='1' then return; end if; tick; end loop;
+      assert false report label_text severity failure;
+    end procedure;
+  begin
+    reset_dut;
+    drive('1'); tick; request_valid<='0'; await_completion("V7 M operation exceeded XLEN-bounded completion latency");
+    assert completion_provider_tag="010" and completion_rd="{expected_rd}" and completion_rd_write='{write_bit}' and
+      completion_rd_value=x"{expected}" and completion_provider_event_id=x"00000000000000A7" and completion_decode_event_id=x"00000000000000A7"
+      report "V7 M completion lost result, x0/writeback, tag, or lineage" severity failure;
+    assert completion_privilege="11" and completion_original_instruction=canonical_instruction and
+      completion_canonical_instruction=canonical_instruction and completion_instruction_length_bytes="100" and
+      completion_pc_before=std_logic_vector(to_unsigned(64,{xlen})) and completion_pc_after=std_logic_vector(to_unsigned(68,{xlen})) and
+      completion_memory_address=(others=>'0') and completion_memory_read_mask=(others=>'0') and completion_memory_write_mask=(others=>'0') and
+      completion_memory_read_data=(others=>'0') and completion_memory_write_data=(others=>'0') and
+      completion_execute_trap_valid='0' and completion_execute_trap_cause=(others=>'0') and completion_execute_trap_tval=(others=>'0') and
+      completion_memory_trap_valid='0' and completion_memory_trap_cause=(others=>'0') and completion_memory_trap_tval=(others=>'0') and
+      completion_redirect_valid='0' and completion_redirect_target=(others=>'0') and completion_illegal_valid='0'
+      report "V7 M completion leaked a side effect, trap, redirect, or captured metadata" severity failure;
+    tick; assert completion_valid='1' and completion_rd_value=x"{expected}"
+      report "V7 M completion was not held under backpressure" severity failure;
+    completion_ready<='1'; tick; completion_ready<='0';
+    assert completion_valid='0' and request_ready='1' report "V7 M completion was not consumed exactly once" severity failure;
+    drive('0'); tick; request_valid<='0';
+    assert provider_protocol_fault='1' and request_ready='0' and completion_valid='0'
+      report "malformed V7 M lineage was not sticky fail-stop" severity failure;
+    reset_dut;
+    finish;
+  end process;
+end architecture;
+"""
+
+fn simulate_m_provider(entity_name: text, config: CoreConfig, plan: RiscvScalarDecoderPlan,
+    entry_id: text, semantic_operation: text, is_word: i32, instruction: text,
+    lhs: text, rhs: text, expected: text, expected_rd: text, expected_write: i32) -> bool:
+    # This direct owner call is deliberate.  It is the fail-fast placeholder
+    # for V7; do not replace it with V6's multiply-only provider.
+    val module = strict_riscv_scalar_runtime_m_provider(entity_name, config, plan)
+    if module.is_err(): return false
+    val emitted = render_strict_sequential_hwir(module.ok().unwrap(), "hwir-gen2-riscv-runtime-m-provider-v7")
+    if not emitted.is_success(): return false
+    val workdir = ghdl_unique_workdir(entity_name); if workdir.is_err(): return false
+    val isolated = workdir.ok().unwrap(); val path = isolated + "/" + entity_name + ".vhd"
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + m_provider_tb(entity_name, config.xlen,
+        m_row_width(plan), m_row(plan, entry_id), riscv_scalar_semantic_opcode(semantic_operation),
+        is_word, instruction, lhs, rhs, expected, expected_rd, expected_write)): return false
+    if not ghdl_analyze_in(path, isolated).success: return false
+    if not ghdl_elaborate_in(entity_name + "_tb", isolated).success: return false
+    ghdl_run_in(entity_name + "_tb", Some("4us"), isolated).success
+
+describe "clocked V7 unified runtime M provider GHDL integration":
+    slow_it "should prove every RV32 multiply form plus DIV, DIVU, REM, REMU, divide-by-zero, signed overflow, x0, hold, consume, and reset":
+        val available = ghdl_available(); expect(available).to_equal(true)
+        if not available: return
+        val plan = riscv_scalar_decoder_plan("rv32im").unwrap(); val cfg = m_rv32()
+        # The high-half family shares the tag-2 owner but has three distinct
+        # signedness contracts.  0x80000000 * 2 distinguishes all of them.
+        expect(simulate_m_provider("runtime_m_v7_rv32_mul", cfg, plan, "rv.m.mul", "multiply_low", 0, "027302B3", "FFFFFFFF", "00000002", "FFFFFFFE", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_mulh", cfg, plan, "rv.m.mulh", "multiply_high_signed", 0, "027312B3", "80000000", "00000002", "FFFFFFFF", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_mulhsu", cfg, plan, "rv.m.mulhsu", "multiply_high_signed_unsigned", 0, "027322B3", "80000000", "00000002", "FFFFFFFF", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_mulhu", cfg, plan, "rv.m.mulhu", "multiply_high_unsigned", 0, "027332B3", "80000000", "00000002", "00000001", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_mul_x0", cfg, plan, "rv.m.mul", "multiply_low", 0, "02730033", "FFFFFFFF", "00000002", "00000000", "00000", 0)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_div", cfg, plan, "rv.m.div", "divide_signed", 0, "027342B3", "FFFFFFF7", "00000003", "FFFFFFFD", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_divu", cfg, plan, "rv.m.divu", "divide_unsigned", 0, "027352B3", "FFFFFFF7", "00000003", "55555552", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_rem", cfg, plan, "rv.m.rem", "remainder_signed", 0, "027362B3", "FFFFFFF7", "00000003", "FFFFFFFE", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_remu", cfg, plan, "rv.m.remu", "remainder_unsigned", 0, "027372B3", "FFFFFFF7", "00000003", "00000001", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_div0", cfg, plan, "rv.m.div", "divide_signed", 0, "027342B3", "80000001", "00000000", "FFFFFFFF", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_min", cfg, plan, "rv.m.div", "divide_signed", 0, "027342B3", "80000000", "FFFFFFFF", "80000000", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv32_x0", cfg, plan, "rv.m.div", "divide_signed", 0, "02704033", "FFFFFFFF", "00000003", "00000000", "00000", 0)).to_equal(true)
+
+    slow_it "should prove RV64 base M, all W divide/remainder rows, and multiply-family regression through the same owner ABI":
+        val available = ghdl_available(); expect(available).to_equal(true)
+        if not available: return
+        val plan = riscv_scalar_decoder_plan("rv64im").unwrap(); val cfg = m_rv64()
+        expect(simulate_m_provider("runtime_m_v7_rv64_div", cfg, plan, "rv.m.div", "divide_signed", 0, "027342B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "FFFFFFFFFFFFFFFD", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_divu", cfg, plan, "rv.m.divu", "divide_unsigned", 0, "027352B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "5555555555555552", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_rem", cfg, plan, "rv.m.rem", "remainder_signed", 0, "027362B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "FFFFFFFFFFFFFFFE", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_remu", cfg, plan, "rv.m.remu", "remainder_unsigned", 0, "027372B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "0000000000000001", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_divw", cfg, plan, "rv64.m.divw", "divide_signed", 1, "027342BB", "00000000FFFFFFF7", "0000000000000003", "FFFFFFFFFFFFFFFD", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_divuw", cfg, plan, "rv64.m.divuw", "divide_unsigned", 1, "027352BB", "00000000FFFFFFF7", "0000000000000003", "0000000055555552", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_remw", cfg, plan, "rv64.m.remw", "remainder_signed", 1, "027362BB", "00000000FFFFFFF7", "0000000000000003", "FFFFFFFFFFFFFFFE", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_remuw", cfg, plan, "rv64.m.remuw", "remainder_unsigned", 1, "027372BB", "00000000FFFFFFF7", "0000000000000003", "0000000000000001", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_divuw_signext", cfg, plan, "rv64.m.divuw", "divide_unsigned", 1, "027352BB", "0000000080000000", "0000000000000001", "FFFFFFFF80000000", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_mul_regression", cfg, plan, "rv.m.mul", "multiply_low", 0, "027302B3", "0000000000000011", "0000000000000022", "0000000000000242", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_mulh", cfg, plan, "rv.m.mulh", "multiply_high_signed", 0, "027312B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "FFFFFFFFFFFFFFFF", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_mulhsu", cfg, plan, "rv.m.mulhsu", "multiply_high_signed_unsigned", 0, "027322B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "FFFFFFFFFFFFFFFF", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_mulhu", cfg, plan, "rv.m.mulhu", "multiply_high_unsigned", 0, "027332B3", "FFFFFFFFFFFFFFF7", "0000000000000003", "0000000000000002", "00101", 1)).to_equal(true)
+        expect(simulate_m_provider("runtime_m_v7_rv64_mulw", cfg, plan, "rv64.m.mulw", "multiply_low", 1, "027302BB", "00000000FFFFFFFF", "0000000000000001", "FFFFFFFFFFFFFFFF", "00101", 1)).to_equal(true)

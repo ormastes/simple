@@ -1,0 +1,113 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{strict_hw_scalar_decoded_uop_interface}
+use compiler.mir.hwir.riscv_scalar_completion_interface.{strict_hw_scalar_completion_interface}
+use compiler.mir.hwir.riscv_scalar_pending_provider_protocol.{strict_hw_scalar_pending_provider_protocol}
+use compiler.mir.hwir.riscv_scalar_pending_provider_owner.{strict_riscv_scalar_pending_provider_owner}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+fn fixture(config: CoreConfig):
+    val decoder_plan = riscv_scalar_decoder_plan(config.isa_profile).unwrap()
+    val decoder = strict_riscv_scalar_decoder_hwir("pending_owner_decoder", config, decoder_plan).unwrap()
+    val decoded = strict_hw_scalar_decoded_uop_interface(config, decoder_plan, decoder).unwrap()
+    val completion = strict_hw_scalar_completion_interface(config,
+        if config.xlen == 32: LsuConfig.rv32_product_default() else: LsuConfig.rv64_product_default()).unwrap()
+    val protocol = strict_hw_scalar_pending_provider_protocol(
+        config, decoded, decoder, decoder_plan, completion).unwrap()
+    (protocol, decoded, decoder, decoder_plan, completion)
+
+describe "one-entry scalar pending-provider owner":
+    it "binds all four descriptor tags and exact lineage state":
+        val config = CoreConfig.rv64_zca_mission_critical()
+        val (protocol, decoded, decoder, decoder_plan, completion) = fixture(config)
+        val owner = strict_riscv_scalar_pending_provider_owner(
+            "scalar_pending_provider_owner", protocol, decoded, decoder, decoder_plan, completion).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.origins[0].source_name).to_start_with("riscv.scalar.pending-provider/")
+        expect(owner.origins[0].source_name).to_end_with(protocol.structural_sha256())
+        expect(owner.plan.registers.len()).to_be_greater_than(40)
+        expect(owner.plan.named_width(owner.ports, "tag_reg")).to_equal(3)
+        expect(owner.plan.named_width(owner.ports, "request_provider_event_id_reg")).to_equal(64)
+        expect(owner.plan.named_width(owner.ports, "request_decode_event_id_reg")).to_equal(64)
+        expect(owner.plan.named_width(owner.ports, "fence_request_valid")).to_equal(1)
+        expect(owner.plan.named_width(owner.ports, "fence_request_provider_tag")).to_equal(3)
+        expect(owner.plan.named_width(owner.ports, "fence_completion_ready")).to_equal(1)
+        expect(owner.plan.named_width(owner.ports, "busy")).to_equal(1)
+        expect(owner.datapath_comb_ops.any(_.result == "busy_pending_or_issued" and
+            _.lhs == "pending_reg" and _.rhs == "issued_reg")).to_be(true)
+        expect(owner.datapath_comb_ops.any(_.result == "busy_full_or_fault" and
+            _.lhs == "full_reg" and _.rhs == "fault_reg")).to_be(true)
+        expect(owner.datapath_comb_ops.any(_.result == "busy_any" and
+            _.lhs == "busy_pending_or_issued" and _.rhs == "busy_full_or_fault")).to_be(true)
+        expect(owner.plan.rules.len()).to_equal(5)
+        expect(owner.plan.named_width(owner.ports, "lsu_request_canonical_instruction")).to_equal(32)
+        expect(owner.plan.named_width(owner.ports, "fence_request_rs1_value")).to_equal(64)
+        expect(owner.plan.named_width(owner.ports, "selected_completion_memory_address")).to_equal(64)
+        expect(owner.plan.rules[0].name).to_equal("protocol_fault")
+        expect(owner.plan.rules[4].name).to_equal("capture_dispatch")
+
+    it "renders one-outstanding request completion hold and sticky-fault logic":
+        val config = CoreConfig.rv32()
+        val (protocol, decoded, decoder, decoder_plan, completion) = fixture(config)
+        val owner = strict_riscv_scalar_pending_provider_owner(
+            "scalar_pending_provider_owner_rv32", protocol, decoded, decoder, decoder_plan, completion).unwrap()
+        val emitted = render_strict_sequential_hwir(owner,
+            "hwir-gen2-scalar-pending-provider-owner-v1")
+        expect(emitted.is_success()).to_be(true)
+        expect(emitted.hwir_graph_sha256).to_equal(owner.structural_sha256())
+        expect(emitted.vhdl).to_contain("dispatch_ready <= '1' when pending_reg='0' and issued_reg='0' and full_reg='0' and fault_reg='0' else '0';")
+        expect(emitted.vhdl).to_contain("busy_pending_or_issued <= pending_reg or issued_reg;")
+        expect(emitted.vhdl).to_contain("busy_full_or_fault <= full_reg or fault_reg;")
+        expect(emitted.vhdl).to_contain("busy_any <= busy_pending_or_issued or busy_full_or_fault;")
+        expect(emitted.vhdl).to_contain("busy <= busy_any;")
+        expect(emitted.vhdl).to_contain("fence_request_valid <= '1' when pending_reg='1' and fault_reg='0' and fence_selected='1' else '0';")
+        expect(emitted.vhdl).to_contain("fence_request_provider_tag <= tag_reg when pending_reg='1' and fault_reg='0' and fence_selected='1' else (others=>'0');")
+        expect(emitted.vhdl).to_contain("selected_completion_valid <= '1' when full_reg='1' and fault_reg='0' else '0';")
+        expect(emitted.vhdl).to_contain("lsu_request_canonical_instruction <= request_canonical_instruction_reg when pending_reg='1' and fault_reg='0' and lsu_selected='1' else (others=>'0');")
+        expect(emitted.vhdl).to_contain("selected_completion_memory_address <= completion_memory_address_reg when full_reg='1' and fault_reg='0' else (others=>'0');")
+        expect(emitted.vhdl).to_contain("if fault_all='1' and fault_reg='0' then")
+        expect(emitted.vhdl).to_contain("fault_reg <= fault_all;")
+        expect(emitted.vhdl).to_contain("-- simple-hwir route=hwir-gen2-scalar-pending-provider-owner-v1")
+        val route_rejected = render_strict_sequential_hwir(owner, "")
+        expect(route_rejected.is_success()).to_be(false)
+        expect(route_rejected.diagnostic).to_contain("SEQUENTIAL-ROUTE")
+
+    it "admits only exact one-based stateful rows from the selected plan":
+        val config = CoreConfig.rv32()
+        val (protocol, decoded, decoder, decoder_plan, completion) = fixture(config)
+        val owner = strict_riscv_scalar_pending_provider_owner(
+            "scalar_pending_exact_plan", protocol, decoded, decoder, decoder_plan, completion).unwrap()
+        expect(owner.datapath_comb_ops.any(_.result.starts_with("route_") and
+            _.result.ends_with("_row") and _.lhs == "dispatch_decoded_row_index")).to_be(true)
+        expect(owner.datapath_comb_ops.any(_.result.starts_with("route_") and
+            _.result.ends_with("_semantic") and _.lhs == "dispatch_decoded_semantic_opcode")).to_be(true)
+        expect(owner.datapath_comb_ops.any(_.result == "dispatch_identity_left" and
+            _.rhs == "not_route_overlap")).to_be(true)
+        # An out-of-range row and a wrong semantic for a real row cannot satisfy
+        # the same exact row predicate: both fields participate in every selector.
+        expect(owner.datapath_constants.any(_.name.starts_with("route_row_") and
+            _.value > decoder_plan.entries.len())).to_be(false)
+        # Base I has load/store and fence rows, but no M or CSR rows; the owner
+        # therefore must not synthesize route constants for absent families.
+        expect(owner.datapath_constants.any(_.name.starts_with("route_class_") and
+            (_.value == 4 or _.value == 6))).to_be(false)
+        expect(owner.structural_sha256()).to_equal(
+            strict_riscv_scalar_pending_provider_owner("scalar_pending_exact_plan",
+                protocol, decoded, decoder, decoder_plan, completion).unwrap().structural_sha256())
+
+    it "rejects empty identity and descriptor schema drift":
+        val config = CoreConfig.rv32()
+        val (protocol, decoded, decoder, decoder_plan, completion) = fixture(config)
+        val missing = strict_riscv_scalar_pending_provider_owner(
+            "", protocol, decoded, decoder, decoder_plan, completion)
+        expect(missing.is_err()).to_be(true)
+        expect(missing.err().unwrap()).to_contain("PENDING-OWNER-ID")
+        var drifted = protocol
+        drifted.version = "hwir-scalar-pending-provider/v2"
+        val rejected = strict_riscv_scalar_pending_provider_owner(
+            "drifted_pending_owner", drifted, decoded, decoder, decoder_plan, completion)
+        expect(rejected.is_err()).to_be(true)
+        expect(rejected.err().unwrap()).to_contain("PENDING-VERSION")

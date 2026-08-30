@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)"
+fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/simple-font-runtime-provenance.XXXXXX")"
+trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
+
+runtime_env="$fixture_root/runtime.env"
+output_dir="$fixture_root/out"
+
+cat >"$runtime_env" <<'EOF'
+production_gui_font_runtime_status=pass
+production_gui_font_runtime_selected_backend=cuda
+EOF
+
+set +e
+SIMPLE_BIN=/bin/true \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_env" \
+BUILD_DIR="$output_dir" REPORT_PATH="$output_dir/report.md" \
+sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$fixture_root/missing.out" 2>&1
+missing_status=$?
+set -e
+[ "$missing_status" -ne 0 ]
+grep -qx 'production_gui_font_offload_reason=runtime-font-provenance-missing' "$output_dir/evidence.env"
+
+cat >>"$runtime_env" <<'EOF'
+production_gui_font_runtime_font_backend=cuda
+production_gui_font_runtime_font_driver=fixture-driver
+production_gui_font_runtime_font_device_handle=101
+production_gui_font_runtime_font_module_or_queue_handle=102
+production_gui_font_runtime_font_kernel_or_pipeline_handle=103
+production_gui_font_runtime_font_fence_handle=104
+production_gui_font_runtime_font_readback_checksum=105
+production_gui_font_runtime_font_parity_status=pass
+EOF
+
+SIMPLE_BIN=/bin/true \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_env" \
+BUILD_DIR="$output_dir" REPORT_PATH="$output_dir/report.md" \
+sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$fixture_root/pass.out"
+grep -qx 'production_gui_font_offload_status=pass' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_fence_handle=104' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_parity_status=pass' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_vector_expected_checksum=105' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_bitmap_actual_checksum=105' "$output_dir/evidence.env"
+
+runtime_cpu="$fixture_root/runtime-cpu.env"
+sed 's/^production_gui_font_runtime_selected_backend=cuda$/production_gui_font_runtime_selected_backend=cpu/; s/^production_gui_font_runtime_font_backend=cuda$/production_gui_font_runtime_font_backend=cpu/' "$runtime_env" >"$runtime_cpu"
+set +e
+SIMPLE_BIN=/bin/true \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_cpu" \
+BUILD_DIR="$output_dir/cpu" REPORT_PATH="$output_dir/cpu/report.md" \
+sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$fixture_root/cpu.out" 2>&1
+cpu_status=$?
+set -e
+[ "$cpu_status" -ne 0 ]
+grep -qx 'production_gui_font_offload_reason=runtime-font-provenance-missing' "$output_dir/cpu/evidence.env"
+! grep -Eq 'vector_pixels|bitmap_bits|, 7, 11' "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs"
+
+auto_output="$fixture_root/auto"
+mkdir -p "$auto_output/runtime"
+cp "$runtime_env" "$auto_output/runtime/evidence.env"
+printf '#!/bin/sh\nexit 17\n' >"$fixture_root/failing-runtime.sh"
+chmod +x "$fixture_root/failing-runtime.sh"
+set +e
+SIMPLE_BIN=/bin/true \
+PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_SCRIPT="$fixture_root/failing-runtime.sh" \
+BUILD_DIR="$auto_output" REPORT_PATH="$auto_output/report.md" \
+sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$fixture_root/auto.out" 2>&1
+auto_status=$?
+set -e
+[ "$auto_status" -ne 0 ]
+! test -e "$auto_output/runtime/evidence.env"
+grep -qx 'production_gui_font_offload_reason=runtime-evidence-generator-failed' "$auto_output/evidence.env"
+grep -qx 'production_gui_font_offload_runtime_evidence_source=auto' "$auto_output/evidence.env"
+grep -qx 'production_gui_font_offload_runtime_evidence_producer_exit=17' "$auto_output/evidence.env"
+
+# CUDA provenance must come from the runtime's opaque handles and the actual
+# font readback, never fixture constants or an invented fence identifier.
+cuda_source="$ROOT_DIR/scripts/check/check-cuda-generated-2d-readback.shs"
+grep -Fq 'cuDriverGetVersion(&driver_version)' "$cuda_source"
+grep -Fq '(uint64_t)(uintptr_t)ctx' "$cuda_source"
+grep -Fq '(uint64_t)(uintptr_t)font_module' "$cuda_source"
+grep -Fq '(uint64_t)(uintptr_t)font_fn' "$cuda_source"
+grep -Fq 'cuEventRecord(font_event, 0)' "$cuda_source"
+grep -Fq 'cuEventSynchronize(font_event)' "$cuda_source"
+grep -Fq 'cuda_generated_2d_readback_font_readback_checksum=%llu' "$cuda_source"
+grep -Fq 'cuda_generated_2d_readback_font_fence_handle_kind=cuevent-recorded-after-font-launch' "$cuda_source"
+
+echo "production GUI font runtime provenance contract: PASS"

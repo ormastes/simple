@@ -2,6 +2,29 @@
 
 > Integration tests for DI Container with realistic service patterns.
 
+<!-- sdn-diagram:id=di_injection_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=di_injection_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+di_injection_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=di_injection_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -21,7 +44,7 @@ Integration tests for DI Container with realistic service patterns.
 | Category | Runtime \| Dependency Injection |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/di_injection_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 **Tags:** di, integration
@@ -35,22 +58,13 @@ Tests focus on scenarios not covered by unit tests.
 
 #### creates service with repository dependency
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates service with repository dependency
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates service with repository dependency")
 # Direct construction simulates what a DI container would do
 val repo = Repository(name: "users")
 val service = UserService(repo: repo)
@@ -62,18 +76,18 @@ expect service.repo.name == "users"
 
 #### chains multiple text dependencies
 
-- chains multiple text dependencies
+1. var container = TextContainer empty
+2. container set
+3. container set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains multiple text dependencies")
 # Three-level dependency chain: App -> Service -> Config
 var container = TextContainer.empty()
 
@@ -100,18 +114,16 @@ expect app == "app using pool:db://localhost:5432"
 
 #### profile enum converts to text
 
-- profile enum converts to text
+1. expect p name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("profile enum converts to text")
 val p = Profile.Test
 expect p.name() == "test"
 ```
@@ -120,18 +132,16 @@ expect p.name() == "test"
 
 #### profile enum parses from text
 
-- profile enum parses from text
+1. expect p name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("profile enum parses from text")
 val p = Profile.from_text("prod")
 expect p.name() == "prod"
 ```
@@ -140,18 +150,16 @@ expect p.name() == "prod"
 
 #### profile defaults to dev for unknown
 
-- profile defaults to dev for unknown
+1. expect p name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("profile defaults to dev for unknown")
 val p = Profile.from_text("unknown")
 expect p.name() == "dev"
 ```
@@ -160,18 +168,13 @@ expect p.name() == "dev"
 
 #### all profiles have unique names
 
-- all profiles have unique names
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("all profiles have unique names")
 val test = Profile.Test.name()
 val dev = Profile.Dev.name()
 val prod = Profile.Prod.name()
@@ -188,18 +191,18 @@ expect prod != sdn
 
 #### stores and retrieves values
 
-- stores and retrieves values
+1. var container = TextContainer empty
+2. container set
+3. expect result unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("stores and retrieves values")
 var container = TextContainer.empty()
 container.set("service", "my_service")
 
@@ -212,18 +215,19 @@ expect result.unwrap() == "my_service"
 
 #### has returns true for existing keys
 
-- has returns true for existing keys
+1. var container = TextContainer empty
+2. container set
+3. expect container has
+4. expect not container has
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has returns true for existing keys")
 var container = TextContainer.empty()
 container.set("key", "value")
 
@@ -235,18 +239,13 @@ expect not container.has("missing")
 
 #### get returns None for missing keys
 
-- get returns None for missing keys
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("get returns None for missing keys")
 val container = TextContainer.empty()
 val result = container.get("missing")
 
@@ -257,18 +256,19 @@ expect not result.?
 
 #### set overwrites existing values
 
-- set overwrites existing values
+1. var container = TextContainer empty
+2. container set
+3. container set
+4. expect result unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("set overwrites existing values")
 var container = TextContainer.empty()
 container.set("key", "first")
 container.set("key", "second")
@@ -284,18 +284,16 @@ expect result.unwrap() == "second"
 
 #### returns Ok for existing binding
 
-- returns Ok for existing binding
+1. expect result unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns Ok for existing binding")
 val data: Dict<text, text> = {"Service": "instance"}
 val result = resolve(data, "Service")
 
@@ -307,18 +305,16 @@ expect result.unwrap() == "instance"
 
 #### returns Err for missing binding
 
-- returns Err for missing binding
+1. expect err msg starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns Err for missing binding")
 val data: Dict<text, text> = {}
 val result = resolve(data, "Missing")
 
@@ -333,18 +329,17 @@ expect err_msg.starts_with("No binding")
 
 #### function with @inject is parsed
 
-- function with @inject is parsed
+1. fn create service
+2. expect create service
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("function with @inject is parsed")
 @inject
 fn create_service(config: text) -> text:
     "service:{config}"
@@ -358,18 +353,17 @@ expect create_service("test") == "service:test"
 
 #### class method with @inject is parsed
 
-- class method with @inject is parsed
+1. static fn create
+2. Database
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("class method with @inject is parsed")
 class Database:
     connection: text
 
@@ -395,51 +389,3 @@ expect db.connection == "db://localhost"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `64ad87da60bff2fd7c5181ead51ad2e4aa67d42c85ae41f3f0682fa17504100f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `64ad87da60bff2fd7c5181ead51ad2e4aa67d42c85ae41f3f0682fa17504100f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `64ad87da60bff2fd7c5181ead51ad2e4aa67d42c85ae41f3f0682fa17504100f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/di_injection_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/di_injection_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/di_injection_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/di_injection_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/di_injection_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates service with repository dependency' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/di_injection_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'chains multiple text dependencies' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/di_injection_spec.spl:128:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'profile enum converts to text' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

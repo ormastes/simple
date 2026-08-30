@@ -1,6 +1,29 @@
 # T32 Native Flow Specification
 
-> Tests covering T32 Power Debug T32 Native config, T32 Power Debug T32 Native flash and reset, T32 Power Debug T32 Native trace and coverage, T32 Power Debug T32 Native debug ops.
+> <details>
+
+<!-- sdn-diagram:id=t32_native_flow_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=t32_native_flow_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+t32_native_flow_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=t32_native_flow_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,13 @@
 
 #### has correct T32 config
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- has correct T32 config
-   - Expected: s.t32_cfg equals `t32_startup.cmm`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has correct T32 config")
 val s = T32NativeSession.for_t32_target()
 expect(s.t32_cfg).to_equal("t32_startup.cmm")
 ```
@@ -42,19 +55,13 @@ expect(s.t32_cfg).to_equal("t32_startup.cmm")
 
 #### has T32 port 20000
 
-- has T32 port 20000
-   - Expected: s.t32_port equals `20000`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("has T32 port 20000")
 val s = T32NativeSession.for_t32_target()
 expect(s.t32_port).to_equal(20000)
 ```
@@ -63,19 +70,13 @@ expect(s.t32_port).to_equal(20000)
 
 #### target name is T32 Power Debug
 
-- target name is T32 Power Debug
-   - Expected: s.target_name equals `T32 Power Debug`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("target name is T32 Power Debug")
 val s = T32NativeSession.for_t32_target()
 expect(s.target_name).to_equal("T32 Power Debug")
 ```
@@ -86,7 +87,9 @@ expect(s.target_name).to_equal("T32 Power Debug")
 
 #### connect then flash succeeds
 
-- connect then flash succeeds
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
    - Expected: s.flashed is true
    - Expected: s.state equals `halted`
 
@@ -94,12 +97,10 @@ expect(s.target_name).to_equal("T32 Power Debug")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("connect then flash succeeds")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("target_app.elf")
@@ -111,19 +112,19 @@ expect(s.state).to_equal("halted")
 
 #### system reset transitions to halted
 
-- system reset transitions to halted
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s system reset
    - Expected: s.state equals `halted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("system reset transitions to halted")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.system_reset()
@@ -134,19 +135,17 @@ expect(s.state).to_equal("halted")
 
 #### flash without connect fails
 
-- flash without connect fails
+1. var s = T32NativeSession for t32 target
    - Expected: s.flashed is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("flash without connect fails")
 var s = T32NativeSession.for_t32_target()
 val result = s.flash_program("app.elf")
 expect(s.flashed).to_equal(false)
@@ -158,18 +157,18 @@ expect(s.flashed).to_equal(false)
 
 #### trace capture returns trace data
 
-- trace capture returns trace data
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s trace capture
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("trace capture returns trace data")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.trace_capture(500)
@@ -181,18 +180,18 @@ expect(s.trace_data).to_contain("500ms")
 
 #### coverage collect returns coverage data
 
-- coverage collect returns coverage data
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s coverage collect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("coverage collect returns coverage data")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.coverage_collect("main")
@@ -204,19 +203,17 @@ expect(s.coverage_data).to_contain("main")
 
 #### trace capture when disconnected fails
 
-- trace capture when disconnected fails
+1. var s = T32NativeSession for t32 target
    - Expected: s.trace_data equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("trace capture when disconnected fails")
 var s = T32NativeSession.for_t32_target()
 val result = s.trace_capture(1000)
 expect(s.trace_data).to_equal("")
@@ -228,19 +225,21 @@ expect(s.trace_data).to_equal("")
 
 #### halt from running
 
-- halt from running
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
+4. s resume
+5. s halt
    - Expected: s.state equals `halted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("halt from running")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("app.elf")
@@ -253,19 +252,20 @@ expect(s.state).to_equal("halted")
 
 #### resume from halted
 
-- resume from halted
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
+4. s resume
    - Expected: s.state equals `running`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("resume from halted")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("app.elf")
@@ -277,19 +277,20 @@ expect(s.state).to_equal("running")
 
 #### single step while halted
 
-- single step while halted
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
+4. s single step
    - Expected: s.state equals `halted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("single step while halted")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("app.elf")
@@ -301,19 +302,19 @@ expect(s.state).to_equal("halted")
 
 #### read memory while halted
 
-- read memory while halted
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
    - Expected: s.state equals `halted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("read memory while halted")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("app.elf")
@@ -325,19 +326,19 @@ expect(s.state).to_equal("halted")
 
 #### read register while halted
 
-- read register while halted
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
    - Expected: s.state equals `halted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("read register while halted")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("app.elf")
@@ -349,19 +350,19 @@ expect(s.state).to_equal("halted")
 
 #### set breakpoint
 
-- set breakpoint
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s set breakpoint
    - Expected: s.state equals `connected`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("set breakpoint")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.set_breakpoint("main\\10")
@@ -372,22 +373,25 @@ expect(s.state).to_equal("connected")
 
 #### full debug cycle: flash -> resume -> halt -> step
 
-- full debug cycle: flash -> resume -> halt -> step
+1. var s = T32NativeSession for t32 target
+2. s connect
+3. s flash program
    - Expected: s.state equals `halted`
+4. s resume
    - Expected: s.state equals `running`
+5. s halt
    - Expected: s.state equals `halted`
+6. s single step
    - Expected: s.state equals `halted`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("full debug cycle: flash -> resume -> halt -> step")
 var s = T32NativeSession.for_t32_target()
 s.connect()
 s.flash_program("target_app.elf")
@@ -409,12 +413,12 @@ expect(s.state).to_equal("halted")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/debug/remote/t32_native_flow_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering T32 Power Debug T32 Native config, T32 Power Debug T32 Native flash and reset, T32 Power Debug T32 Native trace and coverage, T32 Power Debug T32 Native debug ops.
+Tests covering:
 - T32 Power Debug T32 Native config
 - T32 Power Debug T32 Native flash and reset
 - T32 Power Debug T32 Native trace and coverage
@@ -432,54 +436,3 @@ Tests covering T32 Power Debug T32 Native config, T32 Power Debug T32 Native fla
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `3d12a06ec4d01b8d663fb99e2f6f887e9b500c2b25187128cb3c35d655255255`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `3d12a06ec4d01b8d663fb99e2f6f887e9b500c2b25187128cb3c35d655255255`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `3d12a06ec4d01b8d663fb99e2f6f887e9b500c2b25187128cb3c35d655255255`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/app/debug/remote/t32_native_flow_spec.spl
-mirror: doc/06_spec/01_unit/app/debug/remote/t32_native_flow_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/debug/remote/t32_native_flow_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/debug/remote/t32_native_flow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/debug/remote/t32_native_flow_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/debug/remote/t32_native_flow_spec.spl:112:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has correct T32 config' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/debug/remote/t32_native_flow_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has T32 port 20000' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/debug/remote/t32_native_flow_spec.spl:124:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'target name is T32 Power Debug' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

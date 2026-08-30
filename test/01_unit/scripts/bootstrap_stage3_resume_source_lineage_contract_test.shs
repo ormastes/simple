@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-source-lineage.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+fixture="$tmp/repo"
+mkdir -p "$fixture/src/compiler" "$fixture/src/app" "$fixture/src/lib" \
+  "$fixture/examples/10_tooling" "$fixture/src/compiler_rust" "$tmp/archive"
+printf 'compiler authority\n' >"$fixture/src/compiler/marker.spl"
+printf 'app authority\n' >"$fixture/src/app/marker.spl"
+printf 'lib authority\n' >"$fixture/src/lib/marker.spl"
+printf 'tool authority\n' >"$fixture/examples/10_tooling/marker.spl"
+cp "$root/src/compiler_rust/rust-toolchain.toml" "$fixture/src/compiler_rust/"
+git -C "$fixture" init -q
+git -C "$fixture" config user.email bootstrap-contract@example.invalid
+git -C "$fixture" config user.name bootstrap-contract
+git -C "$fixture" add .
+git -C "$fixture" commit -qm 'fixture: admitted Stage-2 lineage'
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$facade"
+BOOTSTRAP_STAGE3_VERSION_ROOT="$fixture"
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$facade"
+
+source_before="$tmp/source-inputs-before.txt"
+git_before="$tmp/git-state-before.env"
+tool_before="$tmp/tool-authority-before.txt"
+archive="$tmp/archive"
+# Production receipts bind a canonicalized tool path. Keep the fixture equally
+# strict rather than inheriting user PATH components that may be symlinks.
+path=/usr/bin
+bootstrap_stage3_source_snapshot "$source_before" "$fixture"
+bootstrap_stage3_git_state "$fixture" "$git_before"
+bootstrap_stage3_tool_authority_snapshot "$tool_before" "$path" "$fixture"
+
+# Execute the production resume-time lineage block verbatim in a function so
+# both the stale rejection and matching acceptance cover its real operations.
+{
+  echo 'check_resume_lineage() {'
+  sed -n \
+    '/^resume_source_check="\$archive\/source-preflight\.\$\$"/,/^rm -f "\$resume_source_check" "\$resume_git_check" "\$resume_tool_check"/p' \
+    "$resume"
+  echo '}'
+} >"$tmp/lineage-function.sh"
+. "$tmp/lineage-function.sh"
+
+printf 'source drift\n' >>"$fixture/src/compiler/marker.spl"
+if (check_resume_lineage); then
+  fail 'stale Stage-2 source lineage was accepted'
+fi
+
+# A new authoritative receipt for the current tree must pass the identical
+# production block, proving the gate distinguishes freshness from blanket
+# refusal. The function also removes all temporary preflight snapshots.
+bootstrap_stage3_source_snapshot "$source_before" "$fixture"
+bootstrap_stage3_git_state "$fixture" "$git_before"
+bootstrap_stage3_tool_authority_snapshot "$tool_before" "$path" "$fixture"
+check_resume_lineage || fail 'matching fresh Stage-2 lineage was rejected'
+set -- "$archive"/*-preflight.*
+[ "$1" = "$archive/*-preflight.*" ] ||
+  fail 'fresh lineage acceptance left mutable preflight snapshots behind'
+
+echo 'bootstrap_stage3_resume_source_lineage_contract_test: PASS'

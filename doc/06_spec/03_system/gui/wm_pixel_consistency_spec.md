@@ -1,6 +1,30 @@
 # Wm Pixel Consistency Specification
 
-> Tests covering WM Pixel Consistency — Golden Test, WM Pixel Consistency — Scene Rendering, WM Pixel Consistency — Comparison Details, WM Pixel Consistency — Diff Visualization, WM Pixel Consistency — Report.
+> <details>
+
+<!-- sdn-diagram:id=wm_pixel_consistency_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=wm_pixel_consistency_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+wm_pixel_consistency_spec -> std
+wm_pixel_consistency_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=wm_pixel_consistency_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,20 +43,13 @@
 
 #### AC-5: reference scene renders through both capture paths
 
-- AC-5: reference scene renders through both capture paths
-   - Expected: host_captured is true
-   - Expected: qemu_captured is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-5: reference scene renders through both capture paths")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -47,19 +64,13 @@ expect(qemu_captured).to_equal(true)
 
 #### AC-5: pixel match percentage is 100% with wm_default profile
 
-- AC-5: pixel match percentage is 100% with wm_default profile
-   - Expected: passes is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-5: pixel match percentage is 100% with wm_default profile")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -71,19 +82,13 @@ expect(passes).to_equal(true)
 
 #### AC-5: golden test passes with tolerance profile
 
-- AC-5: golden test passes with tolerance profile
-   - Expected: report.passed is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-5: golden test passes with tolerance profile")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -96,19 +101,13 @@ expect(report.passed).to_equal(true)
 
 #### AC-5: strict profile comparison provides baseline metrics
 
-- AC-5: strict profile comparison provides baseline metrics
-   - Expected: valid_pct is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-5: strict profile comparison provides baseline metrics")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_strict()
 val report = run_consistency_check(scene, profile)
@@ -125,19 +124,13 @@ expect(valid_pct).to_equal(true)
 
 #### AC-2: Electron captures non-empty pixel buffer for WM scene
 
-- AC-2: Electron captures non-empty pixel buffer for WM scene
-   - Expected: has_error is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: Electron captures non-empty pixel buffer for WM scene")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val result = capture_electron_scene(scene)
 if result.success:
@@ -152,20 +145,13 @@ else:
 
 #### AC-2: Electron capture produces correct-sized buffer
 
-- AC-2: Electron capture produces correct-sized buffer
-   - Expected: result.pixels.len().to_i32() equals `expected`
-   - Expected: result.success is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: Electron capture produces correct-sized buffer")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val result = capture_electron_scene(scene)
 if result.success:
@@ -181,18 +167,13 @@ else:
 
 #### AC-3: QEMU in-process captures non-empty pixel buffer
 
-- AC-3: QEMU in-process captures non-empty pixel buffer
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: QEMU in-process captures non-empty pixel buffer")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val result = capture_qemu_inprocess(scene)
 expect(result.pixels.len()).to_be_greater_than(0)
@@ -202,19 +183,13 @@ expect(result.pixels.len()).to_be_greater_than(0)
 
 #### AC-3: QEMU in-process produces correct-sized buffer
 
-- AC-3: QEMU in-process produces correct-sized buffer
-   - Expected: result.pixels.len().to_i32() equals `expected`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: QEMU in-process produces correct-sized buffer")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val result = capture_qemu_inprocess(scene)
 val expected = SCENE_W * SCENE_H
@@ -229,19 +204,13 @@ expect(result.pixels.len().to_i32()).to_equal(expected)
 
 #### AC-4: comparison reports max channel diff
 
-- AC-4: comparison reports max channel diff
-   - Expected: valid_diff is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-4: comparison reports max channel diff")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -253,18 +222,13 @@ expect(valid_diff).to_equal(true)
 
 #### AC-4: comparison reports per-channel results
 
-- AC-4: comparison reports per-channel results
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-4: comparison reports per-channel results")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -277,19 +241,13 @@ expect(report.channels.len()).to_be_greater_than(0)
 
 #### AC-4: comparison detects diff regions (if any)
 
-- AC-4: comparison detects diff regions (if any)
-   - Expected: is_list is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-4: comparison detects diff regions (if any)")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -304,19 +262,13 @@ expect(is_list).to_equal(true)
 
 #### AC-4: perceptual result reports AA pixel count
 
-- AC-4: perceptual result reports AA pixel count
-   - Expected: valid_aa is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-4: perceptual result reports AA pixel count")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -328,19 +280,13 @@ expect(valid_aa).to_equal(true)
 
 #### AC-4: perceptual match percentage is available
 
-- AC-4: perceptual match percentage is available
-   - Expected: valid_pct is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-4: perceptual match percentage is available")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -356,19 +302,13 @@ expect(valid_pct).to_equal(true)
 
 #### AC-6: diff artifacts can be exported from consistency report
 
-- AC-6: diff artifacts can be exported from consistency report
-   - Expected: is_bool is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-6: diff artifacts can be exported from consistency report")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_strict()
 val report = run_consistency_check(scene, profile)
@@ -381,19 +321,13 @@ expect(is_bool).to_equal(true)
 
 #### AC-6: diff image generation works with captured buffers
 
-- AC-6: diff image generation works with captured buffers
-   - Expected: electron.success is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-6: diff image generation works with captured buffers")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val electron = capture_electron_scene(scene)
 val qemu = capture_qemu_inprocess(scene)
@@ -414,18 +348,13 @@ else:
 
 #### AC-1: consistency report produces markdown documentation
 
-- AC-1: consistency report produces markdown documentation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-1: consistency report produces markdown documentation")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -437,19 +366,13 @@ expect(md.len()).to_be_greater_than(100)
 
 #### AC-1: markdown includes industry comparison methodology
 
-- AC-1: markdown includes industry comparison methodology
-   - Expected: has_methodology is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-1: markdown includes industry comparison methodology")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -462,19 +385,13 @@ expect(has_methodology).to_equal(true)
 
 #### AC-7: markdown documents rendering divergence root causes
 
-- AC-7: markdown documents rendering divergence root causes
-   - Expected: has_root_cause is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-7: markdown documents rendering divergence root causes")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -487,19 +404,13 @@ expect(has_root_cause).to_equal(true)
 
 #### AC-7: markdown documents normalization strategies
 
-- AC-7: markdown documents normalization strategies
-   - Expected: has_strategy is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-7: markdown documents normalization strategies")
 val scene = standard_wm_scene(SCENE_W, SCENE_H)
 val profile = profile_wm_default()
 val report = run_consistency_check(scene, profile)
@@ -517,12 +428,12 @@ expect(has_strategy).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/wm_pixel_consistency_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering WM Pixel Consistency — Golden Test, WM Pixel Consistency — Scene Rendering, WM Pixel Consistency — Comparison Details, WM Pixel Consistency — Diff Visualization, WM Pixel Consistency — Report.
+Tests covering:
 - WM Pixel Consistency — Golden Test
 - WM Pixel Consistency — Scene Rendering
 - WM Pixel Consistency — Comparison Details
@@ -541,54 +452,3 @@ Tests covering WM Pixel Consistency — Golden Test, WM Pixel Consistency — Sc
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `171e4ce6debedc813aabeec52b870f31f094c32aa9f05bf775d2b9f3c705b4b0`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `171e4ce6debedc813aabeec52b870f31f094c32aa9f05bf775d2b9f3c705b4b0`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `171e4ce6debedc813aabeec52b870f31f094c32aa9f05bf775d2b9f3c705b4b0`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/gui/wm_pixel_consistency_spec.spl
-mirror: doc/06_spec/03_system/gui/wm_pixel_consistency_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=55 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/wm_pixel_consistency_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
-  why: Retained evidence must be visible or linked from the professional manual.
-  improve: Select a supported evidence display and regenerate.
-doc/06_spec/03_system/gui/wm_pixel_consistency_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/wm_pixel_consistency_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/wm_pixel_consistency_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-5: reference scene renders through both capture paths' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/wm_pixel_consistency_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-5: pixel match percentage is 100% with wm_default profile' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/wm_pixel_consistency_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-5: golden test passes with tolerance profile' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

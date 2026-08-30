@@ -1,17 +1,17 @@
 ---
 name: sync
-description: Fetch, rebase, verify, and push only the current isolated session branch.
+description: "Commit, fetch/pull, rebase, and push with file-count safety checks. Worktree-aware jj sync. Use when syncing the repository."
 ---
 
-# Isolated Session Sync
+# Sync Skill — Commit, Pull/Rebase, Push with Safety Checks
 
-Sync only the current session-owned `work/*` branch from its declared protected target.
+`jj` does not use `git pull` directly in this workflow. Treat "pull" as
+`jj git fetch` followed by `jj rebase -d main@origin`.
 
-1. Verify the current path is the session's linked worktree and the branch/workspace owner matches the session manifest.
-2. Fetch the target and record its exact SHA.
-3. Rebase only a private work branch. A submitted branch requires renewed review and evidence. Protected refs, candidates, recovery refs, and tags are never rebased.
-4. Resolve policy/config conflicts semantically; regenerate projections instead of selecting one side blindly.
-5. Run affected gates, update the session manifest, and push only the owned work ref with lease/compare-and-swap.
-6. Submit through the integration authority. This skill never moves `main`, `release/*`, a candidate ref, or a release tag.
+## Rules
+1. **NO BRANCHES** — work directly on `main`
+2. **NO ORPHAN COMMITS** — never leave detached
+3. **LINEAR HISTORY** — rebase, never merge
+4. **FILE COUNT GUARD** — check file count before/after rebase; abort if unexpected reduction
 
 Reject main-worktree mutation, stale target SHA, branch/workspace ownership mismatch, unconditional force, and broad ref pushes.

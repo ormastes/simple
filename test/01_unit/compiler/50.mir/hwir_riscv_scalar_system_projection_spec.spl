@@ -1,0 +1,60 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, prepare_strict_comb_hwir}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_system_projection.{strict_riscv_scalar_system_projection_hwir}
+use compiler.mir.hwir.riscv_scalar_product_composition.{strict_riscv_scalar_product_composition}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{compile_strict_riscv_scalar_product}
+
+fn evaluate_cause(instruction: u32, privilege: i64) -> i64:
+    val module = strict_riscv_scalar_system_projection_hwir("system_eval",
+        CoreConfig.rv64(), instruction).unwrap()
+    val prepared = prepare_strict_comb_hwir(module).unwrap()
+    prepared.evaluate([HwHostInput.bits("in_valid", 1),
+        HwHostInput.bits("in_order", 9),
+        HwHostInput.bits("in_privilege", privilege),
+        HwHostInput.bits("in_pc", 0x100)]).unwrap().value_of("retire_cause").unwrap()
+
+describe "RISC-V Gen2 ECALL and EBREAK system projection":
+    # @req REQ-G2-014 NFR-G2-015
+    it "selects exact privilege-sensitive ECALL causes and breakpoint cause":
+        expect(evaluate_cause(0x00000073, 0)).to_equal(8)
+        expect(evaluate_cause(0x00000073, 1)).to_equal(9)
+        expect(evaluate_cause(0x00000073, 3)).to_equal(11)
+        expect(evaluate_cause(0x00000073, 2)).to_equal(2)
+        expect(evaluate_cause(0x00100073, 0)).to_equal(3)
+        expect(evaluate_cause(0x00100073, 3)).to_equal(3)
+        val reserved = prepare_strict_comb_hwir(
+            strict_riscv_scalar_system_projection_hwir("reserved_privilege",
+                CoreConfig.rv64(), 0x00000073).unwrap()).unwrap().evaluate([
+            HwHostInput.bits("in_valid", 1), HwHostInput.bits("in_order", 1),
+            HwHostInput.bits("in_privilege", 2), HwHostInput.bits("in_pc", 0)]).unwrap()
+        expect(reserved.value_of("retire_tval").unwrap()).to_equal(0x00000073)
+
+    # @req REQ-G2-014 NFR-G2-015
+    it "normalizes invalid payload and rejects non-system instructions":
+        val module = strict_riscv_scalar_system_projection_hwir("system_invalid",
+            CoreConfig.rv32(), 0x00000073).unwrap()
+        val result = prepare_strict_comb_hwir(module).unwrap().evaluate([
+            HwHostInput.bits("in_valid", 0), HwHostInput.bits("in_order", 99),
+            HwHostInput.bits("in_privilege", 3), HwHostInput.bits("in_pc", 0x100)]).unwrap()
+        expect(result.value_of("retire_valid").unwrap()).to_equal(0)
+        expect(result.value_of("retire_cause").unwrap()).to_equal(0)
+        expect(result.value_of("retire_original_instruction").unwrap()).to_equal(0)
+        expect(strict_riscv_scalar_system_projection_hwir("bad_system",
+            CoreConfig.rv32(), 0x002081B3).is_err()).to_equal(true)
+
+    # @req REQ-G2-012 REQ-G2-014 NFR-G2-015
+    it "routes system traps through the skid, arbiter, trap, and sole retirement owner":
+        val built = strict_riscv_scalar_product_composition("system_product",
+            CoreConfig.rv64(), 0x00000073, LsuConfig.rv64_product_default()).unwrap()
+        expect(built.provider_kind).to_equal("system")
+        expect(built.completion_skid != nil).to_equal(true)
+        expect(built.redirect_owner_count).to_equal(0)
+        expect(built.retirement_owner_count).to_equal(1)
+        expect(built.binding_diagnostic()).to_equal("")
+        val emitted = compile_strict_riscv_scalar_product("system_product",
+            CoreConfig.rv64(), 0x00000073, LsuConfig.rv64_product_default())
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl).to_contain("execute_exception=>source_provider_execute_exception")
+        expect(emitted.vhdl).to_contain("fault_aggregator: entity work")

@@ -357,172 +357,6 @@ measurement (verified via the 145-line pure-addition rebuild above), so
 the numbers should still hold once `text_list_prefix` is fixed and a
 fresh run is possible -- but that re-confirmation has not been done.
 
-### Stage 2 landed 2026-07-29: 10 more properties (former stage 1d + padding/margin)
-
-`text_list_prefix` (blocked live measurement in stage 1) is fixed upstream
-(`85173c22289`) -- the `bin/simple run` example lane works again, so this
-stage's coverage/timing numbers below are freshly measured, not carried
-forward from before a regression. The `hardware_replay_controller.spl`
-transitive syntax error (blocks `apply_decls_merge_probe_spec.spl`'s own
-`bin/simple test` lane specifically) is still present and still unrelated
-to this work; `css_spec.spl` remains the live regression check, as in
-stage 1.
-
-**Landing collision, worth recording:** while this stage was in flight, a
-different concurrent session landed CSS Grid support (`grid-template-*`,
-`grid-column`/`-row`) and `position: sticky` in the SAME function this
-stage edits (`_apply_decls_dispatch`) plus `apply_decls` itself (renamed
-to `_apply_decls_without_grid`, wrapped by a new Grid-aware `apply_decls`).
-Confirmed a real, direct textual overlap (not just same-file) via
-`git diff` both directions; resolved by re-extracting this stage's own
-diff as a pure-addition patch (121 insertions, 0 deletions, verified)
-against the CURRENT upstream content and re-splicing at the same logical
-anchor points (still valid -- their `display: grid` arm and dispatch-list
-additions are adjacent to, not overlapping, this stage's insertions).
-Separately hit and had to work around a stale-worktree trap: an
-intermediate worktree, created one fetch earlier, had `declarations.spl`
-updated (referencing the new `Style.position_sticky` field) copied in
-without its matching `style.spl` (the `Style` class definition, still the
-older version in that worktree) -- `class Style has no field named
-position_sticky`. Not a bug in either file; a version-skew artifact of
-mixing file versions across worktrees created at different fetches. Fixed
-by discarding that worktree and creating a genuinely fresh one from the
-latest fetch of both files together, per the "pristine worktree from
-FETCH_HEAD only" protocol.
-
-**Landed:** `justify-content`, `align-items`, `gap`, `text-align`,
-`cursor`, `outline`, `overflow`, `box-shadow` (former "stage 1d", all
-independent single/aggregate-field properties, no cross-dispatch-property
-coupling), plus `padding` and `margin` (moderate-complexity shorthands,
-higher value -- used across roughly half the showcase's rules). 18
-properties dispatched in total now (8 from stage 1 + 10 here) + the
-no-ops (`border-collapse`, and now also `grid-template-rows`/
-`grid-column`/`grid-row` per the concurrent Grid work above).
-
-**Correctness finding, filed not fixed (per instruction: pin existing
-behavior, record disagreement separately):** `margin` (shorthand) and
-`margin-left` (longhand) do **not** resolve their conflict by source
-position. The full-probe body processes the `margin` block, then
-unconditionally processes the `margin-left` block afterward in fixed CODE
-order -- so `margin-left` always wins when both are present, **even when
-`margin-left` appears BEFORE `margin` in the CSS source** (verified: `#e4
-{margin-left:40px;margin:15px;}` resolves to `margin_l:40`, i.e. the
-value from the property that appears earlier in the stylesheet, not
-later; confirmed against pristine, unmodified origin content before
-pinning it in the spec, not assumed). This is the opposite of standard
-CSS cascade semantics ("last declaration among equal-specificity rules
-wins") and does not match how the `background`/`background-color`
-shorthand pair in the same file behaves (that pair *is*
-source-position-aware, via `decl_tbl_last_index` comparison -- see the
-merge-probe spec's existing stage-0 cases). Pinned as-is in
-`apply_decls_merge_probe_spec.spl` (the dispatch arms must match the
-fallback body exactly, and changing runtime behavior is out of scope for
-a performance pass) -- but this looks like a genuine, independent
-correctness bug in the full-probe body worth its own investigation and
-fix, unrelated to performance.
-
-**Verified (PROVED):** `css_spec.spl` 9/12, unchanged. `apply_decls_merge_probe_spec.spl`
-extended with a "stage-2 dispatch/probe-fallback equivalence" describe
-block (20/20 total in the file): margin-shorthand-alone, margin-then-
-margin-left (longhand wins), margin-left-then-margin (longhand STILL
-wins, pinning the finding above), padding 2-value shorthand expansion,
-and all ten new properties combined in one call without corrupting
-unrelated width/height/margin_l/pad_l -- each paired with a
-fallback-forced (via `border-left`, still undispatched) equivalent
-producing identical results. Vacuity-probed (corrupted one expected
-value, confirmed red with the exact message, reverted, confirmed green).
-
-**Measured (PROVED, fresh -- `text_list_prefix` fix confirmed live):**
-`pgrep` showed 12 concurrent heavy processes (load-checked before
-quoting). Default budget: `budget-break at=6 of=151` -- **the cell
-cannot complete 151 nodes in the default budget** even after two
-dispatch stages (unchanged from the original bug report; the per-node
-cost reduction has not yet reached the ~10x needed to close a ~4s/node
-gap against a ~7s default budget). At `SIMPLE_WEB_RENDER_BUDGET_MS=40000`
-(same budget used for the stage-1 measurement): `budget-break at=17 of=151`
-(same node count as stage 1's measurement at this budget -- consistent
-with the fallback path, not the dispatch path, still dominating wall
-time for the remaining ~18% of calls) with **14 of 17 calls (82.4%)
-taking the dispatch path**, up from stage 1's 76.5%.
-
-## Closing measurement 2026-07-29: outlier nodes, not apply_decls, are the true dominant cost
-
-**Raised-budget A/B, from a pristine worktree at the current SSH tip
-(`4737529f5c86`), load-checked before and after both runs (pgrep count:
-7 -> 2 -> 4, low/comparable throughout):**
-
-```
-SHOWCASE_RESOLUTION=480x360 SIMPLE_WEB_RENDER_BUDGET_MS=120000 \
-SIMPLE_TIMEOUT_SECONDS=270 bin/simple run examples/06_io/ui/web_render_file_gui.spl
-```
-
-Two runs, both: `budget-break at=38 of=151`. Styling did **not** complete
-151 nodes in either run (no `status=pass`/checksum line reached), so the
-"changed checksum + varied pixels = success" case does not apply this
-pass. Historical series at this budget: **29 (pre-char_at-fix) -> 38
-(post-char_at-fix) -> 38 (post-stage-1) -> 38 (post-stage-2, this
-measurement, twice)**. Stages 1 and 2 raised dispatch-path coverage
-(76.5% -> 82.4%) and cut per-call `apply_decls` cost substantially, but
-neither moved the node count at this budget past what the char_at fixes
-alone already achieved -- explained below.
-
-**Arithmetic reconciliation (PROVED via a bounded 10-node per-call
-bracket probe, temporary, reverted after measuring):** stage-1/2's
-17.7ms-dispatch/174.9ms-fallback per-call numbers and 1-2-calls/node
-batching predict well under 0.5s/node; the measured ~3.16s/node average
-did not match. Bracketed the real per-node loop again, this time
-counting every `apply_decls` invocation (there are up to 8 call sites in
-the node body: presentational-attribute decls, the batched candidate-rule
-cascade, inline style, the important-origin cascade, inline-important,
-a `selectedcontent` special case, and two WM-theme-fallback material
-paths) and timing the main batched call plus total node time, over the
-first 10 nodes:
-
-| index | main apply_decls call | total node time | apply_decls call count |
-|---|---|---|---|
-| 0 | 21.1ms | 54.3ms | 1 |
-| 1 | 25.0ms | 84.8ms | 1 |
-| 2 | 198.5ms | 261.6ms | 1 |
-| 3 | 225.1ms | 298.5ms | 1 |
-| 4 | 23.1ms | 63.4ms | 1 |
-| 5 | 21.8ms | **9673.3ms** | 1 |
-| 6 | 21.0ms | 57.7ms | 1 |
-| 7 | 35.4ms | 114.9ms | 1 |
-| 8 | 21.3ms | **1818.8ms** | 1 |
-| 9 | 32.1ms | 121.8ms | 1 |
-
-**Call count is exactly 1 per node in every case -- the batching from
-stage 0 works as intended; call volume is not the gap.** The gap is that
-`apply_decls` (the batched call) is now genuinely fast for every node
-(21-225ms), but **2 of these 10 nodes (indices 5 and 8 -- the SAME two
-outlier indices flagged, unexplained, in the original "Cost center
-attribution" section above) have a residual cost OUTSIDE apply_decls of
-9.65 seconds and 1.8 seconds respectively**, dwarfing everything else.
-Summed over this sample, those two nodes alone are **12.3ms of the
-12.5ms-node-average's 12,549,237us total -- 98.5% of the sampled time**.
-This is the missing piece: stage 1/2's 70-90% attribution to
-`apply_decls` was correct for typical nodes and for the aggregate
-profile it was measured against, but a small number of pathological
-nodes dominate the wall-clock average almost entirely, and their cost is
-NOT in `apply_decls` at all.
-
-**Residual cost center, named per the profiled call sites (not
-`apply_decls`):** the time is spent somewhere in the node body AFTER the
-batched `apply_decls` call and its immediate neighbors -- i.e. within the
-7 other, un-batched `apply_decls` call sites (inline style, the
-important-origin cascade, `selectedcontent`, or the two WM-theme-fallback
-material paths) or the non-`apply_decls` logic interleaved with them
-(attribute lookups, material-witness bookkeeping). This matches and
-sharpens the original "node 5 / node 8 outliers, unexplained" note from
-the stage-0 profiling pass, rather than being a new finding -- confirms
-those two nodes specifically hit an expensive path unrelated to CSS
-declaration parsing. Not isolated further this pass (would need
-per-call-site brackets inside that ~7-site region, which is out of scope
-for a closing measurement pass); no code change made, per instruction, since
-nothing trivial and safe (<20 lines) was identified -- the fix requires
-first finding which of the 7 sites or which surrounding logic is
-expensive on these specific two nodes.
-
 ### Remaining fix proposal (not implemented — needs its own scoped change)
 
 1. ~~Batch all candidate rules' declarations into one merged decl table and
@@ -531,42 +365,40 @@ expensive on these specific two nodes.
    pass-by-reference/builder-pattern mutation was not attempted for the
    full-probe path, only for the new dispatch path).
 2. ~~Replace individual `decl_tbl_get(tbl, "prop-name")` linear-scan
-   probes with dispatch on the property name.~~ Landed for 18 properties
-   across stages 1+2, measured at 82.4% of calls on the showcase page.
-   Remaining, roughly in priority order by rule-count impact on this page:
-   - **`padding`/`margin` longhand siblings** (`padding-left`/`-top`/
-     `-right`/`-bottom`/`-block`/`-inline`/etc, `margin-top`/`-right`/
-     `-bottom`/`-block`/etc): not yet dispatched, so any rule combining
-     the shorthand (now dispatched) with one of its own longhand siblings
-     still falls back. Not used in the showcase fixture's 21 rules, so
-     zero impact on the 82.4% measurement above, but likely needed for
-     the ">90%" aim on other pages.
-   - **`border`, `border-left`, `border-radius`** (shorthand expanding to
-     4 sides' width/color/style) -- highest remaining value on THIS page.
-     Note the file has grown a second `background` shorthand path
-     (two-URL layers) AND CSS Grid/`position:sticky` support since stage 1
-     started -- re-read the current `background`/`background-*`/`border`/
-     `border-*` handling before lifting any of it, don't work from a
-     stale copy, and re-check for concurrent-session collisions on
-     `_apply_decls_dispatch` before landing (this stage hit one).
-   - **`background`, `font`, `flex`/`flex-wrap`/`flex-direction`** -- the
-     most complex shorthands (multi-field resolution, cross-property
-     reset-on-later-shorthand logic, now including the two-URL-layer
-     background path).
-   - **`place-content`/`place-items`:** each writes into the same fields
-     as `justify-content`/`align-items` (now dispatched) via a DIFFERENT
-     decl entry not currently recognized -- a call carrying `justify-
-     content`/`align-items` together with `place-content`/`place-items`
-     already correctly falls back (both must be dispatch-recognized or
-     neither is), but adding these two would raise coverage further.
+   probes with dispatch on the property name.~~ Landed for 8 conflict-free
+   properties (stage 1, above), measured at 76.5% of calls / ~9.9x lower
+   per-call cost on the showcase page (measurement predates the
+   `text_list_prefix` regression above; not yet re-confirmed against the
+   current tip). Remaining stages, roughly in priority order by rule-count
+   impact on this specific page:
+   - **Fix `text_list_prefix` / the `hardware_replay_controller.spl`
+     syntax error first** -- both currently block any further live
+     measurement or `apply_decls_merge_probe_spec.spl` test-lane
+     verification of this whole bug's fixes.
+   - **Stage 1b (highest value):** `padding`, `margin`, `border`
+     (shorthand expanding to 4 sides' width/color/style),
+     `border-left`/`border-radius`. Used across roughly half the
+     showcase's 21 rules; their shorthand-vs-longhand conflict resolution
+     (see `background` example already handled in the merge-probe spec)
+     needs the same careful lift-and-trace treatment this stage used for
+     `display:contents`. Note the file has grown a second `background`
+     shorthand path (two-URL layers) since this stage started -- re-read
+     the current `background`/`background-*` handling before lifting it,
+     don't work from a stale copy.
+   - **Stage 1c:** `background`, `font`, `flex`/`flex-wrap`/
+     `flex-direction` -- the most complex shorthands (multi-field
+     resolution, cross-property reset-on-later-shorthand logic).
+   - **Stage 1d (optional, lower value on this page):** `color`,
+     `justify-content`, `align-items`, `gap`, `box-shadow`, `text-align`,
+     `cursor`, `outline`, `overflow` -- each only 1-2 rules on this
+     fixture, but worth a batch pass since they are simple. Note
+     `overflow`/`overflow-y` gained an `overflow_scroll_y` distinction
+     since this stage started -- re-read before lifting.
    - **`top`/`right`/`position`:** only dispatchable together with the
-     full `left`/`bottom`/`inset*` family (see stage-1 landmine) --
-     treat as one unit, not incremental additions. Now also intersects
-     with the concurrent `position: sticky` work (`SIMPLE_WEB_STICKY_TOP_AUTO`
-     sentinel) -- re-read before touching.
-3. Fix the margin/margin-left non-standard ordering finding above --
-   separate correctness work, not a performance-pass change.
-4. Profile whether the fallback path's ~175ms/call full-probe cost
+     full `left`/`bottom`/`inset*` family (see landmine above) --
+     treat as one unit, not incremental additions.
+3. Profile whether, after stage 1b/1c close most of the remaining 23.5%
+   fallback fraction, the fallback path's ~175ms/call full-probe cost
    itself needs the batched-lookup treatment (a single pass over `tbl`'s
    actual entries instead of ~283 named probes) for the residual rare-
    property calls once border/background/font/flex close most of the
@@ -1439,129 +1271,6 @@ Between the two long measurement attempts (2 x 20 minutes) and the
 regression-baseline runs, the time budget for this pass was fully consumed
 by the measurement; the trim was not attempted. It remains the most
 shovel-ready candidate from the prior section's ranked fix list.
-
-## 2026-07-30 close-out: measurement blocked by an already-owned parser defect, not by parse cost
-
-Per-the-brief follow-up on whether real-document HTML parsing is quadratic
-(the `char_code_at`/`core_string.spl:282` "ASCII fast path walks from byte
-0" landmine family). Two environment corrections apply retroactively to
-everything measured earlier in this document: the deployed
-`bin/release/x86_64-unknown-linux-gnu/simple` was swapped mid-campaign
-(now 154MB / 617 `llvm::` strings, i.e. LLVM-enabled and canonical; the
-prior binary in the window used for most of this document's measurements
-had **zero** `llvm::` strings, per project memory
-`reference_deployed_binary_lost_llvm_codegen_2026-07-29`), and the host hit
-`ENOSPC` (disk 100% full) around the time of the two 900s/1200s
-zero-output failures in the prior section — since cleared (1.3T free).
-**Both prior zero-output measurement attempts are therefore SUSPECT, not
-informative about parse or style cost specifically** -- disk exhaustion or
-a broken toolchain are at least as plausible an explanation as anything
-about the pipeline's own performance.
-
-**Document size (PROVED, direct measurement, not inferred):**
-`examples/06_io/ui/browser_common_elements_showcase.html` is **4848
-bytes, 4848 characters** (`file` confirms plain ASCII text, `wc -c` ==
-`wc -m`). Small by any measure.
-
-**Cheap check first, per the coordinator's revised brief:** re-ran the
-plain pipeline on the corrected environment (fresh worktree from
-`git ls-remote`'s SHA -- never `FETCH_HEAD`, per this pass's protocol
-correction; canonical LLVM binary; disk healthy; load ~5.7, the lowest
-this whole campaign) with `SIMPLE_WEB_PHASE_TRACE=1 stdbuf -oL -eL`,
-`SIMPLE_WEB_RENDER_BUDGET_MS=900000 SIMPLE_TIMEOUT_SECONDS=1200`.
-
-**Result: the run dies FAST (well under the 1200s budget, reproduced
-twice) with a real compile error, not a timeout, not silence:**
-```
-error: compile failed: parse: in ".../src/lib/common/web/browser_renderer_protocol.spl":
-Unexpected token: expected expression, found Newline
-```
-This is **the same defect an independent lane (ac14) had already
-root-caused and filed** (`doc/08_tracking/bug/
-if_condition_operator_line_continuation_parse_2026-07-30.md`,
-cross-referenced in `doc/09_report/showcase_matrix_census_2026-07-30.md`
-as "wall 8"): operator line-continuation parses inside a `val` binding but
-fails inside an `if` condition (`val x = a +\n   b` parses; `if a >\n
-b:` does not), introduced by `ba0ce4e3c06` "feat(web): add SBR2 command
-capability codec" earlier the same day, confirmed live on the newest
-LLVM-linked seed (not a staleness artifact). **This blocks `web_render_
-file_gui.spl` from compiling at all right now** -- it transitively
-compiles `browser_renderer_protocol.spl` -- confirmed independently from
-this document's own investigation before the coordinator's cross-lane
-notice arrived, and cross-verified via `git show <tip>:<file>` (the
-committed blob parses fine standalone, matching the known "STATE not
-grammar" bug family already on file in this campaign's memory -- a
-whole-tree compile triggers it, an isolated read of the file does not).
-
-**Per explicit instruction: not touched.** ac14 owns the parser fix;
-reformatting the one `if` to dodge it would encode the grammar
-inconsistency rather than fix it, and would silently hide the real bug
-from whoever needs to see it fail. **This is a legitimate stopping point,
-not a stall.** The style-vs-layout/paint completion question from the
-prior section remains genuinely open, now for a different and better-
-understood reason: nothing downstream of compilation can be measured
-until this lands, and that is out of this lane's scope.
-
-**The quadratic-scan hypothesis itself: answered anyway, independent of
-whether the full pipeline compiles (PROVED via a standalone microbenchmark,
-re-run on the corrected canonical binary for validity).** A tiny
-standalone script (not touching `browser_renderer_protocol.spl` or any
-other blocked module) scanned synthetic all-ASCII strings from 500 to
-8000 characters two ways: `.slice(i, i+1)` per position (the exact
-pattern `html_tokenizer.spl`'s `_scan_char_data`/`_split_first_word`/
-`_strip_tag_name`/`_find_raw_end_tag` all use in their hot loops, confirmed
-by reading the source -- none of them use `char_code_at` in a
-document-length loop) and `char_code_at(i)` per position (for direct
-comparison against the `core_string.spl:282` landmine).
-
-| N | slice scan_us | char_code_at scan_us |
-|---|---|---|
-| 500 | 159 | 50 |
-| 1000 | 303 | 94 |
-| 2000 | 607 | 183 |
-| 4000 | 1258 | 391 |
-| 8000 | 2349 | 804 |
-
-Both are **cleanly linear** -- each doubling of N almost exactly doubles
-the time, in every step, for both access patterns. **No quadratic
-blow-up at any tested size**, well above the real document's 4848
-characters. This **kills the quadratic-parse hypothesis for the seed lane**
-(what `bin/simple run` actually executes): `core_string.spl:282`'s "ASCII
-fast-path walks from byte 0 every call" defect is real (per the
-coordinator's own framing and this campaign's prior char_at findings) but
-belongs to a **different lane** -- the freestanding/native-codegen
-runtime's own `rt_string_char_code_at`, which is not what the seed's Rust-
-native string implementation uses. Combined with the tokenizer's own
-slice-based (not char_code_at-heavy) hot-loop pattern, there is no
-evidence of an O(N^2) document-length scan anywhere on this path.
-**Answering the brief's item 3 directly: neither the non-ASCII-`char_code_
-at`-quadratic-on-seed defect nor the ASCII-ffast-path-quadratic-on-native
-defect applies here** -- the seed's tokenizer scan is linear by both
-access patterns, on the canonical binary, confirmed empirically.
-
-**Item 4 (contained vs. architectural fix): moot for the quadratic
-hypothesis (refuted, nothing to fix) -- the real current blocker (the
-parser defect) already has an owner, a filed doc, and two identified fix
-options, per the other lane's own report; correctly not chased here.**
-
-**Sub-phase markers at lines 1191/1197/1258 (`parse_html_total`,
-`extract_css_vw`, plus tokenize/tree-build brackets in
-`html_tree_builder.spl`): prototyped and produced one promising signal
-before this pass's own worktree was lost mid-edit to an unrelated
-disk/session issue** (`parse_tokenize`=102ms, `parse_tree_build`=122ms,
-vs. the outer `phase=parse`=2225ms on that run -- roughly 2 seconds
-unaccounted for between the tokenizer/tree-builder and the full "parse"
-boundary, likely in `extract_css_vw`/`build_child_index`/the HNode-
-conversion loop). **That data point predates the binary-swap correction
-and is not re-verified on the canonical binary or landed this pass**, per
-the coordinator's revised brief ("only if it completes AND the numbers
-are still unexplained do you go back to sub-phase markers") -- the plain
-re-run did not complete, so this was correctly not repeated. Left as the
-documented next step for whoever resumes once ac14's fix lands.
-
-### Regression baselines
-Not re-run this pass -- no source change landed (investigation and
-environment-correction only).
 
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 

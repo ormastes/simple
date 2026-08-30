@@ -1,17 +1,21 @@
 # LLM Caret CLI Process Hardening
 
-> Runs the actual Caret command entrypoint through the self-hosted `bin/simple` runtime and separately verifies that the production `bin/caret` wrapper selects an explicit cached executable, forwards arguments, and fails closed on an invalid override. A fixture configuration routes the Claude provider to a deterministic local executable, so success, subprocess failure, help, and argument rejection are verified without credentials, network access, or paid calls.
+> Runs the Caret source entrypoint through the self-hosted runtime and separately verifies cached production-wrapper selection, argument forwarding, and fail-closed invalid overrides. Provider behavior remains deterministic and offline.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| Tests | Active | Skipped | Pending | Executed |
+|-------|--------|---------|---------|---------:|
+| 3 | 3 | 0 | 0 | 0 |
+
+> Execution status: designed and manually synchronized. The current
+> self-hosted runner cannot resolve its process-spawn boundary, so this manual
+> does not claim an executable PASS.
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # LLM Caret CLI Process Hardening
 
-Runs the actual Caret command entrypoint through the self-hosted `bin/simple` runtime and separately verifies that the production `bin/caret` wrapper selects an explicit cached executable, forwards arguments, and fails closed on an invalid override. A fixture configuration routes the Claude provider to a deterministic local executable, so success, subprocess failure, help, and argument rejection are verified without credentials, network access, or paid calls.
+Runs the Caret source entrypoint through the self-hosted runtime and separately verifies cached production-wrapper selection, argument forwarding, and fail-closed invalid overrides. Provider behavior remains deterministic and offline.
 
 ## At a Glance
 
@@ -24,8 +28,8 @@ Runs the actual Caret command entrypoint through the self-hosted `bin/simple` ru
 | Design | doc/05_design/llm_caret_claude_cli_full_parity.md |
 | Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-24 |
+| Generator | Manual synchronization; executable docgen is runtime-blocked |
 
 ## Overview
 
@@ -195,23 +199,20 @@ explicitly authorized live-provider run.
 
 #### should preserve help, success, failure, and usage behavior
 
-- should preserve help, success, failure, and usage behavior
 - Load the accepted Claude feature map
    - Expected: cases.len() equals `4`
 - Invoke the caret CLI provider
 - Check the structured CLI response
+- check cli result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-LLM-CARET-FULL-003
-# @req REQ-SSPEC-SYSTEM
-step("should preserve help, success, failure, and usage behavior")
 step("Load the accepted Claude feature map")
 expect(file_exists(FEATURE_MAP)).to_be(true)
 expect(file_read(FEATURE_MAP)).to_contain("\tcli\t")
@@ -230,24 +231,21 @@ for case in cases:
 
 #### should execute an explicit cached Caret artifact with unchanged arguments
 
-- should execute an explicit cached Caret artifact with unchanged arguments
 - Load the accepted Claude feature map
+   - Expected: `bin/caret` exists
 - Invoke the caret CLI provider
 - Check the structured CLI response
-   - Expected: result.2 equals `0`
-   - Expected: result.1 ?? "" equals ``
-
+   - Expected: exit equals `0`
+   - Expected: stdout contains `caret-wrapper-marker --plain`
+   - Expected: stderr is empty
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-LLM-CARET-FULL-006
-# @req REQ-SSPEC-SYSTEM
-step("should execute an explicit cached Caret artifact with unchanged arguments")
 step("Load the accepted Claude feature map")
 expect(file_exists("bin/caret")).to_be(true)
 val previous = env_get("SIMPLE_CARET_NATIVE")
@@ -271,22 +269,20 @@ expect(result.1 ?? "").to_equal("")
 
 #### should reject a missing explicit cached Caret artifact
 
-- should reject a missing explicit cached Caret artifact
 - Load the accepted Claude feature map
 - Invoke the caret CLI provider
 - Check the structured CLI response
-   - Expected: result.2 equals `127`
-
+   - Expected: exit equals `127`
+   - Expected: stderr contains `SIMPLE_CARET_NATIVE is not executable`
+   - Expected: stdout does not contain Caret usage
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should reject a missing explicit cached Caret artifact")
 step("Load the accepted Claude feature map")
 val previous = env_get("SIMPLE_CARET_NATIVE")
 expect(env_set(
@@ -317,6 +313,7 @@ expect((result.0 ?? "").contains("Usage:")).to_be(false)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+| Executed scenarios | 0 |
 
 
 ## Related Documentation
@@ -328,65 +325,3 @@ expect((result.0 ?? "").contains("Usage:")).to_be(false)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-LLM-CARET-FULL-003`
-- `REQ-LLM-CARET-FULL-006`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a49bccaf530543376577abf6552a8cf67e375095f0994bbcfcfbc42e1171a565`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a49bccaf530543376577abf6552a8cf67e375095f0994bbcfcfbc42e1171a565`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a49bccaf530543376577abf6552a8cf67e375095f0994bbcfcfbc42e1171a565`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **84/100**; effective score: **84/100**; blockers: **0**.
-
-SSpec documentization score: 84/100
-source: test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl
-mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md (current)
-findings: 9 blockers: 0
-  narrative=100 structure=85 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:264:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve help, success, failure, and usage behavior' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:264:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve help, success, failure, and usage behavior' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:281:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute an explicit cached Caret artifact with unchanged arguments' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:281:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should execute an explicit cached Caret artifact with unchanged arguments' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:303:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject a missing explicit cached Caret artifact' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl:303:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject a missing explicit cached Caret artifact' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

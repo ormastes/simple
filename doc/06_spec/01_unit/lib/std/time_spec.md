@@ -2,6 +2,29 @@
 
 > Test suite for the std.time module, verifying time measurement and sleep functionality.
 
+<!-- sdn-diagram:id=time_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=time_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+time_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=time_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -20,7 +43,7 @@ Test suite for the std.time module, verifying time measurement and sleep functio
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/std/time_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Test suite for the std.time module, verifying time measurement and sleep functionality.
@@ -33,18 +56,13 @@ Test suite for the std.time module, verifying time measurement and sleep functio
 
 #### now_micros returns positive microseconds
 
-- now_micros returns positive microseconds
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("now_micros returns positive microseconds")
 val micros = time_now_micros()
 expect micros > 0
 ```
@@ -53,18 +71,13 @@ expect micros > 0
 
 #### now_nanos returns positive nanoseconds
 
-- now_nanos returns positive nanoseconds
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("now_nanos returns positive nanoseconds")
 val nanos = time_now_nanos()
 expect nanos > 0
 ```
@@ -73,18 +86,13 @@ expect nanos > 0
 
 #### now_ms returns positive milliseconds
 
-- now_ms returns positive milliseconds
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("now_ms returns positive milliseconds")
 val ms = time_now_ms()
 expect ms > 0
 ```
@@ -93,18 +101,13 @@ expect ms > 0
 
 #### now returns positive seconds
 
-- now returns positive seconds
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("now returns positive seconds")
 val secs = time_now()
 expect secs > 0.0
 ```
@@ -113,18 +116,16 @@ expect secs > 0.0
 
 #### nanos is approximately micros * 1000
 
-- nanos is approximately micros * 1000
+1. expect diff abs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("nanos is approximately micros * 1000")
 val micros = time_now_micros()
 val nanos = time_now_nanos()
 # Should be within same millisecond (allowing for execution time)
@@ -136,18 +137,16 @@ expect diff.abs() < 1000  # Within 1ms
 
 #### ms is approximately micros / 1000
 
-- ms is approximately micros / 1000
+1. expect diff abs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ms is approximately micros / 1000")
 val micros = time_now_micros()
 val ms = time_now_ms()
 val diff = micros / 1000 - ms
@@ -158,18 +157,13 @@ expect diff.abs() < 2  # Within 2ms
 
 #### elapsed time increases
 
-- elapsed time increases
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("elapsed time increases")
 val start = time_now_micros()
 # Busy wait a bit
 var x = 0
@@ -183,18 +177,13 @@ expect end > start
 
 #### elapsed time is measurable
 
-- elapsed time is measurable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("elapsed time is measurable")
 val start = time_now()
 # Busy wait
 var x = 0
@@ -210,18 +199,16 @@ expect elapsed > 0.0
 
 #### sleep pauses execution for specified duration
 
-- sleep pauses execution for specified duration
+1. time sleep
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sleep pauses execution for specified duration")
 val start = time_now()
 time_sleep(0.1)  # Sleep 100ms
 val elapsed = time_now() - start
@@ -235,18 +222,16 @@ expect elapsed <= 0.2
 
 #### sleep_ms pauses for milliseconds
 
-- sleep_ms pauses for milliseconds
+1. time sleep ms
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sleep_ms pauses for milliseconds")
 val start = time_now_ms()
 time_sleep_ms(50)
 val elapsed = time_now_ms() - start
@@ -258,18 +243,16 @@ expect elapsed <= 100  # At most 100ms
 
 #### sleep with zero duration does not crash
 
-- sleep with zero duration does not crash
+1. time sleep
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sleep with zero duration does not crash")
 time_sleep(0.0)
 # Should complete without error
 ```
@@ -278,18 +261,16 @@ time_sleep(0.0)
 
 #### sleep_micros with small duration works
 
-- sleep_micros with small duration works
+1. time sleep micros
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sleep_micros with small duration works")
 val start = time_now_micros()
 time_sleep_micros(1000)  # 1ms
 val elapsed = time_now_micros() - start
@@ -303,18 +284,13 @@ expect elapsed <= 5000  # At most 5ms
 
 #### microseconds to milliseconds conversion
 
-- microseconds to milliseconds conversion
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("microseconds to milliseconds conversion")
 val micros: i64 = 1000000  # 1 million microseconds
 val ms = micros / 1000
 expect ms == 1000  # 1000 milliseconds
@@ -324,18 +300,13 @@ expect ms == 1000  # 1000 milliseconds
 
 #### milliseconds to seconds conversion
 
-- milliseconds to seconds conversion
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("milliseconds to seconds conversion")
 val ms: i64 = 5000
 val secs = ms as f64 / 1000.0
 expect secs == 5.0
@@ -345,18 +316,13 @@ expect secs == 5.0
 
 #### nanoseconds to microseconds approximation
 
-- nanoseconds to microseconds approximation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("nanoseconds to microseconds approximation")
 val nanos: i64 = 1000000  # 1 million nanoseconds
 val micros = nanos / 1000
 expect micros == 1000
@@ -368,18 +334,13 @@ expect micros == 1000
 
 #### now functions work multiple times
 
-- now functions work multiple times
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("now functions work multiple times")
 val t1 = time_now_micros()
 val t2 = time_now_micros()
 val t3 = time_now_micros()
@@ -391,18 +352,16 @@ expect t2 >= t1
 
 #### time values are monotonic
 
-- time values are monotonic
+1. var prev = time now micros
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("time values are monotonic")
 var prev = time_now_micros()
 for _ in 0..10:
     val curr = time_now_micros()
@@ -414,18 +373,17 @@ for _ in 0..10:
 
 #### very short sleep does not panic
 
-- very short sleep does not panic
+1. time sleep
+2. time sleep micros
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("very short sleep does not panic")
 time_sleep(0.001)  # 1ms
 time_sleep_micros(100)  # 100 microseconds
 # Should complete without error
@@ -445,51 +403,3 @@ time_sleep_micros(100)  # 100 microseconds
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `176ffca8920e8f7bbd00f2e9f049877f24f2697252f8e0fc5de6453d47278e46`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `176ffca8920e8f7bbd00f2e9f049877f24f2697252f8e0fc5de6453d47278e46`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `176ffca8920e8f7bbd00f2e9f049877f24f2697252f8e0fc5de6453d47278e46`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/std/time_spec.spl
-mirror: doc/06_spec/01_unit/lib/std/time_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/std/time_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/std/time_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/std/time_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'now_micros returns positive microseconds' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/time_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'now_nanos returns positive nanoseconds' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/time_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'now_ms returns positive milliseconds' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

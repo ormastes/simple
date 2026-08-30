@@ -111,10 +111,7 @@ Per-cycle procedure (per `--level`):
 4. Only `approve` from the bot triggers `POST .../approve` (gh/bb/jira). `request-changes` posts inline comments and resets the cycle.
 
 **Approve API per target:**
-- GitHub, eligible independent reviewer: `gh pr review --approve` (existing).
-- GitHub, same author: provider approval is impossible; evaluate scoped
-  privilege and dispatch the exact-head `SPipe Self Review Admission` required
-  check through `spipe self-review-guide` (or the pinned plugin/MCP entrypoint).
+- GitHub: `gh pr review --approve` (existing).
 - Bitbucket: `POST /repositories/{ws}/{repo}/pullrequests/{id}/approve` with Bearer token.
 - Jira: not applicable (Jira tracks the issue, not the code review — L2/L3 work on gh/bb only; Jira is for ticket linking).
 

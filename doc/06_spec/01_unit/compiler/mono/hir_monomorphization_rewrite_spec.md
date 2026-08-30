@@ -23,6 +23,7 @@
 | Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+```simple
 `run_monomorphization` was wired as driver Phase 4 but was an expensive no-op:
 `rewrite_module` returned the module unchanged ("For now, return module
 unchanged"), so no specialization was ever emitted and no call site was ever
@@ -53,6 +54,7 @@ outright, so a generic HirFunction cannot be produced from source today. Those
 gates stay loud; see
 `doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md`.
 
+```
 ## Scenarios
 
 ### HIR monomorphization pass (#158 Phase B)

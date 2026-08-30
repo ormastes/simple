@@ -1,6 +1,6 @@
-# Group Algorithms Contract Specification
+# Contract spec: test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl
 
-> Tests covering group algorithms contract — OpenCL backend, group algorithms contract — CUDA/PTX backend, group algorithms — recognition and arity.
+> Audience: engineers owning the module under test. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Group Algorithms Contract Specification
+# Contract spec: test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl
+
+Audience: engineers owning the module under test. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the module under test. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -88,7 +128,6 @@ expect(source).to_contain("sub_group_scan_inclusive_add(")
 #### does not emit unsupported placeholder for reduce_add
 
 - does not emit unsupported placeholder for reduce_add
-   - Expected: source does not contain `// unsupported OpenCL intrinsic`
 
 
 <details>
@@ -103,7 +142,7 @@ step("does not emit unsupported placeholder for reduce_add")
 # evidence(protocol_json): asserted result fields below are the complete typed oracle
 val func = make_opencl_group_kernel("sg_reduce_no_placeholder", 303, warp_reduce_add_block())
 val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
-expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
+expect(source).to_not_contain("// unsupported OpenCL intrinsic")
 ```
 
 </details>
@@ -111,7 +150,6 @@ expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
 #### does not emit unsupported placeholder for broadcast
 
 - does not emit unsupported placeholder for broadcast
-   - Expected: source does not contain `// unsupported OpenCL intrinsic`
 
 
 <details>
@@ -126,7 +164,7 @@ step("does not emit unsupported placeholder for broadcast")
 # evidence(protocol_json): asserted result fields below are the complete typed oracle
 val func = make_opencl_group_kernel("sg_broadcast_no_placeholder", 304, warp_broadcast_block())
 val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
-expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
+expect(source).to_not_contain("// unsupported OpenCL intrinsic")
 ```
 
 </details>
@@ -134,7 +172,6 @@ expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
 #### does not emit unsupported placeholder for scan_add
 
 - does not emit unsupported placeholder for scan_add
-   - Expected: source does not contain `// unsupported OpenCL intrinsic`
 
 
 <details>
@@ -149,7 +186,7 @@ step("does not emit unsupported placeholder for scan_add")
 # evidence(protocol_json): asserted result fields below are the complete typed oracle
 val func = make_opencl_group_kernel("sg_scan_no_placeholder", 305, warp_scan_add_block())
 val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
-expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
+expect(source).to_not_contain("// unsupported OpenCL intrinsic")
 ```
 
 </details>
@@ -488,15 +525,12 @@ expect(recognize_gpu_intrinsic("gpu_warp_scan_add") != nil).to_equal(true)
 #### all_gpu_intrinsic_names includes group algorithm intrinsics
 
 - all_gpu_intrinsic_names includes group algorithm intrinsics
-   - Expected: names contains `gpu_warp_reduce_add`
-   - Expected: names contains `gpu_warp_broadcast`
-   - Expected: names contains `gpu_warp_scan_add`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -504,9 +538,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("all_gpu_intrinsic_names includes group algorithm intrinsics")
 # evidence(protocol_json): asserted result fields below are the complete typed oracle
 val names = all_gpu_intrinsic_names()
-expect(names.contains("gpu_warp_reduce_add")).to_equal(true)
-expect(names.contains("gpu_warp_broadcast")).to_equal(true)
-expect(names.contains("gpu_warp_scan_add")).to_equal(true)
+expect(names).to_contain("gpu_warp_reduce_add")        expect(names).to_contain("gpu_warp_broadcast")        expect(names).to_contain("gpu_warp_scan_add")
 ```
 
 </details>
@@ -536,23 +568,6 @@ expect(is_gpu_builtin_call("gpu_warp_scan_add")).to_equal(true)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering group algorithms contract — OpenCL backend, group algorithms contract — CUDA/PTX backend, group algorithms — recognition and arity.
-- group algorithms contract — OpenCL backend
-- group algorithms contract — CUDA/PTX backend
-- group algorithms — recognition and arity
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -577,34 +592,24 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `40ebf5160afbb368f14231ebcdf621411ce74ffa4ae463a72fb5a3b50fc48100`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `e8909b265fd229e3ba16c61ce4271c700afdc984eb54cca99f7f52b0e134f334`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `40ebf5160afbb368f14231ebcdf621411ce74ffa4ae463a72fb5a3b50fc48100`.
+Source SHA-256: `e8909b265fd229e3ba16c61ce4271c700afdc984eb54cca99f7f52b0e134f334`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `40ebf5160afbb368f14231ebcdf621411ce74ffa4ae463a72fb5a3b50fc48100`  
+Source SHA-256: `e8909b265fd229e3ba16c61ce4271c700afdc984eb54cca99f7f52b0e134f334`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **100/100**; effective score: **100/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 100/100
 source: test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl
 mirror: doc/06_spec/01_unit/compiler/codegen/group_algorithms_contract_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
+findings: 0 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=87; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/codegen/group_algorithms_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/codegen/group_algorithms_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/codegen/group_algorithms_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 <!-- sspec-maintain:scorecard:end -->

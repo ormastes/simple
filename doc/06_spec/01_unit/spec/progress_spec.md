@@ -2,6 +2,29 @@
 
 > Tests for the progress() function that reports test execution status.
 
+<!-- sdn-diagram:id=progress_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=progress_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+progress_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=progress_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -20,7 +43,7 @@ Tests for the progress() function that reports test execution status.
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/spec/progress_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests for the progress() function that reports test execution status.
@@ -36,7 +59,27 @@ Tests for the progress() function that reports test execution status.
 
 #### prints progress message with timestamp
 
-- prints progress message with timestamp
+1. progress
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+progress("Starting test...")
+expect true
+```
+
+</details>
+
+#### shows elapsed time since test started
+
+1. progress
+2. progress
+3. progress
 
 
 <details>
@@ -46,28 +89,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("prints progress message with timestamp")
-progress("Starting test...")
-expect true
-```
-
-</details>
-
-#### shows elapsed time since test started
-
-- shows elapsed time since test started
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SPEC
-step("shows elapsed time since test started")
 progress("Step 1")
 progress("Step 2")
 progress("Step 3")
@@ -78,18 +99,18 @@ expect true
 
 #### can report percentage completion
 
-- can report percentage completion
+1. progress
+2. progress
+3. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can report percentage completion")
 progress("Processing: 0%")
 progress("Processing: 50%")
 progress("Processing: 100%")
@@ -100,18 +121,18 @@ expect true
 
 #### can report step-based completion
 
-- can report step-based completion
+1. progress
+2. progress
+3. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can report step-based completion")
 val total_steps = 3
 progress("Step 1 of 3")
 progress("Step 2 of 3")
@@ -125,18 +146,20 @@ expect true
 
 #### shows progress during long operation
 
-- shows progress during long operation
+1. progress
+2. progress
+3. progress
+4. progress
+5. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("shows progress during long operation")
 progress("Loading modules...")
 progress("Loaded 5/15 modules")
 progress("Loaded 10/15 modules")
@@ -151,18 +174,13 @@ expect true
 
 #### tests without progress calls work normally
 
-- tests without progress calls work normally
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("tests without progress calls work normally")
 expect 1 + 1 == 2
 ```
 
@@ -170,18 +188,16 @@ expect 1 + 1 == 2
 
 #### progress calls can be conditional
 
-- progress calls can be conditional
+1. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("progress calls can be conditional")
 val show_progress = true
 if show_progress:
     progress("Progress enabled")
@@ -194,7 +210,25 @@ expect true
 
 #### supports simple messages
 
-- supports simple messages
+1. progress
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+progress("Simple message")
+expect true
+```
+
+</details>
+
+#### supports string interpolation
+
+1. progress
 
 
 <details>
@@ -204,28 +238,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("supports simple messages")
-progress("Simple message")
-expect true
-```
-
-</details>
-
-#### supports string interpolation
-
-- supports string interpolation
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SPEC
-step("supports string interpolation")
 val count = 42
 val name = "items"
 progress("Processed " + count.to_string() + " " + name)
@@ -236,18 +248,18 @@ expect true
 
 #### handles multiline descriptions
 
-- handles multiline descriptions
+1. progress
+2. progress
+3. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("handles multiline descriptions")
 progress("Phase 1: Initialization")
 progress("Phase 2: Processing")
 progress("Phase 3: Finalization")
@@ -260,18 +272,17 @@ expect true
 
 #### shows time elapsed in human-readable format
 
-- shows time elapsed in human-readable format
+1. progress
+2. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("shows time elapsed in human-readable format")
 progress("Start")
 progress("After some work")
 expect true
@@ -283,18 +294,17 @@ expect true
 
 #### progress output preserved when test fails
 
-- progress output preserved when test fails
+1. progress
+2. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("progress output preserved when test fails")
 progress("Step 1 completed")
 progress("Step 2 started")
 expect true
@@ -306,18 +316,16 @@ expect true
 
 #### has simple function signature
 
-- has simple function signature
+1. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("has simple function signature")
 progress("Message")
 expect true
 ```
@@ -326,18 +334,16 @@ expect true
 
 #### is available in all test contexts
 
-- is available in all test contexts
+1. progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("is available in all test contexts")
 progress("Available in test")
 expect true
 ```
@@ -356,57 +362,3 @@ expect true
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SPEC`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `9fbeba322b86c08d692e7231986b237a1671736ff4b46a0bc0878ca685cd5988`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `9fbeba322b86c08d692e7231986b237a1671736ff4b46a0bc0878ca685cd5988`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `9fbeba322b86c08d692e7231986b237a1671736ff4b46a0bc0878ca685cd5988`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/01_unit/spec/progress_spec.spl
-mirror: doc/06_spec/01_unit/spec/progress_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=90 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/spec/progress_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/spec/progress_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/spec/progress_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prints progress message with timestamp' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/spec/progress_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shows elapsed time since test started' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/spec/progress_spec.spl:52:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can report percentage completion' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/spec/progress_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can report percentage completion' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/spec/progress_spec.spl:60:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can report step-based completion' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

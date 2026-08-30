@@ -1,7 +1,5 @@
 # `set` method: dict returns nil on the JIT; array/tuple silently no-op when a dict `.set` shares the module
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 Date: 2026-08-02
 Status: ARCHITECTURAL-OPEN — re-verified 2026-08-09 and again fresh
 2026-08-10; still architectural/out-of-scope for a .spl/.shs-only lane.
@@ -185,39 +183,3 @@ compilation failed: Runtime source directory not found. Expected
 src/runtime/runtime.c`), and an unmeasured dispatch-table edit is exactly what
 the `reverse`/`sort` pins in
 `codegen/instr/closures_structs.rs` exist to prevent.
-
-## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
-
-SPLIT VERDICT.
-- Self-hosted-lane companion defect: ALREADY-FIXED. `is_dict_method_name` (src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1367) now lists `"set"`, and an explicit `if receiver_is_dict and method == "set" and args.len() == 2:` route exists at :1589. (`"insert"` is still NOT in that whitelist — a residual gap.)
-- Defect 1 (JIT `.set` return value): STILL LIVE on the deployed seed. Verbatim:
-  jit: `ret=` / `nil` / `b=` / `2`
-  SIMPLE_EXECUTION_MODE=interpreter: `ret=` / `{a: 1, b: 2}` / `b=` / `2`
-  Unchanged from the 2026-08-10 re-verification. Root cause remains in the Rust seed's Cranelift codegen.
-
----
-
-## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
-
-**Governing fact for every 50.mir-attributed row:** nothing runnable on this
-host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
-`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
-2026-08-16 22:59), whose own `--version` banner states it is a Rust
-**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
-`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
-2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
-binary exists under `build/bootstrap/`. Therefore any evidence in this doc
-phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
-about 50.mir, and the runtime claim here can only be closed by a full
-self-hosted bootstrap (not run: the user's bootstrap is live and
-`build/bootstrap/**` is off-limits). Rows were therefore classified by
-grepping current source.
-
-**Verdict: 50.mir HALF ALREADY-FIXED; the primary defect is a SEED defect and remains open.**
-
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1367`
-`is_dict_method_name` now includes `... or method == "set" or method == "clear"`,
-which this doc records as absent at `:1254`. Defect 1 (`.set()` returns nil under
-the seed JIT while the mutation lands) lives in the Rust seed's Cranelift
-codegen and is unverifiable from `src/compiler/50.mir` — it stays open and is
-correctly attributed to the seed, not to MIR.

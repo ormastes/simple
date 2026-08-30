@@ -1,6 +1,29 @@
 # Baseline Memleak Specification
 
-> Tests covering Baseline memleak - file 1.
+> <details>
+
+<!-- sdn-diagram:id=baseline_memleak_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=baseline_memleak_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+baseline_memleak_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=baseline_memleak_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,19 @@
 
 #### performs string operations to generate typical stdout
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- performs string operations to generate typical stdout
+- fn do work
+- out push
+- print "  Generated {results len
    - Expected: results.len() equals `10`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-MEMLEAK
-step("performs string operations to generate typical stdout")
 # Generate output similar to real tests
 # Note: nested fn can't mutate outer closure vars, so we return the array
 fn do_work() -> [text]:
@@ -52,19 +71,13 @@ expect(results.len()).to_equal(10)
 
 #### reads /proc/self/status for RSS measurement
 
-- reads /proc/self/status for RSS measurement
-   - Expected: 1 equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-MEMLEAK
-step("reads /proc/self/status for RSS measurement")
 val status = rt_file_read_text("/proc/self/status") ?? ""
 var rss_line = ""
 if status != "":
@@ -83,19 +96,13 @@ expect(1).to_equal(1)
 
 #### verifies this is a clean child process
 
-- verifies this is a clean child process
-   - Expected: 1 equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-MEMLEAK
-step("verifies this is a clean child process")
 # This runs in a child process spawned by test runner.
 # The child exits after this file, and OS reclaims all memory.
 # Any leak in the child does NOT affect the parent.
@@ -113,12 +120,12 @@ expect(1).to_equal(1)
 | Category | Memory Safety |
 | Status | Active |
 | Source | `test/01_unit/memleak/baseline_memleak_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Baseline memleak - file 1.
+Tests covering:
 - Baseline memleak - file 1
 
 ## Scenario Summary
@@ -133,54 +140,3 @@ Tests covering Baseline memleak - file 1.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-MEMLEAK`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `77555ef76184aea9ca90429c03ac81eda77e3c97fee438abc164daa96cf63bb7`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `77555ef76184aea9ca90429c03ac81eda77e3c97fee438abc164daa96cf63bb7`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `77555ef76184aea9ca90429c03ac81eda77e3c97fee438abc164daa96cf63bb7`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/memleak/baseline_memleak_spec.spl
-mirror: doc/06_spec/01_unit/memleak/baseline_memleak_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/memleak/baseline_memleak_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/memleak/baseline_memleak_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/memleak/baseline_memleak_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/memleak/baseline_memleak_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'performs string operations to generate typical stdout' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/memleak/baseline_memleak_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads /proc/self/status for RSS measurement' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/memleak/baseline_memleak_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'verifies this is a clean child process' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

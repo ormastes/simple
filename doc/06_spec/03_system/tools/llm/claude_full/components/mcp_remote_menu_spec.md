@@ -2,6 +2,30 @@
 
 > Modern SSpec coverage for the MCP remote server menu parity model.
 
+<!-- sdn-diagram:id=mcp_remote_menu_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mcp_remote_menu_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mcp_remote_menu_spec -> std
+mcp_remote_menu_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mcp_remote_menu_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -20,7 +44,7 @@ Modern SSpec coverage for the MCP remote server menu parity model.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Modern SSpec coverage for the MCP remote server menu parity model.
@@ -31,11 +55,6 @@ Modern SSpec coverage for the MCP remote server menu parity model.
 
 #### should render connected remote server menu options
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- should render connected remote server menu options
 - Build a connected HTTP server
    - Expected: render.mode equals `menu`
    - Expected: render.title equals `github MCP Server`
@@ -51,12 +70,10 @@ Modern SSpec coverage for the MCP remote server menu parity model.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should render connected remote server menu options")
 step("Build a connected HTTP server")
 val server = MCPRemoteServerInfo.new("github", "connected", "http", " https://mcp.example ", "srv_1", "user", "http", true, false)
 val props = Props.new(server, 3, false)
@@ -76,7 +93,6 @@ expect(render.options[1].value).to_equal("reauth")
 
 #### should render unauthenticated and disabled actions
 
-- should render unauthenticated and disabled actions
 - Show authenticate for needs-auth remote servers
    - Expected: mcpRemoteAuthLabel(needsAuth, 0) equals `not authenticated`
    - Expected: authOptions[0].value equals `auth`
@@ -89,12 +105,10 @@ expect(render.options[1].value).to_equal("reauth")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should render unauthenticated and disabled actions")
 step("Show authenticate for needs-auth remote servers")
 val needsAuth = MCPRemoteServerInfo.new("jira", "needs-auth", "sse", "https://jira.example", "", "project", "", false, true)
 val authOptions = mcpRemoteMenuOptions(needsAuth, 0)
@@ -113,7 +127,6 @@ expect(mcpRemoteSelectAction(disabled, "toggle-enabled", 0)).to_equal("enable")
 
 #### should model claude.ai authentication flows
 
-- should model claude.ai authentication flows
 - Build claude.ai auth URL
    - Expected: render.mode equals `claudeai-authenticating`
    - Expected: render.auth equals `managed by claude.ai`
@@ -125,12 +138,10 @@ expect(mcpRemoteSelectAction(disabled, "toggle-enabled", 0)).to_equal("enable")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should model claude.ai authentication flows")
 step("Build claude.ai auth URL")
 val proxy = MCPRemoteServerInfo.new("memory", "needs-auth", "claudeai-proxy", "", "mcprs123", "user", "claudeai-proxy", false, false)
 val authState = handleClaudeAIAuth(proxy, "https://claude.ai", "org-1", "claude-code")
@@ -150,7 +161,6 @@ expect(clearRender.url).to_equal("https://claude.ai/settings/connectors")
 
 #### should model authentication, reconnect, and client updates
 
-- should model authentication, reconnect, and client updates
 - Format auth and reconnect results
    - Expected: handleAuthenticate(server, false, "connected") equals `Authentication successful. Connected to github.`
    - Expected: handleAuthenticate(server, true, "connected") equals `Authentication successful. Reconnected to github.`
@@ -163,12 +173,10 @@ expect(clearRender.url).to_equal("https://claude.ai/settings/connectors")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should model authentication, reconnect, and client updates")
 step("Format auth and reconnect results")
 val server = MCPRemoteServerInfo.new("github", "needs-auth", "http", "https://mcp.example", "", "user", "http", false, false)
 expect(handleAuthenticate(server, false, "connected")).to_equal("Authentication successful. Connected to github.")
@@ -186,7 +194,6 @@ expect(failed[0].client.typeName).to_equal("failed")
 
 #### should render transient states and source-line helper
 
-- should render transient states and source-line helper
 - Render manual authentication state
    - Expected: authRender.mode equals `authenticating`
    - Expected: mcpRemoteCopyableUrl(authState) equals `https://auth.example`
@@ -199,12 +206,10 @@ expect(failed[0].client.typeName).to_equal("failed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should render transient states and source-line helper")
 step("Render manual authentication state")
 val server = MCPRemoteServerInfo.new("github", "needs-auth", "http", "https://mcp.example", "", "user", "http", false, false)
 val authState = MCPRemoteInteractionState.authenticating("https://auth.example", "http://callback")
@@ -234,69 +239,3 @@ expect(mcpRemoteServerMenuSourceLinesModeled()).to_equal(648)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `05b08d1fe65e1b88237ba5855b617d5589b45d382342b229da62078770ff81b9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `05b08d1fe65e1b88237ba5855b617d5589b45d382342b229da62078770ff81b9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `05b08d1fe65e1b88237ba5855b617d5589b45d382342b229da62078770ff81b9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl
-mirror: doc/06_spec/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.md (current)
-findings: 11 blockers: 0
-  narrative=100 structure=75 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:18:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should render connected remote server menu options' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should render connected remote server menu options' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:35:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should render unauthenticated and disabled actions' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should render unauthenticated and disabled actions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:51:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model claude.ai authentication flows' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model claude.ai authentication flows' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:68:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model authentication, reconnect, and client updates' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/components/mcp_remote_menu_spec.spl:83:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should render transient states and source-line helper' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

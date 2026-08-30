@@ -198,12 +198,10 @@ expect(ok).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("AC-4: map_anonymous returns a non-zero physical frame address")
 val frame_pa = vm_fault_map_anonymous(0x10000)
 expect(frame_pa).to_be_greater_than(0)
 ```
@@ -212,23 +210,21 @@ expect(frame_pa).to_be_greater_than(0)
 
 #### AC-4: map_anonymous for same vaddr in guard region returns zero (fault)
 
-- AC-4: map_anonymous for same vaddr in guard region returns zero (fault)
+1. vm fault register vma
    - Expected: result equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("AC-4: map_anonymous for same vaddr in guard region returns zero (fault)")
 # Guard region: expected to return 0 (access fault / kill signal)
 vm_fault_register_vma(0x50000, 4096, VmaKind.guard)
 val result = vm_fault_map_anonymous(0x50000)
-expect(result).to_equal(0)
+expect(result).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -329,6 +325,7 @@ expect(result).to_equal("mapped")
 
 - AC-4: unregister removes the region so faults become unhandled
    - Expected: before equals `mapped`
+2. vm fault unregister vma
    - Expected: after equals `unhandled`
 
 
