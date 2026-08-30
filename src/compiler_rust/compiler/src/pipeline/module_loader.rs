@@ -3719,3 +3719,93 @@ impl Wrapper:
         }
     }
 }
+
+#[cfg(test)]
+mod duplicate_fn_resolution_tests {
+    //! Regression tests for the (module path, name) keying of co-compiled
+    //! free functions — the collision family behind
+    //! `doc/08_tracking/bug/co_compiled_symbol_collision_decision_2026-08-09.md`
+    //! and the two 2026-08-25 llm_caret defects (`extract_json_string`,
+    //! `char_from_code`).
+    use super::*;
+    use std::collections::HashSet;
+
+    fn fixture(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let a = dir.join("mod_a.spl");
+        let b = dir.join("mod_b.spl");
+        let main = dir.join("main.spl");
+        fs::write(&a, "fn who() -> text:\n    \"a\"\n").unwrap();
+        fs::write(&b, "fn who() -> text:\n    \"b\"\n\nfn other() -> text:\n    \"other\"\n").unwrap();
+        // Entry imports `who` ONLY from mod_a; mod_b's same-named definition is
+        // co-compiled via the `other` group import.
+        fs::write(&main, "use mod_a.{who}\nuse mod_b.{other}\n\nfn main():\n    print(who())\n").unwrap();
+        (a, b, main)
+    }
+
+    #[test]
+    fn flatten_keeps_both_duplicate_definitions_with_distinct_owner_tags() {
+        let temp = tempfile::tempdir().unwrap();
+        let (a, b, main) = fixture(temp.path());
+        let module = load_module_with_imports(&main, &mut HashSet::new()).unwrap();
+
+        let owners: Vec<String> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Function(f) if f.name == "who" => Some(function_owner_module(f).to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(owners.len(), 2, "both co-compiled `who` definitions must survive flattening");
+        assert_ne!(owners[0], owners[1], "the two `who` definitions must carry distinct owner tags");
+
+        // The entry's `use mod_a.{who}` must be recorded as an import-binding
+        // marker naming mod_a — this is what call-site resolution keys on.
+        let source_a = normalize_path_key(&a).to_string_lossy().into_owned();
+        let expected = import_binding_marker_name("<entry>", "who", &source_a, "who");
+        assert!(
+            module.items.iter().any(|item| matches!(item, Node::Const(c) if c.name == expected)),
+            "entry-module import binding marker for `who` -> mod_a missing"
+        );
+        let _ = b;
+    }
+
+    #[test]
+    fn hir_lowering_mangles_duplicates_and_binds_entry_caller_to_its_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let (a, b, main) = fixture(temp.path());
+        let module = load_module_with_imports(&main, &mut HashSet::new()).unwrap();
+        let hir = crate::hir::lower::lower(&module).expect("lowering failed");
+
+        let names: Vec<&str> = hir.functions.iter().map(|f| f.name.as_str()).collect();
+        let owner_a = normalize_path_key(&a).to_string_lossy().into_owned();
+        let owner_b = normalize_path_key(&b).to_string_lossy().into_owned();
+        let mangled_a = crate::interpreter::flatten_owner_mangled_name(&owner_a, "who");
+        let mangled_b = crate::interpreter::flatten_owner_mangled_name(&owner_b, "who");
+        // Keep-first-bare policy: the FIRST flattened owner (mod_a — the
+        // entry's first import) keeps the bare name so no-route callers keep
+        // the historical first-import-wins pick; every LATER owner's
+        // definition is emitted owner-mangled.
+        assert_eq!(
+            names.iter().filter(|n| **n == "who").count(),
+            1,
+            "exactly one bare `who` (the first owner's) may survive lowering; got {names:?}"
+        );
+        assert!(
+            !names.contains(&mangled_a.as_str()),
+            "the first owner keeps the bare name and must not also be mangled"
+        );
+        assert!(names.contains(&mangled_b.as_str()), "mod_b's `who` must be emitted owner-mangled");
+
+        // The entry `main` imports `who` from mod_a only: its lowered body must
+        // reference mod_a's symbol (the bare name here) and never mod_b's.
+        let main_fn = hir
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("entry `main` missing from HIR");
+        let body = format!("{:?}", main_fn.body);
+        assert!(body.contains("Global(\"who\")"), "entry `main` must call mod_a's `who`; body: {body}");
+        assert!(!body.contains(&mangled_b), "entry `main` must not call mod_b's `who`");
+    }
+}
