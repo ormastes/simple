@@ -1107,6 +1107,26 @@ impl MirLowering:
             if bootstrap_trace:
                 print "[mir-lower] block:stmt {blk_i}"
             val stmt: HirStmt = block_stmts[blk_i]
+            # [mir-lower-stmt-probe] -- DIAGNOSTIC, default OFF, same memoised gate as
+            # [mir-lower-type-probe]. Interleaving statement boundaries with the
+            # lower_type records shows WHICH STATEMENT the disc=-1 transition lands in:
+            # in both measured runs the first N lower_type calls returned valid
+            # discriminants and then every subsequent one returned -1, so the question is
+            # what happens at that boundary.
+            # SAFETY: `stmt` is the caller's own, well-formed HirStmt (already typed-rebound
+            # on the line above and successfully matched by lower_stmt); this reads only its
+            # `kind` discriminant and touches nothing belonging to the suspect HirType.
+            if mir_lower_type_probe_state < 0:
+                if mir_trace_enabled():
+                    mir_lower_type_probe_state = 1
+                else:
+                    mir_lower_type_probe_state = 0
+            if mir_lower_type_probe_state == 1 and mir_lower_type_probe_seq < 50000:
+                val stmt_probe_fn = if self.current_function_names.len() > 0:
+                    self.current_function_names[self.current_function_names.len() - 1]
+                else:
+                    "<none>"
+                eprint("[mir-lower-stmt-probe] stmt={blk_i} fn={stmt_probe_fn} kind_disc={_sffi_hir_type_discriminant(stmt.kind)}\n")
             self.lower_stmt(stmt)
             if trace_enabled:
                 print "[mir-lower] block:stmt-done {blk_i}"

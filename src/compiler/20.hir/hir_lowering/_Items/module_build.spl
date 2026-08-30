@@ -86,7 +86,27 @@ impl HirLowering:
             # Dict.values() aggregates in one mixed call can erase one through
             # Any in the stage4 bootstrap ABI and later produce a nil receiver.
             var flat_symbols: [HirSymbol] = []
-            val flat_symbol_keys = self.symbols.symbols.keys()
+            # DETERMINISM -- MEASUREMENT PREREQUISITE, NOT A FIX.
+            # These six lists feed `bootstrap_hir_modules_add`
+            # (lowering_helpers.spl:103,120) -> `_bootstrap_hir_module_*`, which drives
+            # BOTH the prescan loop and the MIR lowering order. `rt_dict_keys`
+            # (src/runtime/runtime_native.c:8652) walks BUCKET order, so that order varied
+            # per process. Measured over ten runs (p1..p10): the function order flipped
+            # 5/5 and correlated PERFECTLY with the outcome -- the run reported 4 errors or
+            # 20 purely according to which function got lowered first, because
+            # bootstrap_globals.spl:400 bails at the first function that accumulates fatal
+            # errors. Sorting makes that stable so counts become comparable between runs.
+            #
+            # IT FIXES NOTHING ELSE. Both functions still carry types whose `.kind` reads
+            # as a non-enum: disc=-1 on 4 of 11 lower_type calls in
+            # module_logical_name_from_path and 20 of 26 in
+            # _module_path_naming_text_index_of, matching their error counts exactly. That
+            # defect is real, per-function, stable, and entirely untouched by this change.
+            #
+            # An earlier sort in module_declarations_bootstrap.spl changed nothing here
+            # because it sorted the SYMBOL-DECLARATION pass -- a different collection.
+            var flat_symbol_keys = self.symbols.symbols.keys()
+            flat_symbol_keys.sort()
             var flat_idx = 0
             while flat_idx < flat_symbol_keys.len():
                 flat_symbols = flat_symbols.push(self.symbols.symbols[flat_symbol_keys[flat_idx]])
@@ -96,31 +116,36 @@ impl HirLowering:
             # bootstrap accumulator loses the entry's functions under the
             # bootstrap ABI even though lower_module populated its Dict.
             var flat_functions: [HirFunction] = []
-            val flat_function_keys = lowered_module.functions.keys()
+            var flat_function_keys = lowered_module.functions.keys()
+            flat_function_keys.sort()
             flat_idx = 0
             while flat_idx < flat_function_keys.len():
                 flat_functions = flat_functions.push(lowered_module.functions[flat_function_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_constants: [HirConst] = []
-            val flat_constant_keys = lowered_module.constants.keys()
+            var flat_constant_keys = lowered_module.constants.keys()
+            flat_constant_keys.sort()
             flat_idx = 0
             while flat_idx < flat_constant_keys.len():
                 flat_constants = flat_constants.push(lowered_module.constants[flat_constant_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_enums: [HirEnum] = []
-            val flat_enum_keys = lowered_module.enums.keys()
+            var flat_enum_keys = lowered_module.enums.keys()
+            flat_enum_keys.sort()
             flat_idx = 0
             while flat_idx < flat_enum_keys.len():
                 flat_enums = flat_enums.push(lowered_module.enums[flat_enum_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_structs: [HirStruct] = []
-            val flat_struct_keys = lowered_module.structs.keys()
+            var flat_struct_keys = lowered_module.structs.keys()
+            flat_struct_keys.sort()
             flat_idx = 0
             while flat_idx < flat_struct_keys.len():
                 flat_structs = flat_structs.push(lowered_module.structs[flat_struct_keys[flat_idx]])
                 flat_idx = flat_idx + 1
             var flat_classes: [HirClass] = []
-            val flat_class_keys = lowered_module.classes.keys()
+            var flat_class_keys = lowered_module.classes.keys()
+            flat_class_keys.sort()
             flat_idx = 0
             while flat_idx < flat_class_keys.len():
                 flat_classes = flat_classes.push(lowered_module.classes[flat_class_keys[flat_idx]])
