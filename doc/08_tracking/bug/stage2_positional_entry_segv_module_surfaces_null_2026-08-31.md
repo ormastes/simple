@@ -260,3 +260,49 @@ Every `Option.unwrap()` / `Result.unwrap()` call site compiled by the seed in a
 closure that contains any bare-`unwrap` provider is at risk. `src/` has 4254
 `.unwrap()` call sites. Patching them in pure Simple is not a fix; the seed
 resolution is.
+
+## 2026-08-31 — measured after the `??` substitution + rt_heap_ref_wellformed restore
+
+Rebuilt Stage 2 via the sanctioned script
+(`--full-bootstrap --stop-after-stage2 --mode=dynload --backend=cranelift
+--incremental-unlimited`). New binary:
+`build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`, 32007416 bytes,
+mtime 2026-08-31 05:29,
+sha256 `5d20345bef9dc49f324f3e3c1ea2f636839ba03f14e28f0343c257b1629e30a7`.
+
+**The SEGV documented at the top of this file is GONE.** HIR lowering now runs
+to completion on the positional two-line fixture:
+
+```
+[build] hir 0/1 step 2/6 ... scripts.check.cert.redeploy_gate.fixtures.hello_world
+[bootstrap-error-count] source_idx=0 point=post-lowering  count=0
+[bootstrap-error-count] source_idx=0 point=post-diagnostics count=0
+[bootstrap-error-count] source_idx=0 point=post-store      count=0
+[build] hir 1/1 step 2/6 ... complete
+```
+
+Previously the process died mid-`hir 0/1` inside
+`module_surface_registry_index`. Neither that frame nor
+`surface_index_for_name` appears in any backtrace now.
+
+**The gate still fails, at a NEW and unrelated site.** `candidate_frontend_smoke`
+returns 1 in BOTH modes (`CANDIDATE_FRONTEND_BOOTSTRAP=0` and `=1`), rc=139,
+and the fault has moved:
+
+```
+[ERROR] phase 3 FAILED
+EXC_BAD_ACCESS (code=1, address=0xc0)
+frame #0  CompileContext.has_errors + 4          <- null receiver
+frame #1  CompilerDriver.compile + 6432
+frame #2  compiler_driver_run_compile
+frame #3  app.cli.bootstrap_main.run_native_build_bootstrap
+```
+
+Two separate open questions, neither of which is this record's defect:
+
+1. why phase 3 reports FAILED with an empty error list while every
+   `bootstrap-error-count` receipt reads 0, and
+2. why `self.ctx` is null on the failure path in `CompilerDriver.compile`.
+
+Both should be filed and chased separately. This record's own symptom is
+resolved; the record stays open only until the two follow-ups have homes.
