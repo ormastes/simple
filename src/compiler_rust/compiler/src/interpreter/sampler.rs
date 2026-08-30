@@ -90,6 +90,7 @@ fn init() -> bool {
             .and_then(|v| v.parse().ok())
             .filter(|v: &i64| *v >= 100)
             .unwrap_or(10_000);
+        #[cfg(unix)]
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = on_sigprof as usize;
@@ -101,7 +102,23 @@ fn init() -> bool {
             libc::setitimer(libc::ITIMER_PROF, &it, std::ptr::null_mut());
             libc::atexit(dump_at_exit);
         }
+        // This sampler is built on SIGPROF + setitimer, which Windows does not
+        // provide; `libc` is a cfg(unix)-only dependency here, so the block
+        // above cannot even be compiled. Say so LOUDLY instead of reporting
+        // "enabled" and then producing no samples: a profiler that silently
+        // emits nothing is exactly the trap .claude/rules/commands.md records
+        // under "Profiling trap: SIMPLE_INTERP_SAMPLE emits NOTHING", which has
+        // already cost two investigations.
+        #[cfg(not(unix))]
+        {
+            let _ = us;
+            eprintln!(
+                "warning: SIMPLE_INTERP_SAMPLE is set but the interpreter sampler is                  unavailable on this platform (it requires POSIX SIGPROF/setitimer);                  no samples will be collected"
+            );
+        }
     }
+    #[cfg(not(unix))]
+    let on = false;
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
     on
 }
@@ -212,6 +229,7 @@ fn bump(table: &'static [Slot], key: *mut u8, len: usize, incl: bool) -> bool {
     false
 }
 
+#[cfg(unix)]
 extern "C" fn on_sigprof(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     TOTAL_SAMPLES.fetch_add(1, Ordering::Relaxed);
     let d = DEPTH.load(Ordering::Acquire).min(STACK_CAP);
@@ -296,6 +314,7 @@ pub fn render() -> String {
     out
 }
 
+#[cfg(unix)]
 extern "C" fn dump_at_exit() {
     unsafe {
         let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
