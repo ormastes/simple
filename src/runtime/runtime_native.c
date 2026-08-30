@@ -968,10 +968,6 @@ int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_compl
 int64_t rt_host_gpu_queue_in_flight_count(void) { return rt_host_gpu_queue_in_flight_depth; }
 int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
 int64_t rt_host_gpu_queue_last_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
-/* Adopted verbatim from origin/mcdc-hal cc960a064cf (never merged, no PR).
- * Referenced by generated code and defined nowhere on main, which made it
- * one of the undefined symbols at the Stage 2 Windows link. */
-int64_t rt_host_gpu_active_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
 int64_t rt_host_gpu_queue_last_device_time_us(void) { return rt_host_gpu_queue_last_device_time_us_value; }
 int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_last_payload_size_value; }
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
