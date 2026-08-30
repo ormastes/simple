@@ -1,0 +1,63 @@
+# Fences the two HIR-entry handoffs that fail closed on a zeroed enum payload.
+#
+# Both sites take a `ModuleSurfacesByName?` owner across a method boundary and
+# then dereference it. The 2026-08-22 stage-3 incident showed a Some-tagged
+# Option arriving with payload word 0: the readiness scalar was true, the
+# `== nil` guard read "present", `.unwrap()` "succeeded", and the first field
+# load faulted at address 0.
+# See doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
+#
+# Policy reconciliation: main's standing rule (1e6f5216e8e, "assert on
+# unlowerable MIR instead of silently dropping it") is a NAMED GREPPABLE code
+# plus a hard stop. The driver already owns an error channel that stops the
+# build, so these sites keep `add_error` + `return false` rather than a panic,
+# but adopt the named-code convention -- E-DRIVER-HIR-*.
+#
+# THIS SPEC FAILS ON origin/main AS OF f16c2a4736a: neither call site exists.
+use std.spec
+use std.io.{file_read}
+
+val DRIVER = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+describe "the streaming HIR entry fails closed on a malformed owner payload":
+    it "declares the probe as an extern so the call links":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("extern fn rt_heap_ref_wellformed(value: Any) -> bool")
+
+    it "probes the unwrapped streaming owner before the first dereference":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("if not rt_heap_ref_wellformed(surfaces):")
+
+    it "reports a named compile error instead of faulting at address 0":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("E-DRIVER-HIR-OWNER-MALFORMED")
+
+    it "keeps the pre-existing nil guard as well, not instead":
+        # The nil guard and the formation probe answer different questions --
+        # absence vs. malformation. Replacing one with the other reopens the
+        # other half of the hole.
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("Streaming module surface owner payload missing after phase 2")
+
+describe "the non-streaming HIR entry fails closed on the same class":
+    it "probes the retained module_surfaces owner before unwrapping into use":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("if self.ctx.module_surfaces != nil and not rt_heap_ref_wellformed(self.ctx.module_surfaces.unwrap()):")
+
+    it "reports a named compile error for the retained owner too":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED")
+
+    it "guards only when the owner is present, so absence keeps its own path":
+        # A `nil` owner is legal here and falls through to the
+        # module_surfaces_from_modules branch; the probe must not hijack it.
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("elif self.ctx.sources.len() > 0:")
+
+describe "the guards stop the build rather than continuing on a bad owner":
+    it "returns a failing verdict from both sites":
+        val driver = file_read(DRIVER)
+        expect(driver).to_contain("E-DRIVER-HIR-OWNER-MALFORMED")
+        expect(driver).to_contain("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED")
+        # Both named errors are followed by the driver's failing return.
+        expect(driver).to_contain("return (self.ctx, false)")

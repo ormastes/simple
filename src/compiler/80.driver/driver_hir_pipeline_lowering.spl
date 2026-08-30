@@ -50,6 +50,7 @@ use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_stdout_flush()
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
@@ -111,6 +112,15 @@ impl CompilerDriver:
         val surfaces = self.streaming_module_surfaces_owner.unwrap()
         if surfaces == nil:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
+            return (self.ctx, false)
+        # Fail closed on a malformed payload, never on a valid one. A
+        # heap-typed payload must be a tagged pointer outside the zero page;
+        # the 2026-08-22 incident read back a Some-tagged Option with payload
+        # word 0 and SIGSEGV'd on the first field load below. This is a
+        # formation probe (rt_heap_ref_wellformed), not a liveness proof, so
+        # it cannot false-reject a live owner.
+        if not rt_heap_ref_wellformed(surfaces):
+            self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return (self.ctx, false)
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
@@ -416,6 +426,17 @@ impl CompilerDriver:
         # creating a fresh array near the terminal module can fail registry
         # growth under peak AST+HIR pressure and leave `errors` invalid.
         dtrace("[DRV] lac-canary=module-surfaces-before")
+        # Same fail-closed formation probe as the streaming entry: a
+        # heap-typed owner payload must be a tagged pointer outside the zero
+        # page (2026-08-22 zeroed-payload incident class).
+        # NOTE (2026-08-31): the probe argument uses `??`, not `.unwrap()`.
+        # `.unwrap()` is itself stolen by `Poll.unwrap` on this lane
+        # (poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25.md),
+        # so an `.unwrap()`-fed probe measures the stolen 0 rather than the
+        # field, and would fail closed on every build including healthy ones.
+        if self.ctx.module_surfaces != nil and not rt_heap_ref_wellformed(self.ctx.module_surfaces ?? ModuleSurfacesByName.empty()):
+            self.ctx.add_error("E-DRIVER-HIR-RETAINED-SURFACES-MALFORMED: retained module surface payload malformed at HIR entry (heap-typed payload word is 0 or in the zero page)")
+            return (self.ctx, false)
         # NEVER `.unwrap()` here. Under the seed's native codegen a BARE
         # `unwrap` is rebound by name to whichever module in the entry closure
         # publishes one (`Poll.unwrap`, `FailSafeResult.unwrap`, ...); that
