@@ -1341,8 +1341,29 @@ impl MirLowering:
                                 if has_init:
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                     if found_init_hir_type.?:
-                                        val init_hir_type = found_init_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
-                                        self.remember_local_hir_type(local.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
+                                        # AGGREGATE ABI HAZARD -- documented twice in-tree:
+                                        # mir_lowering_types.spl:574-581 ("the admitted Stage 2
+                                        # native ABI can corrupt an aggregate `HirType` passed
+                                        # ... into `remember_local_hir_type`. Keep both method
+                                        # arguments scalar") and mir_lowering_stmts.spl:686-689
+                                        # ("passing the aggregate returned by
+                                        # `find_local_hir_type` into another native method
+                                        # corrupts the staged ABI"). This site did BOTH: it took
+                                        # the aggregate out of the metadata arrays via
+                                        # find_local_hir_type and passed it straight back in as
+                                        # an ABI argument. The corrupted aggregate was then
+                                        # STORED in local_hir_type_values, so every later
+                                        # find_local_hir_type -> lower_type read saw a `kind`
+                                        # that is not an enum (disc=-1) for the rest of the
+                                        # function -- which is exactly the measured signature:
+                                        # the flip begins at the FIRST Let and never recovers.
+                                        # copy_local_hir_type_metadata is the established
+                                        # mitigation (already applied at :689): scalar ids only,
+                                        # and it moves type + isolation + resource state, the
+                                        # same three things this call moved. The aggregate is
+                                        # still RECEIVED above to test presence, which is not the
+                                        # hazard -- passing it onward was.
+                                        self.copy_local_hir_type_metadata(init_local.id, local.id)
                                     else:
                                         # Nullable, not an Option box -- same migration as
                                         # the `mir_type` read above in this arm.
