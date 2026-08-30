@@ -5881,6 +5881,40 @@ double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
 }
 
+/* Fault limits are process policy for the pure-Simple runner and its child
+ * compiler/test processes. Keep this provider independent from the legacy
+ * Rust CLI CGU (which also owns seed-delegating rt_cli_run_tests). The names
+ * are the canonical variables consumed by compiler initialization. */
+static void rt_fault_set_env_i64(const char* name, int64_t value) {
+    char text[32];
+    snprintf(text, sizeof(text), "%lld", (long long)value);
+#if defined(_WIN32)
+    _putenv_s(name, text);
+#else
+    setenv(name, text, 1);
+#endif
+}
+
+void rt_fault_set_stack_overflow_detection(uint8_t enabled) {
+#if defined(_WIN32)
+    _putenv_s("SIMPLE_STACK_OVERFLOW_DETECTION", enabled ? "1" : "0");
+#else
+    setenv("SIMPLE_STACK_OVERFLOW_DETECTION", enabled ? "1" : "0", 1);
+#endif
+}
+
+void rt_fault_set_max_recursion_depth(int64_t depth) {
+    rt_fault_set_env_i64("SIMPLE_MAX_RECURSION_DEPTH", depth);
+}
+
+void rt_fault_set_timeout(int64_t secs) {
+    rt_fault_set_env_i64("SIMPLE_TIMEOUT_SECONDS", secs);
+}
+
+void rt_fault_set_execution_limit(int64_t limit) {
+    rt_fault_set_env_i64("SIMPLE_EXECUTION_LIMIT", limit);
+}
+
 /* ================================================================
  * DMA Operations (hosted fallback — FR-DRIVER-0005)
  * ================================================================
