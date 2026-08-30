@@ -81,6 +81,8 @@ fn init() -> bool {
     if on && !ATEXIT_REGISTERED.swap(true, Ordering::Relaxed) {
         unsafe {
             libc::atexit(dump_at_exit);
+            libc::signal(libc::SIGTERM, dump_on_signal as libc::sighandler_t);
+            libc::signal(libc::SIGINT, dump_on_signal as libc::sighandler_t);
         }
     }
     STATE.store(if on { ON } else { OFF }, Ordering::Relaxed);
@@ -120,6 +122,19 @@ pub fn bump(counter: &AtomicU64, by: u64) {
     if enabled() {
         counter.fetch_add(by, Ordering::Relaxed);
     }
+}
+
+/// Dump on SIGTERM/SIGINT as well as at exit.
+///
+/// `atexit` never runs when the process is killed by a signal, and the
+/// workloads these counters are most useful on are exactly the ones that get
+/// killed by a `timeout` budget. Only installed when `SIMPLE_PERF_COUNTERS`
+/// is set, so the default path is unchanged. The handler allocates, which is
+/// not async-signal-safe in general; that is acceptable for an opt-in
+/// diagnostic whose next action is to terminate the process anyway.
+extern "C" fn dump_on_signal(sig: libc::c_int) {
+    dump_at_exit();
+    unsafe { libc::_exit(128 + sig) };
 }
 
 extern "C" fn dump_at_exit() {
