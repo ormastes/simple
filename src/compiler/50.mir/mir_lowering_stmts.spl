@@ -24,6 +24,12 @@ use std.io_runtime.{env_get_opt}
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
 @unsafe(reason: "raw nullable tagged HIR statement payload ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr?
+# Raw element read for [mir-let-slot-probe] below. `rt_array_get` is a registered
+# runtime symbol (native_project/config.rs:193) and is NOT otherwise declared in this
+# file, so this introduces no conflicting signature for an already-declared C symbol.
+extern fn rt_array_get(arr: Any, idx: i64) -> i64
+# Cached probe gate (-1 unknown, 0 off, 1 on), same shape as function_lowering.spl's.
+var mir_let_slot_probe_state: i64 = -1
 
 @always_inline
 fn _sffi_hir_stmt_discriminant(value: HirStmtKind) -> i64:
@@ -1206,6 +1212,31 @@ impl MirLowering:
                         self.lower_expr(expr)
 
                     case Let(symbol, type_, init):
+                        # [mir-let-slot-probe] -- DIAGNOSTIC, default OFF (SIMPLE_MIRB_TRACE).
+                        # Reads the RAW payload word for slot 1 (`type_`) straight out of the
+                        # enum, BYPASSING the arm binding, so it reports what the writer
+                        # actually stored rather than what the guarded copy produced.
+                        # This is the measurement that separates the two remaining candidates,
+                        # which BOTH yield an all-zero copy and are therefore indistinguishable
+                        # from `kindzero=true` alone:
+                        #   raw == 3  -> the slot holds the nil sentinel
+                        #     (rt_core_nil -> RT_VALUE_SPECIAL_NIL). The store is CORRECT, the
+                        #     guard's TEST is correct, and the zeroed-block FALLBACK is a
+                        #     PRE-EXISTING codegen defect that the Option migration merely made
+                        #     reachable -- it did not cause it.
+                        #   raw is a pointer with low bits != 1 -> the store dropped the heap
+                        #     tag; the migration IS the cause and the fix is local to the store.
+                        # SAFETY: this is a raw i64; no field of any object is read, and the
+                        # value is only printed and compared. `_sffi_hir_stmt_payload` is the
+                        # file's existing wrapper, so no new signature for rt_enum_payload.
+                        if mir_let_slot_probe_state < 0:
+                            if mir_trace_enabled():
+                                mir_let_slot_probe_state = 1
+                            else:
+                                mir_let_slot_probe_state = 0
+                        if mir_let_slot_probe_state == 1:
+                            val raw_slot1 = rt_array_get(_sffi_hir_stmt_payload(stmt_kind_value), 1)
+                            eprint("[mir-let-slot-probe] rawslot1={raw_slot1} isnil3={raw_slot1 == 3}\n")
                         val symbol_id = mir_stmt_symbol_id_value(symbol)
                         if symbol_id < 0:
                             self.error("let binding has no resolved symbol", Some(span))
