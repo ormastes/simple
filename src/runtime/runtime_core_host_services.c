@@ -18,6 +18,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <sys/stat.h>
+#undef max
 #else
 #include <sys/socket.h>
 #include <sys/stat.h>
