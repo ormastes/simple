@@ -363,44 +363,6 @@ pub(crate) fn build_import_map(
                             }
                         }
                     }
-                    simple_parser::ast::Node::Impl(imp) => {
-                        // Methods declared in an `impl` block never reached
-                        // `fn_return_types`: this loop walked only `Node::Function`.
-                        // So the whole-program map had no row for a static factory
-                        // like `CompilerConfig.from_env`, and `lower_static_method_call`
-                        // fell through to its "ClassName.factory() returns ClassName"
-                        // GUESS -- which yields ANY whenever the class itself is not
-                        // registered in the IMPORTING module. Qualified `Type.method`
-                        // keys share no namespace with the bare function names above,
-                        // so they cannot collide with them; same-name collisions
-                        // between modules are marked ambiguous exactly as above and
-                        // dropped by the `retain` before this map is returned.
-                        let impl_type_name = match &imp.target_type {
-                            simple_parser::ast::Type::Simple(n) => Some(n.clone()),
-                            simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                            _ => None,
-                        };
-                        if let Some(impl_type_name) = impl_type_name {
-                            for m in &imp.methods {
-                                if m.body.statements.is_empty() {
-                                    continue;
-                                }
-                                let Some(captured) = m.return_type.clone() else {
-                                    continue;
-                                };
-                                match fn_return_types.entry(format!("{}.{}", impl_type_name, m.name)) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        if e.get() != &captured {
-                                            e.insert(simple_parser::Type::Simple(String::new()));
-                                        }
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(captured);
-                                    }
-                                }
-                            }
-                        }
-                    }
                     simple_parser::ast::Node::Class(c) => {
                         // Register the bare type name so cross-module imports of the
                         // class type resolve to the defining module's mangled symbol
@@ -639,7 +601,32 @@ pub(crate) fn build_import_map(
                                     let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
                                     fn_arities.insert(mangled.clone(), method_arity(m));
                                     raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
-                                    raw_to_mangled.entry(raw).or_default().push(mangled);
+                                    raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
+                                    // Declared return type of an `impl` method, keyed
+                                    // `Type.method`. Without this row the whole-program
+                                    // map had nothing for a static factory such as
+                                    // `CompilerConfig.from_env`, so
+                                    // `lower_static_method_call` fell through to its
+                                    // "ClassName.factory() returns ClassName" guess,
+                                    // which is ANY when the class is not registered in
+                                    // the IMPORTING module. Qualified keys share no
+                                    // namespace with the bare function names recorded
+                                    // above, so they cannot collide with them; a genuine
+                                    // cross-module clash is marked ambiguous exactly as
+                                    // the `Node::Function` arm does and is dropped by the
+                                    // `retain` before this map is returned.
+                                    if let Some(captured) = m.return_type.clone() {
+                                        match fn_return_types.entry(raw) {
+                                            std::collections::hash_map::Entry::Occupied(mut e) => {
+                                                if e.get() != &captured {
+                                                    e.insert(simple_parser::Type::Simple(String::new()));
+                                                }
+                                            }
+                                            std::collections::hash_map::Entry::Vacant(e) => {
+                                                e.insert(captured);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
