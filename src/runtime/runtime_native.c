@@ -8648,6 +8648,28 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
+/* Canonical descriptor provider for std.nogc_sync_mut.io.FileHandle. Mode
+ * encoding matches runtime/src/value/sffi/file_io/io_file.rs exactly:
+ * 0 read, 1 write/create/truncate, 2 read/write/create, 3 append/create. */
+int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode) {
+    char path[RT_TEXT_PATH_MAX];
+    int flags;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+    switch (mode) {
+        case 0: flags = O_RDONLY; break;
+        case 1: flags = O_WRONLY | O_CREAT | O_TRUNC; break;
+        case 2: flags = O_RDWR | O_CREAT; break;
+        case 3: flags = O_WRONLY | O_CREAT | O_APPEND; break;
+        default: return -1;
+    }
+#if defined(_WIN32)
+    flags |= _O_BINARY;
+    return (int64_t)_open(path, flags, _S_IREAD | _S_IWRITE);
+#else
+    return (int64_t)open(path, flags, 0666);
+#endif
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
