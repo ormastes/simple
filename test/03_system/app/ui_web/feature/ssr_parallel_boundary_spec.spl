@@ -1,51 +1,43 @@
-# @cover src/lib/gc_async_mut/http_server/ssr_renderer_owner.spl 0%
-"""# SSR parallel request boundary contract
+"""# Hosted SSR ownership boundary contract
 
-The hosted SSR callback runs on the bounded runtime pool.  This contract keeps
-the socket-worker aggregate (`HttpRequestData`) out of the child closure: only
-the immutable method/body fields may cross the execution boundary.
+Hosted SSR dispatch remains synchronous through the canonical HTTP registry.
+The process-global renderer state is serialized by one mutex and delegates to
+the canonical web layout/Engine2D path; no removed async lifecycle is revived.
 """
 
 use std.spec.*
 
-describe "hosted SSR parallel request boundary":
+describe "hosted SSR ownership boundary":
     extern fn rt_file_read_text(path: text) -> text
 
-    it "captures only immutable request fields before pool submission":
+    it "routes requests through the synchronous HandlerRegistry callback":
         val source = rt_file_read_text(
             "src/lib/gc_async_mut/http_server/ssr_submitter.spl"
         ) ?? ""
-        expect(source).to_contain("val request_method = request.method")
-        expect(source).to_contain("val request_body = request.body")
-        expect(source).to_contain(
-            "_complete_ssr_job(\n        job_id, completion_channel_id, request_method, request_body, width,"
-        )
-        expect(source).to_contain(
-            "headers: [],\n        body: request_body,\n        params: {},"
-        )
-        expect(source).to_contain(
-            "HttpRequestData is a worker-owned aggregate and must not be captured"
-        )
-        expect(source).to_contain("val width = SSR_ASYNC_CONFIG.width")
-        expect(source).to_contain("val engine2d_backend = SSR_ASYNC_CONFIG.engine2d_backend")
+        expect(source).to_contain("use std.http_server.handler.{HandlerRegistry}")
+        expect(source).to_contain("registry.register(name, _registered_ssr_handler)")
+        expect(source).to_contain("render_ssr_request(request, SSR_CONFIG)")
 
-    it "does not capture the worker-owned request aggregate":
+    it "serializes canonical renderer state behind one mutex":
         val source = rt_file_read_text(
             "src/lib/gc_async_mut/http_server/ssr_submitter.spl"
         ) ?? ""
-        expect(source.find(
-            "multicore_green_spawn(\\: _complete_ssr_job(job_id, completion_channel_id, request))"
-        )).to_equal(-1)
+        expect(source).to_contain("SSR_RENDER_GATE: Mutex = mutex_new(0)")
+        expect(source).to_contain("mutex_with_lock_keeping(SSR_RENDER_GATE, 0,")
+        expect(source).to_contain("simple_web_ssr_render_html_to_pixels(")
 
-    it "serializes the global Engine2D cache section behind a renderer-owner lease":
+    it "delegates rendering to the canonical web layout and Engine2D owners":
+        val renderer = rt_file_read_text(
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_ssr_renderer.spl"
+        ) ?? ""
+        expect(renderer).to_contain("simple_web_engine2d_resolved_backend_name")
+        expect(renderer).to_contain("simple_web_layout_render_html_pixels_engine2d")
+
+    it "does not revive the deleted asynchronous lifecycle":
         val source = rt_file_read_text(
             "src/lib/gc_async_mut/http_server/ssr_submitter.spl"
         ) ?? ""
-        expect(source).to_contain("SSR_RENDERER_GATE: Mutex = mutex_new(0)")
-        expect(source).to_contain("SSR_RENDERER_OWNER.admit(job)")
-        expect(source).to_contain("SSR_RENDERER_OWNER.complete(admission")
-        expect(source).to_contain("mutex_with_lock_keeping(SSR_RENDERER_GATE, 0,")
-        expect(source).to_contain("SsrRenderJob.create(job_id, request.method")
-        expect(source).to_contain("render_ssr_request_with_job_id(child_request,")
-        expect(source).to_contain("admission.selected_backend")
-        expect(source).to_contain("simple_web_ssr_render_html_to_pixels")
+        expect(source.contains("multicore_green_spawn")).to_equal(false)
+        expect(source.contains("SSR_RENDERER_OWNER")).to_equal(false)
+        expect(source.contains("SsrRenderJob")).to_equal(false)
+        expect(source.contains("SSR_ASYNC_CONFIG")).to_equal(false)
