@@ -684,7 +684,13 @@ impl Lowerer {
                 // the end of the object) instead of CompileOptions' 22 (0xb0).
                 // Purely additive -- an unusable hint simply fails the caller's
                 // subsequent field lookup and falls back to today's behaviour.
-                local.and_then(|local| local.type_name_hint.clone())
+                if let Some(hint) = local.and_then(|local| local.type_name_hint.clone()) {
+                    return Some(hint);
+                }
+                // Last resort: a local with no annotation still has the declared
+                // return type NAME of the static call that initialized it,
+                // recorded by `stmt_lowering.rs` when the TypeId erased to ANY.
+                ctx.static_call_type_hints.get(name).cloned()
             }
             Expr::FieldAccess { receiver: base, field } => {
                 let base_struct_name = self.try_resolve_receiver_struct_name_from_expr(base, ctx)?;
