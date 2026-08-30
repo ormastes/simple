@@ -1626,7 +1626,26 @@ int main(int argc, char** argv) {
         }
         #[cfg(target_os = "windows")]
         if is_clang_cl && !strict_no_stub_fallback {
-            cmd.arg("/link").arg("/WHOLEARCHIVE").arg("/FORCE:MULTIPLE,UNRESOLVED");
+            // Into the accumulator, NOT its own `/link`: `/link` consumes the
+            // rest of the command line, so a second group is handed to the
+            // linker as an option, answered with `LNK4044: unrecognized option
+            // '/link'`, and DISCARDED together with everything after it -- here
+            // that would silently drop the trailing group's whole-archive
+            // arguments and `/OPT:REF,ICF`. Measured; see
+            // clang_cl_whole_archive_arg.
+            //
+            // Only reachable when stub fallback is permitted; the bootstrap
+            // sets SIMPLE_NO_STUB_FALLBACK=1, which is why the two-group bug
+            // has been latent rather than fatal.
+            //
+            // NOTE (not changed here): the bare `/WHOLEARCHIVE` has no `:lib`
+            // argument, so it whole-archives EVERY input archive, which is what
+            // multiplies duplicate import descriptors such as
+            // __IMPORT_DESCRIPTOR_kernel32 (measured 4x in
+            // simple_native_all.lib). Narrowing that is a linker-contract
+            // change and is deliberately left for its own commit.
+            clang_cl_link_args.push("/WHOLEARCHIVE".to_string());
+            clang_cl_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         } else if is_msvc && !strict_no_stub_fallback {
             cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
         }
