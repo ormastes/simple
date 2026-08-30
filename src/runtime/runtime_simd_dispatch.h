@@ -76,10 +76,17 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
  * ================================================================ */
 
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
-#    include <cpuid.h>
-#  elif defined(_MSC_VER)
+/* _MSC_VER FIRST: clang-cl defines __clang__ *and* _MSC_VER, so testing the
+ * GNU branch first pulled in GCC's <cpuid.h>, whose 5-argument `__cpuid` macro
+ * then collided with the 2-argument `__cpuid` function that MSVC's <intrin.h>
+ * declares ("too few arguments provided to function-like macro invocation").
+ * runtime_native.c's own cpuid guard already orders these correctly; this one
+ * did not. On GCC/real-clang _MSC_VER is never defined, so those builds are
+ * byte-identical. */
+#  if defined(_MSC_VER)
 #    include <intrin.h>
+#  elif defined(__GNUC__) || defined(__clang__)
+#    include <cpuid.h>
 #  endif
 #endif
 
@@ -94,7 +101,7 @@ static inline int simd_detect_avx2(void) {
 #if defined(SIMPLE_RUNTIME_FORCE_NO_AVX2)
     return 0;
 #elif SIMD_CAN_AVX2
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     /* AVX2 requires AVX plus OS-managed XMM/YMM state. */
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
@@ -219,7 +226,7 @@ void simd_crypto_init(void);
 
 static inline int simd_detect_aesni(void) {
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
     return (ecx & (1U << 25)) ? 1 : 0;
@@ -237,7 +244,7 @@ static inline int simd_detect_aesni(void) {
 
 static inline int simd_detect_sha_ni(void) {
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) return 0;
     return (ebx & (1U << 29)) ? 1 : 0;
@@ -255,7 +262,7 @@ static inline int simd_detect_sha_ni(void) {
 
 static inline int simd_detect_pclmulqdq(void) {
 #if SIMD_HAS_X86
-#  if defined(__GNUC__) || defined(__clang__)
+#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     unsigned int eax, ebx, ecx, edx;
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
     return (ecx & (1U << 1)) ? 1 : 0;

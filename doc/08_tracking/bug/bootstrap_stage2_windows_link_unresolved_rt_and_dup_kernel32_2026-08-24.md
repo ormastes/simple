@@ -288,3 +288,51 @@ the easy half.** Both halves are architectural:
 
 Do not attempt the build-config route as a quick win. Measure the overlap first
 with the three commands above; it takes under a minute and it is decisive.
+
+
+## 2026-08-30 — Blocker A root-caused and fixed on the MSVC lane
+
+The 2026-08-24 conclusion ("a build-pipeline question: find why
+`--runtime-bundle core-c-bootstrap` does not build/link its C archive") was the
+right thread. Pulled on the **MSVC** lane it ends in a compile failure, not a
+pipeline gap: `runtime_native.c` **does not compile under clang-cl**, so the
+core-C archive can never be produced and every symbol the file defines is
+absent from the link.
+
+Measured, `clang-cl 18.1.8`, reading the compiler's status directly (not
+through a pipe — a piped `rc` reports `head`'s status and reads as success):
+
+| stage | errors | cause |
+|---|---|---|
+| initial | 1 fatal | `runtime_native.c:32` `#include <unistd.h>` — MSVC has none |
+| after guarding it | 21 | `ssize_t` (supplied by `unistd.h`) |
+| after `SSIZE_T` typedef | 11 | `popen`/`pclose`/`ftruncate`/`clock_gettime`; `__cpuid` macro-vs-function |
+| after shims | 5 | `__get_cpuid` / `__get_cpuid_count` unavailable under clang-cl |
+| after cpuid gating | **0** | compiles clean |
+
+The cpuid failures were an ordering bug worth naming: `runtime_simd_dispatch.h`
+tested `defined(__GNUC__) || defined(__clang__)` **before** `defined(_MSC_VER)`,
+and **clang-cl defines both**. So it took the GNU branch, pulled GCC's
+`<cpuid.h>` (whose `__cpuid` is a 5-argument macro), and that collided with the
+2-argument `__cpuid` function in MSVC's `<intrin.h>`. Correct MSVC branches
+already existed at all five call sites — they were simply unreachable.
+`runtime_native.c`'s own cpuid guard had the order right, which is why only the
+header was wrong.
+
+Result: the object now defines **929** `rt_*` symbols, including
+`rt_io_udp_bind`, `rt_iocp_create` and `rt_io_tcp_write_bytes` — three of the
+names this record lists as undefined.
+
+**`rt_black_box` is NOT fixed** and is not fixable this way: as this record
+already established, it has no definition anywhere in `src/runtime/*.c` or
+`src/compiler_rust/runtime/src`. Same for `rt_host_gpu_active_backend_handle`.
+Those remain genuinely missing implementations.
+
+Every change is gated on `_MSC_VER`, never `_WIN32`: MinGW supplies `unistd.h`,
+`popen`, `ftruncate` and `clock_gettime` itself, and widening the guard would
+shadow them. Verified both ways — clang-cl 0 errors, MinGW `gcc` still compiles
+the file and emits an object.
+
+**Blocker B (duplicate kernel32 import descriptors) is untouched** and now
+appears on MSVC too, as `LNK2005 __IMPORT_DESCRIPTOR_kernel32`. This record's
+judgement stands: it is a linker-contract decision, not a unilateral one.
