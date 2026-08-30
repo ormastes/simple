@@ -124,6 +124,8 @@ pub struct Lowerer {
     /// units have no interpreter to fall back to. Populated by
     /// `collect_flattened_import_aliases`, consumed by `lower_identifier`. See
     /// `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`.
+    /// Keyed by local name only: two importers binding the same local name
+    /// from different sources clobber each other here.
     pub(super) import_alias_bindings: HashMap<String, String>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
