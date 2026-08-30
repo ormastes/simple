@@ -39,11 +39,17 @@ thread_local! {
     /// of every file, so the same `(parent, segment)` pairs were recomputed
     /// enormous numbers of times.
     ///
-    /// Measured 2026-08-31 (`sample` of a hung
-    /// `check-bootstrap-stage2-struct-receiver.shs` route step, 93% CPU,
-    /// 3.4 GB RSS, spinning in `NativeProjectBuilder::build`): 88 frames in
-    /// `find_numbered_dir` and 123 in `find_segment_within_numbered_dirs` —
-    /// the two hottest frames in the whole sample.
+    /// Measured 2026-08-31 on a hung
+    /// `check-bootstrap-stage2-struct-receiver.shs` route step (93% CPU,
+    /// ~3.2 GB RSS, spinning in `NativeProjectBuilder::build`): before this
+    /// memo, `find_numbered_dir` / `find_segment_within_numbered_dirs` were
+    /// the two most frequently occurring frames in a `sample`; after it, a
+    /// re-`sample` of the same route puts all of `module_resolver::resolution`
+    /// at under 300 of ~19,000 weighted samples. The hit/miss counters
+    /// (`SIMPLE_PERF_COUNTERS=1`, `NUMBERED_DIR_HITS` / `_MISSES`) report the
+    /// redundancy directly. NOTE: this memo removes a real redundancy but is
+    /// NOT sufficient to make that route finish — the remaining cost is in
+    /// `pipeline::native_project::imports` and `hir::lower::import_loader`.
     ///
     /// BUILD-LIFETIME ASSUMPTION: this is a memo of a filesystem probe, so it
     /// is sound only because the source tree is not mutated while a build is
@@ -94,8 +100,10 @@ pub(crate) fn clear_numbered_dir_cache() {
 fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
     let key = (parent.to_path_buf(), segment.to_string());
     if let Some(hit) = NUMBERED_DIR_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::NUMBERED_DIR_HITS, 1);
         return hit;
     }
+    crate::perf_counters::bump(&crate::perf_counters::NUMBERED_DIR_MISSES, 1);
     let answer = find_numbered_dir_uncached(parent, segment);
     NUMBERED_DIR_CACHE.with(|c| c.borrow_mut().insert(key, answer.clone()));
     answer
@@ -146,8 +154,10 @@ fn find_explicit_numbered_dir(parent: &Path, prefix: &str, suffix: &str) -> Opti
 fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<PathBuf> {
     let key = (parent.to_path_buf(), segment.to_string());
     if let Some(hit) = SEGMENT_WITHIN_NUMBERED_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::SEGMENT_WITHIN_NUMBERED_HITS, 1);
         return hit;
     }
+    crate::perf_counters::bump(&crate::perf_counters::SEGMENT_WITHIN_NUMBERED_MISSES, 1);
     let answer = find_segment_within_numbered_dirs_uncached(parent, segment);
     SEGMENT_WITHIN_NUMBERED_CACHE.with(|c| c.borrow_mut().insert(key, answer.clone()));
     answer

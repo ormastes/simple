@@ -59,6 +59,11 @@ counters!(
     // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
     IMPORT_AST_PARSES,
     IMPORT_AST_HITS,
+    // numbered-layer-directory memos (module_resolver::resolution)
+    NUMBERED_DIR_MISSES,
+    NUMBERED_DIR_HITS,
+    SEGMENT_WITHIN_NUMBERED_MISSES,
+    SEGMENT_WITHIN_NUMBERED_HITS,
 );
 
 #[inline(always)]
