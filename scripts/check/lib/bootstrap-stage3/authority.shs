@@ -1198,8 +1198,16 @@ bootstrap_stage3_copy_seed_tuple() {
         for my $target (@targets) {
             my ($path, $wanted, $digest) = @$target;
             my @st = lstat($path);
-            @st && S_ISREG($st[2]) && !S_ISLNK($st[2]) &&
-                S_IMODE($st[2]) == $wanted or die "target identity/mode changed\n";
+            @st && S_ISREG($st[2]) && !S_ISLNK($st[2])
+                or die "target identity/mode changed\n";
+            # Same Windows mode limitation as the copy step above: MSYS
+            # reports 0444 for anything read-only, so an exact match on
+            # 0400/0500 is unattainable. Immutability is still asserted.
+            unless (S_IMODE($st[2]) == $wanted) {
+                die "target identity/mode changed\n"
+                    unless $^O =~ /^(?:MSWin32|msys|cygwin)$/
+                        && (S_IMODE($st[2]) & 0222) == 0;
+            }
             my ($fh) = open_bound($path);
             digest_fh($fh) eq $digest or die "target digest changed\n";
             close($fh) or die "close verify target: $!\n";
