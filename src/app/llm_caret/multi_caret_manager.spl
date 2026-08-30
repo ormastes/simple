@@ -95,6 +95,39 @@ pub fn stop_multi_caret_manager(manager: MultiCaretManager) -> MultiCaretManager
     _manager(manager.manager_id, "stopped", "processes_stopped",
         manager.capacity, stopped)
 
-export MultiCaretManager
+struct ManagedAgent:
+    agent_id: text
+    pid: i64
+    status: text
+    reason: text
+    alive: bool
+
+pub fn list_multi_caret_agents(manager: MultiCaretManager) -> [ManagedAgent]:
+    # The roster is derived from the parent-owned process table, never from a
+    # separate registry that could drift out of step with the real children.
+    # `alive` restates the same rule `_leaked_processes` uses: a pid <= 0 was
+    # never spawned, and a child is only claimed dead once it has stopped or
+    # exited -- an "error" status with a live pid is still running.
+    var agents: [ManagedAgent] = []
+    for proc in manager.team.processes:
+        val alive = proc.pid > 0 and proc.status != "stopped" and proc.status != "exited"
+        agents.push(ManagedAgent(agent_id: proc.agent_id, pid: proc.pid,
+            status: proc.status, reason: proc.reason, alive: alive))
+    agents
+
+pub fn render_multi_caret_agents(manager: MultiCaretManager) -> text:
+    val agents = list_multi_caret_agents(manager)
+    var out = "Manager: " + manager.manager_id + " [" + manager.status + "]\n"
+    if agents.len() == 0:
+        return out + "  (no agents)\n"
+    out = out + "  AGENT  PID  STATUS  ALIVE  REASON\n"
+    for a in agents:
+        val alive_text = if a.alive: "yes" else: "no"
+        out = out + "  " + a.agent_id + "  " + a.pid.to_text() + "  " +
+            a.status + "  " + alive_text + "  " + a.reason + "\n"
+    out
+
+export MultiCaretManager, ManagedAgent
 export launch_multi_caret_manager, poll_multi_caret_manager,
-    stop_multi_caret_manager
+    stop_multi_caret_manager, list_multi_caret_agents,
+    render_multi_caret_agents

@@ -5,7 +5,8 @@ use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
 use app.llm_caret.agent_tmux.{build_agent_tmux_embed}
 use app.llm_caret.multi_caret_manager.{MultiCaretManager,
     launch_multi_caret_manager, poll_multi_caret_manager,
-    stop_multi_caret_manager}
+    stop_multi_caret_manager, list_multi_caret_agents,
+    render_multi_caret_agents}
 
 fn _request(provider: text) -> AgentLaunchRequest:
     AgentLaunchRequest(provider: provider, agent_md_path: "agents/a.md",
@@ -76,3 +77,50 @@ describe "LLM Caret multi-process manager reports process truth":
         val idle = launch_multi_caret_manager("", [_request("bogus")], 2,
             "", "", "", "", "")
         expect(stop_multi_caret_manager(idle).reason).to_equal("no_processes")
+
+describe "listing the agents a manager currently owns":
+    # The roster must be derived from the parent-owned process table, never
+    # from a side registry that can drift out of step with the real children.
+    # @manual scenario evidence
+    it "reports one row per owned child with its real pid":
+        step("List a team holding one live child and one that never spawned")
+        val m = _manager_over([
+            AgentProcess(agent_id: "claude", status: "started",
+                reason: "process_spawned", pid: 4242),
+            AgentProcess(agent_id: "codex", status: "error",
+                reason: "spawn_failed", pid: -1)])
+        val agents = list_multi_caret_agents(m)
+        expect(agents.len()).to_equal(2)  # oracle: 2 — one row per process
+        expect(agents[0].agent_id).to_equal("claude")
+        expect(agents[0].pid).to_equal(4242)
+        expect(agents[0].alive).to_equal(true)
+
+    it "does not call a child that never spawned alive":
+        step("A pid <= 0 was never spawned, so it cannot be running")
+        val m = _manager_over([AgentProcess(agent_id: "codex",
+            status: "error", reason: "spawn_failed", pid: -1)])
+        expect(list_multi_caret_agents(m)[0].alive).to_equal(false)
+
+    it "does not call a stopped child alive":
+        step("A child that was killed is no longer running")
+        val m = _manager_over([AgentProcess(agent_id: "claude",
+            status: "stopped", reason: "process_stopped", pid: 4242)])
+        expect(list_multi_caret_agents(m)[0].alive).to_equal(false)
+
+    it "renders an empty roster without inventing rows":
+        step("Render a manager that owns nothing")
+        val empty = launch_multi_caret_manager("", [_request("bogus")], 2,
+            "", "", "", "", "")
+        expect(render_multi_caret_agents(empty)).to_contain("(no agents)")
+
+    it "renders every owned agent id in the table":
+        step("Render a two-agent roster")
+        val m = _manager_over([
+            AgentProcess(agent_id: "claude", status: "started",
+                reason: "process_spawned", pid: 4242),
+            AgentProcess(agent_id: "codex", status: "started",
+                reason: "process_spawned", pid: 4243)])
+        val out = render_multi_caret_agents(m)
+        expect(out).to_contain("claude")
+        expect(out).to_contain("codex")
+        expect(out).to_contain("4243")

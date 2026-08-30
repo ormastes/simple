@@ -1,10 +1,30 @@
 # LLM Caret - JSON Helpers
 #
 # JSON building and parsing utilities following mcp/helpers.spl patterns.
+# Deliberately does NOT import std.mcp.helpers: that module defines a
+# same-signature `extract_json_string` (no escape tracking) which, under the
+# seed's name-keyed co-compile registry, silently hijacks this module's
+# definition in any test that co-compiles both. See
+# doc/08_tracking/bug/llm_caret_json_helpers_escaped_quote_cross_module_2026-08-25.md
 # Uses string concat (no f-strings) to avoid `}}` brace issues.
 
 use std.text.{escape_json}
-use std.mcp.helpers.{Q, LB, RB, js, jp}
+
+# Local one-liners (previously imported from std.mcp.helpers; see header)
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    "{"
+
+fn RB() -> text:
+    "}"
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn js(value: text) -> text:
+    Q() + escape_json(value) + Q()
 
 # ============================================================================
 # JSON Escaping
@@ -101,16 +121,38 @@ fn ja(items: [text]) -> text:
 # JSON Parsing Helpers
 # ============================================================================
 
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
+# Substring search returning a bare index (-1 if absent).
+# ponytail: hand-written scan, not text.index_of — the seed's int-boxing
+# mangles certain Option<i64> results (e.g. index 3 returns nil) via the
+# tag-box wall; see doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md
+fn json_find(s: text, needle: text) -> i64:
+    val nlen = needle.len()
+    if nlen == 0:
+        return 0
+    val slen = s.len()
+    if nlen > slen:
+        return -1
+    # Compare with substring, not `s[i + j]`: `.len()`/`.substring()` count
+    # BYTES while `[]` counts CHARACTERS, so bounding this loop by the byte
+    # length and indexing by character ran off the end of any string holding
+    # non-ASCII text -- a provider error message in Chinese was enough to trap.
+    # Staying in bytes also keeps the RETURNED index in the same unit every
+    # caller feeds it to (`json.substring(idx + ...)`), which the character
+    # form silently got wrong even when it did not crash. See
+    # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
+    var i = 0
+    val last = slen - nlen
+    while i <= last:
+        if s.substring(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
 
 # Extract a string value for a given key from JSON
 fn extract_json_string(json: text, key: text) -> text:
     val quote = "\""
     val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return ""
     val slen = search.len()
@@ -119,44 +161,83 @@ fn extract_json_string(json: text, key: text) -> text:
     val trimmed = after.trim()
     if trimmed.starts_with(quote):
         val rest = trimmed.substring(1)
-        # Find unescaped closing quote
-        var end = 0
+        # Find the unescaped closing quote by ACCUMULATING characters rather
+        # than remembering an index and slicing: `.len()`/`.substring()` count
+        # BYTES while `[]` counts CHARACTERS, so the index form both ran off
+        # the end and sliced at the wrong offset on non-ASCII values. See
+        # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
+        var acc = ""
         var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
+        for ch in rest.chars():
             if escaped:
+                acc = acc + ch
                 escaped = false
             elif ch == "\\":
+                acc = acc + ch
                 escaped = true
             elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
+                return acc
+            else:
+                acc = acc + ch
     ""
 
 # Extract a raw value (number, boolean, null) for a given key from JSON
 fn extract_json_value(json: text, key: text) -> text:
     val search = Q() + key + Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return "null"
     val slen = search.len()
     val start = idx + slen
     val after = json.substring(start)
     val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
+    # Same byte/char hazard as extract_json_string above.
+    var acc = ""
+    for ch in trimmed.chars():
         if ch == "," or ch == RB() or ch == "]":
             break
-        end = end + 1
-    trimmed.substring(0, end).trim()
+        acc = acc + ch
+    acc.trim()
+
+# Digit value of a single-char string, or -1 if not 0-9.
+# ponytail: explicit compare, NOT ch.to_i64() — the seed boxes char.to_i64()
+# across module boundaries (returns <value:0xN>/digit-value instead of the code
+# point), so any to_i64-based digit loop mis-parses when called cross-module.
+# See doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md
+fn _digit_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+# Parse a decimal integer from text (bounded, boxing-free).
+fn json_parse_int(s: text) -> i64:
+    var n = 0
+    var i = 0
+    var neg = false
+    if s.len() > 0 and s[0] == "-":
+        neg = true
+        i = 1
+    while i < s.len():
+        val d = _digit_val(s[i])
+        if d >= 0:
+            n = n * 10 + d
+        i = i + 1
+    if neg: -n else: n
 
 # Extract integer value for a given key
 fn extract_json_int(json: text, key: text) -> i64:
     val raw = extract_json_value(json, key)
     if raw == "null" or raw == "":
         return 0
-    int(raw)
+    json_parse_int(raw)
 
 # Extract boolean value for a given key
 fn extract_json_bool(json: text, key: text) -> bool:
@@ -166,7 +247,7 @@ fn extract_json_bool(json: text, key: text) -> bool:
 # Extract a nested string value: outer_key -> inner_key
 fn extract_nested_string(json: text, outer_key: text, inner_key: text) -> text:
     val search = Q() + outer_key + Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return ""
     val slen = search.len()

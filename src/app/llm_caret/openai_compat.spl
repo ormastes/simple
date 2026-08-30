@@ -3,7 +3,9 @@
 # Generic OpenAI-compatible endpoint for Ollama, LM Studio, vLLM, LocalAI, etc.
 # Same protocol as OpenAI but configurable base URL and optional API key.
 
-extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+use app.llm_caret.json_helpers.{json_find, json_parse_int}
+
+use std.nogc_sync_mut.io.http_sffi.{http_request_raw}
 
 # ============================================================================
 # JSON helpers (inlined)
@@ -18,16 +20,14 @@ fn _RB() -> text:
 fn _Q() -> text:
     "\""
 
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
 fn _escape_json(s: text) -> text:
+    # Iterate characters, never `while i < s.len()` with `s[i]`: `.len()`
+    # counts BYTES while `[]` counts CHARACTERS, so the indexed form ran off
+    # the end of any non-ASCII string and trapped -- which made it impossible
+    # to send a prompt containing non-ASCII text at all. See
+    # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
     var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
+    for ch in s.chars():
         if ch == "\\":
             result = result + "\\\\"
         elif ch == "\"":
@@ -40,13 +40,12 @@ fn _escape_json(s: text) -> text:
             result = result + "\\t"
         else:
             result = result + ch
-        i = i + 1
     result
 
 fn _extract_json_string(json: text, key: text) -> text:
     val quote = "\""
     val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return ""
     val slen = search.len()
@@ -55,41 +54,49 @@ fn _extract_json_string(json: text, key: text) -> text:
     val trimmed = after.trim()
     if trimmed.starts_with(quote):
         val rest = trimmed.substring(1)
-        var end = 0
+        # Accumulate characters instead of remembering an index: `.len()` and
+        # `.substring()` count BYTES while `[]` counts CHARACTERS, so the old
+        # index-and-slice form both ran off the end and sliced at the wrong
+        # offset once the value held any non-ASCII text -- a provider error
+        # message in Chinese was enough to kill the process. See
+        # doc/08_tracking/bug/text_len_substring_bytes_but_index_chars_2026-08-30.md
+        var acc = ""
         var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
+        for ch in rest.chars():
             if escaped:
+                acc = acc + ch
                 escaped = false
             elif ch == "\\":
+                acc = acc + ch
                 escaped = true
             elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
+                return acc
+            else:
+                acc = acc + ch
     ""
 
 fn _extract_json_value(json: text, key: text) -> text:
     val search = _Q() + key + _Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
+    val idx = json_find(json, search)
     if idx < 0:
         return "null"
     val slen = search.len()
     val start = idx + slen
     val after = json.substring(start)
     val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
+    # Same byte/char hazard as _extract_json_string above.
+    var acc = ""
+    for ch in trimmed.chars():
         if ch == "," or ch == _RB() or ch == "]":
             break
-        end = end + 1
-    trimmed.substring(0, end).trim()
+        acc = acc + ch
+    acc.trim()
 
 fn _extract_json_int(json: text, key: text) -> i64:
     val raw = _extract_json_value(json, key)
     if raw == "null" or raw == "":
         return 0
-    int(raw)
+    json_parse_int(raw)
 
 # ============================================================================
 # Response struct
@@ -105,13 +112,19 @@ struct CompatResponse:
     is_error: bool
     raw: text
 
+struct CompatRequest:
+    method: text
+    url: text
+    headers: text
+    body: text
+
 # ============================================================================
 # Request building
 # ============================================================================
 
 fn build_compat_body(model: text, messages_json: text, max_tokens: i64, temperature: f64) -> text:
     var parts: [text] = []
-    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + model + _Q()]
+    parts = parts + [_Q() + "model" + _Q() + ":" + _Q() + _escape_json(model) + _Q()]
     parts = parts + [_Q() + "messages" + _Q() + ":" + messages_json]
     if max_tokens > 0:
         parts = parts + [_Q() + "max_tokens" + _Q() + ":" + max_tokens.to_text()]
@@ -133,12 +146,44 @@ fn build_compat_headers(api_key: text) -> text:
         h = "Authorization: Bearer " + api_key + "\n" + h
     h
 
+fn compat_endpoint_url(base_url: text) -> text:
+    var base = base_url
+    while base.len() > 0 and base.ends_with("/"):
+        base = base.substring(0, base.len() - 1)
+    # A base URL that already names its API version (OpenAI "/v1", Zhipu GLM
+    # "/api/paas/v4") must not have a second "/v1" appended -- that is what
+    # made Moonshot answer url.not_found.
+    if _ends_with_version(base):
+        return base + "/chat/completions"
+    base + "/v1/chat/completions"
+
+fn _ends_with_version(base: text) -> bool:
+    val idx = base.last_index_of("/v")
+    if idx < 0:
+        return false
+    val tail = base.substring(idx + 2)
+    if tail.len() == 0:
+        return false
+    for ch in tail.chars():
+        if ch < "0" or ch > "9":
+            return false
+    true
+
+fn build_compat_request(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatRequest:
+    CompatRequest(
+        method: "POST",
+        url: compat_endpoint_url(base_url),
+        headers: build_compat_headers(api_key),
+        body: build_compat_body(model, messages_json, max_tokens, temperature)
+    )
+
 # ============================================================================
 # Response parsing
 # ============================================================================
 
 fn parse_compat_response(raw: text) -> CompatResponse:
-    if raw.trim() == "":
+    val trimmed_raw = raw.trim()
+    if trimmed_raw == "":
         return CompatResponse(
             content: "",
             model: "",
@@ -148,6 +193,17 @@ fn parse_compat_response(raw: text) -> CompatResponse:
             error: "empty response",
             is_error: true,
             raw: ""
+        )
+    if not trimmed_raw.starts_with(_LB()) or not trimmed_raw.ends_with(_RB()):
+        return CompatResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: "malformed response",
+            is_error: true,
+            raw: raw
         )
     val error_msg = _extract_json_string(raw, "message")
     val has_content = _extract_json_string(raw, "content")
@@ -159,6 +215,28 @@ fn parse_compat_response(raw: text) -> CompatResponse:
             prompt_tokens: 0,
             completion_tokens: 0,
             error: error_msg,
+            is_error: true,
+            raw: raw
+        )
+    if not _has_json_key(raw, "content"):
+        return CompatResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: "malformed response",
+            is_error: true,
+            raw: raw
+        )
+    if not _has_json_string_value(raw, "content"):
+        return CompatResponse(
+            content: "",
+            model: "",
+            finish_reason: "error",
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            error: "malformed response",
             is_error: true,
             raw: raw
         )
@@ -181,17 +259,17 @@ fn parse_compat_response(raw: text) -> CompatResponse:
         raw: raw
     )
 
-# ============================================================================
-# Send request
-# ============================================================================
+fn _has_json_key(json: text, key: text) -> bool:
+    json_find(json, _Q() + key + _Q() + ":") >= 0
 
-fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatResponse:
-    val url = base_url + "/v1/chat/completions"
-    val headers = build_compat_headers(api_key)
-    val body = build_compat_body(model, messages_json, max_tokens, temperature)
-    val result = http_request_raw("POST", url, headers, body)
-    val resp_body = result.1 ?? ""
-    val http_error = result.2 ?? ""
+fn _has_json_string_value(json: text, key: text) -> bool:
+    val marker = _Q() + key + _Q() + ":"
+    val index = json_find(json, marker)
+    if index < 0:
+        return false
+    json.substring(index + marker.len()).trim().starts_with(_Q())
+
+fn complete_compat_exchange(resp_body: text, http_error: text) -> CompatResponse:
     if http_error != "":
         return CompatResponse(
             content: "",
@@ -204,3 +282,14 @@ fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, 
             raw: resp_body
         )
     parse_compat_response(resp_body)
+
+# ============================================================================
+# Send request
+# ============================================================================
+
+fn compat_send(base_url: text, api_key: text, model: text, messages_json: text, max_tokens: i64, temperature: f64) -> CompatResponse:
+    val request = build_compat_request(base_url, api_key, model, messages_json, max_tokens, temperature)
+    val result = http_request_raw(request.method, request.url, request.headers, request.body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    complete_compat_exchange(resp_body, http_error)
