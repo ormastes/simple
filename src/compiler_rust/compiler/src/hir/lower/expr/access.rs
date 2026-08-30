@@ -385,7 +385,19 @@ impl Lowerer {
                     // degrade the expression type to ANY so method
                     // dispatch stays bare and tag-dispatches at runtime.
                     let ambiguous_field = self.is_ambiguous_global_field(field);
-                    if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                    // FAIL-CLOSED (2026-08-30): degrading only the TYPE to ANY
+                    // while keeping the receiver-blind "most fields wins" INDEX
+                    // fail-opens the byte offset. `mcdc_owner_bytes` is field 10
+                    // of CompilerConfig, 22 of CompileOptions, 26 of MirLowering
+                    // -- the 97-field MirLowering won, so `CompileContext.create`
+                    // read [0xd0] out of a 112-byte CompilerConfig. An ambiguous
+                    // name must resolve by receiver or not at all.
+                    let global_field_info = if ambiguous_field {
+                        None
+                    } else {
+                        self.resolve_global_field_info(field)
+                    };
+                    if let Some((field_index, field_ty, _count, _sname)) = global_field_info {
                         if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] NKM-GLOBAL/{field} idx={field_index} in {fpath}"); }
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
@@ -407,6 +419,12 @@ impl Lowerer {
                                 }
                             }
                         }
+                    }
+                    if ambiguous_field {
+                        // Same fail-closed rule as the NKM-GLOBAL block above:
+                        // never emit a receiver-blind byte offset for a name
+                        // whose defining structs disagree on the index.
+                        best = None;
                     }
                     if let Some((field_index, field_ty, _)) = best {
                         if crate::hir::lower::trace_field_get_enabled() { let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown"); eprintln!("[FT2] NKM-LOCALBEST/{field} idx={field_index} in {fpath}"); }
