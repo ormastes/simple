@@ -147,6 +147,7 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::DictComprehension { .. } => "DictComprehension",
         Expr::Slice { .. } => "Slice",
         Expr::Spread(_) | Expr::DictSpread(_) => "Spread",
+        Expr::StructSpread(_) => "StructSpread",
         Expr::MacroInvocation { .. } => "MacroInvocation",
         Expr::Await(_) => "Await",
         Expr::Spawn(_) => "Spawn",

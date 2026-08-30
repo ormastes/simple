@@ -338,6 +338,7 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
                 }
             }
             Expr::Spread(expr) | Expr::DictSpread(expr) => visit_expr(expr, visitor),
+            Expr::StructSpread(expr) => visit_expr(expr, visitor),
             Expr::Spawn(expr)
             | Expr::Await(expr)
             | Expr::Try(expr)

@@ -268,6 +268,16 @@ fn route_expr(
         | Expr::DictSpread(_) => {
             collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
+        // A struct-update spread is consumed by the constructor that owns it
+        // (interpreter_call/core/class_instantiation.rs). Reaching generic
+        // expression evaluation means `..base` was written somewhere it has no
+        // meaning; say so instead of evaluating the base and silently using it
+        // as an ordinary value.
+        Expr::StructSpread(_) => Some(Err(CompileError::semantic(
+            "struct spread `..base` is only valid as an argument of a struct/class construction \
+             such as `S(..base, field: value)`"
+                .to_string(),
+        ))),
         // Remaining variants (Spawn, Await, Yield, Try, MacroInvocation, Unwrap*, etc.)
         // are handled by the match in evaluate_expr.
         _ => None,

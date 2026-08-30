@@ -447,10 +447,51 @@ impl<'a> Parser<'a> {
             // Record start position for span
             let arg_start = self.current.span;
 
+            // ROOT FIX (bug struct_spread_paren_form_parses_as_range_2026-08-30):
+            // PAREN-form struct spread `S(..base, field: v)`.
+            //
+            // Before this, `..` here fell through to `parse_expression` ->
+            // `parse_range`, producing `Expr::Range { start: None, end: base }`
+            // which lowers to `rt_range(0, <tagged object pointer>)` — a range
+            // of billions of elements, i.e. a compiler/runtime HANG. All 110
+            // spread sites in `src/` use this form; zero use the brace form the
+            // parser half-supported.
+            //
+            // Containment: this is the ONLY place prefix `..` is reinterpreted.
+            // `parse_range` is untouched, so `a..b`, `0..n`, `arr[..n]`, `x..`,
+            // `for i in 0..n` and `f(1..5)` all still parse as ranges. A bare
+            // `f(..)` (full range) and `f(..=x)` also still reach `parse_range`,
+            // because we only fire when `..` is followed by a token that can
+            // actually start an expression.
+            //
+            // A genuine prefix-range ARGUMENT (`f(..n)`) is the one shape this
+            // reinterprets; HIR rejects `StructSpread` in a non-constructor call
+            // with a hard error, so that case becomes a loud diagnostic rather
+            // than silent wrongness.
+            let is_struct_spread = self.check(&TokenKind::DoubleDot)
+                && !matches!(
+                    self.peek_next().kind,
+                    TokenKind::RParen
+                        | TokenKind::RBracket
+                        | TokenKind::RBrace
+                        | TokenKind::Comma
+                        | TokenKind::Colon
+                        | TokenKind::Semicolon
+                        | TokenKind::Newline
+                        | TokenKind::Dedent
+                        | TokenKind::Eof
+                );
+            if is_struct_spread {
+                self.advance(); // consume '..'
+            }
+
             // Check for named argument with '=' or ':' syntax
             // Also support keywords as named argument names (e.g., type="model", default=true)
             let mut name = None;
-            let maybe_name = match &self.current.kind {
+            let maybe_name = if is_struct_spread {
+                None
+            } else {
+                match &self.current.kind {
                 TokenKind::Identifier { name: id, .. } => Some(id.clone()),
                 // Allow keywords as named argument names
                 TokenKind::Type => Some("type".to_string()),
@@ -522,6 +563,7 @@ impl<'a> Parser<'a> {
                 // (e.g. K(and_then: "ok")).
                 TokenKind::AndThen => Some("and_then".to_string()),
                 _ => None,
+                }
             };
             if let Some(id_clone) = maybe_name {
                 // Peek ahead for '=' or ':' without consuming the stream
@@ -550,6 +592,10 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Ellipsis) {
                 self.advance(); // consume ...
                 value = Expr::Spread(Box::new(value));
+            }
+
+            if is_struct_spread {
+                value = Expr::StructSpread(Box::new(value));
             }
 
             // Create span from start to current position

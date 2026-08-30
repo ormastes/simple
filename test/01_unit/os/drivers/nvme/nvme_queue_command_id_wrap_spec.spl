@@ -1,0 +1,30 @@
+use std.spec.{describe, it, expect}
+use os.drivers.nvme.nvme_queue.{
+    NVME_COMMAND_ID_SUBMIT_FAILURE,
+    nvme_submission_command_id,
+    nvme_command_id_after_submission,
+    nvme_completion_matches_command_id
+}
+
+describe "NVMe command ID wrap contract":
+    it "reserves the submit-failure sentinel and wraps the next hardware CID to zero":
+        val before_reserved = nvme_submission_command_id(0xFFFEu16)
+        val reserved_next = nvme_command_id_after_submission(before_reserved)
+        val wrapped = nvme_submission_command_id(reserved_next)
+        val after_wrapped = nvme_command_id_after_submission(wrapped)
+
+        expect(before_reserved).to_equal(0xFFFEu16)
+        expect(reserved_next).to_equal(NVME_COMMAND_ID_SUBMIT_FAILURE)
+        expect(wrapped).to_equal(0u16)
+        expect(after_wrapped).to_equal(1u16)
+        expect(wrapped == NVME_COMMAND_ID_SUBMIT_FAILURE).to_equal(false)
+
+    it "correlates completions across wrap without accepting the failure sentinel":
+        val status_for_last = 0x0001FFFEu32
+        val status_for_wrapped = 0x00010000u32
+        val status_for_reserved = 0x0001FFFFu32
+
+        expect(nvme_completion_matches_command_id(status_for_last, 0xFFFEu16)).to_equal(true)
+        expect(nvme_completion_matches_command_id(status_for_wrapped, 0u16)).to_equal(true)
+        expect(nvme_completion_matches_command_id(status_for_last, 0u16)).to_equal(false)
+        expect(nvme_completion_matches_command_id(status_for_reserved, NVME_COMMAND_ID_SUBMIT_FAILURE)).to_equal(false)
