@@ -780,6 +780,26 @@ int64_t rt_host_gpu_lane_end_count(void) { return rt_host_gpu_lane_end_total; }
 int64_t rt_host_gpu_lane_last_lane(void) { return rt_host_gpu_lane_last_lane_code; }
 int64_t rt_host_gpu_lane_last_phase(void) { return rt_host_gpu_lane_last_phase_code; }
 
+/*
+ * Handle of the GPU backend currently bound to the host/GPU lane.
+ *
+ * Contract (src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:22):
+ *     extern fn rt_host_gpu_active_backend_handle() -> i64
+ * Its single caller (:230) feeds the result straight into
+ * rt_host_gpu_queue_emit's `backend_handle` parameter, so it lives in the
+ * SAME handle space as that parameter: 0 == no backend, >0 == a real
+ * backend, and a NEGATIVE value is rejected outright by the emit path
+ * (see the `backend_handle < 0` guard below). Completion maps a GPU-lane
+ * packet carrying handle 0 to RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE, which
+ * is exactly the "no GPU here" outcome we want reported.
+ *
+ * The core C runtime binds no GPU backend, and nothing anywhere in this
+ * tree registers an "active" one -- every real backend_handle observed by
+ * the queue arrives as a caller-supplied argument. So this is an honest
+ * no-backend answer, not a placeholder: it returns 0.
+ */
+int64_t rt_host_gpu_active_backend_handle(void) { return 0; }
+
 void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_next_packet_id = 1;
     rt_host_gpu_queue_head = 0;
@@ -5949,6 +5969,63 @@ void rt_volatile_write_u64(int64_t addr, int64_t value) {
 void rt_memory_barrier(void) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
+
+/*
+ * rt_black_box -- optimization barrier for constant-time code.
+ *
+ * Contract: `extern fn rt_black_box(value: i64) -> i64`
+ *   - src/os/crypto/scram_common.spl:17           (-> i64)
+ *   - src/lib/common/crypto/constant_time.spl:7   (-> i64?)
+ * The two spellings are the SAME C ABI: an `i64?` extern return is a
+ * Simple-side nullability annotation, not a tagged value (cf.
+ * `extern fn rt_free(ptr: i64) -> i64?` against `void rt_free(void*)` at
+ * :5816, and `rt_io_tcp_set_read_timeout(fd: i64, ms: i64?)` against
+ * `int64_t rt_io_tcp_set_read_timeout(int64_t, int64_t)` at :11338).
+ * The Simple wrapper's `?? value` merely supplies a fallback.
+ *
+ * Semantically the identity function; the whole point is that the
+ * optimizer must not be able to prove that. Callers are constant-time
+ * comparisons (ct_eq / HTTP Basic auth / SCRAM) that XOR-accumulate a
+ * difference and then test it once -- without a barrier the compiler is
+ * free to rewrite that into an early-exit branch and reintroduce the
+ * data-dependent timing the loop exists to remove.
+ *
+ * A bare `return value;` is NOT sufficient: it is opaque only until
+ * someone enables LTO or inlines across the TU. The inline-asm form below
+ * forces the value through a register the compiler must treat as
+ * clobbered, which is what makes it a real barrier.
+ *
+ * WEAK on GNUC/clang for the same reason as rt_heap_live_bytes in
+ * runtime_memtrack.c: the Rust runtime (lib.rs) defines this symbol
+ * strongly via std::hint::black_box, and two strong definitions are a hard
+ * lld duplicate-symbol error in any link that carries both. Weak means
+ * standalone C links keep this fallback and mixed links get Rust's, which
+ * is the correct precedence. MSVC has no weak attribute; Windows builds do
+ * not whole-archive this file into the Rust cdylib, so a strong definition
+ * is fine there.
+ */
+#if defined(_MSC_VER)
+/* MSVC (incl. clang-cl in MS mode) rejects GNU inline asm. A volatile
+ * round-trip cannot be elided or constant-folded, so it is a genuine
+ * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
+ * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
+static volatile int64_t rt_black_box_sink;
+int64_t rt_black_box(int64_t value) {
+    rt_black_box_sink = value;
+    return rt_black_box_sink;
+}
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) int64_t rt_black_box(int64_t value) {
+    __asm__ __volatile__("" : "+r"(value) : : "memory");
+    return value;
+}
+#else
+static volatile int64_t rt_black_box_sink;
+int64_t rt_black_box(int64_t value) {
+    rt_black_box_sink = value;
+    return rt_black_box_sink;
+}
+#endif
 
 double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
