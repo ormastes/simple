@@ -950,6 +950,34 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
             weak.insert(name.to_string());
         }
     }
+    // Mach-O carries weakness in the N_WEAK_DEF bit, which `nm -p`'s one-letter
+    // kind column does NOT surface: a weak definition prints as `T`, byte for
+    // byte identical to a strong one. So the ELF-shaped W/V parse above finds
+    // nothing on macOS and every weak fallback looks strong to the caller —
+    // which made the Stage-4 capsule guard reject the core-C archive's
+    // deliberately-weak rt_heap_live_bytes/rt_heap_peak_bytes and fail Stage 2.
+    // Apple's `nm -m` does report it, as "weak external". Names keep their
+    // leading underscore here, matching archive_global_symbols' raw keys.
+    if cfg!(target_os = "macos") {
+        let detailed = nm_command()
+            .arg("-g")
+            .arg("-m")
+            .arg(path)
+            .output()
+            .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+        if detailed.status.success() {
+            for line in String::from_utf8_lossy(&detailed.stdout).lines() {
+                if !line.contains("weak external") && !line.contains("weak definition") {
+                    continue;
+                }
+                if let Some(name) = line.split_whitespace().last() {
+                    // "... weak external automatically hidden _sym" also ends in
+                    // the symbol, so taking the last field is correct for both.
+                    weak.insert(name.to_string());
+                }
+            }
+        }
+    }
     Ok(weak)
 }
 
