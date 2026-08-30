@@ -998,9 +998,32 @@ bootstrap_stage3_copy_seed_tuple() {
         [ -f "$bootstrap_stage3_hosted_path" ] &&
             [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
         bootstrap_stage3_hosted_count=$((bootstrap_stage3_hosted_count + 1))
-        bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_path
+        if [ -z "$bootstrap_stage3_hosted_candidates" ] ||
+            [ "$bootstrap_stage3_hosted_path" -nt                 "$bootstrap_stage3_hosted_candidates" ]; then
+            bootstrap_stage3_hosted_candidates=$bootstrap_stage3_hosted_path
+        fi
     done
-    [ "$bootstrap_stage3_hosted_count" -eq 1 ] || return 1
+    # The comment above assumed "Cargo owns exactly one hash-named product in
+    # the selected profile's deps directory". That is FALSE for this bootstrap:
+    # it deliberately runs the same `bootstrap` profile twice with different LTO
+    # settings (rust-runtime-nolto-build passes CARGO_PROFILE_BOOTSTRAP_LTO=off)
+    # into ONE CARGO_TARGET_DIR, so two metadata-distinct rlibs legitimately
+    # coexist. Measured on x86_64-pc-windows-msvc: both 288,302 bytes with the
+    # same 26 win32 symbols, differing only in embedded metadata.
+    #
+    # Refusing outright surfaced as a bare "could not prepare immutable Rust
+    # authority generation" naming nothing, after four successful builds.
+    #
+    # Newest-wins matches the semantics this bootstrap ALREADY documents for the
+    # sibling archive slot ("The last cargo invocation wins the deps/ archive
+    # slot", bootstrap-from-scratch.sh) -- so the tuple is frozen from the same
+    # final state of the target dir rather than from an arbitrary member.
+    #
+    # Zero candidates is still fatal, and the choice is never silent.
+    [ "$bootstrap_stage3_hosted_count" -ge 1 ] || return 1
+    if [ "$bootstrap_stage3_hosted_count" -gt 1 ]; then
+        echo "bootstrap authority: $bootstrap_stage3_hosted_count spl_hosted_runtime rlibs in $bootstrap_stage3_hosted_deps; freezing the newest: $bootstrap_stage3_hosted_candidates" >&2
+    fi
     bootstrap_stage3_hosted_name=deps/$(basename -- \
         "$bootstrap_stage3_hosted_candidates")
     set -- "$@" "$bootstrap_stage3_hosted_name"
