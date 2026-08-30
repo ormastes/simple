@@ -859,8 +859,18 @@ impl MirLowering:
                         # this same slot already uses successfully
                         # (declaration_lowering.spl:469), and it unwraps a box
                         # while passing a bare value through.
+                        # `??`, NOT `.unwrap()`. I wrote `.unwrap()` here when
+                        # replacing the `case Some` destructure, and it was wrong
+                        # for a reason I only learned afterwards: a bare `unwrap`
+                        # published by any module (Poll, FailSafeResult) STEALS
+                        # every Option.unwrap binding and returns raw 0, so
+                        # `type_value.kind` below then null-dereferenced at
+                        # address 0x0 in the self-hosted Stage-2 binary.
+                        # `??` is immune to that binding; `.?` is too, so the
+                        # presence test is unchanged. Only the bare method call
+                        # was affected.
                         val mir_type = if let_type.?:
-                            val type_value = let_type.unwrap()
+                            val type_value = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                             match type_value.kind:
                                 case HirTypeKind.Infer(_, _): MirType.i64()
                                 case _: self.lower_type(type_value)
@@ -869,7 +879,7 @@ impl MirLowering:
 
                         var init_local = self.lower_expr(let_init)
                         if let_type.?:
-                                val declared_type = let_type.unwrap()
+                                val declared_type = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                 # The staged native lane can preserve the
                                 # optional discriminant while dropping its
                                 # struct payload after an earlier match of the
@@ -1148,7 +1158,7 @@ impl MirLowering:
                                     # the bare writers nor survives the boxed
                                     # ones' payload arm-binding copy.
                                     if let_type.?:
-                                        val declared_type = let_type.unwrap()
+                                        val declared_type = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                         self.remember_local_hir_type(local.id, declared_type, 0, 0)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced, touched per the
@@ -3110,7 +3120,7 @@ impl MirLowering:
         # `.?`/`.unwrap()` shape is required here, not an Option arm.
         if val loop_symbol = self.symbols.get_symbol_raw(var_.id):
             if loop_symbol.type_.?:
-                element_type = self.lower_type(loop_symbol.type_.unwrap())
+                element_type = self.lower_type(loop_symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty()))
 
         # The loop-variable symbol's HIR type is frequently nil on this
         # pipeline (native-build's lower_to_mir runs without a full
