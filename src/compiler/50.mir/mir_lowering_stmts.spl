@@ -148,6 +148,27 @@ fn mir_hir_let_init(k: HirStmtKind, fallback: HirExpr) -> HirExpr:
         case HirStmtKind.Let(_, _, init): init
         case _: fallback
 
+# The Let's OWN declared type, read straight off the statement payload instead of
+# via the symbol table. Same "independent compiled helper" shape as the two above,
+# for the same documented reason: repeating payload matches in one SSA scope
+# corrupts the later copies.
+#
+# Why not the symbol table: measured on the self-hosted Stage-2 binary, the
+# HirType coming back from `get_symbol_type_raw` is GARBAGE AT REST -- its
+# discriminant probes as -1 (or a 3-billion value) BEFORE any unwrap, at the call
+# site. See self_hosted_symbol_table_hirtype_garbage_at_rest_2026-08-31.md. The
+# statement payload is a different storage path, and HirStmtKind.Let.type_ is a
+# PLAIN NULLABLE (not an Option box), so reading it needs no payload extraction.
+fn mir_hir_let_type_present(k: HirStmtKind) -> bool:
+    match k:
+        case HirStmtKind.Let(_, type_, _): type_ != nil
+        case _: false
+
+fn mir_hir_let_type(k: HirStmtKind, fallback: HirType) -> HirType:
+    match k:
+        case HirStmtKind.Let(_, type_, _): type_ ?? fallback
+        case _: fallback
+
 # Rank-4 caller-of-lower_expr probe (stage3 self-host blocker, 2026-08-05:
 # doc/08_tracking/bug/stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md).
 # lower_expr itself was proven to complete cleanly on every crashing run to
@@ -795,7 +816,12 @@ impl MirLowering:
                         # the nullable middle enum payload a second time, a
                         # native self-host operation proven to corrupt the
                         # tagged HirType value and SIGSEGV.
-                        val let_type = self.symbols.get_symbol_type_raw(symbol_value_id)
+                        # Read the Let's own payload type, NOT the symbol table:
+                        # the symbol-table HirType is garbage at rest on the
+                        # self-hosted lane (disc=-1 before any unwrap, measured).
+                        val let_type_present = mir_hir_let_type_present(stmt_kind_value)
+                        val let_type_value: HirType = mir_hir_let_type(stmt_kind_value, fallback_type)
+                        val let_type = if let_type_present: let_type_value else: nil
                         # [mir-let-symtype-probe] -- DIAGNOSTIC, default OFF.
                         # THE LIVE PATH. The earlier arm=A/arm=B slot probe measured payload
                         # slot 1, which this handler deliberately never reads (see the comment
