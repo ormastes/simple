@@ -423,8 +423,27 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 i += 1;
             }
             other => {
-                // Treat as source directory
-                source_dirs.push(PathBuf::from(other));
+                // A positional FILE is the ENTRY POINT, not a source directory.
+                //
+                // Treating a `.spl` file as a source dir made it contribute
+                // nothing to discovery (nothing walks a non-directory), and
+                // `entry_file` then fell through to its silent default of
+                // `src/app/cli/main.spl` below -- so `native-build <fixture>.spl`
+                // built the entire compiler CLI closure instead of the fixture.
+                // Measured: a 12-line fixture emitted 422 object files and had
+                // not finished after 300s, while the identical build with
+                // `--entry <same file>` takes 2.4s and compiles 2 modules.
+                //
+                // Only the FIRST positional file becomes the entry; a later one
+                // is still pushed as a source path rather than silently
+                // overriding it, and an explicit `--entry` always wins because
+                // this only fills an empty slot.
+                let candidate = PathBuf::from(other);
+                if entry_file.is_none() && candidate.is_file() {
+                    entry_file = Some(candidate);
+                } else {
+                    source_dirs.push(candidate);
+                }
                 i += 1;
             }
         }
