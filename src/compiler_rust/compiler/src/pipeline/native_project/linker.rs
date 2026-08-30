@@ -1561,6 +1561,32 @@ int main(int argc, char** argv) {
                                     "failed to build the core-c-bootstrap runtime supplement".to_string()
                                 })?;
                         cmd.arg(core_c_runtime);
+                        // Archive members resolve at OBJECT granularity, not
+                        // symbol granularity: pulling runtime_native.obj to
+                        // satisfy rt_iocp_create also drags in every other
+                        // symbol it defines, ~514 of which native_all defines
+                        // too (measured -- the same class 8ca87866c6 recorded
+                        // as 475 collisions). Lazy resolution alone therefore
+                        // does NOT avoid the duplicates.
+                        //
+                        // /FORCE:MULTIPLE takes the first definition, so
+                        // native_all (listed first) wins for every shared
+                        // symbol and the core-C copies are ignored -- exactly
+                        // the precedence the two-archive layering intends.
+                        //
+                        // Deliberately NOT /FORCE:MULTIPLE,UNRESOLVED: the
+                        // UNRESOLVED half would launder genuinely missing
+                        // symbols into NULL calls at runtime, which is the
+                        // repo's known rt_unwrap_or_trap SEGV class. Undefined
+                        // symbols must still fail the link, and they do --
+                        // LNK1120 still fires.
+                        if is_clang_cl {
+                            clang_cl_link_args.push("/FORCE:MULTIPLE".to_string());
+                        } else if is_msvc {
+                            cmd.arg("-Wl,/FORCE:MULTIPLE");
+                        } else {
+                            cmd.arg("-Wl,--allow-multiple-definition");
+                        }
                     }
                 } else {
                     #[cfg(target_os = "macos")]
