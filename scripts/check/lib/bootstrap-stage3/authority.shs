@@ -344,6 +344,30 @@ bootstrap_stage3_resolve_llvm_build_authority() (
         *'
 '*|*'	'*) return 1 ;;
     esac
+    # On MSYS2/Cygwin, llvm-config is a native Windows program and reports
+    # native drive-letter paths (`C:/msys64/mingw64/lib/libLLVMCore.a`). Every
+    # consumer below -- and the `/*` absolute-path guard in particular -- speaks
+    # POSIX, so a Windows host failed the guard for EVERY library and returned 1
+    # with no diagnostic at all. `--prefix` and `--libdir` escaped this only
+    # because they are laundered through `cd ... && pwd -P`, which accepts a
+    # drive path and emits a POSIX one; `--libfiles` is consumed literally.
+    # Normalize once, here, so nothing downstream needs to know the difference.
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            command -v cygpath >/dev/null 2>&1 || {
+                echo 'llvm authority: cygpath is required to normalize llvm-config --libfiles on Windows' >&2
+                return 1
+            }
+            bootstrap_stage3_llvm_libfiles=$(
+                printf '%s
+' "$bootstrap_stage3_llvm_libfiles" |
+                    tr ' ' '
+' | cygpath -u -f - | tr '
+' ' '
+            ) || return 1
+            bootstrap_stage3_llvm_libfiles=${bootstrap_stage3_llvm_libfiles% }
+            ;;
+    esac
     bootstrap_stage3_llvm_libdir=$(
         env -i PATH="$PATH" LC_ALL=C LANG=C \
             "$bootstrap_stage3_llvm_config" --libdir
@@ -466,7 +490,14 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     for bootstrap_stage3_llvm_lib in "$@"; do
         case "$bootstrap_stage3_llvm_lib" in
             /*) ;;
-            *) return 1 ;;
+            *)
+                # Never fail mute here: this rejection previously surfaced only
+                # as `error: failed to fingerprint Rust seed inputs`, with the
+                # offending path nowhere in any log or error manifest.
+                printf '%s%s
+'                     'llvm authority: llvm-config --libfiles returned a '                     "non-absolute path: ${bootstrap_stage3_llvm_lib}" >&2
+                return 1
+                ;;
         esac
         bootstrap_stage3_llvm_lib=$(
             bootstrap_stage3_canonical_file "$bootstrap_stage3_llvm_lib"
