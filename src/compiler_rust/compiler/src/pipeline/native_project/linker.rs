@@ -21,28 +21,33 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
-/// Whole-archive arguments for the **clang-cl** driver.
+/// The whole-archive argument for the **clang-cl** driver, WITHOUT `/link`.
 ///
-/// clang-cl is an MSVC-compatible driver and rejects both GNU-style spellings.
-/// Measured against clang-cl 18.1.8 (MSVC-built), linking a real archive:
+/// clang-cl is an MSVC-compatible driver and rejects both GNU spellings.
+/// Measured against clang-cl 18.1.8, linking a real archive (with MSYS
+/// argument conversion disabled -- Git Bash rewrites `/`-prefixed args and
+/// fakes every result otherwise):
 ///
 /// | form | result |
 /// |---|---|
-/// | `-Xlinker /WHOLEARCHIVE:lib` | FAILS -- "unknown argument ignored in clang-cl: '-Xlinker'", then the value is taken as a filename |
-/// | `-Wl,/WHOLEARCHIVE:lib` | FAILS -- parsed as a WARNING option ("unknown warning option"), never reaches the linker |
+/// | `-Xlinker /WHOLEARCHIVE:lib` | FAILS -- flag dropped, value taken as a filename |
+/// | `-Wl,/WHOLEARCHIVE:lib` | FAILS -- parsed as a WARNING option, never reaches the linker |
 /// | `/WHOLEARCHIVE:lib` (bare) | FAILS -- "no such file or directory" |
-/// | `/link /WHOLEARCHIVE:lib` | **works** |
+/// | `/link /WHOLEARCHIVE:lib` | works |
 ///
-/// `/link` forwards the remainder to the linker. Repeating it for a second
-/// archive costs one `LNK4044: unrecognized option '/link'` warning and still
-/// applies -- verified by linking two archives that way -- so each call stays
-/// self-contained rather than requiring callers to order a single trailing
-/// `/link` group.
+/// `/link` forwards *the remainder of the command line* to the linker, so it
+/// must appear EXACTLY ONCE and last. A second `/link` is passed to the linker
+/// as an option, which answers `LNK4044: unrecognized option '/link'` and
+/// DISCARDS it -- and with it the archive that followed. That is not
+/// hypothetical: emitting one `/link` per archive left the runtime archive
+/// unlinked and produced `LNK1120: 99 unresolved externals` (72 distinct
+/// `rt_*` symbols). Callers therefore accumulate these and emit a single
+/// trailing `/link` group; see `clang_cl_link_args` in `link_objects`.
 ///
 /// The sibling `else if is_msvc` branches keep `-Wl,/WHOLEARCHIVE:`: those run
 /// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
-fn clang_cl_whole_archive_args(path: &Path) -> [String; 2] {
-    ["/link".to_string(), format!("/WHOLEARCHIVE:{}", path.display())]
+fn clang_cl_whole_archive_arg(path: &Path) -> String {
+    format!("/WHOLEARCHIVE:{}", path.display())
 }
 
 /// Linker stdout+stderr, with source attribution appended for any undefined
@@ -1294,6 +1299,11 @@ int main(int argc, char** argv) {
             cmd.arg("-fmemory-profile");
         }
 
+        // clang-cl linker arguments are accumulated and emitted ONCE, after
+        // every compiler argument, because `/link` consumes the rest of the
+        // command line (see clang_cl_whole_archive_arg).
+        let mut clang_cl_link_args: Vec<String> = Vec::new();
+
         if is_clang_cl {
             cmd.arg(&main_o);
             if let Some(ref init) = init_o {
@@ -1370,7 +1380,7 @@ int main(int argc, char** argv) {
                 #[cfg(target_os = "windows")]
                 {
                     if is_clang_cl {
-                        cmd.args(clang_cl_whole_archive_args(&archive_path));
+                        clang_cl_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else if is_msvc {
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
@@ -1435,7 +1445,7 @@ int main(int argc, char** argv) {
                     #[cfg(target_os = "windows")]
                     {
                         if is_clang_cl {
-                            cmd.args(clang_cl_whole_archive_args(runtime_lib));
+                            clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
                         } else if is_msvc {
                             cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
                         } else {
@@ -1628,12 +1638,20 @@ int main(int argc, char** argv) {
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
             if is_clang_cl {
-                cmd.arg("/link").arg("/DEBUG:NONE").arg("/OPT:REF,ICF");
+                clang_cl_link_args.push("/DEBUG:NONE".to_string());
+                clang_cl_link_args.push("/OPT:REF,ICF".to_string());
             } else if is_msvc {
                 cmd.arg("-Wl,/DEBUG:NONE").arg("-Wl,/OPT:REF,ICF");
             } else {
                 cmd.arg("-Wl,--gc-sections").arg("-Wl,-s");
             }
+        }
+
+        // Single `/link` group, last: everything after it belongs to the
+        // linker, so this must follow every compiler argument above.
+        if is_clang_cl && !clang_cl_link_args.is_empty() {
+            cmd.arg("/link");
+            cmd.args(&clang_cl_link_args);
         }
 
         if self.config.verbose {
@@ -2519,8 +2537,8 @@ mod linker_tests {
     #[test]
     fn clang_cl_retains_each_required_archive() {
         assert_eq!(
-            clang_cl_whole_archive_args(Path::new("simple_native_all.lib")),
-            ["/link", "/WHOLEARCHIVE:simple_native_all.lib"]
+            clang_cl_whole_archive_arg(Path::new("simple_native_all.lib")),
+            "/WHOLEARCHIVE:simple_native_all.lib"
         );
     }
 
