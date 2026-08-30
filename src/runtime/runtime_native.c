@@ -8715,6 +8715,44 @@ bool rt_io_file_close(int64_t fd) {
 #endif
 }
 
+/* Read from the descriptor's current position through EOF into the canonical
+ * packed-byte array representation used by `[u8]`. The descriptor remains
+ * open and retains its advanced position. */
+int64_t rt_io_file_read_all(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    size_t len = 0;
+    size_t cap = 4096;
+    uint8_t* bytes = (uint8_t*)malloc(cap);
+    if (!bytes) return rt_core_nil();
+    for (;;) {
+        if (len == cap) {
+            if (cap > SIZE_MAX / 2) { free(bytes); return rt_core_nil(); }
+            size_t next_cap = cap * 2;
+            uint8_t* grown = (uint8_t*)realloc(bytes, next_cap);
+            if (!grown) { free(bytes); return rt_core_nil(); }
+            bytes = grown;
+            cap = next_cap;
+        }
+#if defined(_WIN32)
+        int count = _read((int)fd, bytes + len,
+            (unsigned int)((cap - len) > UINT_MAX ? UINT_MAX : (cap - len)));
+#else
+        ssize_t count = read((int)fd, bytes + len, cap - len);
+#endif
+        if (count > 0) { len += (size_t)count; continue; }
+        if (count == 0) break;
+        if (errno == EINTR) continue;
+        free(bytes);
+        return rt_core_nil();
+    }
+    SplArray* result = rt_byte_array_new_len((uint64_t)len);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) { free(bytes); return rt_core_nil(); }
+    if (len != 0) memcpy(array->data, bytes, len);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
