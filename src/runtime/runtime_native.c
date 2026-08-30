@@ -8704,6 +8704,17 @@ int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode
 #endif
 }
 
+/* Canonical FileHandle close ABI. The descriptor originates from
+ * rt_io_file_open above; invalid descriptors fail closed. */
+bool rt_io_file_close(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    return _close((int)fd) == 0;
+#else
+    return close((int)fd) == 0;
+#endif
+}
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
