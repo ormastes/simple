@@ -398,7 +398,29 @@ impl HirLowering:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
             else:
                 return_type = declared_ret
-        elif self.ambient_bootstrap_enabled():
+        elif self.ambient_bootstrap_enabled() and fn_.name != "main":
+            # `main` is excluded for the same reason it is excluded at the
+            # `not fn_.has_return_type` guard further down in this file: an
+            # entry point with no declared return type IS unit.
+            #
+            # Without this exclusion the function contradicts itself. The BODY
+            # is lowered by `has_return_type` (false here) via
+            # `lower_hir_block_unit`, which deliberately produces NO tail value;
+            # but the RETURN TYPE came from `bootstrap_builtin_return_type`,
+            # whose fallback for any name outside its small builtin table
+            # (get_args / bootstrap_version / eprint) is
+            # `hir_bootstrap_i64_type`. So `fn main(): print(...)` was lowered
+            # as unit-bodied but i64-returning, and
+            # 50.mir/_MirLowering/function_lowering.spl:577 correctly rejected
+            # it: "E-SFFI-016: missing return in non-unit function 'main'".
+            #
+            # The table is meant as a fallback for bootstrap BUILTINS whose
+            # declarations are not visible, not for a declared function that
+            # simply omits its return type. NOTE: the same contradiction still
+            # exists for any other undeclared, bodied function lowered in
+            # bootstrap mode; only the entry point is fixed here, because that
+            # is the one this gate exercises and a wider change to the fallback
+            # is unverifiable without a bootstrap.
             return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
