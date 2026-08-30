@@ -33,7 +33,27 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <fcntl.h>
+#if defined(_MSC_VER)
+/* MSVC ships no <unistd.h>. MinGW DOES, and the GNU-ABI Windows lane includes
+ * it, so this is gated on _MSC_VER and not on _WIN32 -- widening it to _WIN32
+ * would drop the header out from under the MinGW build. The heavier POSIX
+ * headers are already `#if !defined(_WIN32)` below.
+ *
+ * Without this the file failed to compile under clang-cl with
+ * `fatal error: 'unistd.h' file not found`, so it never reached the core-C
+ * archive -- which is why the Stage 2 MSVC link reported ~72 undefined rt_*
+ * symbols that this very file defines. */
+#include <basetsd.h>
+/* ssize_t is one of the things <unistd.h> was supplying. The Windows SDK
+ * spells it SSIZE_T; _SSIZE_T_DEFINED is the guard the CRT headers use, so
+ * respect it rather than risk a conflicting typedef. */
+#if !defined(_SSIZE_T_DEFINED)
+typedef SSIZE_T ssize_t;
+#define _SSIZE_T_DEFINED
+#endif
+#else
 #include <unistd.h>
+#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
@@ -41,6 +61,55 @@
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
+#endif
+
+#if defined(_MSC_VER)
+/* POSIX entry points this file calls that MSVC does not provide. MinGW HAS all
+ * of them, so every shim is gated on _MSC_VER, never _WIN32 -- widening would
+ * shadow MinGW's real implementations. */
+#define popen  _popen
+#define pclose _pclose
+
+/* MSVC has no ftruncate; _chsize_s is the CRT equivalent. */
+static int rt_msvc_ftruncate(int fd, long long length) {
+    return _chsize_s(fd, length) == 0 ? 0 : -1;
+}
+#define ftruncate rt_msvc_ftruncate
+
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+/* CLOCK_REALTIME from the system clock (FILETIME's 1601 epoch rebased to
+ * 1970); CLOCK_MONOTONIC from QueryPerformanceCounter, the only genuinely
+ * monotonic Windows source. Any other clock id is refused rather than silently
+ * answered with the wrong timebase. */
+static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
+    if (!ts) return -1;
+    if (clock_id == CLOCK_REALTIME) {
+        FILETIME ft;
+        ULARGE_INTEGER t;
+        GetSystemTimeAsFileTime(&ft);
+        t.LowPart = ft.dwLowDateTime;
+        t.HighPart = ft.dwHighDateTime;
+        t.QuadPart -= 116444736000000000ULL;
+        ts->tv_sec = (time_t)(t.QuadPart / 10000000ULL);
+        ts->tv_nsec = (long)((t.QuadPart % 10000000ULL) * 100ULL);
+        return 0;
+    }
+    if (clock_id == CLOCK_MONOTONIC) {
+        LARGE_INTEGER freq, now;
+        if (!QueryPerformanceFrequency(&freq) || freq.QuadPart == 0) return -1;
+        if (!QueryPerformanceCounter(&now)) return -1;
+        ts->tv_sec = (time_t)(now.QuadPart / freq.QuadPart);
+        ts->tv_nsec = (long)(((now.QuadPart % freq.QuadPart) * 1000000000LL) / freq.QuadPart);
+        return 0;
+    }
+    return -1;
+}
+#define clock_gettime rt_msvc_clock_gettime
 #endif
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -879,6 +948,10 @@ int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_compl
 int64_t rt_host_gpu_queue_in_flight_count(void) { return rt_host_gpu_queue_in_flight_depth; }
 int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
 int64_t rt_host_gpu_queue_last_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
+/* Adopted verbatim from origin/mcdc-hal cc960a064cf (never merged, no PR).
+ * Referenced by generated code and defined nowhere on main, which made it
+ * one of the undefined symbols at the Stage 2 Windows link. */
+int64_t rt_host_gpu_active_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
 int64_t rt_host_gpu_queue_last_device_time_us(void) { return rt_host_gpu_queue_last_device_time_us_value; }
 int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_last_payload_size_value; }
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
