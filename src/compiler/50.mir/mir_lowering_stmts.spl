@@ -796,6 +796,29 @@ impl MirLowering:
                         # native self-host operation proven to corrupt the
                         # tagged HirType value and SIGSEGV.
                         val let_type = self.symbols.get_symbol_type_raw(symbol_value_id)
+                        # [mir-let-symtype-probe] -- DIAGNOSTIC, default OFF.
+                        # THE LIVE PATH. The earlier arm=A/arm=B slot probe measured payload
+                        # slot 1, which this handler deliberately never reads (see the comment
+                        # just above), so its tag=1 result said nothing about the value that
+                        # actually reaches lower_type. This measures that value's SOURCE.
+                        # Read against the existing [mir-lower-type-probe] kindzero:
+                        #   letkindzero=true  -> already corrupt AT the symbol-table read, so
+                        #     the fault is upstream in the table/writer, not in any copy here;
+                        #   letkindzero=false while lower_type reports kindzero=true -> the
+                        #     value is intact here and is destroyed by the `case Some(type_value)`
+                        #     Option-payload arm binding below, i.e. the guarded copy one level
+                        #     down. That is coordinator option 2 and it revives the zeroed-block
+                        #     account at the place it was never actually tested.
+                        # SAFETY: `== nil` / `== 0` are the codebase's own sentinel idiom
+                        # (copy_local_hir_type_metadata, mir_lowering_types.spl:595), and `.kind`
+                        # is the one field round 1 proved safe to touch on a corrupt object.
+                        if mir_let_slot_probe_state < 0:
+                            if mir_trace_enabled():
+                                mir_let_slot_probe_state = 1
+                            else:
+                                mir_let_slot_probe_state = 0
+                        if mir_let_slot_probe_state == 1:
+                            eprint("[mir-let-symtype-probe] letnil={let_type == nil} letzero={let_type == 0} letkindzero={let_type.kind == 0}\n")
                         # `val f = \x: ...` -- keep the existing bind-time
                         # capture snapshot, and materialize non-capturing lambdas
                         # through the same lifted FuncPtr used for lambda args.
