@@ -11,9 +11,10 @@
 #   - Multiple export formats (JSON, Markdown, Text)
 
 # I/O imports
-use app.io.context_ops (context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query, context_get_args, context_file_exists, context_file_write)
+use app.io.context_ops (context_log_summary_file, context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query, context_get_args, context_file_exists, context_file_write)
 use std.cli.cli_util (has_flag)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.common.text.{parse_i64}
 
 fn print_help():
     print "Simple Context Pack Generator"
@@ -36,6 +37,12 @@ fn print_help():
     print "  --sql           Use Simple embedded SQLite for index/query"
     print "  --db=<path>     SQLite index database path (default: in-memory)"
     print "  --source-filter=<text>  Filter SQL query rows by stored source path"
+    print ""
+    print "Log summary mode (BM25 over log lines; the log is NEVER echoed):"
+    print "  --log <file>            Log to summarize"
+    print "  --purpose <text>        What the caller needs from the log"
+    print "  --query <terms>         Ranking terms (falls back to --purpose)"
+    print "  --top N                 Ranked lines to emit (default 10)"
     for line in log_options_help():
         print "  {line}"
     print "  -h, --help      Show this help"
@@ -176,6 +183,42 @@ fn main() -> i64:
             if progress_line != "":
                 print progress_line
         print output
+        return 0
+
+    # Log-summary mode. Dispatched BEFORE the positional-source check because it
+    # takes no source file; otherwise `--log x --purpose y` falls through to help.
+    var log_file = ""
+    var log_purpose = ""
+    var log_query = ""
+    var log_top = 10
+    var k = 0
+    while k < args.len():
+        val a = args[k]
+        if a == "--log" and k + 1 < args.len():
+            log_file = args[k + 1]
+            k = k + 1
+        elif a.starts_with("--log="):
+            log_file = a[6:]
+        elif a == "--purpose" and k + 1 < args.len():
+            log_purpose = args[k + 1]
+            k = k + 1
+        elif a.starts_with("--purpose="):
+            log_purpose = a[10:]
+        elif a == "--query" and k + 1 < args.len():
+            log_query = args[k + 1]
+            k = k + 1
+        elif a == "--top" and k + 1 < args.len():
+            log_top = parse_i64(args[k + 1]) ?? 10
+            k = k + 1
+        elif a.starts_with("--top="):
+            log_top = parse_i64(a[6:]) ?? 10
+        k = k + 1
+
+    if log_file != "":
+        if not context_file_exists(log_file):
+            print "context: cannot read {log_file}: file not found"
+            return 1
+        print context_log_summary_file(log_file, log_purpose, log_query, log_top)
         return 0
 
     if source_path == "":

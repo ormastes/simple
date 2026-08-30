@@ -1,0 +1,127 @@
+"""
+## Purpose and audience
+Purpose: Prove that the BM25 log-summary mode reduces a log instead of echoing it.
+Audience: compiler and tooling engineers who maintain the context-pack tool.
+"""
+
+# @req: REQ-APP-TOOLING-002 — stable requirement identity for this spec.
+use app.io.context_ops.{context_log_summary, context_log_summary_file}
+use std.io_runtime.{file_write, dir_create_all}
+use std.spec.step
+
+fn _synthetic_log() -> text:
+    # 400 filler lines share no term with the query, plus 30 decoys that each
+    # carry exactly ONE query term. Only line 431 carries all three, so a real
+    # BM25 ranker must place it first — a substring grep would not.
+    var body: text = ""
+    var i: i64 = 0
+    while i < 400:
+        body = body + "2026-08-30 INFO worker fillerpayload routine heartbeat iteration {i} ok\n"
+        i = i + 1
+    var d: i64 = 0
+    while d < 30:
+        if d % 3 == 0:
+            body = body + "2026-08-30 INFO linker resolved batch {d} cleanly\n"
+        elif d % 3 == 1:
+            body = body + "2026-08-30 INFO cache entry undefined for batch {d}\n"
+        else:
+            body = body + "2026-08-30 INFO symbol table rebuilt for batch {d}\n"
+        d = d + 1
+    body = body + "2026-08-30 ERROR linker undefined symbol during native link\n"
+    body
+
+fn _long_line_log() -> text:
+    var pad: text = ""
+    var i: i64 = 0
+    while i < 60:
+        pad = pad + "abcdefghij"
+        i = i + 1
+    "linker undefined symbol " + pad + "\nunrelated filler line\n"
+
+fn _log_fixture_path() -> text:
+    val path = "build/test/context_log_summary_fixture.log"
+    dir_create_all("build/test")
+    file_write(path, _synthetic_log())
+    path
+
+describe "context log summary":
+    it "summarizes far smaller than the raw log":
+        step("Verify: summary_bytes < raw_bytes")
+        # @req: REQ-APP-TOOLING-002
+        val raw = _synthetic_log()
+        val out = context_log_summary(raw, "fixture.log", "why did the build break",
+                                      "linker undefined symbol", 10)
+        expect(out.len() < raw.len()).to_equal(true)
+        expect(out).to_contain("context_log_summary: raw_bytes=")
+
+    it "ranks the needle line into the top N":
+        step("Verify: needle ranks in top N")
+        # @req: REQ-APP-TOOLING-002
+        val raw = _synthetic_log()
+        val out = context_log_summary(raw, "fixture.log", "why did the build break",
+                                      "linker undefined symbol", 5)
+        expect(out).to_contain("  431: 2026-08-30 ERROR linker undefined symbol")
+        # 30 decoys each match one term, so ranking (not filtering) picks 431.
+        expect(out).to_contain("matched_lines: 31")
+        val after_header = out.split("top_lines:\n")
+        val first_ranked = after_header[1].split("\n")[0]
+        expect(first_ranked).to_contain("431: 2026-08-30 ERROR linker undefined symbol")
+
+    it "never echoes the raw log body":
+        step("Verify: filler lines are absent")
+        # @req: REQ-APP-TOOLING-002
+        val raw = _synthetic_log()
+        val out = context_log_summary(raw, "fixture.log", "why did the build break",
+                                      "linker undefined symbol", 5)
+        expect(out.contains("fillerpayload")).to_equal(false)
+        expect(out.contains("heartbeat")).to_equal(false)
+
+    it "reports the header fields for the purpose and source":
+        step("Verify: header names purpose and source")
+        # @req: REQ-APP-TOOLING-002
+        val raw = _synthetic_log()
+        val out = context_log_summary(raw, "fixture.log", "why did the build break",
+                                      "linker undefined symbol", 5)
+        expect(out).to_contain("purpose: why did the build break")
+        expect(out).to_contain("source: fixture.log")
+        expect(out).to_contain("total_lines: 431")
+
+    it "summarizes a log read from disk":
+        step("Verify: file-backed summary")
+        # @req: REQ-APP-TOOLING-002
+        val path = _log_fixture_path()
+        val out = context_log_summary_file(path, "why did the build break",
+                                           "linker undefined symbol", 3)
+        expect(out).to_contain("source: {path}")
+        expect(out).to_contain("linker undefined symbol")
+        expect(out.contains("fillerpayload")).to_equal(false)
+
+    it "falls back to the purpose terms when no query is given":
+        step("Verify: purpose drives ranking")
+        # @req: REQ-APP-TOOLING-002
+        val raw = _synthetic_log()
+        val out = context_log_summary(raw, "fixture.log", "linker undefined symbol", "", 5)
+        expect(out).to_contain("query: linker undefined symbol")
+        expect(out).to_contain("431:")
+
+    it "handles a query that matches nothing":
+        step("Verify: zero matches is not a crash")
+        # @req: REQ-APP-TOOLING-002
+        val raw = _synthetic_log()
+        val out = context_log_summary(raw, "fixture.log", "unrelated", "zzzznomatchzzzz", 5)
+        expect(out).to_contain("matched_lines: 0")
+        expect(out).to_contain("(no lines matched)")
+
+    it "truncates a very long ranked line":
+        step("Verify: long lines are cut to the column width")
+        # @req: REQ-APP-TOOLING-002
+        val out = context_log_summary(_long_line_log(), "long.log", "linker", "linker undefined symbol", 3)
+        expect(out).to_contain("...")
+        expect(out.len() < _long_line_log().len()).to_equal(true)
+
+    it "reports summary_bytes equal to the emitted byte count":
+        step("Verify: summary_bytes is the real size")
+        # @req: REQ-APP-TOOLING-002
+        val out = context_log_summary(_synthetic_log(), "fixture.log", "p", "linker undefined symbol", 5)
+        val n = out.len()
+        expect(out).to_contain("summary_bytes={n} ")
