@@ -1014,9 +1014,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 timed_out: false, cached: false
             )
 
+    # Both values cross the conditional extraction/persistence region and are
+    # consumed when the child argv is assembled. Keep their lexical owner at
+    # function scope; branch-local tuple bindings cannot be loaded afterward.
+    var mcdc_manifest = ""
     var mcdc_manifest_path = ""
     if mcdc_enabled:
-        val (mcdc_manifest, mcdc_manifest_valid) =
+        val (extracted_mcdc_manifest, mcdc_manifest_valid) =
             extract_compiler_mcdc_obligation_manifest(compile_output)
         if not mcdc_manifest_valid:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path,
@@ -1028,6 +1032,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 error: "test-runner: missing or malformed MC/DC obligation manifest",
                 timed_out: false, cached: false
             )
+        mcdc_manifest = extracted_mcdc_manifest
         # O_EXCL rejects pre-existing files (including symlinks). A fresh CSPRNG
         # name in the private runner temp directory prevents tested code from
         # predicting the handoff path before creation.
@@ -1060,10 +1065,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         run_args.push("--gc-log")
     if options.gc_off and not options.coverage:
         run_args.push("--gc=off")
-    if mcdc_manifest_path != "":
-        run_args.push("--simple-mcdc-manifest={mcdc_manifest_path}")
-        run_args.push("--simple-mcdc-manifest-length={mcdc_manifest.len()}")
-        run_args.push("--simple-mcdc-manifest-sha256={sha256_text(mcdc_manifest)}")
+    for manifest_arg in mcdc_manifest_transport_args(mcdc_manifest_path, mcdc_manifest):
+        run_args.push(manifest_arg)
 
     var stdout = ""
     var stderr = ""
@@ -1108,6 +1111,15 @@ fn run_test_file_compile(file_path: text, options: TestOptions) -> TestFileResul
     """Compile mode: compile test file to .smf and run it.
     Delegates to run_test_file_native which already does compile-then-run."""
     run_test_file_native(file_path, options)
+
+fn mcdc_manifest_transport_args(path: text, manifest: text) -> [text]:
+    if path == "":
+        return []
+    [
+        "--simple-mcdc-manifest={path}",
+        "--simple-mcdc-manifest-length={manifest.len()}",
+        "--simple-mcdc-manifest-sha256={sha256_text(manifest)}",
+    ]
 
 # =========================================================================
 # G1: Safe mode execution with resource limits
@@ -1166,3 +1178,4 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
+export mcdc_manifest_transport_args
