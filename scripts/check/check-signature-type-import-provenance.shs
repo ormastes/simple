@@ -215,7 +215,7 @@ run_auto() {
     [ -f "$AUTO_EXCL" ] || return 5
     ( cd "$auto_root" 2>/dev/null || exit 4
       find src -name '*.spl' -not -path '*/vendor/*' -not -path '*/compiler_rust/*' -type f 2>/dev/null \
-        | while IFS= read -r f; do realpath --relative-to=. "$f"; done | sort -u ) > "$auto_list"
+        | while IFS= read -r f; do realpath --relative-to=. "$f" 2>/dev/null || printf '%s\n' "$f"; done | sort -u ) > "$auto_list"
     [ -s "$auto_list" ] || return 4
     ( cd "$auto_root" && awk -v EXCL="$AUTO_EXCL" -v LIST="$auto_list" -v AMBOUT="$auto_amb" \
         -f "$AUTO_AWK" 2>"$auto_list.meta" )
@@ -240,13 +240,14 @@ selftest_auto() {
     # type PARAMETER shape -> must be EXCLUDED
     printf 'struct C:\n    x: i64\n' > "$t/src/a/cdecl.spl"
     printf 'use a.something.*\nfn w(ctx: C) -> i64: 0\n' > "$t/src/b/cuser.spl"
+    TAB=$(printf '\t')
     out=$(run_auto "$t" "$t/list" "$t/amb"); arc=$?
     rm -rf "$t.keep" 2>/dev/null
     af=0
     printf '%s\n' "$out" | grep -q 'src/b/user.spl	Gizmo' || { echo "selftest FAIL(auto): unique cross-module type not flagged"; af=1; }
     printf '%s\n' "$out" | grep -q 'Twin' && { echo "selftest FAIL(auto): AMBIGUOUS type was flagged instead of excluded"; af=1; }
     printf '%s\n' "$out" | grep -q 'Bool' && { echo "selftest FAIL(auto): excluded builtin name was flagged"; af=1; }
-    printf '%s\n' "$out" | grep -qP '\tC\t' && { echo "selftest FAIL(auto): type-parameter-shaped name was flagged"; af=1; }
+    printf '%s\n' "$out" | grep -qF "${TAB}C${TAB}" && { echo "selftest FAIL(auto): type-parameter-shaped name was flagged"; af=1; }
     grep -q '^Twin' "$t/amb" 2>/dev/null || { echo "selftest FAIL(auto): ambiguous name not reported for human judgement"; af=1; }
     rm -rf "$t"
     [ $af -eq 0 ] || return 1
