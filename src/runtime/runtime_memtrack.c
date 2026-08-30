@@ -257,10 +257,20 @@ int64_t spl_memtrack_live_bytes(void) {
  * that cdylib to relink, having sat latent because the seed guard only
  * `cargo check`s (which never links). Weak here means: standalone C builds
  * keep these fallbacks; any link that also carries the Rust runtime gets the
- * Rust accounting, which is the correct precedence. MSVC has no weak
- * attribute, but Windows builds do not whole-archive this file into the
- * Rust cdylib, so the strong fallback is fine there. */
-#if defined(__GNUC__) || defined(__clang__)
+ * Rust accounting, which is the correct precedence.
+ *
+ * MSVC has no weak attribute. This comment used to claim that was harmless
+ * because "Windows builds do not whole-archive this file into the Rust
+ * cdylib" -- that assumption was measured FALSE on 2026-08-30: the
+ * x86_64-pc-windows-msvc seed link failed with
+ *   runtime_sffi_c.lib(runtime_memtrack.o) : error LNK2005:
+ *   rt_heap_live_bytes already defined in simple_runtime...rcgu.o
+ * So on MSVC the build passes SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS and
+ * the fallbacks are omitted entirely, which is what "weak" would have bought.
+ * Standalone C builds define nothing and keep the fallbacks, as before. */
+#if defined(SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS)
+/* Rust's value::heap owns these; defining them here would be a duplicate. */
+#elif defined(__GNUC__) || defined(__clang__)
 __attribute__((weak)) int64_t rt_heap_live_bytes(void) {
     return g_live_bytes;
 }
