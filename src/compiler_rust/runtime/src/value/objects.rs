@@ -514,10 +514,9 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
         return true;
     }
     let none_disc = hash_variant_discriminant("None");
-    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .is_some_and(|p| unsafe {
-            (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
-        })
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
+    })
 }
 
 /// Check if a value is Some (not None/nil).

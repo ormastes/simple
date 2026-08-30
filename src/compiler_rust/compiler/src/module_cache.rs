@@ -701,8 +701,7 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_probe_source_cache, probe_source_cached, reserve_module_load, reset_total_modules,
-        total_modules_loaded,
+        clear_probe_source_cache, probe_source_cached, reserve_module_load, reset_total_modules, total_modules_loaded,
     };
 
     #[test]
@@ -720,7 +719,9 @@ mod tests {
         std::fs::write(&path, "pub fn changed(): 2\n").expect("mutate probe source");
         super::clear_module_cache_selective();
         assert_eq!(
-            probe_source_cached(&path, u64::MAX).expect("edited source is visible").as_str(),
+            probe_source_cached(&path, u64::MAX)
+                .expect("edited source is visible")
+                .as_str(),
             "pub fn changed(): 2\n"
         );
 
@@ -731,7 +732,9 @@ mod tests {
         std::fs::write(&path, "pub fn recreated(): 3\n").expect("recreate probe source");
         super::clear_module_cache_selective();
         assert_eq!(
-            probe_source_cached(&path, u64::MAX).expect("recreated source is visible").as_str(),
+            probe_source_cached(&path, u64::MAX)
+                .expect("recreated source is visible")
+                .as_str(),
             "pub fn recreated(): 3\n"
         );
 

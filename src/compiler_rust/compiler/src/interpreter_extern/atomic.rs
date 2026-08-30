@@ -126,9 +126,10 @@ pub fn rt_atomic_bool_swap(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 fn atomic_bool_handle_and_value(args: &[Value], operation: &str) -> Result<(i64, bool), CompileError> {
-    let handle = args.first().ok_or_else(|| {
-        CompileError::semantic(format!("{operation} expects a handle and boolean value"))
-    })?.as_int()?;
+    let handle = args
+        .first()
+        .ok_or_else(|| CompileError::semantic(format!("{operation} expects a handle and boolean value")))?
+        .as_int()?;
     let value = match args.get(1) {
         Some(Value::Bool(value)) => *value,
         _ => return Err(CompileError::semantic(format!("{operation} expects a bool value"))),
@@ -138,14 +139,24 @@ fn atomic_bool_handle_and_value(args: &[Value], operation: &str) -> Result<(i64,
 
 pub fn rt_atomic_bool_compare_exchange(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
-        return Err(CompileError::semantic("rt_atomic_bool_compare_exchange expects 3 arguments"));
+        return Err(CompileError::semantic(
+            "rt_atomic_bool_compare_exchange expects 3 arguments",
+        ));
     }
     let (handle, current) = atomic_bool_handle_and_value(args, "rt_atomic_bool_compare_exchange")?;
     let new_value = match &args[2] {
         Value::Bool(value) => *value,
-        _ => return Err(CompileError::semantic("rt_atomic_bool_compare_exchange expects bool argument")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_atomic_bool_compare_exchange expects bool argument",
+            ))
+        }
     };
-    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_compare_exchange(handle, current, new_value))) }
+    unsafe {
+        Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_compare_exchange(
+            handle, current, new_value,
+        )))
+    }
 }
 
 pub fn rt_atomic_bool_fetch_and(args: &[Value]) -> Result<Value, CompileError> {
@@ -153,7 +164,11 @@ pub fn rt_atomic_bool_fetch_and(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::semantic("rt_atomic_bool_fetch_and expects 2 arguments"));
     }
     let (handle, value) = atomic_bool_handle_and_value(args, "rt_atomic_bool_fetch_and")?;
-    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_and(handle, value))) }
+    unsafe {
+        Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_and(
+            handle, value,
+        )))
+    }
 }
 
 pub fn rt_atomic_bool_fetch_or(args: &[Value]) -> Result<Value, CompileError> {
@@ -161,7 +176,11 @@ pub fn rt_atomic_bool_fetch_or(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::semantic("rt_atomic_bool_fetch_or expects 2 arguments"));
     }
     let (handle, value) = atomic_bool_handle_and_value(args, "rt_atomic_bool_fetch_or")?;
-    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_or(handle, value))) }
+    unsafe {
+        Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_or(
+            handle, value,
+        )))
+    }
 }
 
 pub fn rt_atomic_bool_fetch_not(args: &[Value]) -> Result<Value, CompileError> {

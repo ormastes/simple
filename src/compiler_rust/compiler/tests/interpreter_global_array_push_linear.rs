@@ -43,7 +43,8 @@ fn run_pkg_program(lib: &str, main: &str) -> Result<i32, String> {
 const LIB: &str = "var g_tag: [i64] = []\nvar g_s: [text] = []\n\nfn alloc(t: i64) -> i64:\n    val idx = g_tag.len()\n    g_tag.push(t)\n    g_s.push(\"\")\n    idx\n\nfn fill(n: i64) -> i64:\n    var i = 0\n    while i < n:\n        alloc(i)\n        i = i + 1\n    g_tag.len()\n";
 
 fn time_fill(n: usize) -> Duration {
-    let main = format!("use pkg.lib (fill)\n\nfn main() -> i32:\n    if fill({n}) != {n}:\n        return 1\n    return 0\n");
+    let main =
+        format!("use pkg.lib (fill)\n\nfn main() -> i32:\n    if fill({n}) != {n}:\n        return 1\n    return 0\n");
     let start = Instant::now();
     let result = run_pkg_program(LIB, &main);
     let elapsed = start.elapsed();
@@ -59,7 +60,10 @@ fn module_global_array_push_from_helper_fn_is_linear() {
     let large = time_fill(8_000);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.001);
     eprintln!("[global-push] 2k {small:?}, 8k {large:?}, ratio {ratio:.2}");
-    assert!(ratio < 8.0, "4x pushes cost {ratio:.1}x — global array push is copying the Vec per call again");
+    assert!(
+        ratio < 8.0,
+        "4x pushes cost {ratio:.1}x — global array push is copying the Vec per call again"
+    );
 }
 
 #[test]

@@ -26,7 +26,9 @@ mod unsafe_inline_body {
             err("fn r(addr: u64) -> u64:\n    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)\n")
         );
         assert!(
-            parses("fn w(addr: u64, v: u64):\n    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_write_u64(addr, v)\n"),
+            parses(
+                "fn w(addr: u64, v: u64):\n    unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_write_u64(addr, v)\n"
+            ),
             "one-line unsafe body with a multi-argument call must parse"
         );
         assert!(

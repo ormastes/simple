@@ -97,7 +97,10 @@ pub fn set_enabled(on: bool) {
 pub fn trace_min_len() -> u64 {
     static MIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MIN.get_or_init(|| {
-        std::env::var("SIMPLE_PERF_COUNTERS_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        std::env::var("SIMPLE_PERF_COUNTERS_TRACE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
     })
 }
 

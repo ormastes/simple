@@ -124,14 +124,9 @@ pub struct Lowerer {
     /// units have no interpreter to fall back to. Populated by
     /// `collect_flattened_import_aliases`, consumed by `lower_identifier`. See
     /// `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`.
+    /// Keyed by local name only: two importers binding the same local name
+    /// from different sources clobber each other here.
     pub(super) import_alias_bindings: HashMap<String, String>,
-    /// (importer, local name) -> (source owner, source name), from the import
-    /// binding markers. Unlike `import_alias_bindings` this is keyed per
-    /// importer, so two modules importing the same name from different sources
-    /// cannot clobber each other.
-    pub(super) importer_fn_bindings: HashMap<(String, String), (String, String)>,
-    /// importer -> glob (`use m.*`) source owners.
-    pub(super) importer_glob_sources: HashMap<String, Vec<String>>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -235,8 +230,6 @@ impl Lowerer {
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
             import_alias_bindings: HashMap::new(),
-            importer_fn_bindings: HashMap::new(),
-            importer_glob_sources: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -292,8 +285,6 @@ impl Lowerer {
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
             import_alias_bindings: HashMap::new(),
-            importer_fn_bindings: HashMap::new(),
-            importer_glob_sources: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -372,8 +363,6 @@ impl Lowerer {
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
             import_alias_bindings: HashMap::new(),
-            importer_fn_bindings: HashMap::new(),
-            importer_glob_sources: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -431,10 +420,7 @@ impl Lowerer {
     /// instead of appearing with no source location at all.
     pub(super) fn record_lenient_global(&mut self, name: &str, kind: LenientGlobalKind) {
         let entry = LenientGlobal {
-            file: self
-                .current_file
-                .as_ref()
-                .map(|path| path.display().to_string()),
+            file: self.current_file.as_ref().map(|path| path.display().to_string()),
             function: self.current_function_name.clone(),
             function_line: self.current_function_line,
             name: name.to_string(),
@@ -793,8 +779,7 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
-            let Some((importer, local_name, source_owner, source_name)) =
-                decode_import_binding_marker(&marker.name)
+            let Some((importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
             };

@@ -12,14 +12,14 @@ pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
     BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_COUNT,
-    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
-    BDD_SHARED_EXAMPLES,
+    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, bind_args_with_values, captured_env_with_live_globals, exec_function, exec_function_with_bound_args,
-    exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self, exec_lambda,
-    execute_function_body, instantiate_class, publish_and_repoint, publish_live_bound_globals, refresh_live_bound_globals,
-    sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
+    bind_args, bind_args_with_injected, bind_args_with_values, captured_env_with_live_globals, exec_function,
+    exec_function_with_bound_args, exec_function_with_captured_env, exec_function_with_values,
+    exec_function_with_values_and_self, exec_lambda, execute_function_body, instantiate_class, publish_and_repoint,
+    publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals, sync_owned_captured_globals,
+    ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 
@@ -516,16 +516,11 @@ pub(crate) fn evaluate_call(
         let user_defined = functions.contains_key(name.as_str())
             || FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name.as_str()));
         let builtin_wins = builtin_wins_over_user_fn(name.as_str(), user_defined);
-        if user_defined
-            && !builtin_wins
-            && super::interpreter_eval::is_user_facing_prelude(name.as_str())
-        {
+        if user_defined && !builtin_wins && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
             warn_prelude_shadow_once(name.as_str(), functions, false);
         }
         if builtin_wins {
-            if let Some(result) =
-                builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)?
-            {
+            if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }
         }
@@ -799,7 +794,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                        "variant-construction",
+                        &(module_name.clone()),
+                        &(field.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
@@ -836,7 +834,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(module_name.clone()), &(field.clone()), &payload,
+                        "variant-construction",
+                        &(module_name.clone()),
+                        &(field.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: module_name.clone(),
@@ -993,7 +994,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                        "variant-construction",
+                        &(type_name.clone()),
+                        &(method_name.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),
@@ -1134,7 +1138,10 @@ pub(crate) fn evaluate_call(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                 // `EnumName.Variant(args)` construction path.
                 crate::interpreter::note_enum_payload_function_opt(
-                    "variant-construction", &("Option".to_string()), &(method_name.clone()), &payload,
+                    "variant-construction",
+                    &("Option".to_string()),
+                    &(method_name.clone()),
+                    &payload,
                 );
                 return Ok(Value::Enum {
                     enum_name: "Option".to_string(),
@@ -1162,7 +1169,10 @@ pub(crate) fn evaluate_call(
                 // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                 // `EnumName.Variant(args)` construction path.
                 crate::interpreter::note_enum_payload_function_opt(
-                    "variant-construction", &("Result".to_string()), &(method_name.clone()), &payload,
+                    "variant-construction",
+                    &("Result".to_string()),
+                    &(method_name.clone()),
+                    &payload,
                 );
                 return Ok(Value::Enum {
                     enum_name: "Result".to_string(),
@@ -1302,7 +1312,10 @@ pub(crate) fn evaluate_call(
                     // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1): the generic
                     // `EnumName.Variant(args)` construction path.
                     crate::interpreter::note_enum_payload_function_opt(
-                        "variant-construction", &(type_name.clone()), &(method_name.clone()), &payload,
+                        "variant-construction",
+                        &(type_name.clone()),
+                        &(method_name.clone()),
+                        &payload,
                     );
                     return Ok(Value::Enum {
                         enum_name: type_name.clone(),

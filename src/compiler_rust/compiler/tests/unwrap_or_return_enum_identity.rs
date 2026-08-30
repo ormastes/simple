@@ -50,7 +50,9 @@ fn run_interpreter() -> i32 {
     interpreter::clear_module_cache();
     interpreter::clear_interpreter_state();
     let source = format!("{SOURCE}\nmain = main()\n");
-    let module = Parser::new(&source).parse().expect("parity source must parse for interpreter");
+    let module = Parser::new(&source)
+        .parse()
+        .expect("parity source must parse for interpreter");
     interpreter::evaluate_module(&module.items).expect("parity source must run in interpreter")
 }
 
@@ -68,5 +70,8 @@ fn user_ok_err_and_typed_option_result_match_interpreter_and_native_jit() {
     let interpreted = run_interpreter();
     let native = run_jit();
     assert_eq!(interpreted, 0, "interpreter control failed at case {interpreted}");
-    assert_eq!(native, interpreted as i64, "native/interpreter parity diverged at case {native}");
+    assert_eq!(
+        native, interpreted as i64,
+        "native/interpreter parity diverged at case {native}"
+    );
 }

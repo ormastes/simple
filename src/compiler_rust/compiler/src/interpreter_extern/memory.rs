@@ -148,9 +148,7 @@ fn harden_quarantine_free(ptr: usize, size: usize) {
 /// Callable from Simple as: `rt_mem_harden_check() -> i64`
 pub fn rt_mem_harden_check(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_harden_check requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_harden_check requires 0 arguments"));
     }
     if !harden_enabled() {
         return Ok(Value::Int(0));
@@ -180,9 +178,7 @@ pub fn rt_mem_harden_check(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_mem_guard_stats() -> i64`
 pub fn rt_mem_guard_stats(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_guard_stats requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_guard_stats requires 0 arguments"));
     }
     Ok(Value::Int(mem_guard::guard_sampled_count()))
 }
@@ -207,9 +203,7 @@ pub const MEM_PROFILE_FEATURE_OWNER_ATTRIBUTION: i64 = 1 << 3;
 /// Callable from Simple as: `rt_mem_profile_abi_version() -> i64`
 pub fn rt_mem_profile_abi_version(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_profile_abi_version requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_profile_abi_version requires 0 arguments"));
     }
     Ok(Value::Int(MEM_PROFILE_ABI_VERSION))
 }
@@ -220,9 +214,7 @@ pub fn rt_mem_profile_abi_version(args: &[Value]) -> Result<Value, CompileError>
 /// bit0 = header-bytes, bit1 = hosted-alloc-metadata, bit2 = real-memory-usage.
 pub fn rt_mem_profile_features(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_profile_features requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_profile_features requires 0 arguments"));
     }
     let mut features = MEM_PROFILE_FEATURE_HEADER_BYTES | MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA;
     if process_rss_bytes().is_some() {
@@ -239,9 +231,7 @@ pub fn rt_mem_profile_features(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_mem_attr_enabled() -> i64`
 pub fn rt_mem_attr_enabled(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_mem_attr_enabled requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_mem_attr_enabled requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_mem_attr_enabled()))
 }
@@ -257,9 +247,7 @@ pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let Value::Str(name) = &args[0] else {
-        return Err(CompileError::runtime(
-            "rt_mem_attr_set_owner requires a text name",
-        ));
+        return Err(CompileError::runtime("rt_mem_attr_set_owner requires a text name"));
     };
     simple_runtime::value::heap::set_current_owner(name.as_ref());
     Ok(Value::Nil)
@@ -270,9 +258,7 @@ pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_mem_attr_report(n: i64) -> text`
 pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_mem_attr_report requires 1 argument (n)",
-        ));
+        return Err(CompileError::runtime("rt_mem_attr_report requires 1 argument (n)"));
     }
     let Value::Int(n) = args[0] else {
         return Err(CompileError::runtime("rt_mem_attr_report requires an i64 n"));
@@ -314,9 +300,7 @@ pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
 /// Return the hosted runtime's live heap-registry entry count.
 pub fn rt_heap_registry_count(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_heap_registry_count requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_heap_registry_count requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
 }
@@ -326,9 +310,7 @@ pub fn rt_heap_registry_count(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_heap_live_bytes() -> i64`
 pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_heap_live_bytes requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_heap_live_bytes requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes()))
 }
@@ -338,9 +320,7 @@ pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_heap_aux_live_bytes() -> i64`
 pub fn rt_heap_aux_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
-        return Err(CompileError::runtime(
-            "rt_heap_aux_live_bytes requires 0 arguments",
-        ));
+        return Err(CompileError::runtime("rt_heap_aux_live_bytes requires 0 arguments"));
     }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_aux_live_bytes()))
 }
@@ -367,9 +347,7 @@ pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError>
         ));
     }
     let Value::Int(kind) = args[0] else {
-        return Err(CompileError::runtime(
-            "rt_heap_live_bytes_by_kind requires an i64 kind",
-        ));
+        return Err(CompileError::runtime("rt_heap_live_bytes_by_kind requires an i64 kind"));
     };
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(
         kind,
@@ -386,9 +364,7 @@ pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError>
         ));
     }
     let Value::Int(kind) = args[0] else {
-        return Err(CompileError::runtime(
-            "rt_heap_live_count_by_kind requires an i64 kind",
-        ));
+        return Err(CompileError::runtime("rt_heap_live_count_by_kind requires an i64 kind"));
     };
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(
         kind,
@@ -885,12 +861,7 @@ pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
     if addr <= 0 || length <= 0 {
         return Ok(Value::Int(-1));
     }
-    let result = unsafe {
-        libc::munmap(
-            addr as usize as *mut libc::c_void,
-            length as usize,
-        )
-    };
+    let result = unsafe { libc::munmap(addr as usize as *mut libc::c_void, length as usize) };
     Ok(Value::Int(i64::from(result)))
 }
 

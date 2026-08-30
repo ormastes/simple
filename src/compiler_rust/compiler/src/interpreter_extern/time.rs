@@ -51,7 +51,9 @@ pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
 /// * i64 representing milliseconds since Unix epoch
 pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
     let time_seconds = simple_runtime::value::rt_time_now_seconds_f64();
-    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(time_seconds)))
+    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(
+        time_seconds,
+    )))
 }
 
 /// Get current time in milliseconds since Unix epoch (alias for web stack)
@@ -59,7 +61,9 @@ pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_time_now_ms()`
 pub fn rt_time_now_ms(_args: &[Value]) -> Result<Value, CompileError> {
     let time_seconds = simple_runtime::value::rt_time_now_seconds_f64();
-    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(time_seconds)))
+    Ok(Value::Int(simple_runtime::value::fractional_seconds_to_millis(
+        time_seconds,
+    )))
 }
 
 /// Get current time as integer seconds since Unix epoch (DNS resolver)
@@ -102,7 +106,9 @@ pub fn rt_progress_clock_now_nanos(_args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Int(simple_runtime::value::sffi::rt_progress_clock_now_nanos()))
 }
 pub fn rt_progress_tls_is_initialized(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(simple_runtime::value::sffi::rt_progress_tls_is_initialized()))
+    Ok(Value::Bool(
+        simple_runtime::value::sffi::rt_progress_tls_is_initialized(),
+    ))
 }
 pub fn rt_progress_tls_start_nanos(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::sffi::rt_progress_tls_start_nanos()))
@@ -110,7 +116,11 @@ pub fn rt_progress_tls_start_nanos(_args: &[Value]) -> Result<Value, CompileErro
 pub fn rt_progress_tls_store_start_nanos(args: &[Value]) -> Result<Value, CompileError> {
     let start = match args {
         [Value::Int(v)] => *v,
-        _ => return Err(CompileError::semantic("rt_progress_tls_store_start_nanos requires one i64")),
+        _ => {
+            return Err(CompileError::semantic(
+                "rt_progress_tls_store_start_nanos requires one i64",
+            ))
+        }
     };
     simple_runtime::value::sffi::rt_progress_tls_store_start_nanos(start);
     Ok(Value::Nil)

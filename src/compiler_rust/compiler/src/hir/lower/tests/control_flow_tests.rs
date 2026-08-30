@@ -42,10 +42,10 @@ fn assert_returns_outer_local(source: &str, function_name: &str, local_name: &st
         .expect("test function");
     let outer_index = func.params.len()
         + func
-        .locals
-        .iter()
-        .position(|local| local.name == local_name)
-        .expect("outer local slot");
+            .locals
+            .iter()
+            .position(|local| local.name == local_name)
+            .expect("outer local slot");
     let HirStmt::Return(Some(expr)) = func.body.last().expect("return statement") else {
         panic!("expected final return: {:?}", func.body)
     };
@@ -101,10 +101,16 @@ fn nested_block_lambda_keeps_outer_capture_slot_after_scope_restore() {
     let func = &module.functions[0];
     let repr = format!("{:?}", func.body);
     assert!(repr.contains("captures: [0]"), "lambda lost outer capture slot: {repr}");
-    assert!(func.locals.iter().any(|local| local.name == "thunk"), "block slot was truncated");
+    assert!(
+        func.locals.iter().any(|local| local.name == "thunk"),
+        "block slot was truncated"
+    );
     assert!(matches!(
         &func.body.last().unwrap(),
-        HirStmt::Return(Some(HirExpr { kind: HirExprKind::Local(0), .. }))
+        HirStmt::Return(Some(HirExpr {
+            kind: HirExprKind::Local(0),
+            ..
+        }))
     ));
 }
 
@@ -775,8 +781,14 @@ fn test_unwrap_or_return_lowers_to_native_branch_and_real_return() {
     let hir_repr = format!("{:?}", function.body);
 
     assert!(hir_repr.contains("LetIn"), "subject was not bound once: {hir_repr}");
-    assert!(hir_repr.contains("rt_is_none"), "optional absence was not tested: {hir_repr}");
-    assert!(hir_repr.contains("rt_unwrap_or_value"), "present optional was not unwrapped: {hir_repr}");
+    assert!(
+        hir_repr.contains("rt_is_none"),
+        "optional absence was not tested: {hir_repr}"
+    );
+    assert!(
+        hir_repr.contains("rt_unwrap_or_value"),
+        "present optional was not unwrapped: {hir_repr}"
+    );
     assert!(
         hir_repr.contains("Return(Some") && hir_repr.contains("fallback_code"),
         "fallback was not preserved as a real early return: {hir_repr}"
@@ -784,7 +796,10 @@ fn test_unwrap_or_return_lowers_to_native_branch_and_real_return() {
 
     let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
     let mir_repr = format!("{mir:?}");
-    assert!(mir_repr.contains("rt_is_none"), "absence check did not reach MIR: {mir_repr}");
+    assert!(
+        mir_repr.contains("rt_is_none"),
+        "absence check did not reach MIR: {mir_repr}"
+    );
     assert!(
         mir_repr.contains("Return(Some(") && mir_repr.contains("fallback_code"),
         "fallback return did not reach MIR: {mir_repr}"

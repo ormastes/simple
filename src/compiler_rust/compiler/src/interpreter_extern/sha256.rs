@@ -126,9 +126,7 @@ fn payload_bytes(v: &Value) -> Result<Vec<u8>, CompileError> {
 fn handle_of(args: &[Value], who: &str) -> Result<i64, CompileError> {
     match args.first() {
         Some(Value::Int(h)) => Ok(*h),
-        Some(_) => Err(CompileError::runtime(format!(
-            "{who}: hasher handle must be i64"
-        ))),
+        Some(_) => Err(CompileError::runtime(format!("{who}: hasher handle must be i64"))),
         None => Err(CompileError::runtime(format!("{who}: missing hasher handle"))),
     }
 }
@@ -136,9 +134,7 @@ fn handle_of(args: &[Value], who: &str) -> Result<i64, CompileError> {
 #[inline(always)]
 fn require_arity(args: &[Value], expected: usize, who: &str) -> Result<(), CompileError> {
     if args.len() != expected {
-        return Err(CompileError::runtime(format!(
-            "{who}: expected {expected} arguments"
-        )));
+        return Err(CompileError::runtime(format!("{who}: expected {expected} arguments")));
     }
     Ok(())
 }
@@ -147,9 +143,7 @@ fn require_arity(args: &[Value], expected: usize, who: &str) -> Result<(), Compi
 pub fn rt_sha256_new(args: &[Value]) -> Result<Value, CompileError> {
     require_arity(args, 0, "rt_sha256_new")?;
     let handle = SHA256_COUNTER
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-            current.checked_add(1)
-        })
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| current.checked_add(1))
         .map_err(|_| CompileError::runtime("rt_sha256_new: handle space exhausted"))?;
     SHA256_STATE.lock().unwrap().insert(handle, Context::new(&SHA256));
     Ok(Value::Int(handle))
@@ -168,9 +162,8 @@ pub fn rt_sha256_write(args: &[Value]) -> Result<Value, CompileError> {
         Some(v) => payload_bytes(v)?,
         None => return Err(CompileError::runtime("rt_sha256_write: missing data".to_string())),
     };
-    let limit = usize::try_from(args[2].as_int()?).map_err(|_| {
-        CompileError::runtime("rt_sha256_write: len is outside usize range")
-    })?;
+    let limit = usize::try_from(args[2].as_int()?)
+        .map_err(|_| CompileError::runtime("rt_sha256_write: len is outside usize range"))?;
     if limit > payload.len() {
         return Err(CompileError::runtime(format!(
             "rt_sha256_write: len {} exceeds payload length {}",
@@ -364,12 +357,7 @@ mod tests {
         let handle = new_handle();
         let payload = Value::text("abc".to_string());
         assert!(rt_sha256_write(&[Value::Int(handle), payload.clone()]).is_err());
-        assert!(rt_sha256_write(&[
-            Value::Int(handle),
-            payload,
-            Value::text("3".to_string()),
-        ])
-        .is_err());
+        assert!(rt_sha256_write(&[Value::Int(handle), payload, Value::text("3".to_string()),]).is_err());
         assert!(rt_sha256_finish(&[Value::Int(handle), Value::Nil]).is_err());
         assert!(rt_sha256_finish_bytes(&[Value::Int(handle), Value::Nil]).is_err());
         assert!(rt_sha256_reset(&[Value::Int(handle), Value::Nil]).is_err());
@@ -380,12 +368,7 @@ mod tests {
     #[test]
     fn finish_bytes_matches_published_vector() {
         let handle = new_handle();
-        rt_sha256_write(&[
-            Value::Int(handle),
-            Value::text("abc".to_string()),
-            Value::Int(3),
-        ])
-        .unwrap();
+        rt_sha256_write(&[Value::Int(handle), Value::text("abc".to_string()), Value::Int(3)]).unwrap();
         let result = rt_sha256_finish_bytes(&[Value::Int(handle)]).unwrap();
         let bytes = result.try_array_bytes().unwrap();
         assert_eq!(

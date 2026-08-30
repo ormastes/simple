@@ -859,12 +859,10 @@ pub fn rt_directx_hardware_adapter_identity_fn(_args: &[Value]) -> Result<Value,
 }
 
 pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(c_ptr_to_string(rt_metal_device_name(arg_i64(
-        args,
-        0,
+    Ok(Value::text(c_ptr_to_string(
+        rt_metal_device_name(arg_i64(args, 0, "rt_metal_device_name", 1)?),
         "rt_metal_device_name",
-        1,
-    )?), "rt_metal_device_name")?))
+    )?))
 }
 
 pub fn rt_metal_device_memory_fn(args: &[Value]) -> Result<Value, CompileError> {

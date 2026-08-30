@@ -268,18 +268,17 @@ impl Lowerer {
         // collide and it can hand back the wrong field list -- fine as a
         // best-effort ORDERING hint (its prior use), but not sound enough to
         // reject a name on. Only the registry list gates the hard error below.
-        let registry_declared: Option<Vec<String>> = self
-            .module
-            .types
-            .get(struct_ty)
-            .and_then(|hir_ty| match hir_ty {
-                HirType::Struct { fields: sf, .. } => Some(sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
-                _ => None,
-            });
+        let registry_declared: Option<Vec<String>> = self.module.types.get(struct_ty).and_then(|hir_ty| match hir_ty {
+            HirType::Struct { fields: sf, .. } => Some(sf.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()),
+            _ => None,
+        });
         let from_registry = registry_declared.is_some();
         let declared_field_names = registry_declared.or_else(|| {
             self.global_struct_fields_for_name(name).map(|fields| {
-                fields.iter().map(|(field_name, _)| field_name.clone()).collect::<Vec<_>>()
+                fields
+                    .iter()
+                    .map(|(field_name, _)| field_name.clone())
+                    .collect::<Vec<_>>()
             })
         });
 
@@ -289,8 +288,16 @@ impl Lowerer {
             // written, in source order, matching prior behavior for this
             // unresolvable case.
             if crate::hir::lower::trace_field_get_enabled() {
-                let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
-                eprintln!("[CTOR-TRACE] {name} ERASED source-order n={} in {fpath}", provided.len());
+                let fpath = self
+                    .current_file
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                eprintln!(
+                    "[CTOR-TRACE] {name} ERASED source-order n={} in {fpath}",
+                    provided.len()
+                );
             }
             let mut out = Vec::with_capacity(provided.len());
             for (_, expr) in provided {

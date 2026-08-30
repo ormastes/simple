@@ -2106,8 +2106,7 @@ impl<'a> MirLowerer<'a> {
                 // must reach LLVM as a literal `$$`. This MUST run BEFORE the
                 // `{name}` -> `$N` rewriter below, otherwise the placeholders
                 // the rewriter inserts would themselves be escaped to `$$N`.
-                let escaped: Vec<String> =
-                    instructions.iter().map(|line| escape_raw_asm_dollars(line)).collect();
+                let escaped: Vec<String> = instructions.iter().map(|line| escape_raw_asm_dollars(line)).collect();
                 let rewritten: Vec<String> = escaped
                     .iter()
                     .map(|line| rewrite_asm_placeholders(line, &placeholder_index))

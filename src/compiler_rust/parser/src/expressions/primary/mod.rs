@@ -107,9 +107,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Identifier { name, .. } if in_capability_list => {
                     capabilities.push(name.clone());
                 }
-                TokenKind::Identifier { name, .. }
-                    if depth == 1 && name == "capabilities" =>
-                {
+                TokenKind::Identifier { name, .. } if depth == 1 && name == "capabilities" => {
                     capability_key_seen = true;
                 }
                 TokenKind::Eof => {

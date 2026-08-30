@@ -981,9 +981,8 @@ pub fn rt_process_run_owned_observed_bounded_value(args: &[Value]) -> Result<Val
         Value::Array(values) => values
             .iter()
             .map(|value| match value {
-                Value::Str(value) => std::ffi::CString::new(value.as_str()).map_err(|_| {
-                    CompileError::runtime(format!("{NAME}: args must not contain NUL"))
-                }),
+                Value::Str(value) => std::ffi::CString::new(value.as_str())
+                    .map_err(|_| CompileError::runtime(format!("{NAME}: args must not contain NUL"))),
                 _ => Err(CompileError::runtime(format!(
                     "{NAME}: args must be an array of strings"
                 ))),
@@ -1838,8 +1837,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exec_captures_stdout_and_exit_code_via_shell() {
-        let out = rt_shell_exec(&[Value::text("echo hello".to_string())])
-            .expect("rt_shell_exec should succeed");
+        let out = rt_shell_exec(&[Value::text("echo hello".to_string())]).expect("rt_shell_exec should succeed");
         let Value::Str(stdout) = out else {
             panic!("expected text result, got {out:?}");
         };
@@ -1864,10 +1862,8 @@ mod tests {
     fn shell_exec_honors_shell_metacharacters() {
         // Real callers (e.g. container_adapter.spl) rely on pipes/redirection
         // being interpreted, not passed literally to argv[1].
-        let out = rt_shell_exec(&[Value::text(
-            "echo one; echo two 1>&2 2>/dev/null".to_string(),
-        )])
-        .expect("rt_shell_exec should succeed");
+        let out = rt_shell_exec(&[Value::text("echo one; echo two 1>&2 2>/dev/null".to_string())])
+            .expect("rt_shell_exec should succeed");
         let Value::Str(stdout) = out else {
             panic!("expected text result, got {out:?}");
         };
@@ -1877,10 +1873,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_exec_tuple_returns_stdout_stderr_and_exit_code_separately() {
-        let result = rt_shell_exec_tuple(&[Value::text(
-            "printf out; printf err 1>&2; exit 3".to_string(),
-        )])
-        .expect("rt_shell_exec_tuple should succeed");
+        let result = rt_shell_exec_tuple(&[Value::text("printf out; printf err 1>&2; exit 3".to_string())])
+            .expect("rt_shell_exec_tuple should succeed");
         let Value::Tuple(parts) = result else {
             panic!("expected tuple result, got {result:?}");
         };

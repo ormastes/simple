@@ -45,7 +45,9 @@ fn init() -> bool {
     if on {
         *COUNTS.lock().unwrap() = Some(BTreeMap::new());
         unsafe {
-            unsafe extern "C" { fn atexit(callback: extern "C" fn()) -> i32; }
+            unsafe extern "C" {
+                fn atexit(callback: extern "C" fn()) -> i32;
+            }
             let _ = atexit(dump_at_exit);
         }
     }

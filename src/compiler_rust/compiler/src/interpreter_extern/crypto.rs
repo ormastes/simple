@@ -286,18 +286,8 @@ mod tests {
         assert!(rt_sha1_write(&[]).is_err());
         assert!(rt_sha1_write(&[Value::Int(1), Value::Int(0), Value::Int(4)]).is_err());
         let handle = rt_sha1_new(&[]).unwrap().as_int().unwrap();
-        assert!(rt_sha1_write(&[
-            Value::Int(handle),
-            Value::text("abc"),
-            Value::text("3"),
-        ])
-        .is_err());
-        assert!(rt_sha1_write(&[
-            Value::Int(handle),
-            Value::text("abc"),
-            Value::Int(4),
-        ])
-        .is_err());
+        assert!(rt_sha1_write(&[Value::Int(handle), Value::text("abc"), Value::text("3"),]).is_err());
+        assert!(rt_sha1_write(&[Value::Int(handle), Value::text("abc"), Value::Int(4),]).is_err());
         assert!(rt_sha1_finish_bytes(&[Value::Int(handle), Value::Nil]).is_err());
         assert!(rt_sha1_finish(&[Value::Int(i64::MAX)]).is_err());
         assert!(rt_sha1_reset(&[Value::Bool(false)]).is_err());
@@ -310,11 +300,7 @@ mod tests {
         assert!(rt_constant_time_compare(&[Value::text("a"), Value::Nil]).is_err());
         assert!(rt_sha1(&[]).is_err());
         assert!(rt_base64url_encode(&[Value::text("value"), Value::Nil]).is_err());
-        assert!(rt_base64url_encode(&[
-            Value::text("value"),
-            Value::Int(6),
-        ])
-        .is_err());
+        assert!(rt_base64url_encode(&[Value::text("value"), Value::Int(6),]).is_err());
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type};
+use simple_parser::ast::{
+    AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type,
+};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{strict_mem_enabled, Env, Value};
 use super::core_types::{
@@ -748,7 +750,7 @@ pub(crate) fn exec_assignment(
                                 if let Some(v) = env.get(name) {
                                     cell.borrow_mut().insert(name.clone(), v.clone());
                                 }
-                                });
+                            });
                             return Ok(Control::Next);
                         }
                     }
@@ -781,7 +783,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                             Some(rhs_val) => {
@@ -812,7 +814,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                         }
@@ -872,7 +874,7 @@ pub(crate) fn exec_assignment(
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
-                    });
+                });
             }
         }
         Ok(Control::Next)
@@ -3048,7 +3050,10 @@ mod nested_assignment_target_tests {
         let mut env = Env::new();
         let row = obj("Row", vec![("cols", Value::array(vec![Value::Int(0), Value::Int(0)]))]);
         env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![row]))]));
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
         assert_eq!(
@@ -3097,7 +3102,10 @@ mod nested_assignment_target_tests {
         let alias = read(&env, "s", &["rows"]);
         env.insert("alias".to_string(), alias);
 
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
 
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
@@ -3122,6 +3130,9 @@ mod nested_assignment_target_tests {
             Expr::Integer(0),
         );
         let err = exec(&assign(target, Expr::Integer(1)), &mut env);
-        assert!(err.is_err(), "a call-result index target is not a place and must be an error");
+        assert!(
+            err.is_err(),
+            "a call-result index target is not a place and must be an error"
+        );
     }
 }
