@@ -297,6 +297,43 @@ bootstrap_stage3_resolve_rust_toolchain() (
         "$bootstrap_stage3_cargo"
 )
 
+# The MSVC `LIB` search path is a semicolon-separated list of NATIVE Windows
+# directories. Emit it as newline-separated POSIX paths so the `.lib` token
+# branch can test each one. Empty when LIB is unset (a non-MSVC lane), which
+# makes the caller's loop a no-op rather than an error.
+bootstrap_stage3_llvm_msvc_lib_dirs() {
+    [ -n "${LIB:-}" ] || return 0
+    command -v cygpath >/dev/null 2>&1 || return 0
+    # Trailing newline is load-bearing: with `printf '%s'` the final LIB entry
+    # is unterminated and `read` discards it -- which silently dropped the
+    # Windows SDK `um/x64` directory, the one holding psapi.lib.
+    printf '%s
+' "$LIB" | tr ';' '
+' | while IFS= read -r bootstrap_stage3_llvm_msvc_raw; do
+        [ -n "$bootstrap_stage3_llvm_msvc_raw" ] || continue
+        cygpath -u "$bootstrap_stage3_llvm_msvc_raw" 2>/dev/null || true
+    done
+}
+
+# Print the first directory-qualified match for an MSVC import library, or
+# nothing. $1 is the bare token (`psapi.lib`), $2 the LLVM libdir searched
+# ahead of the SDK path. Reads line-oriented so directories containing spaces
+# survive.
+bootstrap_stage3_llvm_msvc_find_lib() {
+    [ "$#" -eq 2 ] || return 0
+    bootstrap_stage3_llvm_msvc_token=$1
+    { printf '%s
+' "$2"; bootstrap_stage3_llvm_msvc_lib_dirs; } |
+        while IFS= read -r bootstrap_stage3_llvm_msvc_dir; do
+            [ -n "$bootstrap_stage3_llvm_msvc_dir" ] || continue
+            if [ -f "$bootstrap_stage3_llvm_msvc_dir/$bootstrap_stage3_llvm_msvc_token" ]; then
+                printf '%s
+' "$bootstrap_stage3_llvm_msvc_dir/$bootstrap_stage3_llvm_msvc_token"
+                break
+            fi
+        done
+}
+
 bootstrap_stage3_resolve_llvm_build_authority() (
     [ "$#" -eq 2 ] || return 1
     bootstrap_stage3_llvm_path=$1
@@ -608,14 +645,38 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 echo "llvm authority: unsupported llvm-config --system-libs flag token: ${bootstrap_stage3_llvm_system_token}" >&2
                 return 1
                 ;;
-            *)
+            *.lib|*.LIB)
                 # An MSVC-built llvm-config reports bare import-library names
                 # (`psapi.lib shell32.lib ... libxml2s.lib`) rather than the
-                # GNU `-lpsapi` form every branch above is written against.
-                # Those resolve against the Windows SDK library path, which
-                # this authority does not capture, so binding them is not yet
-                # possible -- but say so instead of returning a bare 1.
-                echo "llvm authority: unresolvable llvm-config --system-libs token: ${bootstrap_stage3_llvm_system_token} (MSVC-style '<name>.lib' tokens are not supported; use a GNU-ABI llvm-config on this lane)" >&2
+                # GNU `-lpsapi` form the branch above is written against.
+                # Resolve them exactly the way the linker will: LLVM's own
+                # libdir first, then each entry of the MSVC `LIB` search path.
+                # Binding them is what lets the receipt name the Windows SDK
+                # import libraries it actually linked, so this is a stronger
+                # record than the GNU path, not a weaker one.
+                # Resolved in a command substitution, NOT an unquoted `for`:
+                # every MSVC/SDK directory contains a space ("Program Files"),
+                # which word-splitting silently shreds into unmatchable
+                # fragments.
+                bootstrap_stage3_llvm_msvc_found=$(
+                    bootstrap_stage3_llvm_msvc_find_lib                         "$bootstrap_stage3_llvm_system_token"                         "$bootstrap_stage3_llvm_libdir"
+                )
+                [ -n "$bootstrap_stage3_llvm_msvc_found" ] || {
+                    echo "llvm authority: llvm-config --system-libs named '${bootstrap_stage3_llvm_system_token}', which is in neither the LLVM libdir (${bootstrap_stage3_llvm_libdir}) nor any LIB entry; is the MSVC environment set?" >&2
+                    return 1
+                }
+                bootstrap_stage3_llvm_system_canonical=$(
+                    bootstrap_stage3_canonical_file                         "$bootstrap_stage3_llvm_msvc_found"
+                ) || return 1
+                printf 'llvm-system-lib-%s-requested=%s
+'                     "$bootstrap_stage3_llvm_key"                     "$bootstrap_stage3_llvm_msvc_found"
+                printf 'llvm-system-lib-%s-path=%s
+'                     "$bootstrap_stage3_llvm_key"                     "$bootstrap_stage3_llvm_system_canonical"
+                printf 'llvm-system-lib-%s-sha256=%s
+'                     "$bootstrap_stage3_llvm_key"                     "$(bootstrap_stage3_hash_file                         "$bootstrap_stage3_llvm_system_canonical")"
+                ;;
+            *)
+                echo "llvm authority: unresolvable llvm-config --system-libs token: ${bootstrap_stage3_llvm_system_token}" >&2
                 return 1
                 ;;
         esac

@@ -109,9 +109,24 @@ authority never captures (only macOS SDK identity is recorded, via `xcrun`), so
 binding them is not possible today without deciding how SDK identity enters the
 receipt.
 
-Both rejections now name the offending token on stderr. Support for MSVC-style
-tokens is NOT implemented — declaring it unsupported out loud is the honest
-state, and a gnu-ABI `llvm-config` is the correct input for a gnu lane anyway.
+**Now IMPLEMENTED** (it became blocking once the lane moved to MSVC: pointing
+`llvm-sys v180.0.0` at msys2's LLVM 21 headers fails, so the MSVC lane must use
+the MSVC `llvm-config`, whose tokens this branch had to accept). `<name>.lib`
+tokens are resolved the way the linker resolves them — LLVM's own libdir first,
+then each entry of the MSVC `LIB` search path — and the resolved file is hashed
+into the receipt. That makes the MSVC record STRONGER than the GNU one: it names
+the exact Windows SDK import libraries linked, which §4 of the plan wants and
+which nothing previously captured.
+
+Three sh portability traps were hit writing it, each silent:
+
+- iterating the directory list with an unquoted `for` word-split every path
+  containing a space — i.e. all of them (`Program Files`);
+- `printf '%s' "$LIB"` leaves the last entry unterminated and `while read`
+  discards it, which dropped the SDK `um/x64` directory — the one holding
+  `psapi.lib`;
+- `printf` with a literal Windows path eats `2` as an octal escape and
+  `` as a vertical tab (this bit the vcvars capture, not the guard).
 
 ## Defect 4 (BLOCKED) — the gnu lane cannot build the Rust seed on this host
 
