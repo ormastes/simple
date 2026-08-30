@@ -27,6 +27,60 @@ const STDLIB_FAMILY_DIRS: &[&str] = &[
     "nogc_async_mut_noalloc",
 ];
 
+thread_local! {
+    /// Per-process memo of `find_numbered_dir(parent, segment)`.
+    ///
+    /// Sibling of `IMPORTED_MODULE_AST` (`hir/lower/import_loader.rs`),
+    /// `PATH_KIND_CACHE` (`fs_probe.rs`), and `DIR_LISTING_CACHE`
+    /// (`interpreter_module/path_resolution.rs`) — the last of which is the
+    /// already-fixed TWIN of this file's `find_numbered_dir`. This copy was
+    /// never memoized: every call did a fresh `read_dir(parent)` plus a
+    /// `p_is_dir` per entry, and import resolution calls it for every import
+    /// of every file, so the same `(parent, segment)` pairs were recomputed
+    /// enormous numbers of times.
+    ///
+    /// Measured 2026-08-31 (`sample` of a hung
+    /// `check-bootstrap-stage2-struct-receiver.shs` route step, 93% CPU,
+    /// 3.4 GB RSS, spinning in `NativeProjectBuilder::build`): 88 frames in
+    /// `find_numbered_dir` and 123 in `find_segment_within_numbered_dirs` —
+    /// the two hottest frames in the whole sample.
+    ///
+    /// BUILD-LIFETIME ASSUMPTION: this is a memo of a filesystem probe, so it
+    /// is sound only because the source tree is not mutated while a build is
+    /// running. That is the same assumption the three sibling caches above
+    /// already make. No invalidation mechanism is added here beyond the
+    /// existing `clear_module_cache` chain, because nothing in the build
+    /// mutates the tree it is reading.
+    ///
+    /// Per-PROCESS only, NEVER persisted to disk — the repo relies on "edit
+    /// `src/lib`, no build needed" (the stdlib is read as source every run),
+    /// so an on-disk cache would break that property. A fresh process always
+    /// re-probes the filesystem.
+    static NUMBERED_DIR_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(PathBuf, String), Option<PathBuf>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Per-process memo of `find_segment_within_numbered_dirs(parent, segment)`.
+    ///
+    /// Deliberately a SEPARATE map from `NUMBERED_DIR_CACHE`: the two
+    /// functions answer different questions about the same key ("is there a
+    /// `NN.segment` under parent?" vs "is there a `segment` under some
+    /// `NN.*` under parent?"). Same lifetime and same assumptions.
+    static SEGMENT_WITHIN_NUMBERED_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(PathBuf, String), Option<PathBuf>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Drop both numbered-directory memos. Wired into the `clear_module_cache`
+/// chain alongside `clear_path_resolution_cache` / `clear_fs_probe_cache`, so
+/// a long-lived process that clears the probe caches clears these too — a memo
+/// that outlived `PATH_KIND_CACHE` would pin pre-clear answers while `p_is_dir`
+/// returned fresh ones.
+pub(crate) fn clear_numbered_dir_cache() {
+    NUMBERED_DIR_CACHE.with(|c| c.borrow_mut().clear());
+    SEGMENT_WITHIN_NUMBERED_CACHE.with(|c| c.borrow_mut().clear());
+}
+
 /// Find a numbered directory matching the pattern `NN.name` or `NNN.name`.
 ///
 /// The Simple compiler organizes source into numbered layers like:
@@ -35,7 +89,19 @@ const STDLIB_FAMILY_DIRS: &[&str] = &[
 ///   src/compiler/70.backend/
 ///
 /// When resolving `compiler.frontend`, this function finds `10.frontend` for segment `frontend`.
+///
+/// Memoized per process — see `NUMBERED_DIR_CACHE`.
 fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
+    let key = (parent.to_path_buf(), segment.to_string());
+    if let Some(hit) = NUMBERED_DIR_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let answer = find_numbered_dir_uncached(parent, segment);
+    NUMBERED_DIR_CACHE.with(|c| c.borrow_mut().insert(key, answer.clone()));
+    answer
+}
+
+fn find_numbered_dir_uncached(parent: &Path, segment: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(parent).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -76,7 +142,18 @@ fn find_explicit_numbered_dir(parent: &Path, prefix: &str, suffix: &str) -> Opti
     }
 }
 
+/// Memoized per process — see `SEGMENT_WITHIN_NUMBERED_CACHE`.
 fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<PathBuf> {
+    let key = (parent.to_path_buf(), segment.to_string());
+    if let Some(hit) = SEGMENT_WITHIN_NUMBERED_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let answer = find_segment_within_numbered_dirs_uncached(parent, segment);
+    SEGMENT_WITHIN_NUMBERED_CACHE.with(|c| c.borrow_mut().insert(key, answer.clone()));
+    answer
+}
+
+fn find_segment_within_numbered_dirs_uncached(parent: &Path, segment: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(parent).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
