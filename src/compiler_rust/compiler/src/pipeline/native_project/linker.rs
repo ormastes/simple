@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use simple_common::target::LinkerFlavor;
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
+use super::config::runtime_bundle_requests_core_c_bootstrap;
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
@@ -1444,14 +1445,63 @@ int main(int argc, char** argv) {
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        if is_clang_cl {
-                            clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
-                        } else if is_msvc {
-                            cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                        // Windows used to whole-archive this unconditionally,
+                        // which is why the link failed with LNK2005 on
+                        // __IMPORT_DESCRIPTOR_kernel32: the archive bundles
+                        // rustc-synthesized raw-dylib import libraries (measured:
+                        // 4,606 members, 582 named kernel32.dll, the descriptor
+                        // defined 4x) and whole-archive forces every one in.
+                        // Lazy resolution pulls exactly one.
+                        //
+                        // Linux has never done this -- it uses retention roots
+                        // and gates whole-archive behind
+                        // SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE. This mirrors that,
+                        // including the escape hatch, so the two platforms now
+                        // agree.
+                        if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
+                            if is_clang_cl {
+                                clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
+                            } else if is_msvc {
+                                cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                            } else {
+                                cmd.arg("-Wl,--whole-archive");
+                                cmd.arg(runtime_lib);
+                                cmd.arg("-Wl,--no-whole-archive");
+                            }
                         } else {
-                            cmd.arg("-Wl,--whole-archive");
+                            let roots = Self::runtime_retention_symbols(
+                                object_paths,
+                                &main_o,
+                                init_o.as_ref(),
+                                runtime_lib,
+                                imports,
+                            )?;
+                            // read_defined_symbol_set FAILS OPEN: it returns an
+                            // empty set when `nm` cannot be run, which would
+                            // silently yield zero roots and drop the whole
+                            // archive. On this host llvm-nm dies rc=127 under
+                            // DLL shadowing, so that is a live hazard, not a
+                            // theoretical one. Refuse rather than emit a binary
+                            // missing its runtime.
+                            if roots.is_empty() {
+                                return Err(format!(
+                                    "no runtime retention roots resolved from {} -- refusing to link                                      without whole-archive, since that would drop the runtime silently.                                      Check that nm is runnable (SIMPLE_TRACE_RUNTIME_ROOTS=1 to trace),                                      or set SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 to restore the old behaviour.",
+                                    runtime_lib.display()
+                                ));
+                            }
+                            // x64 `extern "C"` names are undecorated -- measured
+                            // with nm on the real archive (`T rt_api_surface_extract`,
+                            // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
+                            for root in &roots {
+                                if is_clang_cl {
+                                    clang_cl_link_args.push(format!("/INCLUDE:{root}"));
+                                } else if is_msvc {
+                                    cmd.arg(format!("-Wl,/INCLUDE:{root}"));
+                                } else {
+                                    cmd.arg(format!("-Wl,-u,{root}"));
+                                }
+                            }
                             cmd.arg(runtime_lib);
-                            cmd.arg("-Wl,--no-whole-archive");
                         }
                     }
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1475,6 +1525,41 @@ int main(int argc, char** argv) {
                     if std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() == Ok("1") {
                         let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
                             .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
+                        cmd.arg(core_c_runtime);
+                    } else if runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle) {
+                        // Stage 2 asks for --runtime-bundle core-c-bootstrap, but
+                        // the bootstrap_main entry short-circuits lane selection
+                        // (config.rs:357) and pins the runtime to native_all,
+                        // which does NOT define the C-only entry points.
+                        // Measured on simple_native_all.lib (354 MB):
+                        //   rt_io_udp_bind        1
+                        //   rt_iocp_create        0
+                        //   rt_event_ports_create 0
+                        //   rt_cpu_count          0
+                        // leaving 103 distinct rt_* undefined at the Stage 2 link.
+                        //
+                        // Those live in runtime_native.c, which the core-C
+                        // archive compiles and nothing else in this build does.
+                        // Supply it as an ADDITIONAL archive, exactly like the
+                        // Stage 4 supplement above, rather than replacing
+                        // native_all -- bootstrap_main needs rt_native_build
+                        // from native_all, so swapping would just trade one
+                        // undefined set for another.
+                        //
+                        // Safe against duplicate definitions BECAUSE the branch
+                        // above no longer whole-archives: with lazy resolution a
+                        // member is pulled only to satisfy a still-undefined
+                        // symbol, so the ~560 symbols defined in both archives
+                        // resolve from native_all (listed first) and the core-C
+                        // copies are never pulled. This is also why
+                        // 8ca87866c6's "just add runtime_native.c to the Rust
+                        // build" attempt failed with 475 collisions: compiling
+                        // it INTO the crate gives the linker no such choice.
+                        let core_c_runtime =
+                            build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
+                                .ok_or_else(|| {
+                                    "failed to build the core-c-bootstrap runtime supplement".to_string()
+                                })?;
                         cmd.arg(core_c_runtime);
                     }
                 } else {
