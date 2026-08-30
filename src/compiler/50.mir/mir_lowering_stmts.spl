@@ -1214,15 +1214,22 @@ impl MirLowering:
                         # here -- the seed interpreter mishandles both on a
                         # "present" struct optional. `type_` is nil for any
                         # `val x = ...` without an explicit type annotation;
-                        # the direct match keeps that nil from reaching
+                        # the nil guard keeps that nil from reaching
                         # lower_type and tripping a `.kind` read on nil.
-                        val mir_type = match type_:
-                            case Some(type_value):
-                                match type_value.kind:
-                                    case HirTypeKind.Infer(_, _): MirType.i64()
-                                    case _: self.lower_type(type_value)
-                            case nil:
-                                MirType.i64()
+                        # `HirStmtKind.Let.type_` is a PLAIN NULLABLE `HirType`, not an
+                        # Option box: the writers in
+                        # src/compiler/20.hir/hir_lowering/statements.spl no longer wrap it
+                        # in `Some(...)`. A `case Some(...)` test here would therefore never
+                        # match -- `rt_enum_check_discriminant` returns false for a non-enum
+                        # -- and every annotated `val x: T` would silently fall to the
+                        # `MirType.i64()` default. Nil-guard plus a direct field read is the
+                        # repo's compiled-safe representation check for a nullable.
+                        val mir_type = if type_ != nil:
+                            match type_.kind:
+                                case HirTypeKind.Infer(_, _): MirType.i64()
+                                case _: self.lower_type(type_)
+                        else:
+                            MirType.i64()
 
                         # Lower the initializer first so a bitfield-construct
                         # pass-through can be aliased directly, without first
@@ -1321,11 +1328,10 @@ impl MirLowering:
                                         val init_hir_type = found_init_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
                                         self.remember_local_hir_type(local.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
                                     else:
-                                        match type_:
-                                            case Some(declared_type):
-                                                self.remember_local_hir_type(local.id, declared_type, 0, 0)
-                                            case nil:
-                                                ()
+                                        # Nullable, not an Option box -- same migration as
+                                        # the `mir_type` read above in this arm.
+                                        if type_ != nil:
+                                            self.remember_local_hir_type(local.id, type_, 0, 0)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced): mirror the same
                                 # array_element_struct_syms propagation as the other
