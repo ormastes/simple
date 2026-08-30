@@ -1225,9 +1225,25 @@ impl MirLowering:
                         # `MirType.i64()` default. Nil-guard plus a direct field read is the
                         # repo's compiled-safe representation check for a nullable.
                         val mir_type = if type_ != nil:
-                            match type_.kind:
+                            # TYPED REBIND BEFORE MATCHING -- load-bearing, not style.
+                            # `type_` here is a match-ARM BINDING, which arrives ANY-erased
+                            # on this lane; `hir_lowering/types.spl:573-580` documents the
+                            # same hazard verbatim ("matching `t.kind` on an ANY receiver
+                            # mis-resolves the enum tag/payload") and fixes it the same way
+                            # (`val lt: Type = t`). The code this replaced was
+                            # `case Some(type_value): match type_value.kind`, where
+                            # `type_value` was an accidental typed rebind that restored the
+                            # correct discriminant+payload layout. Dropping the box removed
+                            # that rebind, so `.kind` began mis-resolving to a NON-ENUM
+                            # (disc=-1) and MIR lowering reported
+                            # "E-MIR-TYPE-Unknown: unreachable HirTypeKind disc=-1: 0".
+                            # Because an ANY-erased read depends on memory layout, whether a
+                            # given slot mis-resolves varies per process -- which is also why
+                            # the error count and the reported function moved run to run.
+                            val ht: HirType = type_
+                            match ht.kind:
                                 case HirTypeKind.Infer(_, _): MirType.i64()
-                                case _: self.lower_type(type_)
+                                case _: self.lower_type(ht)
                         else:
                             MirType.i64()
 
@@ -1331,7 +1347,9 @@ impl MirLowering:
                                         # Nullable, not an Option box -- same migration as
                                         # the `mir_type` read above in this arm.
                                         if type_ != nil:
-                                            self.remember_local_hir_type(local.id, type_, 0, 0)
+                                            # Typed rebind, same reason as `mir_type` above.
+                                            val ht2: HirType = type_
+                                            self.remember_local_hir_type(local.id, ht2, 0, 0)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced): mirror the same
                                 # array_element_struct_syms propagation as the other
