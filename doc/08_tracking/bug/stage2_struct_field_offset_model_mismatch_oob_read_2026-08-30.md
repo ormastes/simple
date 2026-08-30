@@ -108,3 +108,56 @@ printf 'fn main():\n    print("hi")\n' > /tmp/hello.spl
 ```
 
 Control (succeeds): the Rust seed under `build/phase_snapshots/phase1_*/simple`.
+
+## Update 2026-08-30 (evening): root cause found and largely fixed
+
+The receiver-blind "most fields wins" search was the mechanism, but not the
+cause. The cause was that types imported via `export use` were never registered,
+so `resolve_type` degraded them to `TypeId::ANY` and the heuristic ran at all.
+
+Fixed in sequence, each verified before the next:
+
+1. `module_pass.rs` — Pass 0.5a/0.5b walked only `Node::UseStmt`, never
+   `Node::ExportUseStmt`. `driver_types.spl:7` is `export use ...*`, its ONLY
+   route to `CompileOptions`. Result: `options` now reads `CompileOptions`
+   field 22 (0xb0) instead of `MirLowering` field 26 (0xd0).
+2. `imports.rs` — the whole-program return-type map walked only `Node::Function`,
+   so no `impl`-block method had a declared return type; `CompilerConfig.from_env`
+   had no row.
+3. `stmt_lowering.rs` / `context.rs` / `access.rs` — hint a local's struct type
+   from its static-call initializer's DECLARED RETURN TYPE (not the callee name,
+   which would mis-hint `Foo.parse() -> text`).
+4. `imports.rs` again — fix (2) landed inside the FIRST of two `for item in
+   &ast.items` matches, shadowing the pre-existing `Node::Impl` arm at :622 that
+   was the sole producer of `raw_to_mangled` entries. That produced ~778
+   unqualified `Type.method` link errors. Un-shadowed; link now green.
+
+Result: Stage 2 links (821 compiled, 0 failed, 136 MB) and the binary runs,
+reporting `simple-bootstrap 1.0.0-rc.1`. This is the furthest the macOS lane has
+reached.
+
+### Still open
+
+Stage 2 is REJECTED at sanity: the binary HANGS on a three-line hello world.
+It compiles cleanly (`[bootstrap-error-count]` 0 at entry, post-lowering,
+post-diagnostics, post-store) and then spins. macOS `sample`, 2161 samples, all
+on one call site:
+
+    compiler__mir_opt__mir_opt__storage_projection_lowering__
+      lower_mir_storage_project_fields_v1 (+288)
+        2001  rt_range (+80)
+          61  rt_array_push_grow (+8)
+
+The loops in that file are bounded by `binding.fields.len()`
+(storage_projection_lowering.spl:86,94). A garbage field read there yields a
+huge bound and an effectively infinite loop — the same defect class as above.
+
+**Note the heuristic is still live.** The fail-closed guards were reverted
+because they broke 47 files (erasure to ANY is pervasive), so "most fields wins"
+still resolves every other ANY receiver. The MIR structs this pass reads may
+still be misresolved. Whether this hang is that, or a pre-existing pathology in
+a pass no macOS build had ever reached, is UNDETERMINED at time of writing.
+
+Discriminator note: comparing against an earlier seed does NOT settle it — the
+seed is the Rust compiler and never executes this pass, which is Simple code
+compiled into Stage 2. No working macOS Stage 2 existed before today.
