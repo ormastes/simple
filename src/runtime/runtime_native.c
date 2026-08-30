@@ -161,6 +161,7 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #define RT_VALUE_SPECIAL_NIL 0x0ULL
 #define RT_VALUE_SPECIAL_TRUE 0x1ULL
 #define RT_VALUE_SPECIAL_FALSE 0x2ULL
+#define RT_VALUE_SPECIAL_ERROR 0x3ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
 #define RT_VALUE_HEAP_CLOSURE 0x03U
@@ -12757,12 +12758,86 @@ SPL_RT_TRAP1(rt_wait)
 /* Dynamic dispatch: the emitter passes no vtable identity the C runtime can
  * resolve, so any answer would be a wrong method address. */
 SPL_RT_TRAP2(rt_vtable_lookup)
-/* io_print.rs:437 takes (value, fmt_ptr, fmt_len) -- the format spec is a raw
- * pointer the C runtime cannot validate; naming the trap beats a wrong string. */
+/* Format a tagged RuntimeValue using the canonical core-C representation.
+ * `fmt` is the compiler-emitted byte span ABI, copied into a bounded local
+ * buffer before parsing.  The value itself is never treated as a generic
+ * pointer: strings and boxed floats go through registry-gated core helpers. */
 int64_t rt_value_format_string(int64_t v, const uint8_t* fmt, uint64_t fmt_len) {
-    (void)v; (void)fmt; (void)fmt_len;
-    rt_trap_unimplemented("rt_value_format_string");
-    return 0;
+    char spec[65];
+    uint64_t n = 0;
+    if (fmt != NULL) {
+        n = fmt_len < sizeof(spec) - 1 ? fmt_len : sizeof(spec) - 1;
+        if (n > 0) memcpy(spec, fmt, (size_t)n);
+    }
+    spec[n] = '\0';
+
+    char type = n > 0 ? spec[n - 1] : '\0';
+    int precision = -1;
+    int width = 0;
+    int zero_pad = n > 0 && spec[0] == '0';
+    for (uint64_t i = 0; i < n; i++) {
+        if (spec[i] == '.') {
+            precision = 0;
+            for (uint64_t j = i + 1; j < n && spec[j] >= '0' && spec[j] <= '9'; j++) {
+                int digit = spec[j] - '0';
+                precision = precision > (64 - digit) / 10 ? 64 : precision * 10 + digit;
+            }
+            break;
+        }
+        if (spec[i] >= '0' && spec[i] <= '9') {
+            int digit = spec[i] - '0';
+            width = width > (256 - digit) / 10 ? 256 : width * 10 + digit;
+        }
+    }
+
+    if (type == '\0' || type == 's') {
+        if (rt_core_is_special(v)) {
+            switch (rt_core_special_payload(v)) {
+                case RT_VALUE_SPECIAL_NIL: return rt_string_new((const uint8_t*)"nil", 3);
+                case RT_VALUE_SPECIAL_ERROR: return rt_string_new((const uint8_t*)"error", 5);
+                default: break;
+            }
+        }
+        return rt_to_string(v);
+    }
+
+    char out[512];
+    int len = -1;
+    if (rt_core_is_int(v)) {
+        long long value = (long long)rt_core_as_int(v);
+        switch (type) {
+            case 'd': break;
+            case 'x': len = snprintf(out, sizeof(out), zero_pad ? "%0*llx" : "%*llx", width, (unsigned long long)value); break;
+            case 'X': len = snprintf(out, sizeof(out), zero_pad ? "%0*llX" : "%*llX", width, (unsigned long long)value); break;
+            case 'o': len = snprintf(out, sizeof(out), zero_pad ? "%0*llo" : "%*llo", width, (unsigned long long)value); break;
+            default: break;
+        }
+        if (type == 'd')
+            len = snprintf(out, sizeof(out), zero_pad ? "%0*lld" : "%*lld", width, value);
+        if (type == 'b') {
+            uint64_t bits = (uint64_t)value;
+            char digits[65];
+            int used = 0;
+            do { digits[used++] = (char)('0' + (bits & 1)); bits >>= 1; } while (bits && used < 64);
+            int pad_count = width > used ? width - used : 0;
+            len = 0;
+            while (pad_count-- > 0 && len < (int)sizeof(out) - 1) out[len++] = zero_pad ? '0' : ' ';
+            while (used > 0 && len < (int)sizeof(out) - 1) out[len++] = digits[--used];
+            out[len] = '\0';
+        }
+    } else if (rt_core_is_float(v) && (type == 'f' || type == 'F' || type == 'e' || type == 'E' || type == '%')) {
+        double value = rt_core_as_float(v);
+        if (type == '%') value *= 100.0;
+        int p = precision >= 0 ? precision : 6;
+        if (type == 'e' || type == 'E')
+            len = snprintf(out, sizeof(out), type == 'E' ? "%.*E" : "%.*e", p, value);
+        else
+            len = snprintf(out, sizeof(out), "%.*f", p, value);
+        if (type == '%' && len >= 0 && len < (int)sizeof(out) - 1) out[len++] = '%';
+    }
+    if (len < 0) return rt_to_string(v);
+    if (len >= (int)sizeof(out)) len = (int)sizeof(out) - 1;
+    return rt_string_new((const uint8_t*)out, (uint64_t)len);
 }
 SPL_RT_TRAP2(rt_fstring_format)
 /* interpreter_bridge.rs:112 -- requires a hosted interpreter. */
