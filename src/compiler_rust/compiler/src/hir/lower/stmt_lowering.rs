@@ -111,6 +111,48 @@ fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
 }
 
 impl Lowerer {
+    /// The DECLARED return type name of a static call `Type.method(...)`, taken
+    /// from the whole-program `global_fn_return_types` map.
+    ///
+    /// Registration-independent on purpose: the map holds parser `Type`s (names),
+    /// so this answers even when `module.types.lookup(type_name)` is None — which
+    /// is exactly the state `driver_types.spl` is in for `CompilerConfig`. Note
+    /// that an unregistered callee type also stops `expr/mod.rs`'s static-call
+    /// routing (it is gated on `module.types.lookup(recv_name).is_some()`), so
+    /// only the `Expr::Path` form reaches static lowering there; both call shapes
+    /// are matched here regardless.
+    ///
+    /// Returns None unless a row exists. Never falls back to the callee type
+    /// name, which would mis-hint any non-factory static (`Foo.parse() -> text`).
+    fn static_call_return_type_name(&self, init: &Expr) -> Option<String> {
+        let (type_name, method) = match init {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Path(segments) if segments.len() == 2 => (segments[0].clone(), segments[1].clone()),
+                _ => return None,
+            },
+            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.clone(), method.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // A local of the same spelling means this is an instance call, not a
+        // static one; there is no reliable receiver name to take here.
+        if !type_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return None;
+        }
+        let declared = self
+            .global_fn_return_types
+            .as_ref()?
+            .get(&format!("{}.{}", type_name, method))?;
+        match declared {
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
+                (!name.is_empty()).then(|| name.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// Lower a list of contract clauses to HIR contract clauses
     fn lower_contract_clauses(
         &mut self,
@@ -352,6 +394,28 @@ impl Lowerer {
                 };
                 self.lifetime_context.register_variable(&name, origin);
 
+                // When the binding's TypeId erased to ANY, recover the AUTHORED
+                // return type NAME of an initializing static call. This is the
+                // registration-INDEPENDENT counterpart to the parameter hint
+                // (`LocalVar::type_name_hint`): `expr/access.rs` resolves an
+                // ANY receiver on an ambiguous field BY NAME through the
+                // whole-program `global_struct_defs`, so a name is enough and no
+                // TypeId ever has to resolve. `var compiler_config =
+                // CompilerConfig.from_env()` in `CompileContext.create` was
+                // reading `mcdc_owner_bytes` at MirLowering's index 26 (0xd0,
+                // 96 bytes past a 112-byte object) instead of CompilerConfig's
+                // index 10 (0x50) for exactly this reason.
+                //
+                // The name comes from the callee's DECLARED return type, never
+                // from the callee type name itself: `Foo.parse() -> text` must
+                // NOT hint "Foo". No declared row means no hint — never a guess.
+                if ty == TypeId::ANY {
+                    if let Some(init) = &let_stmt.value {
+                        if let Some(hint) = self.static_call_return_type_name(init) {
+                            ctx.static_call_type_hints.insert(name.clone(), hint);
+                        }
+                    }
+                }
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);

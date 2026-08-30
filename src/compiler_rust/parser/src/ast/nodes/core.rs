@@ -601,6 +601,17 @@ pub enum Expr {
     Spread(Box<Expr>),
     /// Spread expression in dict: **expr
     DictSpread(Box<Expr>),
+    /// Struct-update spread in a PAREN-form constructor argument list:
+    /// `MirFunction(..base, blocks: bs)`.
+    ///
+    /// Deliberately a distinct variant from `Spread` (postfix `args...`,
+    /// which means *variadic* argument splatting and is consumed as such by
+    /// `interpreter_call/core/arg_binding.rs`). Reusing `Spread` here would
+    /// silently turn a struct update into a variadic splat.
+    ///
+    /// Only ever produced by `parse_arguments`; every other `..` position
+    /// still goes through `parse_range` and stays a `Expr::Range`.
+    StructSpread(Box<Expr>),
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,

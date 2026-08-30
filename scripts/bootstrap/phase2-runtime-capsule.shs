@@ -63,7 +63,14 @@ verify_capsule() {
   [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
   aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha" | sha256sum | awk '{print $1}')
   [ "$(value capsule_identity_sha256 "$receipt")" = "$aggregate" ] || return 1
-  [ -z "$(find "$capsule" -perm /0222 -print -quit)" ] || return 1
+  # `-perm /MODE` (any of these bits) is a GNU findutils extension. BSD find,
+  # which is what /bin/sh gets on macOS, rejects it with
+  # "find: -perm: /0222: illegal mode string" on STDERR and prints nothing on
+  # stdout -- so the `[ -z ... ]` below saw an empty string and reported the
+  # capsule immutable no matter how writable it actually was. That is fail-OPEN
+  # in an immutability check. POSIX `-perm -MODE` (all of these bits) is honoured
+  # by both implementations; OR the three single-bit tests to recover "any".
+  [ -z "$(find "$capsule" \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit)" ] || return 1
 }
 
 case ${1:-} in

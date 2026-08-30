@@ -750,6 +750,7 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
         | Expr::ExistsCheck(expr)
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
+        | Expr::StructSpread(expr)
         | Expr::OptionalChain { expr, .. } => {
             collect_free_vars_recursive(expr, bound, vars);
         }

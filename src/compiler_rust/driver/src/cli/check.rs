@@ -997,6 +997,7 @@ fn validate_concurrency_api_expr(
         | Expr::Cast { expr: operand, .. }
         | Expr::Spread(operand)
         | Expr::DictSpread(operand)
+        | Expr::StructSpread(operand)
         | Expr::Try(operand)
         | Expr::ForceUnwrap(operand)
         | Expr::ExistsCheck(operand)
@@ -1214,6 +1215,7 @@ fn share_nothing_expr(
         | Expr::Cast { expr: operand, .. }
         | Expr::Spread(operand)
         | Expr::DictSpread(operand)
+        | Expr::StructSpread(operand)
         | Expr::Try(operand)
         | Expr::ForceUnwrap(operand)
         | Expr::ExistsCheck(operand)

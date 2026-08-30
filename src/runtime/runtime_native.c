@@ -6875,10 +6875,44 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
 
 /* Canonical half-open integer range `[start, end)`, matching the RuntimeValue
  * array contract used by MIR range lowering. */
+/* Upper bound on elements rt_range will materialise; see the rationale at the
+ * check inside rt_range below. */
+#define RT_RANGE_MAX_LEN ((uint64_t)1 << 28)
+
 int64_t rt_range(int64_t start, int64_t end) {
     if (end <= start) return (int64_t)(uintptr_t)rt_array_new(0);
     uint64_t len = (uint64_t)end - (uint64_t)start;
     if (len > (uint64_t)INT64_MAX) return rt_core_nil();
+    /* FAIL FAST on an absurd bound. rt_range MATERIALISES its range -- one
+     * rt_array_push per element -- so a bogus `end` does not error, it spins
+     * for hours while allocating, which reads as a compiler HANG with no
+     * diagnostic. That is exactly how a mis-parsed paren-form struct spread
+     * (`T(..base, f: v)`, which parses as `Range{start: None, end: base}` --
+     * see the bug doc below) cost a full profiling session to localise.
+     *
+     * RT_RANGE_MAX_LEN = 1<<28 (268,435,456). Chosen for a wide separation,
+     * not a tight fit: materialising that many elements already costs >2 GB,
+     * so no legitimate range reaches it through this path, while any heap
+     * object value -- the actual failure mode -- is >= 0x100000000
+     * (4,294,967,296), a 16x margin above the cap.
+     *
+     * Deliberately a LOUD ABORT naming the operands, never a clamp: clamping
+     * would convert a hang into a silently wrong answer, which is worse.
+     * doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md */
+    if (len > RT_RANGE_MAX_LEN) {
+        fprintf(stderr,
+                "simple runtime: rt_range(%lld, %lld) would materialise %llu elements, "
+                "over the %llu limit.\n"
+                "  A bound this large is a bogus operand, not a real range -- an object "
+                "value used where an integer was expected.\n"
+                "  Common cause: paren-form struct spread `T(..base, f: v)`, which parses "
+                "as a range, not a spread. See\n"
+                "  doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md\n",
+                (long long)start, (long long)end,
+                (unsigned long long)len, (unsigned long long)RT_RANGE_MAX_LEN);
+        fflush(stderr);
+        abort();
+    }
     SplArray* result = rt_array_new((int64_t)len);
     if (!result) return rt_core_nil();
     for (int64_t value = start; value < end; value++) {
