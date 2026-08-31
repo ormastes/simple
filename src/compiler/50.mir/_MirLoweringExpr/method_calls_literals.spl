@@ -974,6 +974,50 @@ impl MirLowering:
         per-element box/unbox. See
         doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md."""
         val mg_other = self.lower_expr(mg_src)
+        # TEXT RECEIVER -> string concat, not array extend.
+        # `collection_desugar.spl` rewrites `x = x + y` into `x.merge(y)` in the
+        # FRONTEND, where no type information exists. Its
+        # `is_definite_scalar_addend` gate can only recognise literal shapes, so
+        # `p = p + "X"` is correctly left alone, while `q = q + s` (identifier)
+        # and `t = t + s.char_at(i)` (method call) are rewritten to `.merge()`.
+        # Measured on the Stage-2 native lane: those lowered to
+        # `call i8 @rt_array_extend_i64(...)` on a TEXT receiver, the runtime
+        # reported "rejected invalid array handle before dereference", and the
+        # result was "" -- silently emptying every char-accumulation loop, which
+        # is what made module_logical_name_from_path return "" and failed the
+        # Stage-2 positional route.
+        # MIR is the first layer that knows the receiver's type, so the repair
+        # belongs here rather than in the desugar. rt_strcat_tagged is the same
+        # helper the binop str-concat path uses for `p + "X"`, which is verified
+        # working, so this routes the rewritten form back to the correct one.
+        if self.local_is_str(mg_recv) or self.local_hir_type_is_str(mg_recv):
+            val mg_cat_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_strcat_tagged"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64(), MirType.i64()],
+                    return_type: MirType.i64(),
+                    is_variadic: false
+                )))
+            ))
+            var b_mg_cat = self.builder
+            val mg_cat_res = b_mg_cat.emit_call(mg_cat_op, [mir_operand_copy(mg_recv), mir_operand_copy(mg_other)], MirType(kind: MirTypeKind.Opaque("str")))
+            self.builder = b_mg_cat
+            if val mg_cat_local = mg_cat_res:
+                # COPY BACK into the receiver local. This arm is reached from a
+                # desugared `x = x + y` that was rewritten into a BARE
+                # `x.merge(y)` statement whose result is discarded -- exactly
+                # the hazard this function's docstring names ("returning a fresh
+                # rt_array_concat would be silently dropped"). Array merge is
+                # in-place through a stable handle, so it needs no copy; string
+                # concat returns a NEW value, so without this the emitted IR
+                # computed rt_strcat_tagged into a fresh local and then went on
+                # printing the ORIGINAL receiver, leaving the string empty.
+                var b_mg_back = self.builder
+                b_mg_back.emit_copy(mg_recv, mg_cat_local)
+                self.builder = b_mg_back
+                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
+                return mg_recv
+            return mg_recv
         val mg_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_extend_i64"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
