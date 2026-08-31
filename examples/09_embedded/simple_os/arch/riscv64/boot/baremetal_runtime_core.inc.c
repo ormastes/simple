@@ -38,6 +38,13 @@ typedef intptr_t RuntimeValue;
 #define HEAP_STRING 1U
 #define HEAP_ARRAY  2U
 #define HEAP_ENUM   7U
+/* Distinct from HEAP_STRING so a string-builder handle can never be read back
+ * as a RuntimeString by rt_string_len / rt_string_data — the two structs have
+ * different layouts and a shared tag would silently return garbage. */
+#define HEAP_STRING_BUILDER 8U
+/* Closure objects. Distinct tag so rt_closure_func_ptr can refuse a handle
+ * that is not actually a closure instead of reading a foreign field. */
+#define HEAP_CLOSURE 9U
 
 typedef struct {
     uint32_t type;
@@ -246,7 +253,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1U);
-    s->len = (uint32_t)len;
+    s->len = (uint64_t)len;
     const char *src = (const char *)(uintptr_t)data;
     for (uintptr_t i = 0; i < len; i++) {
         s->data[i] = src ? src[i] : 0;
@@ -266,13 +273,19 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
 {
     RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) : 0;
     RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) : 0;
+    /* Type-check both sides. Without this a builder or array handle is read
+     * through the RuntimeString layout, taking `len` from a foreign field and
+     * copying out of a foreign region — the same class of silent corruption as
+     * the rt_string_builder_push signature defect above. */
+    if (sa && sa->hdr.type != HEAP_STRING) sa = 0;
+    if (sb && sb->hdr.type != HEAP_STRING) sb = 0;
     uintptr_t la = sa ? sa->len : 0;
     uintptr_t lb = sb ? sb->len : 0;
     RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + la + lb + 1U);
     if (!out) return NIL_VALUE;
     out->hdr.type = HEAP_STRING;
     out->hdr.size = (uint32_t)(sizeof(RuntimeString) + la + lb + 1U);
-    out->len = (uint32_t)(la + lb);
+    out->len = (uint64_t)(la + lb);
     for (uintptr_t i = 0; i < la; i++) out->data[i] = sa->data[i];
     for (uintptr_t i = 0; i < lb; i++) out->data[la + i] = sb->data[i];
     out->data[la + lb] = 0;
@@ -739,3 +752,698 @@ RuntimeValue rt_riscv_harden_canary_value(void)
     return (RuntimeValue)(mixed == 0 ? 1 : mixed);
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Runtime surface needed by REAL product modules, not just hello world.
+ *
+ * Added 2026-08-31 while bringing the toolchain components (caret, the linter,
+ * the MCP dispatcher, the test-runner parser) up in-guest on riscv64. The
+ * hello-world lane only ever needed serial output, so this baremetal runtime
+ * stopped at ~113 rt_* entry points; the moment a real product module is linked
+ * in, ld.lld reports the rest as undefined and the freestanding link dies.
+ *
+ * These are PORTS of the existing hosted ABI in src/runtime/runtime_native.c
+ * into the baremetal runtime — exactly what the rest of this file already is —
+ * NOT new rt_* symbols. Every name here is already declared in
+ * src/runtime/runtime.h and already implemented for hosted targets; the
+ * semantics are copied from there and the encoding is adapted to this file's
+ * tagging (raw int64 in/out for lengths, indices and booleans, RuntimeValue for
+ * strings and arrays), which is the convention rt_array_len and
+ * rt_string_starts_with above already follow.
+ *
+ * Bounded on purpose: allocation goes through rv_alloc, which draws on the
+ * 64 KiB freestanding bump heap, so the array helpers inherit the same growth
+ * ceiling rt_array_push_handle enforces.
+ * ------------------------------------------------------------------------ */
+
+RuntimeValue rt_string_ends_with(RuntimeValue str, RuntimeValue suffix)
+{
+    if (!IS_HEAP(str) || !IS_HEAP(suffix)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    RuntimeString *p = (RuntimeString *)DECODE_PTR(suffix);
+    if (!s || !p || s->hdr.type != HEAP_STRING || p->hdr.type != HEAP_STRING) return 0;
+    if (p->len > s->len) return 0;
+    uint32_t off = s->len - p->len;
+    for (uint32_t i = 0; i < p->len; i++) {
+        if (s->data[off + i] != p->data[i]) return 0;
+    }
+    return 1;
+}
+
+/* UTF-8 codepoint at a CODEPOINT index (not a byte index) — matching the
+ * hosted rt_string_char_code_at, and matching rt_string_chars above, which
+ * already walks the same UTF-8 widths. Indexing bytes here would disagree with
+ * `for ch in s` and silently return half a character on non-ASCII input. */
+RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue index)
+{
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    int64_t want = (int64_t)index;
+    if (want < 0) return 0;
+
+    int64_t seen = 0;
+    for (uint32_t i = 0; i < s->len;) {
+        uint8_t lead = (uint8_t)s->data[i];
+        uint32_t width = 1;
+        uint32_t cp = lead;
+        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) {
+            width = 2; cp = (uint32_t)(lead & 0x1F);
+        } else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) {
+            width = 3; cp = (uint32_t)(lead & 0x0F);
+        } else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) {
+            width = 4; cp = (uint32_t)(lead & 0x07);
+        }
+        for (uint32_t k = 1; k < width; k++) {
+            cp = (cp << 6) | (uint32_t)((uint8_t)s->data[i + k] & 0x3F);
+        }
+        if (seen == want) return (RuntimeValue)(int64_t)cp;
+        seen++;
+        i += width;
+    }
+    return 0;
+}
+
+/* strcmp semantics, sign-normalised to -1/0/1. There is no libc here, so the
+ * comparison walks the bytes directly. */
+RuntimeValue rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
+{
+    RuntimeString *a = IS_HEAP(left) ? (RuntimeString *)DECODE_PTR(left) : (RuntimeString *)0;
+    RuntimeString *b = IS_HEAP(right) ? (RuntimeString *)DECODE_PTR(right) : (RuntimeString *)0;
+    if (a && a->hdr.type != HEAP_STRING) a = 0;
+    if (b && b->hdr.type != HEAP_STRING) b = 0;
+    uint32_t la = a ? a->len : 0;
+    uint32_t lb = b ? b->len : 0;
+    uint32_t n = la < lb ? la : lb;
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t ca = (uint8_t)a->data[i];
+        uint8_t cb = (uint8_t)b->data[i];
+        if (ca != cb) return (RuntimeValue)(int64_t)(ca < cb ? -1 : 1);
+    }
+    if (la == lb) return 0;
+    return (RuntimeValue)(int64_t)(la < lb ? -1 : 1);
+}
+
+/* Slice over a string (byte range) or an array (element range), honouring a
+ * step, with Python-style negative-index normalisation — same contract as the
+ * hosted rt_slice(value, start, end, step). */
+RuntimeValue rt_slice(RuntimeValue value, RuntimeValue start_v, RuntimeValue end_v, RuntimeValue step_v)
+{
+    int64_t step = (int64_t)step_v;
+    if (step == 0) step = 1;
+    if (!IS_HEAP(value)) return value;
+
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+    if (!h) return value;
+
+    int64_t n;
+    if (h->type == HEAP_STRING) {
+        n = (int64_t)((RuntimeString *)h)->len;
+    } else if (h->type == HEAP_ARRAY) {
+        n = (int64_t)((RuntimeArray *)h)->len;
+    } else {
+        return value;
+    }
+
+    int64_t start = (int64_t)start_v;
+    int64_t end = (int64_t)end_v;
+    if (start < 0) start += n;
+    if (end < 0) end += n;
+    if (start < 0) start = 0;
+    if (end > n) end = n;
+
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+
+        /* The contiguous forward slice — which is what `.substring(a, b)`
+         * lowers to and is overwhelmingly the common case — is served by ONE
+         * allocation. The obvious char-by-char concat loop is not merely slow
+         * here: rv_alloc draws on a 64 KiB bump heap that never frees, so two
+         * allocations per character exhausted it inside a single
+         * json_find scan over a 47-byte string and the guest hung with no trap
+         * message (measured 2026-08-31, the caret row stalled right after
+         * printing its built message). Bulk-copying is the fix, not a
+         * micro-optimisation. */
+        if (step == 1) {
+            int64_t take = end - start;
+            if (take <= 0) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+            return rt_string_new((RuntimeValue)(uintptr_t)(s->data + start), (RuntimeValue)take);
+        }
+
+        /* Strided/reverse slices are rare; build the bytes into one buffer
+         * first so this path still costs a single allocation. */
+        int64_t count = 0;
+        if (step > 0) { for (int64_t i = start; i < end; i += step) count++; }
+        else { for (int64_t i = start; i > end; i += step) { if (i >= 0 && i < n) count++; } }
+        if (count <= 0) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+        char *buf = (char *)rv_alloc((size_t)count + 1U);
+        if (!buf) return NIL_VALUE;
+        int64_t w = 0;
+        if (step > 0) { for (int64_t i = start; i < end; i += step) buf[w++] = s->data[i]; }
+        else { for (int64_t i = start; i > end; i += step) { if (i >= 0 && i < n) buf[w++] = s->data[i]; } }
+        buf[w] = 0;
+        return rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)w);
+    }
+
+    RuntimeArray *a = (RuntimeArray *)h;
+    RuntimeValue out = rt_array_new(ENCODE_INT(16));
+    RuntimeValue *items = runtime_array_items(a);
+    if (step > 0) {
+        for (int64_t i = start; i < end; i += step) out = rt_array_push_handle(out, items[i]);
+    } else {
+        for (int64_t i = start; i > end; i += step) {
+            if (i < 0 || i >= n) continue;
+            out = rt_array_push_handle(out, items[i]);
+        }
+    }
+    return out;
+}
+
+RuntimeValue rt_string_join(RuntimeValue array_value, RuntimeValue separator)
+{
+    RuntimeValue out = rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    if (!IS_HEAP(array_value)) return out;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(array_value);
+    if (!a || a->hdr.type != HEAP_ARRAY) return out;
+    RuntimeValue *items = runtime_array_items(a);
+    for (uint64_t i = 0; i < a->len; i++) {
+        if (i != 0) out = rt_string_concat(out, separator);
+        out = rt_string_concat(out, items[i]);
+    }
+    return out;
+}
+
+/* `for x in <text>` must bind one 1-char text per CODEPOINT, not per byte.
+ * The hosted rt_for_iterable routes text through rt_string_chars for exactly
+ * that reason (a byte walk ran 6 times over a 5-character "café," and bound
+ * garbage); rt_string_chars above already does the UTF-8 walk, so this is the
+ * same fix in the same shape. Dicts do not exist in this runtime, so the
+ * hosted dict-entries branch has no counterpart here. */
+RuntimeValue rt_for_iterable(RuntimeValue collection)
+{
+    if (IS_HEAP(collection)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
+        if (h && h->type == HEAP_STRING) return rt_string_chars(collection);
+    }
+    return collection;
+}
+
+/* This runtime has no separate boxed-integer representation: rt_array_len and
+ * friends above hand back raw int64 and simpleos_raw_or_encoded_int is the
+ * single place that tolerates either form. Box/unbox therefore normalise
+ * rather than re-tag — anything else would introduce a second encoding that
+ * nothing else in this file agrees with. */
+RuntimeValue rt_value_int(RuntimeValue value)
+{
+    return value;
+}
+
+RuntimeValue rt_value_unbox_int(RuntimeValue value)
+{
+    return (RuntimeValue)(int64_t)simpleos_raw_or_encoded_int(value);
+}
+
+/* Second tranche of hosted-ABI ports, added for the test-runner component row
+ * (std.nogc_sync_mut.test_runner.test_executor_parsing.parse_test_output).
+ * Same status as the tranche above: ports of names already declared in
+ * src/runtime/runtime.h and already implemented for hosted targets, NOT new
+ * rt_* symbols. Signatures are taken from that header verbatim. */
+
+/* Byte (not codepoint) access, matching the hosted rt_string_byte_at. This is
+ * deliberately the BYTE form even though rt_string_char_code_at above is the
+ * codepoint form — they are different entry points with different contracts,
+ * and parse_test_output's scanners want bytes. */
+RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue index)
+{
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    int64_t i = (int64_t)index;
+    if (!s || s->hdr.type != HEAP_STRING || i < 0 || (uint32_t)i >= s->len) return 0;
+    return (RuntimeValue)(int64_t)(uint8_t)s->data[i];
+}
+
+/* Substring containment for text; element containment for an array. The hosted
+ * rt_contains is polymorphic over both, so this is too. */
+RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
+{
+    if (!IS_HEAP(collection)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
+    if (!h) return 0;
+
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        if (!IS_HEAP(value)) return 0;
+        RuntimeString *needle = (RuntimeString *)DECODE_PTR(value);
+        if (!needle || needle->hdr.type != HEAP_STRING) return 0;
+        if (needle->len == 0) return 1;
+        if (needle->len > s->len) return 0;
+        for (uint32_t i = 0; i + needle->len <= s->len; i++) {
+            uint32_t j = 0;
+            while (j < needle->len && s->data[i + j] == needle->data[j]) j++;
+            if (j == needle->len) return 1;
+        }
+        return 0;
+    }
+
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        RuntimeValue *items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) {
+            if (items[i] == value) return 1;
+            if (rt_string_eq(items[i], value)) return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* Split on a delimiter, returning an array of strings. An empty delimiter
+ * returns the whole input as a single element rather than exploding into
+ * characters — that is the hosted behaviour and callers rely on it. Each piece
+ * is ONE allocation (rt_string_new over the byte range), never a per-character
+ * concat: the freestanding bump heap never frees, so the concat form is what
+ * exhausted it in the rt_slice incident recorded above. */
+RuntimeValue rt_string_split(RuntimeValue value, RuntimeValue delimiter)
+{
+    RuntimeValue out = rt_array_new(ENCODE_INT(16));
+    if (!IS_HEAP(value)) return out;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(value);
+    if (!s || s->hdr.type != HEAP_STRING) return out;
+
+    RuntimeString *d = IS_HEAP(delimiter) ? (RuntimeString *)DECODE_PTR(delimiter) : (RuntimeString *)0;
+    if (d && d->hdr.type != HEAP_STRING) d = 0;
+    if (!d || d->len == 0) {
+        return rt_array_push_handle(out, value);
+    }
+
+    uint32_t start = 0;
+    for (uint32_t i = 0; i + d->len <= s->len;) {
+        uint32_t j = 0;
+        while (j < d->len && s->data[i + j] == d->data[j]) j++;
+        if (j == d->len) {
+            out = rt_array_push_handle(
+                out, rt_string_new((RuntimeValue)(uintptr_t)(s->data + start), (RuntimeValue)(i - start)));
+            i += d->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    out = rt_array_push_handle(
+        out, rt_string_new((RuntimeValue)(uintptr_t)(s->data + start), (RuntimeValue)(s->len - start)));
+    return out;
+}
+
+/* Decimal parse with an optional sign, skipping leading/trailing ASCII space.
+ * Non-numeric input yields 0, matching the hosted rt_string_to_int. */
+RuntimeValue rt_string_to_int(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(value);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+
+    uint32_t i = 0;
+    while (i < s->len && (s->data[i] == ' ' || s->data[i] == '\t' ||
+                          s->data[i] == '\n' || s->data[i] == '\r')) i++;
+    int64_t sign = 1;
+    if (i < s->len && (s->data[i] == '-' || s->data[i] == '+')) {
+        if (s->data[i] == '-') sign = -1;
+        i++;
+    }
+    int64_t acc = 0;
+    int saw_digit = 0;
+    while (i < s->len && s->data[i] >= '0' && s->data[i] <= '9') {
+        acc = acc * 10 + (int64_t)(s->data[i] - '0');
+        saw_digit = 1;
+        i++;
+    }
+    if (!saw_digit) return 0;
+    return (RuntimeValue)(sign * acc);
+}
+
+/* Third tranche of hosted-ABI ports, added for the dev-tool component row
+ * (compiler.tools.lint._LintMain.os_freestanding_lints). Same status as the
+ * two tranches above: ports, not new rt_* symbols.
+ *
+ * The enum accessors sit alongside the pre-existing rt_enum_check_discriminant
+ * (line 526) and read the same RuntimeEnum layout; the lint rule needs the raw
+ * discriminant and enum id because it returns Option<OsFreestandingWarning>
+ * and the caller matches on it. */
+
+RuntimeValue rt_enum_discriminant(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    return (RuntimeValue)(int64_t)e->discriminant;
+}
+
+RuntimeValue rt_enum_id(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    return (RuntimeValue)(int64_t)e->enum_id;
+}
+
+/* Index of the first occurrence, or -1. Polymorphic over text (substring
+ * search, byte offsets) and array (element search), mirroring rt_contains
+ * above and the hosted rt_find. -1 for "absent" is load-bearing: callers
+ * branch on `< 0`, so returning 0 would read as "found at the start". */
+RuntimeValue rt_find(RuntimeValue collection, RuntimeValue value)
+{
+    if (!IS_HEAP(collection)) return (RuntimeValue)(int64_t)-1;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
+    if (!h) return (RuntimeValue)(int64_t)-1;
+
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        if (!IS_HEAP(value)) return (RuntimeValue)(int64_t)-1;
+        RuntimeString *needle = (RuntimeString *)DECODE_PTR(value);
+        if (!needle || needle->hdr.type != HEAP_STRING) return (RuntimeValue)(int64_t)-1;
+        if (needle->len == 0) return 0;
+        if (needle->len > s->len) return (RuntimeValue)(int64_t)-1;
+        for (uint32_t i = 0; i + needle->len <= s->len; i++) {
+            uint32_t j = 0;
+            while (j < needle->len && s->data[i + j] == needle->data[j]) j++;
+            if (j == needle->len) return (RuntimeValue)(int64_t)i;
+        }
+        return (RuntimeValue)(int64_t)-1;
+    }
+
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        RuntimeValue *items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) {
+            if (items[i] == value) return (RuntimeValue)(int64_t)i;
+            if (rt_string_eq(items[i], value)) return (RuntimeValue)(int64_t)i;
+        }
+    }
+    return (RuntimeValue)(int64_t)-1;
+}
+
+/* Fourth tranche of hosted-ABI ports: the STRING BUILDER.
+ *
+ * Found by probe, not by reading codegen: `acc = acc + x` inside a loop does
+ * not lower to repeated rt_string_concat — codegen rewrites it into a builder
+ * (rt_string_builder_new / _push / _finish, with rt_string_data + rt_string_len
+ * to read the appended piece). The freestanding riscv64 runtime had none of
+ * these, so a product module that accumulates a string in a loop fails to link
+ * here. Ports of names already declared in src/runtime/runtime.h, not new rt_*
+ * symbols.
+ *
+ * Because the bump heap never frees, growth DOUBLES rather than reallocating
+ * per push — per-append reallocation is exactly the pattern that exhausted the
+ * heap in the rt_slice incident recorded above.
+ */
+
+typedef struct {
+    HeapHeader hdr;
+    uint32_t len;
+    uint32_t cap;
+    char *data;
+} RuntimeStringBuilder;
+
+RuntimeValue rt_string_len(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(value);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    return (RuntimeValue)(int64_t)s->len;
+}
+
+RuntimeValue rt_string_data(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(value);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    return (RuntimeValue)(uintptr_t)s->data;
+}
+
+RuntimeValue rt_string_builder_new(void)
+{
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)rv_alloc(sizeof(RuntimeStringBuilder));
+    if (!b) return NIL_VALUE;
+    /* Tagged as a DISTINCT heap type so a builder handle can never be read as a
+     * RuntimeString by rt_string_len / rt_string_data above. */
+    b->hdr.type = HEAP_STRING_BUILDER;
+    b->hdr.size = (uint32_t)sizeof(RuntimeStringBuilder);
+    b->len = 0;
+    b->cap = 64;
+    b->data = (char *)rv_alloc(b->cap);
+    if (!b->data) return NIL_VALUE;
+    b->data[0] = 0;
+    return ENCODE_PTR(b);
+}
+
+RuntimeValue rt_string_builder_len(RuntimeValue builder)
+{
+    if (!IS_HEAP(builder)) return 0;
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) return 0;
+    return (RuntimeValue)(int64_t)b->len;
+}
+
+/* Signature MUST match the hosted contract: runtime.h:405 declares
+ *   int64_t rt_string_builder_push(int64_t handle, int64_t string);
+ * — TWO arguments, and the second is a tagged string HANDLE, not a raw char*
+ * with a separate length. This port previously took (builder, data, len) and
+ * cast argument 2 straight to `const char *`, so codegen's 2-argument call
+ * made it copy bytes out of the string object's HEADER and take a garbage
+ * length from an uninitialised register. That is why an in-guest
+ * `acc = acc + "x"` loop produced NUL bytes instead of text (probe step 9a)
+ * and then hung (step 9b), and it is the defect behind the caret row's empty
+ * `extract_json_string` result and the test-runner row's wrong counts. */
+RuntimeValue rt_string_builder_push(RuntimeValue builder, RuntimeValue string)
+{
+    if (!IS_HEAP(builder)) return builder;
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) return builder;
+
+    RuntimeString *s = IS_HEAP(string) ? (RuntimeString *)DECODE_PTR(string) : (RuntimeString *)0;
+    if (!s || s->hdr.type != HEAP_STRING) return builder;
+    uint32_t add = (uint32_t)s->len;
+    const char *src = s->data;
+    if (add == 0) return builder;
+
+    if (b->len + add + 1U > b->cap) {
+        uint32_t want = b->cap ? b->cap : 64U;
+        while (want < b->len + add + 1U) want *= 2U;
+        char *grown = (char *)rv_alloc(want);
+        if (!grown) return builder;
+        for (uint32_t i = 0; i < b->len; i++) grown[i] = b->data[i];
+        b->data = grown;
+        b->cap = want;
+    }
+    for (uint32_t i = 0; i < add; i++) b->data[b->len + i] = src[i];
+    b->len += add;
+    b->data[b->len] = 0;
+    return builder;
+}
+
+RuntimeValue rt_string_builder_finish(RuntimeValue builder)
+{
+    if (!IS_HEAP(builder)) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) {
+        return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)b->data, (RuntimeValue)(int64_t)b->len);
+}
+
+RuntimeValue rt_string_builder_free(RuntimeValue builder)
+{
+    /* The bump heap never frees; this exists so the symbol resolves. */
+    (void)builder;
+    return NIL_VALUE;
+}
+
+/* ---------------------------------------------------------------------------
+ * Closures.
+ *
+ * PORT, not a new symbol: rt_closure_new / rt_closure_set_capture /
+ * rt_closure_get_capture / rt_closure_func_ptr are all declared in
+ * src/runtime/runtime.h (lines 664-667) and defined for the hosted target in
+ * src/runtime/runtime_native.c (rt_closure_new at :8042). What follows is the
+ * same contract re-expressed against this file's bump heap and tagged-value
+ * encoding, so a freestanding image can carry a closure-valued struct field.
+ *
+ * The MCP dispatcher needs exactly this: DispatchEntry.handler is a closure,
+ * so without these four symbols the component kernel does not LINK. Stubbing
+ * them would produce a dispatcher that silently handles nothing, which is why
+ * they are implemented rather than stubbed.
+ *
+ * Differences from the hosted definition, and why each is correct here:
+ *   * calloc -> rv_alloc plus an explicit fill. rv_alloc does NOT zero, and
+ *     zeroing would be wrong anyway: NIL_VALUE is TAG_SPECIAL (0x3), not 0, so
+ *     the captures are filled with NIL_VALUE explicitly rather than relying on
+ *     allocator behaviour.
+ *   * rt_core_register_closure is dropped. That call exists hosted so the GC
+ *     can trace closures; this runtime has no collector and never frees, so
+ *     every closure is already immortal — the property registration buys.
+ *   * func_ptr is stored raw (not tagged). Codegen passes and expects a raw
+ *     code address on both lanes; tagging it here would corrupt the
+ *     indirect call.
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+    HeapHeader   hdr;
+    uint64_t     func_ptr;
+    uint64_t     capture_count;
+    RuntimeValue captures[];
+} RuntimeClosure;
+
+/* Reject a handle that is not a closure rather than reading a foreign field. */
+static RuntimeClosure *as_closure(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeClosure *c = (RuntimeClosure *)DECODE_PTR(value);
+    if (!c || c->hdr.type != HEAP_CLOSURE) return 0;
+    return c;
+}
+
+/* PARAMETER WIDTHS ARE NOT FREE CHOICES — they are the codegen ABI, declared in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:678-681:
+ *   rt_closure_new         (I64, I32)      -> I64
+ *   rt_closure_set_capture (I64, I32, I64) -> I8
+ *   rt_closure_get_capture (I64, I32)      -> I64
+ *   rt_closure_func_ptr    (I64)           -> I64
+ * and matched by the Rust runtime (value/objects.rs:177,198,213,227), whose
+ * index/count parameters are `u32`. Declaring these as 64-bit RuntimeValue —
+ * as this port first did — leaves the upper half of the register undefined, so
+ * the count/index read as garbage, the capture lookup falls out of range, and
+ * the indirect call goes through a NULL func_ptr. That is a trap, and it is
+ * exactly what the mcp row did in-guest. */
+RuntimeValue rt_closure_new(RuntimeValue func_ptr, uint32_t capture_count)
+{
+    int64_t count = (int64_t)capture_count;
+    if (!func_ptr || count < 0) return NIL_VALUE;
+    /* Bounded like every other allocation in this file: the arena is 1 MiB. */
+    if (count > 4096) return NIL_VALUE;
+    RuntimeClosure *c = (RuntimeClosure *)rv_alloc(
+        sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
+    if (!c) return NIL_VALUE;
+    c->hdr.type = HEAP_CLOSURE;
+    c->hdr.size = (uint32_t)(sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
+    c->func_ptr = (uint64_t)(uintptr_t)func_ptr;
+    c->capture_count = (uint64_t)count;
+    for (int64_t i = 0; i < count; i++) c->captures[i] = NIL_VALUE;
+    return ENCODE_PTR(c);
+}
+
+/* Returns I8 per the codegen spec, not a tagged RuntimeValue. */
+int8_t rt_closure_set_capture(RuntimeValue closure, uint32_t index, RuntimeValue value)
+{
+    RuntimeClosure *c = as_closure(closure);
+    if (!c || (uint64_t)index >= c->capture_count) return 0;
+    c->captures[index] = value;
+    return 1;
+}
+
+RuntimeValue rt_closure_get_capture(RuntimeValue closure, uint32_t index)
+{
+    RuntimeClosure *c = as_closure(closure);
+    if (!c || (uint64_t)index >= c->capture_count) return NIL_VALUE;
+    return c->captures[index];
+}
+
+RuntimeValue rt_closure_func_ptr(RuntimeValue closure)
+{
+    RuntimeClosure *c = as_closure(closure);
+    return c ? (RuntimeValue)(uintptr_t)c->func_ptr : 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Four more PORTS of hosted names, needed by the MCP dispatch closure:
+ *   rt_string_bytes  (runtime.h:402, runtime_native.c:2754)
+ *   rt_array_concat  (runtime.h:505, runtime_native.c:7218)
+ *   rt_native_cmp    (runtime.h:677, runtime_native.c:3798)
+ *   rt_bytes_to_text (runtime.c:3633 / runtime_native.c:6946 — defined hosted
+ *                     but NOT declared in runtime.h; still a port of an
+ *                     existing hosted name, not a new symbol)
+ *
+ * The hosted array carries FLAG_BYTES / FLAG_U64_PACKED and switches element
+ * width on them. This runtime's RuntimeArray has no flags — every element is a
+ * RuntimeValue slot — so the ports are the same CONTRACT expressed in the one
+ * representation this file has, rather than a transcription of code whose
+ * branches cannot exist here.
+ * ------------------------------------------------------------------------- */
+
+RuntimeValue rt_string_bytes(RuntimeValue str)
+{
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    if (s && s->hdr.type != HEAP_STRING) s = 0;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(s ? (int64_t)s->len : 0));
+    if (!s) return arr;
+    /* RAW byte, deliberately NOT ENCODE_INT — same reason as the hosted BUGFIX
+     * note at runtime_native.c:2757: `.bytes()` is `[u8]`, and a `[u8]` element
+     * read truncates with & 0xFF WITHOUT untagging, so a tagged slot would hand
+     * back the tag's low byte instead of the byte. */
+    for (uint64_t i = 0; i < s->len; i++) {
+        arr = rt_array_push_handle(arr, (RuntimeValue)(uint8_t)s->data[i]);
+    }
+    return arr;
+}
+
+RuntimeValue rt_bytes_to_text(RuntimeValue bytes_value)
+{
+    RuntimeArray *a = IS_HEAP(bytes_value) ? (RuntimeArray *)DECODE_PTR(bytes_value) : (RuntimeArray *)0;
+    if (a && a->hdr.type != HEAP_ARRAY) a = 0;
+    if (!a || a->len == 0) {
+        return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    }
+    /* Same 4096 bound every other allocating string entry in this file uses. */
+    if (a->len > 4096U) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + (size_t)a->len + 1U);
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)a->len + 1U);
+    out->len = a->len;
+    RuntimeValue *items = runtime_array_items(a);
+    /* Tolerate both slot forms: rt_string_bytes stores raw bytes, but an array
+     * built in Simple as plain ints arrives tag-encoded. */
+    for (uint64_t i = 0; i < a->len; i++) {
+        out->data[i] = (char)(uint8_t)(simpleos_raw_or_encoded_int(items[i]) & 0xFFU);
+    }
+    out->data[a->len] = 0;
+    return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_array_concat(RuntimeValue left, RuntimeValue right)
+{
+    RuntimeArray *a = IS_HEAP(left) ? (RuntimeArray *)DECODE_PTR(left) : (RuntimeArray *)0;
+    RuntimeArray *b = IS_HEAP(right) ? (RuntimeArray *)DECODE_PTR(right) : (RuntimeArray *)0;
+    if (a && a->hdr.type != HEAP_ARRAY) a = 0;
+    if (b && b->hdr.type != HEAP_ARRAY) b = 0;
+    uint64_t la = a ? a->len : 0;
+    uint64_t lb = b ? b->len : 0;
+    RuntimeValue out = rt_array_new(ENCODE_INT((int64_t)(la + lb)));
+    if (out == NIL_VALUE) return NIL_VALUE;
+    if (a) {
+        RuntimeValue *ia = runtime_array_items(a);
+        for (uint64_t i = 0; i < la; i++) out = rt_array_push_handle(out, ia[i]);
+    }
+    if (b) {
+        RuntimeValue *ib = runtime_array_items(b);
+        for (uint64_t i = 0; i < lb; i++) out = rt_array_push_handle(out, ib[i]);
+    }
+    return out;
+}
+
+RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right)
+{
+    RuntimeString *sa = IS_HEAP(left) ? (RuntimeString *)DECODE_PTR(left) : (RuntimeString *)0;
+    RuntimeString *sb = IS_HEAP(right) ? (RuntimeString *)DECODE_PTR(right) : (RuntimeString *)0;
+    if (sa && sa->hdr.type != HEAP_STRING) sa = 0;
+    if (sb && sb->hdr.type != HEAP_STRING) sb = 0;
+    /* Text on either side routes to the text comparator, exactly as hosted. */
+    if (sa || sb) return rt_text_cmp_any(left, right);
+    /* The hosted float branch has no counterpart here: this runtime never boxes
+     * f64 (TAG_FLOAT values are raw bit patterns, see f64_to_bits), so an
+     * ordered float compare would be a guess. Integers only. */
+    int64_t a = (int64_t)simpleos_raw_or_encoded_int(left);
+    int64_t b = (int64_t)simpleos_raw_or_encoded_int(right);
+    if (a < b) return (RuntimeValue)(int64_t)-1;
+    if (a > b) return (RuntimeValue)(int64_t)1;
+    return 0;
+}
