@@ -37,7 +37,7 @@ use super::{
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
     MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
     MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -446,6 +446,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
+    USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     crate::interpreter::reset_owned_globals_from_initial();
@@ -1210,6 +1212,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Unit types define a newtype wrapper with a literal suffix
                 // Register the unit type name and its suffix for later use
                 units.insert(u.suffix.clone(), u.clone());
+                UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                });
+                USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                });
                 env.insert(u.name.clone(), Value::Nil);
             }
             Node::UnitFamily(uf) => {
@@ -1231,6 +1239,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     conversions.insert(variant.suffix.clone(), variant.factor);
                     // Register suffix -> family mapping in thread-local for expression evaluation
                     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                    });
+                    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
                         cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                     });
                 }
@@ -1282,6 +1293,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 for variant in &uf.variants {
                     if (variant.factor - 1.0).abs() < f64::EPSILON {
                         SI_BASE_UNITS.with(|cell| {
+                            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                        });
+                        USER_SI_BASE_UNITS.with(|cell| {
                             cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                         });
                         break; // Only one base unit per family

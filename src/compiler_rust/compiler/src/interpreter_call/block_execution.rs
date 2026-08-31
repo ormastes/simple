@@ -2,7 +2,8 @@
 
 use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{
-    bind_pattern_value, handle_method_call_with_self_update, restore_pattern_scope, save_pattern_scope,
+    bind_pattern_value, handle_method_call_with_self_update, range_object_values, restore_pattern_scope,
+    save_pattern_scope,
 };
 use super::bdd::{BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
@@ -12,6 +13,7 @@ use crate::interpreter::{
     GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
     MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
+use crate::interpreter_unit::{register_standalone_unit_locals, register_unit_family_locals};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, WhileStmt};
 use simple_runtime::value::diagram_sffi;
@@ -177,17 +179,10 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
                 let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
                 let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
                 let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
-                let mut values = Vec::new();
-                if inclusive {
-                    for i in start..=end {
-                        values.push(Value::Int(i));
-                    }
-                } else {
-                    for i in start..end {
-                        values.push(Value::Int(i));
-                    }
-                }
-                return Ok(values);
+                let step = fields.get("step").and_then(|v| v.as_int().ok()).unwrap_or(1);
+                return Ok(range_object_values(
+                    start, end, inclusive, step,
+                ));
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -1343,6 +1338,24 @@ pub(super) fn exec_block_closure_into(
                 }
                 last_value = Value::Nil;
             }
+            // A `unit` / `unit family` declared inside a block-closure body
+            // (a lambda, an `fn` body, or a `describe`/`it` example) used to
+            // fall through to the `_ =>` catch-all below and register nothing,
+            // so its suffixes were invisible and unit literals silently fell
+            // back to the preloaded on-disk unit tree — which is why
+            // `5_km` after `unit length(base: f64): m = 1.0` never got the
+            // kilo multiplier. Only the top-level statement path
+            // (`interpreter_eval.rs`) ever registered them.
+            Node::Unit(u) => {
+                register_standalone_unit_locals(u);
+                local_env.insert(u.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            Node::UnitFamily(uf) => {
+                register_unit_family_locals(uf);
+                local_env.insert(uf.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -2014,6 +2027,24 @@ fn exec_block_closure_mut_inner(
                 if !is_condition_present(&assert_stmt.condition, &condition_value) {
                     return Err(assert_stmt_failure(assert_stmt, &condition_value));
                 }
+                last_value = Value::Nil;
+            }
+            // A `unit` / `unit family` declared inside a block-closure body
+            // (a lambda, an `fn` body, or a `describe`/`it` example) used to
+            // fall through to the `_ =>` catch-all below and register nothing,
+            // so its suffixes were invisible and unit literals silently fell
+            // back to the preloaded on-disk unit tree — which is why
+            // `5_km` after `unit length(base: f64): m = 1.0` never got the
+            // kilo multiplier. Only the top-level statement path
+            // (`interpreter_eval.rs`) ever registered them.
+            Node::Unit(u) => {
+                register_standalone_unit_locals(u);
+                local_env.insert(u.name.clone(), Value::Nil);
+                last_value = Value::Nil;
+            }
+            Node::UnitFamily(uf) => {
+                register_unit_family_locals(uf);
+                local_env.insert(uf.name.clone(), Value::Nil);
                 last_value = Value::Nil;
             }
             _ => {
