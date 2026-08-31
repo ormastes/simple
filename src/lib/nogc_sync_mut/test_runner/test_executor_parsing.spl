@@ -488,6 +488,30 @@ fn find_raw(s: text, keyword: text) -> i64:
         i = i + 1
     -1
 
+# Decode an all-digit run to i64 WITHOUT text.to_int(). Measured in-guest on
+# SimpleOS x86_64 (OVMF -> GRUB-EFI, real firmware, 2026-08-31): the probe
+# `("2".to_int() ?? 0) == 2` prints NO in a freestanding image while
+# starts_with/contains/slice-equality/split all print YES — so `to_int`'s
+# Optional decode is the single failing layer there, and every count this file
+# extracts came back 0. Same defect class find_raw's own comment documents for
+# `text.index_of` (flat-optional in-band sentinel), and the same remedy the
+# senior guidance there prescribes: prefer raw >=0 sentinel arithmetic over an
+# Optional in critical paths. char_code + i64 compares are already mandatory in
+# both callers for the unrelated pointer-cmp miscompile, so this keeps the whole
+# digit path on primitives that are proven to work in-guest.
+# See doc/08_tracking/bug/
+# simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md.
+fn digits_to_i64(digits: text) -> i64:
+    var acc = 0
+    var i = 0
+    while i < digits.len():
+        val code: i64 = char_code(digits[i:i + 1])
+        if code < 48 or code > 57:
+            return -1
+        acc = acc * 10 + (code - 48)
+        i = i + 1
+    acc
+
 fn extract_number_after_colon(s: text, prefix: text) -> i64:
     val idx = find_raw(s, prefix)
     if idx < 0:
@@ -507,7 +531,7 @@ fn extract_number_after_colon(s: text, prefix: text) -> i64:
     if end_pos == 0:
         return -1
     val num_str = after[0:end_pos]
-    num_str.to_int() ?? 0
+    digits_to_i64(num_str)
 
 fn extract_number_before(s: text, keyword: text) -> i64:
     val idx = find_raw(s, keyword)
@@ -534,7 +558,7 @@ fn extract_number_before(s: text, keyword: text) -> i64:
     if start > end:
         return -1
     val num_str = s[start:end + 1]
-    num_str.to_int() ?? 0
+    digits_to_i64(num_str)
 
 # =========================================================================
 # Child Process Arguments & Result Building
