@@ -1,7 +1,7 @@
 # Windows MSVC Stage 2: CompilerConfig/CompileOptions by-value struct transport corrupts fields non-deterministically
 
 **Date:** 2026-08-31
-**Status:** CONFIRMED (measured), NOT FIXED — flagged as core-codegen, fix deferred
+**Status:** CONFIRMED (measured) as a Windows symptom; root cause identified and FIXED upstream in commit `35b22b6aedf1` (2026-08-31 18:34, landed on macOS lane) — Windows re-verification against a post-fix stage1 still outstanding, see "Session update 2026-08-31 (later)" below. Do not close without that re-run.
 **Area:** native codegen / LLVM backend, MSVC ABI, struct-by-value return and parameter transport
 **Severity:** High — silently corrupts unrelated struct fields at runtime, blocks Windows Stage 2 admission entirely
 **Platform:** `x86_64-pc-windows-msvc` native (LLVM 18) build only. Not yet checked on Linux/macOS — see Unix-safety note below.
@@ -1049,3 +1049,160 @@ the fallback picks, and why the existing `type_name_hint`/
 directly observed, only inferred from static analysis converging with an
 existing code comment describing the same symptom for a sibling field
 access. Zero behavior change on any target.
+
+## Session update 2026-08-31 (later): the lead is CONFIRMED and a fix has LANDED - Windows re-verification still outstanding
+
+This session picked up exactly where the prior one stopped and answered its
+open question. Repo: `simple-rebase`, branch
+`work/windows-bootstrap-msvc-rebased`.
+
+### 1. Field identities at indices 26/27 - VERIFIED, exact match
+
+Re-counted `CompileOptions` fields (0-based, `src/compiler/00.common/driver_compile_options.spl:3-45`,
+comments and blank lines excluded from the count):
+
+```
+22  mcdc_owner_bytes: i64 = 0
+23  mcdc_global_bytes: i64 = 0
+24  allowed_families: [text]
+25  build_mode: text
+26  cli_mode_text: text            <- predicted, CONFIRMED
+27  bootstrap_input_count: i64     <- predicted, CONFIRMED
+28  bootstrap_input_0: text
+29  bootstrap_input_1: text
+```
+
+`bootstrap_api.spl:10` unconditionally sets `options.bootstrap_input_count = 1`
+before every bootstrap compile. The +4 index-shift arithmetic in the prior
+session's lead is exactly right.
+
+### 2. The mitigation is not just "exists" - it is the VERIFIED, LANDED root-cause fix, and it predates/upstreams this doc's remaining gap
+
+While this session was investigating, commit `35b22b6aedf1`
+("fix(macos): unbreak the macOS bootstrap lane - 10 platform defects + 5
+compiler defects (#97)", 2026-08-31 18:34:03 +0900) landed on this branch.
+It independently root-caused the identical bug - same symptom
+(`mcdc_owner_bytes`/`mcdc_global_bytes` corruption in
+`CompileContext.create`), same mechanism (`get_field_info`'s ANY-typed
+"most fields wins" fallback), same numbers (`CompilerConfig` field 10/0x50,
+`CompileOptions` field 22/0xb0, `MirLowering` field 26/0xd0 winning by field
+count) - on the macOS lane, and fixed it with four changes:
+
+1. `type_resolver.rs`: the ANY-branch and wildcard-branch "most fields wins"
+   loops now refuse to guess (`best = None`) when `is_ambiguous_global_field`
+   is true, instead of picking the struct with the most fields.
+2. `module_pass.rs` (both pre-registration passes): now also walk
+   `Node::ExportUseStmt`, not just `Node::UseStmt` - `driver_types.spl:7` is
+   `export use compiler.common.driver_core_types.*`, and `CompileOptions`
+   was never registered as a named type through that route, which is why its
+   receiver erased to `ANY` in the first place.
+3. `native_project/imports.rs`: the whole-program return-type map now also
+   collects methods declared inside `impl` blocks (was `Node::Function`
+   only), so `CompilerConfig.from_env()`'s return type is discoverable.
+4. `hir/lower/module_lowering/function.rs` / `expr/access.rs`: the
+   `LocalVar::type_name_hint` mechanism read about last session is confirmed
+   populated unconditionally for every parameter with an explicit type
+   annotation (`module_lowering/function.rs:658-664`), and is additionally
+   extended with `FunctionContext::static_call_type_hints` for a local
+   initialized from a static call whose declared return type is known
+   (covers `compiler_config`, made discoverable by fix 3).
+
+Answer to the prior session's decisive open question ("is
+`populate_global_struct_defs` active for this build?"): yes, confirmed -
+`native_project/mod.rs:875` gates the whole `imports` value (including
+`populate_global_struct_defs: true` at `mod.rs:931`) on
+`!self.config.no_mangle`; `no_mangle` defaults `false` (`mod.rs:460`) and is
+set `true` only by an explicit `--no-mangle` CLI flag
+(`driver/src/cli/native_build.rs:97,239`), which the Windows bootstrap script
+never passes. But the real answer, per 35b22b6's own investigation, is that
+this single mitigation was necessary but NOT sufficient on its own - it took
+the `ExportUseStmt` registration fix plus the impl-method return-type
+collection fix plus the static-call hint extension, in combination, to close
+both the `options` and `compiler_config` receivers.
+
+### 3. Which access mis-resolves - BOTH, confirmed by the fixing commit's own disassembly
+
+The commit body includes real ARM64 disassembly from a genuinely built and
+run macOS Stage 2 binary, at successive points in its own investigation:
+
+```
+ldr x8, [x28, #0xb0]   ; options.mcdc_owner_bytes    CompileOptions f22  fixed  (after fix 2)
+ldr x9, [x22, #0xd0]   ; compiler_config.owner       MirLowering    f26  still wrong (before fixes 3+4)
+```
+
+`options` (a directly annotated function parameter) was fixed first, by the
+`ExportUseStmt` registration fix alone. `compiler_config` (a local bound
+from `CompilerConfig.from_env()`, a cross-module static call) needed the two
+additional fixes because a local's type-resolution path differs from a
+parameter's. Both receivers are now covered by the landed commit.
+
+### 4. Cheap-oracle attempt this session - inconclusive, not pursued further
+
+Confirmed no bootstrap process was actually running (the process-list match
+in the task brief was a false positive: it matched this session's own
+`Get-CimInstance` query string, which itself contains the literal text
+`bootstrap-from-scratch`). Found a freshly built seed,
+`src/compiler_rust/target/release/simple.exe`, timestamped 18:35:08 - 65
+seconds after 35b22b6 landed - so it already contains the fix. Attempted the
+prior session's own recommended cheap test: `SIMPLE_TRACE_FIELD_GET=1` plus
+`native-build --source src/compiler --source src/app --source src/lib
+--entry src/app/cli/bootstrap_main.spl --emit-object` (object-only, no link,
+so it should be fast and MSVC-toolchain-independent). Result: inconclusive
+within a 10-minute budget - sporadic `error: semantic: invalid operation:
+cannot slice value of type str with step` at `driver_types.spl:7:1` on some
+shards while other shards proceeded (the repo's own `parse-shard`/
+`hir-shard` retry machinery was visibly reclaiming and re-queuing shards),
+and `SIMPLE_TRACE_FIELD_GET` turned out to instrument a different
+(interpreter-time) path than native codegen - only 29 `[TRACE FieldGet]`
+lines fired across the whole build, none for `mcdc_owner_bytes`/
+`mcdc_global_bytes`/`CompileContext`, so it is not the right lever for this
+codegen path. No exit-code marker was ever written to the captured log, so
+the run's actual outcome is unknown and a background-task "completed" status
+notification could not be reconciled with the log content and should not be
+trusted as a pass. Recorded so the next session does not repeat it. Also
+worth noting: this checkout's `git status` currently reports extensive
+deletions (`src/compiler/driver`, `src/compiler/blocks`, `src/std`, etc. all
+`D`) that did not stop this build from finding those files on disk - worth
+an independent look before trusting any build result from this checkout. No
+source files were changed and no process was left running (build and
+monitor tasks explicitly stopped at the end of this session).
+
+### 5. General vs. Windows-specific - verdict upgraded from "inferred" to "general, with cross-platform empirical confirmation; Windows re-run still pending"
+
+Prior session: "inferred, not proved... this repo offers no way to run a
+second-platform measurement." That gap is now closed in the general
+direction: the identical mechanism, on a different real platform
+(macOS/aarch64 vs. the Windows/x86_64-msvc this doc covers), with a real
+compiled-and-run Stage 2 binary, went from failing at the same MC/DC
+buffer-cap guard this doc documents to linking, running, and reporting
+`simple-bootstrap 1.0.0-rc.1` after the four fixes above (per 35b22b6's own
+commit body - Stage 2 then hit a different, unrelated hang in
+`lower_mir_storage_project_fields_v1`, confirming the mcdc-corruption
+failure mode specifically was cleared and progress moved past it). Nothing
+in the four fixed files branches on `target_os` or triple; the mechanism is
+squarely in the shared HIR front end used by every backend and target. This
+is real evidence, not just static-source inference, but it is evidence from
+the OTHER platform - this doc's own platform (Windows/MSVC) has not yet been
+re-run against a stage1 built from 35b22b6 or later. The Windows `.rejected`
+artifact analyzed across all sessions on this doc
+(`build/w/stage2/x86_64-pc-windows-msvc/simple.exe.rejected`, born
+16:32:03, modified 16:43:14) unambiguously PREDATES the fix commit
+(18:34:03) and must not be re-cited as evidence of an unfixed Windows
+Stage 2 - it was built before the fix existed.
+
+### Recommended next step
+
+Run the sanctioned Windows bootstrap
+(`scripts/bootstrap/bootstrap-from-scratch.sh`) from a stage1 built at or
+after `35b22b6aedf1`, through Stage 2 admission, and record whether the
+MC/DC buffer-cap sanity failure recurs. If it does not, this doc's status
+should move to FIXED, cross-referenced against
+`stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30.md` (the fix
+was authored and verified there against the macOS symptom; this doc's
+remaining job is to supply the Windows-side confirmation, not a second
+independent fix).
+
+**Status update: still CONFIRMED (measured) as a Windows-observed symptom,
+but the underlying mechanism is now believed FIXED upstream, unverified on
+Windows.** Do not mark this doc resolved without a fresh Windows Stage 2 run
+against a post-35b22b6 stage1.
