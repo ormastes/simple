@@ -282,3 +282,37 @@ Four root-cause stories were adopted in this investigation and three discarded, 
 by a measurement rather than an argument. The step that resolved it was printing
 `content_len` next to the import count — the one datum that separates a short READ
 from a short PARSE. All discarded stories are retained above rather than edited away.
+
+## Fix VERIFIED, but Stage 3 is NOT green (2026-09-01)
+
+Measured with the fixed Stage-2 compiler, `compile --format=smf` on
+`src/app/cli/bootstrap_main.spl` with the entry closure enabled:
+
+| | before | after |
+|---|---|---|
+| entry-closure modules | 741 | **763** |
+| `hir_operators.spl` in the build | absent | **parsed as source 354/763** |
+| `HirBinOp` + `HirUnaryOp` + `HirAssignOp` fatals | 436 | **0** |
+| `unresolved type` occurrences | 1,064 | 910 |
+| distinct files with hir-fatals | 200 | 172 |
+
+The targeted family is eliminated and the closure recovered the 22 modules it had
+been dropping. **The build still fails** (`phase 3 FAILED`), now dominated by a
+different set whose top entries are `LocalId` (65), `MirModule` (64),
+`MirFunction` (40), `MirType` (39), `BlockValue` (27), `PrimitiveType` (25).
+
+Two cautions on reading the after-column:
+
+- It comes from a `compile` invocation, not the Stage-3 native-build, so the
+  totals are indicative rather than strictly comparable. The `436 -> 0` is safe
+  either way: those symbols cannot resolve if their owner is absent, and the
+  owner is now demonstrably present.
+- `Option` / `Result` / `Dict` still appear in the raw `unresolved type` count but
+  are **not** `[hir-fatal]` lines — they come from the advisory
+  `[hir-callable-dep-origin-unresolved]` channel. They are excluded from the
+  per-type table above, which counts only true `^[hir-fatal]` lines.
+
+Whether the remaining MIR-type failures are the same defect class (owners reachable
+only through a glob or re-export hop) or something else is **not yet established**.
+More code now reaches lowering than before, so some of these may be newly exposed
+rather than newly broken.
