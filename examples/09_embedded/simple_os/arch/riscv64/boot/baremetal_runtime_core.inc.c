@@ -503,6 +503,10 @@ RuntimeValue rt_len(RuntimeValue value)
     return 0;
 }
 
+/* Forward declaration: rt_string_char_at is defined further down this TU, but
+ * rt_index_get below must route text subscripts to it. */
+RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx);
+
 RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 {
     if (!IS_INT(index)) return NIL_VALUE;
@@ -510,6 +514,18 @@ RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
     HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
     if (!hdr) return NIL_VALUE;
     if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
+    /* A TEXT subscript (`s[i]`) lowers to rt_index_get exactly like an array
+     * subscript does, but this function used to recognise only HEAP_ARRAY and
+     * fall through to NIL for every string — so `s[i]` was nil for EVERY index,
+     * and any scanner built on it (redact's _is_key_char/_run_* loops, the
+     * caret component row) silently produced an empty result rather than
+     * failing. rt_string_char_at already existed and was simply never reached
+     * from here. It takes a RAW index (`int64_t i = (int64_t)idx`), hence the
+     * DECODE_INT, matching the rt_array_get call above. Byte-indexed, which is
+     * the same basis as this runtime's rt_len for strings.
+     * Measured 2026-08-31: in-guest probe `acc = acc + s[i]` over 5 chars
+     * returned "" before this change and the source text after it. */
+    if (hdr->type == HEAP_STRING) return rt_string_char_at(value, (RuntimeValue)DECODE_INT(index));
     return NIL_VALUE;
 }
 

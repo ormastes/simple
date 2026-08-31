@@ -492,6 +492,8 @@ RuntimeValue rt_len(RuntimeValue value)
     return 0;
 }
 
+RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx);
+
 RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 {
     if (!IS_INT(index)) return NIL_VALUE;
@@ -499,6 +501,16 @@ RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
     HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
     if (!hdr) return NIL_VALUE;
     if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
+    /* A TEXT subscript (`s[i]`) lowers to rt_index_get exactly like an array
+     * subscript, but this recognised only HEAP_ARRAY and fell through to NIL
+     * for every string -- so `s[i]` was nil for EVERY index and any text
+     * scanner built on it silently produced an empty result. rt_string_char_at
+     * already existed in this TU and was simply never reached from here; it
+     * takes a RAW index, hence the DECODE_INT, matching rt_array_get above.
+     * NOTE: this TU, not baremetal_runtime_core.inc.c, is the definition that
+     * actually WINS the link -- verified by objdump on kernel.elf. Fixing only
+     * the .inc.c copy changed nothing in-guest. */
+    if (hdr->type == HEAP_STRING) return rt_string_char_at(value, (RuntimeValue)DECODE_INT(index));
     return NIL_VALUE;
 }
 
