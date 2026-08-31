@@ -14,9 +14,17 @@ extern fn rt_string_char_at(value: i64, index: i64) -> i64
 extern fn rt_string_is_text(value: i64) -> i64
 extern fn rt_string_chars(value: i64) -> i64
 extern fn rt_native_eq(left: i64, right: i64) -> i64
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
 
 # Registry links live in the private fifth word of each pure-Simple array.
 var array_registry_head: i64 = 0
+
+# Dict membership registry, mirroring runtime_native.c's "RtCoreDict
+# membership, mirroring the string/float registries" design: registry links
+# live in the previously unused fourth word (@24) of each dict header, so a
+# reclaimed transient dict handle reports invalid instead of dereferencing
+# freed memory.
+var dict_registry_head: i64 = 0
 
 # ============================================================================
 # Internal ABI helpers — pub so split files (core_array_ops, core_array_query)
@@ -131,6 +139,14 @@ fn array_new_with_flags(cap: i64, flags: i64, elem_size: i64) -> i64:
     set_array_len(array, 0)
     set_array_cap(array, actual_cap)
     register_array(array)
+    # Transient-scope tracking (spec: runtime_native.c
+    # rt_core_register_scoped_immortal): a tracking failure fails the
+    # allocation rather than leaking an untracked scope-born object.
+    if rt_simple_core_transient_note(array, 2) < 0:
+        unregister_array(array)
+        free(items)
+        free(array)
+        return 0
     return array | 1
 
 pub fn rt_array_new(cap: i64) -> i64:
@@ -243,12 +259,13 @@ pub fn rt_array_set_text(array: i64, idx: i64, value: i64) -> i8:
     return rt_array_set(array, idx, value)
 
 fn dict_ptr(dict: i64) -> i64:
-    if dict < 4096 or (dict & 7) != 1:
+    # Registry membership BEFORE the kind-byte dereference (2026-08-31,
+    # mirroring runtime_native.c rt_core_as_dict): a transient dict reclaimed
+    # at scope end is freed memory, and the scope-death contract requires a
+    # stale handle to report invalid silently, not to read through it.
+    if dict_is_valid(dict) < 1:
         return 0
-    val ptr = dict & -8
-    if spl_load_u8(ptr, 0) != 6:
-        return 0
-    ptr
+    dict & -8
 
 fn dict_cap(dict: i64) -> i64:
     spl_load_i64(dict_ptr(dict), 8)
@@ -343,7 +360,51 @@ pub fn rt_dict_new(cap: i64) -> i64:
     spl_store_i64(dict, 8, actual_cap)
     spl_store_i64(dict, 16, 0)
     spl_store_i64(dict, 32, items)
+    spl_store_i64(dict, 24, dict_registry_head)
+    dict_registry_head = dict
+    if rt_simple_core_transient_note(dict, 3) < 0:
+        dict_registry_head = spl_load_i64(dict, 24)
+        free(items)
+        free(dict)
+        return 3
     dict | 1
+
+# Membership test for the transient machinery (core_memory.spl): registry
+# walk BEFORE any dereference of the candidate, then the kind byte.
+pub fn dict_is_valid(dict: i64) -> i64:
+    if dict < 4096 or (dict & 7) != 1:
+        return 0
+    val candidate = dict & -8
+    var current = dict_registry_head
+    while current > 0 and current != candidate:
+        current = spl_load_i64(current, 24)
+    if current < 1:
+        return 0
+    if spl_load_u8(candidate, 0) != 6:
+        return 0
+    return 1
+
+fn dict_unregister(ptr: i64):
+    var previous: i64 = 0
+    var current = dict_registry_head
+    while current > 0:
+        val next = spl_load_i64(current, 24)
+        if current == ptr:
+            if previous < 1:
+                dict_registry_head = next
+            else:
+                spl_store_i64(previous, 24, next)
+            return
+        previous = current
+        current = next
+
+# Scope-end reclamation of an unpromoted transient dict (raw header ptr).
+pub fn dict_reclaim_transient(ptr: i64):
+    dict_unregister(ptr)
+    val items = spl_load_i64(ptr, 32)
+    if items > 0:
+        free(items)
+    free(ptr)
 
 pub fn rt_dict_get(dict: i64, key: i64) -> i64:
     val index = dict_find(dict, key)

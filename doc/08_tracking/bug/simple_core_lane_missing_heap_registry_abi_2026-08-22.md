@@ -1,6 +1,6 @@
 # simple-core lane: 8 core-required ABI symbols need the C heap-registry design ported
 
-**Status:** OPEN — product decision, test left red on purpose
+**Status:** OPTION 1 IMPLEMENTED 2026-08-31 (all 13 ported to pure Simple — see Appendix (2)); awaiting Linux `emit_archive` test pass before closing
 **Test:** `pipeline::native_project::tests::test_simple_core_source_tree_emits_partial_runtime_archive`
 **Filed:** 2026-08-22 (seed lane, follow-up to `doc/08_tracking/test/seed_cargo_test_backlog_2026-08-21.md` group 2)
 
@@ -152,3 +152,51 @@ returns to 0), which is the acceptance oracle for option 1.
 Ranks 9-13 are the statistics surface of the very machinery ranks 4-7 implement.
 They cannot be ported independently and add no new design work — they land with
 option 1 or not at all. This remains a finishing task, not a program.
+
+---
+
+## Appendix 2026-08-31 (2) — option 1 IMPLEMENTED: all 13 ported to pure Simple
+
+The pure-Simple port landed (this appendix records what/where; verification
+limits below are honest, not rhetorical):
+
+| symbols | file |
+|---|---|
+| `rt_struct_alloc`, `rt_struct_receiver_valid`, `rt_transient_array_scope_begin/_pause/_end`, `rt_transient_heap_promote`, all 5 statistics entries; transient-aware `rt_alloc`/`rt_realloc`/`rt_free` | `src/runtime/simple_core/core_memory.spl` |
+| `rt_native_cmp` (next to its `rt_native_eq` sibling) + transient string flag/reclaim helpers | `src/runtime/simple_core/core_string.spl` |
+| `rt_is_jit_runtime` (next to `rt_is_interpreter_runtime`) | `src/runtime/simple_core/core_process.spl` |
+| allocator note-hooks + membership/reclaim helpers (incl. a NEW dict registry in the unused header word @24, so a reclaimed dict handle reports invalid instead of dereferencing freed memory) | `core_array.spl`, `core_array_ops.spl`, `core_enum.spl`, `core_closure.spl` |
+
+Semantics carried over from the C spec, each pinned by a code comment naming
+the C line: reset asymmetry (`stats_reset` zeroes ONLY `last_*`; `scope_*`
+zeroed only by `scope_begin`), INT64_MAX saturation on `scope_*`
+accumulation, promote's refusal gate BEFORE the stats reset, zero-on-entry
+`last_*` window, raw-registry-first classification with tag stripping,
+persistent containers classifying as plan nodes while persistent strings do
+not, owned = !paused for raw registration, membership recheck before every
+reclaim free, and the silent scope-death contract (registry-gated validity).
+
+Documented deviations: module-level `var` state instead of `_Thread_local`
+(equivalent only under the lane's single-threaded contract — disclosed at the
+top of `core_memory.spl`); linear ponytail tables instead of C's hash tables
+(performance, not semantics); no shared/short-cache string exemption (this
+lane has no intern); heap floats and UINT boxes stay unregistered leaves
+(pre-existing lane behaviour); lane-local byte accounting per this lane's
+header sizes.
+
+Verification on the Windows checkout (no cargo, no Linux `emit_archive`):
+mechanical census 88/88 required symbols now defined as `pub fn`; all edited
+files parse and reach SMF emission (fail only on the expected no-`main`);
+lint shows only the pre-existing `primitive_api`/style debt every raw-ABI
+sibling already carries; a renamed 1:1 transliteration of the state machine,
+stats expressions, receiver-validity and cmp dispatch passed 43/43 checks
+under `bin/simple.exe run`. NOT yet verified: the seed test
+`test_simple_core_source_tree_emits_partial_runtime_archive` (Linux-gated)
+and the graph-walk/reclaim halves against
+`rt_transient_heap_scope_selfcheck.c` — the raw-memory SFFI externs
+(`malloc`/`spl_load_i64`/...) are unbacked under the interpreter, so those
+halves are verified by inspection only until a Linux archive build runs.
+The selfcheck's shared-cache / literal-intern assertions are NOT satisfiable
+on this lane (no intern exists; those symbols are not in the 88) and its
+`rt_heap_registry_count` assertions map onto the per-kind registries
+(`rt_heap_registry_count` itself is not core-required and was not added).

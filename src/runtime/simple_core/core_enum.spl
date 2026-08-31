@@ -1,10 +1,12 @@
 # Pure-Simple enum ABI helpers.
 
 extern fn calloc(count: i64, size: i64) -> i64
+extern fn free(ptr: i64)
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
 
 # ponytail: linear registry is enough for bootstrap-sized enum sets; replace
 # with a hash set only if profiles show enum validation on a hot path.
@@ -44,7 +46,34 @@ pub fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> i64:
     spl_store_i64(value, 16, payload)
     spl_store_i64(value, 24, enum_registry_head)
     enum_registry_head = value
+    if rt_simple_core_transient_note(value, 4) < 0:
+        enum_registry_head = spl_load_i64(value, 24)
+        free(value)
+        return 3
     return value | 1
+
+# Membership test for the transient machinery (core_memory.spl).
+pub fn enum_is_valid(value: i64) -> i64:
+    return if enum_ptr(value) > 0: 1 else: 0
+
+fn enum_unregister(ptr: i64):
+    var previous: i64 = 0
+    var current = enum_registry_head
+    while current > 0:
+        val next = spl_load_i64(current, 24)
+        if current == ptr:
+            if previous < 1:
+                enum_registry_head = next
+            else:
+                spl_store_i64(previous, 24, next)
+            return
+        previous = current
+        current = next
+
+# Scope-end reclamation of an unpromoted transient enum (raw header ptr).
+pub fn enum_reclaim_transient(ptr: i64):
+    enum_unregister(ptr)
+    free(ptr)
 
 pub fn rt_enum_discriminant(value: i64) -> i64:
     val ptr = enum_ptr(value)

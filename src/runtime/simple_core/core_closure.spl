@@ -1,9 +1,11 @@
 # Pure-Simple first-class closure ABI.
 
 extern fn calloc(count: i64, size: i64) -> i64
+extern fn free(ptr: i64)
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
 
 var closure_registry_head: i64 = 0
 
@@ -31,7 +33,34 @@ pub fn rt_closure_new(func_ptr: i64, capture_count: i64) -> i64:
     spl_store_i64(closure, 16, capture_count)
     spl_store_i64(closure, 24, closure_registry_head)
     closure_registry_head = closure
+    if rt_simple_core_transient_note(closure, 6) < 0:
+        closure_registry_head = spl_load_i64(closure, 24)
+        free(closure)
+        return 3
     closure | 1
+
+# Membership test for the transient machinery (core_memory.spl).
+pub fn closure_is_valid(value: i64) -> i64:
+    return if closure_ptr(value) > 0: 1 else: 0
+
+fn closure_unregister(ptr: i64):
+    var previous: i64 = 0
+    var current = closure_registry_head
+    while current > 0:
+        val next = spl_load_i64(current, 24)
+        if current == ptr:
+            if previous < 1:
+                closure_registry_head = next
+            else:
+                spl_store_i64(previous, 24, next)
+            return
+        previous = current
+        current = next
+
+# Scope-end reclamation of an unpromoted transient closure (raw header ptr).
+pub fn closure_reclaim_transient(ptr: i64):
+    closure_unregister(ptr)
+    free(ptr)
 
 pub fn rt_closure_set_capture(closure: i64, index: i64, value: i64) -> i64:
     val ptr = closure_ptr(closure)
