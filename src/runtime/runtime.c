@@ -45,6 +45,13 @@
 #ifndef _WIN32
 #include <execinfo.h>
 #include <unistd.h>
+#else
+/* MinGW/MSVC: open/write/close and the O_* flags live in these headers
+ * (they are pulled in transitively by <unistd.h> on POSIX). */
+#include <fcntl.h>
+#include <io.h>
+#include <time.h>
+#include <sys/types.h>
 #endif
 #include <sys/stat.h>
 #ifndef _WIN32
@@ -2468,12 +2475,19 @@ int64_t rt_install_crash_handler(void) { return 0; }
 
 int64_t rt_signal_install(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;
+#ifdef _WIN32
+    /* Windows has no sigaction; signal() is the supported registration API.
+     * SA_RESTART semantics do not exist there (no interruptible syscalls). */
+    if (signal((int)signal_num, _spl_signal_handler) == SIG_ERR) return 0;
+    return 1;
+#else
     struct sigaction sa;
     sa.sa_handler = _spl_signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     if (sigaction((int)signal_num, &sa, NULL) == -1) return 0;
     return 1;
+#endif
 }
 
 int64_t rt_signal_check(int64_t signal_num) {

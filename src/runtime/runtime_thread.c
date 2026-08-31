@@ -1905,7 +1905,13 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
  * runtime_legacy_core.c.  Keep one owner when runtime_thread.c is added to
  * that archive; regular hosted runtime builds still use this implementation.
  */
-#if !defined(SIMPLE_CORE_C_STANDALONE)
+#if !defined(SIMPLE_CORE_C_STANDALONE) || defined(_WIN32)
+/* _WIN32 exception: the hosted Windows lane compiles with
+ * -DSIMPLE_CORE_C_STANDALONE=1 (for spl_dl* ownership) but does NOT include
+ * runtime_legacy_core.c, so omitting this left rt_pool_* with an undefined
+ * spl_thread_cpu_count (measured 2026-08-31). Non-Windows lanes are
+ * unchanged; a future Windows core archive carrying legacy_core links with
+ * --allow-multiple-definition, so the duplicate is tolerated there. */
 int64_t spl_thread_cpu_count(void) {
 #ifdef SPL_THREAD_PTHREAD
     #if defined(__APPLE__) || defined(__MACH__)

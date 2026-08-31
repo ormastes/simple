@@ -46,7 +46,11 @@ fn abs_path(rel: text) -> text:
     val here = cwd()
     if here == "" or here == ".":
         return rel
-    "{here}/{rel}"
+    # cwd() can come back in MSYS form ("/c/Users/...") when launched from an
+    # MSYS2/Git-bash shell (PWD-derived); normalize so CreateProcess can spawn
+    # the result. Verified-rewrite only — a no-op on Unix (see
+    # windows_native_path).
+    windows_native_path("{here}/{rel}")
 
 # A Windows drive-absolute path ("C:\..." or "C:/..."). Detected by the
 # drive-colon at index 1 so this needs no backslash literal.
@@ -55,6 +59,23 @@ fn is_drive_absolute(p: text) -> bool:
         return false
     p.substring(1).starts_with(":")
 
+# MSYS2/Git-bash hand argv[0] in POSIX form ("/c/Users/.../simple.exe").
+# CreateProcess cannot parse that — the spawn dies with "The filename,
+# directory name, or volume label syntax is incorrect." — so rewrite
+# "/<drive>/rest" to "<DRIVE>:/rest", but only when the rewritten path is
+# VERIFIED to exist (never assume the mapping). On Unix a real path like
+# "/c/foo" never has an existing "C:/foo" twin, so this is a no-op there;
+# no env probe is involved.
+fn windows_native_path(p: text) -> text:
+    if p.len() >= 3 and p.starts_with("/") and p.substring(2).starts_with("/"):
+        val drive = p.substring(1, 2)
+        val lower = drive.lower()
+        if lower >= "a" and lower <= "z":
+            val candidate = drive.upper() + ":" + p.substring(2)
+            if file_exists(candidate):
+                return candidate
+    p
+
 fn abs_if_needed(p: text) -> text:
     # A leading "/" is the POSIX absolute form; a drive-colon is the Windows
     # one. Testing only for "/" made abs_path() prepend the cwd to an ALREADY
@@ -62,7 +83,7 @@ fn abs_if_needed(p: text) -> text:
     # rewritten to "/c/Users/.../simple/C:/Users/.../simple.exe" and the worker
     # spawn failed.
     if p.starts_with("/") or is_drive_absolute(p):
-        return p
+        return windows_native_path(p)
     abs_path(p)
 
 # Resolve the compiler binary used to run the native-build worker. The old
@@ -554,6 +575,13 @@ fn run_native_build_worker(args: [text]) -> i64:
         return 1
     if code != 0:
         eprint_bounded(stderr)
+        # On Windows process_run_timeout_live degrades to a captured (non-live)
+        # run, so on failure the worker's stdout — which carries the [build]
+        # step log and the real error line — would otherwise be discarded.
+        # Bounded, failure-path only.
+        if stdout.trim() != "":
+            eprint "--- worker stdout (bounded) ---"
+            eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
         if code == -1 and stderr.contains("[WAIT-INDETERMINATE:"):

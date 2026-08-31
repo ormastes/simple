@@ -20,6 +20,7 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 extern fn rt_getpid() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
 # Platform Helpers
@@ -171,26 +172,59 @@ fn find_c_compiler() -> text:
             return candidate
     ""
 
+fn _cc_verify_compiles(cc: text) -> bool:
+    """VERIFY a candidate C compiler by executing it on a trivial translation
+    unit and checking the exit status AND the produced object file.
+
+    A bare `where`/`which` hit is not evidence the compiler works: on this
+    lane a PATH-shadowed MinGW gcc passed `where gcc` while its cc1.exe
+    crashed on every input with no output at all (Git-for-Windows DLLs
+    shadowing MSYS2's), and the llc bug this lane started from was the same
+    exists-but-never-executed probe shape. Never assume; execute."""
+    val tmp = _get_temp_dir()
+    val pid = rt_getpid()
+    val src = "{tmp}/simple-cc-verify-{pid}.c"
+    val obj = "{tmp}/simple-cc-verify-{pid}.o"
+    if not rt_file_write_text(src, "int main(void) { return 0; }\n"):
+        if runtime_compile_trace_enabled():
+            print "[CC-VERIFY] {cc}: could not write probe source {src}"
+        return false
+    var args: [text] = []
+    if _is_msvc_cc(cc):
+        args = ["/nologo", "/c", "/Fo{obj}", src]
+    else:
+        args = ["-c", "-o", obj, src]
+    val (out, err, code) = rt_process_run(cc, args)
+    val ok = code == 0 and rt_file_exists(obj)
+    if runtime_compile_trace_enabled():
+        print "[CC-VERIFY] {cc}: exit={code} obj_exists={ok}"
+    rt_file_delete(src)
+    rt_file_delete(obj)
+    ok
+
 fn _find_c_compiler_windows() -> text:
-    """Find a C compiler on Windows (MSVC cl.exe or MinGW gcc/clang)."""
+    """Find a C compiler on Windows (MSVC cl.exe or MinGW gcc/clang).
+
+    Every candidate is verified by actually compiling a trivial file
+    (_cc_verify_compiles) — a `where` hit alone selects nothing."""
     # MinGW: prefer gcc/clang
     if _is_mingw():
         val mingw_candidates = ["gcc", "clang", "cc"]
         for candidate in mingw_candidates:
             val (out, err, code) = backend_shell_tuple("where {candidate} 2>nul")
-            if code == 0:
+            if code == 0 and _cc_verify_compiles(candidate):
                 return candidate
 
     # MSVC: try cl.exe (available in VS Developer Command Prompt)
     val (cl_out, cl_err, cl_code) = backend_shell_tuple("where cl.exe 2>nul")
-    if cl_code == 0:
+    if cl_code == 0 and _cc_verify_compiles("cl.exe"):
         return "cl.exe"
 
     # Try clang/gcc on PATH (works in both MSVC and MinGW)
     val candidates = ["clang-cl", "clang", "gcc"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("where {candidate} 2>nul")
-        if code == 0:
+        if code == 0 and _cc_verify_compiles(candidate):
             return candidate
     ""
 
@@ -505,7 +539,12 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             print "[RT-COMPILE] compile result: code={comp_code}"
         if comp_code != 0:
             cleanup_runtime_objects(objects)
-            return Err("Failed to compile {name}.c:\n{comp_out}{comp_err}")
+            var comp_detail = "{comp_out}{comp_err}"
+            if comp_detail.trim() == "":
+                # A silent nonzero exit means the compiler itself died (crash,
+                # missing DLL, spawn failure), not a diagnosis of the source.
+                comp_detail = "(no compiler output; cc='{cc}' exited with code {comp_code} — the compiler crashed or could not start)"
+            return Err("Failed to compile {name}.c:\n{comp_detail}")
 
         if cache_obj != "" and not cache_hit:
             # Publish via a private staging name + rename so concurrent builds

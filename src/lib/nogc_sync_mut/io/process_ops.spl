@@ -305,49 +305,21 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         (stdout, stderr, exit_code)
 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Windows implementation using async spawn + temp files"""
+    """Windows implementation: direct argv bounded run.
+
+    The old mechanism spawned `cmd /c "<cmd> <args> > out.txt 2> err.txt"`.
+    That broke two ways, both measured 2026-08-31: cmd.exe rejects a
+    forward-slash program path, and rt_process_spawn_async quotes the whole
+    /c payload as ONE argument, so the embedded redirection quotes made
+    cmd.exe fail with "The filename, directory name, or volume label syntax
+    is incorrect." (exit 1, no output). A direct argv run preserves argument
+    boundaries exactly and needs no shell at all; rt_process_run_bounded
+    also owns the deadline. Windows-only function — Unix behavior untouched."""
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
-
-    var temp_dir = env_get("TEMP")
-    if temp_dir == "":
-        temp_dir = env_get("TMP")
-    if temp_dir == "":
-        temp_dir = "C:\\Windows\\Temp"
-
-    val pid_str = "{getpid()}"
-    val time_str = "{time_now_unix_micros()}"
-    val stdout_file = "{temp_dir}\\simple_out_{pid_str}_{time_str}.txt"
-    val stderr_file = "{temp_dir}\\simple_err_{pid_str}_{time_str}.txt"
-
-    val args_str = args.join(" ")
-
-    val full_cmd = if args_str == "":
-        "{cmd} > \"{stdout_file}\" 2> \"{stderr_file}\""
-    else:
-        "{cmd} {args_str} > \"{stdout_file}\" 2> \"{stderr_file}\""
-
     proc_slot_acquire()
-    val pid = _process_spawn_async_raw("cmd", ["/c", full_cmd])
-    val exit_code = _process_wait_raw(pid, effective_timeout)
+    val (stdout, stderr, exit_code) = _process_run_bounded_raw(cmd, args, effective_timeout, 67108864)
     proc_slot_release()
-
-    var stdout = ""
-    var stderr = ""
-
-    if file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
-        file_delete(stdout_file)
-
-    if file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
-        file_delete(stderr_file)
-
-    if exit_code == -2:
-        _process_kill_raw(pid)
-        val timeout_secs = effective_timeout / 1000
-        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
-    else:
-        (stdout, stderr, exit_code)
+    (stdout, stderr, exit_code as i32)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Platform-agnostic timeout wrapper"""
