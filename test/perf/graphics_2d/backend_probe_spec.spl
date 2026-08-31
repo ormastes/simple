@@ -12,20 +12,27 @@
 
 use std.spec.{describe, context, it, slow_it, expect}
 use std.gpu.engine2d.engine.{Engine2D}
-use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gpu.engine2d.backend_probe.{BackendStatus, BackendProbeResult, backend_status_text, STATUS_OK, STATUS_FALLBACK, BACKEND_CPU, BACKEND_SOFTWARE}
 use std.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
 use std.nogc_sync_mut.env.platform.{is_macos}
 
-fn make_ok_sentinel(req: text, sel: text, fmt: text) -> ProbeResultSentinel:
-    ProbeResultSentinel(
+fn make_ok_sentinel(req: text, sel: text, fmt: text) -> BackendProbeResult:
+    BackendProbeResult(
         requested_name: req,
         selected_name:  sel,
-        status:         STATUS_OK,
+        status:         BackendStatus.Initialized,
         device_name:    "test-device",
         api_name:       "test-api",
         feature_gate:   "none",
         shader_format:  fmt,
-        fallback_reason: ""
+        fallback_reason: "",
+        backend_name:   sel,
+        available:      true,
+        init_ms:        1,
+        reason:         "",
+        has_compute:    true,
+        has_graphics:   true,
+        has_present:    false
     )
 
 # ---------------------------------------------------------------------------
@@ -53,39 +60,46 @@ fn make_ok_sentinel(req: text, sel: text, fmt: text) -> ProbeResultSentinel:
 # harder to pass than before, not easier.
 # ---------------------------------------------------------------------------
 
-fn make_fallback_sentinel(req: text, sel: text) -> ProbeResultSentinel:
-    ProbeResultSentinel(
+fn make_fallback_sentinel(req: text, sel: text) -> BackendProbeResult:
+    BackendProbeResult(
         requested_name:  req,
         selected_name:   sel,
-        status:          STATUS_FALLBACK,
+        status:          BackendStatus.Fallback,
         device_name:     "cpu",
         api_name:        "software",
         feature_gate:    "none",
         shader_format:   "none",
-        fallback_reason: "silent fallback (should be rejected in strict mode)"
+        fallback_reason: "silent fallback (should be rejected in strict mode)",
+        backend_name:    sel,
+        available:       false,
+        init_ms:         0,
+        reason:          "silent fallback (should be rejected in strict mode)",
+        has_compute:     false,
+        has_graphics:    false,
+        has_present:     false
     )
 
-fn is_strict_fallback_violation(r: ProbeResultSentinel) -> bool:
-    r.status == STATUS_FALLBACK and r.requested_name != BACKEND_CPU and r.requested_name != BACKEND_SOFTWARE
+fn is_strict_fallback_violation(r: BackendProbeResult) -> bool:
+    backend_status_text(r.status) == STATUS_FALLBACK and r.requested_name != BACKEND_CPU and r.requested_name != BACKEND_SOFTWARE
 
 describe "backend_probe — AC-1: strict probe, no silent fallback":
 
     describe "BackendProbeResult field contract":
 
         it "AC-1: probe result carries requested_name field":
-            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            val r: BackendProbeResult = make_ok_sentinel("vulkan", "vulkan", "spirv")
             expect(r.requested_name).to_equal("vulkan")
 
         it "AC-1: probe result carries selected_name field":
-            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            val r: BackendProbeResult = make_ok_sentinel("vulkan", "vulkan", "spirv")
             expect(r.selected_name).to_equal("vulkan")
 
         it "AC-1: probe result carries status field":
-            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
-            expect(r.status).to_equal(STATUS_OK)
+            val r: BackendProbeResult = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            expect(backend_status_text(r.status)).to_equal(STATUS_OK)
 
         it "AC-1: probe result carries shader_format field":
-            val r: ProbeResultSentinel = make_ok_sentinel("vulkan", "vulkan", "spirv")
+            val r: BackendProbeResult = make_ok_sentinel("vulkan", "vulkan", "spirv")
             expect(r.shader_format).to_equal("spirv")
 
 fn assert_strict_backend(name: text, shader_format: text):
@@ -108,19 +122,19 @@ fn assert_strict_backend(name: text, shader_format: text):
         expect(probe.fallback_reason.len()).to_be_greater_than(0)
 
         it "AC-1: fallback sentinel from GPU request is a strict violation":
-            val r: ProbeResultSentinel = make_fallback_sentinel("vulkan", "cpu")
+            val r: BackendProbeResult = make_fallback_sentinel("vulkan", "cpu")
             expect(is_strict_fallback_violation(r)).to_equal(true)
 
         it "AC-1: fallback sentinel from cuda request is a strict violation":
-            val r: ProbeResultSentinel = make_fallback_sentinel("cuda", "cpu")
+            val r: BackendProbeResult = make_fallback_sentinel("cuda", "cpu")
             expect(is_strict_fallback_violation(r)).to_equal(true)
 
         it "AC-1: fallback sentinel from metal request is a strict violation":
-            val r: ProbeResultSentinel = make_fallback_sentinel("metal", "cpu")
+            val r: BackendProbeResult = make_fallback_sentinel("metal", "cpu")
             expect(is_strict_fallback_violation(r)).to_equal(true)
 
         it "AC-1: fallback sentinel from webgpu request is a strict violation":
-            val r: ProbeResultSentinel = make_fallback_sentinel("webgpu", "software")
+            val r: BackendProbeResult = make_fallback_sentinel("webgpu", "software")
             expect(is_strict_fallback_violation(r)).to_equal(true)
 
     context "portable CPU baseline":
