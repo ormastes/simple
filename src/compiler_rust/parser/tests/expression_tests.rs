@@ -93,8 +93,9 @@ fn test_danger_block_is_unsafe_boundary_not_call() {
 
 #[test]
 fn unsafe_block_is_valid_in_value_position_and_calls_stay_calls() {
-    let module = parse("fn digest() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n")
-        .expect("unsafe capability block should parse as an initializer");
+    let module =
+        parse("fn digest() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n")
+            .expect("unsafe capability block should parse as an initializer");
     let Node::Function(function) = &module.items[0] else {
         panic!("expected function");
     };

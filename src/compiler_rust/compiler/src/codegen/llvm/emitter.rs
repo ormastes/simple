@@ -429,6 +429,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         dest: VReg,
         src: VReg,
         byte_size: u32,
+        type_name: Option<&str>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
     ) -> Result<(), String> {
         self.backend

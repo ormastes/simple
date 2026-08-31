@@ -37,7 +37,7 @@ use super::{
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
     MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
     MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -165,7 +165,7 @@ fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute])
 
 /// Call a value (function or lambda) with evaluated arguments.
 /// Used for decorator application where we have Value arguments, not AST Arguments.
-pub(super) fn call_value_with_args(
+pub(crate) fn call_value_with_args(
     callee: &Value,
     args: Vec<Value>,
     _env: &Env,
@@ -446,6 +446,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
+    USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
     // Clear module-level globals from previous runs
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     crate::interpreter::reset_owned_globals_from_initial();
@@ -710,162 +712,37 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 if crate::pipeline::cfg_strip::fn_inactive_cfg_arch_for_host(&f.attributes) {
                     continue;
                 }
-                // If function has decorators, apply them
-                if !f.decorators.is_empty() {
-                    // Create a function value from the original function
-                    // For top-level functions, captured_env is empty (they don't capture anything)
-                    let func_value = Value::Function {
-                        name: f.name.clone(),
-                        def: Arc::new(f.clone()),
-                        captured_env: Arc::new(Env::new()),
-                    };
-
-                    // Apply decorators in reverse order (bottom-to-top, outermost last)
-                    let mut decorated = func_value;
-                    for decorator in f.decorators.iter().rev() {
-                        // Skip compiler-directive decorators that aren't evaluated at runtime
-                        // @extern is a codegen directive, not a runtime decorator
-                        // @deprecated is handled at compile time via HIR lowering
-                        // @hardware/@clocked/@generic/@flatten_struct_output are VHDL
-                        // backend directives consumed by parse_vhdl_hardware_attrs; they
-                        // have no runtime binding and must not be looked up in env.
-                        // @noalloc is a semantic marker consumed by
-                        // src/compiler/35.semantics/noalloc_checker.spl; it likewise has
-                        // no runtime binding. Before 2026-08-08 it was missing from this
-                        // list, so ANY module carrying `@noalloc` (e.g.
-                        // src/lib/nogc_async_mut_noalloc/hash/mod.spl) failed to LOAD
-                        // under the interpreter with "variable `noalloc` not found" --
-                        // reproducible via `bin/simple test`, invisible via `bin/simple
-                        // run` (the JIT path never evaluates decorator expressions). See
-                        // doc/08_tracking/bug/noalloc_decorator_unbound_in_seed_interpreter_2026-08-08.md
-                        if let Expr::Identifier(name) = &decorator.name {
-                            if name == "extern"
-                                || name == "deprecated"
-                                || name == "gpu_kernel"
-                                || name == "gpu_device"
-                                || name == "gpu_shared"
-                                || name == "hardware"
-                                || name == "clocked"
-                                || name == "generic"
-                                || name == "flatten_struct_output"
-                                || name == "noalloc"
-                                // Allocation/mangling/GPU-kernel compiler directives --
-                                // real in-tree usage confirmed (test/01_unit/compiler/parser/alloc_attr_spec.spl,
-                                // src/os/runtime/baremetal/runtime_minimal.spl,
-                                // src/compiler_rust/lib/std/examples/graphics/vulkan/image_blur.spl)
-                                // and none of them are runtime decorator functions.
-                                || name == "alloc"
-                                || name == "no_alloc"
-                                || name == "no_mangle"
-                                || name == "inline"
-                                || name == "always_inline"
-                                || name == "force_inline"
-                                || name == "gpu"
-                                // Inlining hints. These are REAL and honoured: the LLVM
-                                // backend reads all three and applies the `alwaysinline`
-                                // attribute (codegen/llvm/backend_core.rs:134). Only this
-                                // interpreter skip-list omitted them, so 84 files' worth of
-                                // legitimate `@always_inline` -- 18 of them in `src/lib`, on
-                                // the compiler's own startup path -- were rejected as
-                                // "unknown decorator" the moment `bin/simple test` loaded
-                                // them, making `main` un-test-runnable.
-                                // doc/08_tracking/bug/origin_main_not_test_runnable_always_inline_decorator_2026-08-26.md
-                                || name == "always_inline"
-                                || name == "inline"
-                                || name == "force_inline"
-                                // Memory-order directives (design A.2,
-                                // asm_embedded_hal_and_dual_run.md): honoured by
-                                // the LLVM backend (codegen/llvm/functions/inline_asm.rs);
-                                // no interpreter semantics.
-                                || name == "volatile"
-                                || name == "no_reorder"
-                            {
-                                continue;
-                            }
-                        }
-
-                        // Evaluate the decorator expression. A bare `@X` that is neither
-                        // a recognised compiler-directive decorator (skip-listed above)
-                        // nor a function/value named `X` in scope is almost always a
-                        // typo'd or never-implemented annotation. Before 2026-08-08 this
-                        // fell through to the generic "variable not found" error from
-                        // deep inside expression evaluation, which does not name the
-                        // decorator or explain that decorator resolution is what failed.
-                        // Give it a decorator-specific diagnostic instead -- this is the
-                        // general fix for
-                        // doc/08_tracking/bug/unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md.
-                        // Genuine runtime decorators (e.g. `@double_result` defined by
-                        // the user in the same module, see
-                        // test/03_system/feature/usage/decorators_spec.spl) are
-                        // unaffected: this only fires when the identifier lookup itself
-                        // fails.
-                        let decorator_fn = evaluate_expr(
-                            &decorator.name,
-                            &mut env,
-                            &mut functions,
-                            &mut classes,
-                            &enums,
-                            &impl_methods,
-                        )
-                        .map_err(|e| {
-                            if let Expr::Identifier(name) = &decorator.name {
-                                CompileError::semantic_with_context(
-                                    format!(
-                                        "unknown decorator `@{}` on function `{}`",
-                                        name, f.name
-                                    ),
-                                    ErrorContext::new()
-                                        .with_span(decorator.span)
-                                        .with_code(codes::UNDEFINED_VARIABLE)
-                                        .with_help(format!(
-                                            "`{}` is not a recognised compiler annotation and no function named `{}` is in scope to use as a runtime decorator -- fix the typo, register `{}` as a compiler annotation, or define a `fn {}(f)` runtime decorator",
-                                            name, name, name, name
-                                        )),
-                                )
-                            } else {
-                                e
-                            }
-                        })?;
-
-                        // If decorator has arguments, call it first to get the actual decorator
-                        let actual_decorator = if let Some(args) = &decorator.args {
-                            let mut arg_values = vec![];
-                            for arg in args {
-                                arg_values.push(evaluate_expr(
-                                    &arg.value,
-                                    &mut env,
-                                    &mut functions,
-                                    &mut classes,
-                                    &enums,
-                                    &impl_methods,
-                                )?);
-                            }
-                            call_value_with_args(
-                                &decorator_fn,
-                                arg_values,
-                                &env,
-                                &mut functions,
-                                &mut classes,
-                                &enums,
-                                &impl_methods,
-                            )?
-                        } else {
-                            decorator_fn
-                        };
-
-                        // Call the decorator with the current function value
-                        decorated = call_value_with_args(
-                            &actual_decorator,
-                            vec![decorated],
-                            &env,
-                            &mut functions,
-                            &mut classes,
-                            &enums,
-                            &impl_methods,
-                        )?;
-                    }
-
-                    // Store the decorated result in the env
+                // If function has decorators, apply them. Directive/metadata
+                // decorators are skipped by the shared helper; a genuine
+                // user-defined decorator rebinds the name to `dec(original)`.
+                // For top-level functions, captured_env is empty (they don't capture anything)
+                let plain = Value::Function {
+                    name: f.name.clone(),
+                    def: Arc::new(f.clone()),
+                    captured_env: Arc::new(Env::new()),
+                };
+                if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                    f,
+                    plain,
+                    true,
+                    &mut env,
+                    &mut functions,
+                    &mut classes,
+                    &enums,
+                    &impl_methods,
+                )? {
+                    // NOTE: the entry in `functions` is deliberately left in place.
+                    // `evaluate_call` checks `functions` (Priority 5) before `env`
+                    // (Priority 6), so a MODULE-level decorator is still bypassed by
+                    // a call from inside another function -- but removing the entry
+                    // here breaks resolution outright ("function `add_one` not
+                    // found"), because a callee body does not see this top-level
+                    // `env`. Fixing the module-level case needs a real binding for
+                    // the wrapper in the function namespace and is tracked
+                    // separately; the block-level paths (nested `fn`, which is what
+                    // `test/feature/usage/decorators_spec.spl` exercises) are fixed
+                    // in `interpreter_call/block_execution.rs` and
+                    // `interpreter/node_exec.rs`.
                     env.insert(f.name.clone(), decorated);
                 }
             }
@@ -1335,6 +1212,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Unit types define a newtype wrapper with a literal suffix
                 // Register the unit type name and its suffix for later use
                 units.insert(u.suffix.clone(), u.clone());
+                UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                });
+                USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+                });
                 env.insert(u.name.clone(), Value::Nil);
             }
             Node::UnitFamily(uf) => {
@@ -1356,6 +1239,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     conversions.insert(variant.suffix.clone(), variant.factor);
                     // Register suffix -> family mapping in thread-local for expression evaluation
                     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                    });
+                    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
                         cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                     });
                 }
@@ -1407,6 +1293,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 for variant in &uf.variants {
                     if (variant.factor - 1.0).abs() < f64::EPSILON {
                         SI_BASE_UNITS.with(|cell| {
+                            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                        });
+                        USER_SI_BASE_UNITS.with(|cell| {
                             cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                         });
                         break; // Only one base unit per family
@@ -1953,6 +1842,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
                 // External module declarations (no body) are handled by the module resolver
             }
+            // `on pc{...} use advice <kind> priority N` — register the advice
+            // so the call path can run it. Previously listed in the no-op arm
+            // below, which is why no advice ever executed.
+            Node::AopAdvice(advice) => {
+                super::interpreter_call::aop_runtime::register_advice(advice, &functions)?;
+            }
             Node::MultiUse(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
@@ -1960,7 +1855,6 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
             | Node::HandlePool(_)
-            | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::InjectGraph(_)
             | Node::SecurityPolicy(_)

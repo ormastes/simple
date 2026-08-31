@@ -144,17 +144,25 @@ pub fn rt_progress_get_elapsed_seconds() -> f64 {
     unsafe { c_sffi::rt_progress_get_elapsed_seconds() }
 }
 #[inline(always)]
-pub fn rt_progress_clock_now_nanos() -> i64 { unsafe { c_sffi::rt_progress_clock_now_nanos() } }
+pub fn rt_progress_clock_now_nanos() -> i64 {
+    unsafe { c_sffi::rt_progress_clock_now_nanos() }
+}
 #[inline(always)]
-pub fn rt_progress_tls_is_initialized() -> bool { unsafe { c_sffi::rt_progress_tls_is_initialized() } }
+pub fn rt_progress_tls_is_initialized() -> bool {
+    unsafe { c_sffi::rt_progress_tls_is_initialized() }
+}
 #[inline(always)]
-pub fn rt_progress_tls_start_nanos() -> i64 { unsafe { c_sffi::rt_progress_tls_start_nanos() } }
+pub fn rt_progress_tls_start_nanos() -> i64 {
+    unsafe { c_sffi::rt_progress_tls_start_nanos() }
+}
 #[inline(always)]
 pub fn rt_progress_tls_store_start_nanos(start_nanos: i64) {
     unsafe { c_sffi::rt_progress_tls_store_start_nanos(start_nanos) }
 }
 #[inline(always)]
-pub fn rt_progress_tls_clear() { unsafe { c_sffi::rt_progress_tls_clear() } }
+pub fn rt_progress_tls_clear() {
+    unsafe { c_sffi::rt_progress_tls_clear() }
+}
 
 #[cfg(test)]
 mod tests {
@@ -198,10 +206,7 @@ mod tests {
 
     #[test]
     fn fractional_seconds_to_millis_preserves_subsecond_precision() {
-        assert_eq!(
-            fractional_seconds_to_millis(1_700_000_000.125),
-            1_700_000_000_125
-        );
+        assert_eq!(fractional_seconds_to_millis(1_700_000_000.125), 1_700_000_000_125);
         assert_eq!(fractional_seconds_to_millis(12.999), 12_999);
     }
 }

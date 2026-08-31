@@ -173,3 +173,35 @@ hir-fingerprint 3/3, incremental-parse 9/9). Ledger 61/61 done (week-8 rows
 due 2026-11-10, signed step scripts
 SCV-IMPL-{E-08,E-09,P-07,G-06,D-05,D-06,D-07,I-05,I-06,B-05}, WOTS leaves
 59..68).
+
+## Post-Wave-5 (2026-08-26) — last ungated wave
+
+Wave 5 landed the final two ungated plan items, D-08 and B-06. All ungated
+items in `doc/03_plan/app/tools/scv_complete_impl_plan.md` are now done;
+what remains is gated only (B-01/B-02 blocked on an `sj` segfault rc=139,
+B-07 a 6-12 month shadow soak, B-08 human sign-off).
+
+**D-08 is landed ADVISORY-RED — read this before trusting a merge.** The
+28-case corpus (`test/fixtures/scv_merge_corpus/`) and its gate
+`scripts/check/check-scv-merge-corpus.shs` are wired and the gate's selftest is
+green, but the gate FAILs at **3 missed real conflicts**:
+`22_cpp_ifdef_condition_vs_body`, `24_cpp_ifdef_else_split`,
+`26_cpp_rename_edit_preprocessor` — the merger claims clean merges across
+divergent preprocessor branches. Filed as
+`doc/08_tracking/bug/scv_merge_silently_merges_across_divergent_preprocessor_branches_2026-08-26.md`.
+Do NOT baseline these misses. The `SCV-IMPL-D-08.shs` step script exits PASS
+because it checks artifacts + selftest, not the full ~50-minute scan.
+
+**B-06 (green):** `pack_v2.spl` reachability-aware `pack-write-v2r` /
+`pack-verify-v2r` reusing `scv_gc_roots_reachable` from `maintenance.spl` by
+import (never a copy), `reach <id>` payload lines skipped by the pre-existing
+v2 reader (no format break, v1 reads spec-pinned), seeded-LCG `pack-fuzz-v2`
+(64/64 corruptions detected, 0 silent decodes), `pack-soak-v2`
+write/pack/gc-quarantine/fsck cycles. Spec 8/8. The 50-cycle soak did NOT
+complete (20 cycles in budget; 50 projects to ~2500s, killed twice).
+Perf: `gzip_compress` takes ~110s for 16KB and dominates pack write —
+`doc/08_tracking/bug/scv_gzip_compress_dominates_pack_write_2026-08-26.md`;
+the soak works around it with stored blocks. Measured but deliberately NOT
+"fixed": `scv_append_bytes` alias-push 1ms vs concat 582ms.
+Regressions held: scv_mvp 11/11, scv_merge 5/5. Ledger 63/63 done (week-9 rows
+due 2026-11-24, signed step scripts SCV-IMPL-{D-08,B-06}, WOTS leaves 69..70).

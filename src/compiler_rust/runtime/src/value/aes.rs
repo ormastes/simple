@@ -1602,7 +1602,10 @@ mod tests {
         };
 
         assert_eq!(payload, vec![0x11, 0x22, 0x33]);
-        assert!(payload.capacity() >= payload.len() + 1, "v2 status append must not relocate payload");
+        assert!(
+            payload.capacity() >= payload.len() + 1,
+            "v2 status append must not relocate payload"
+        );
     }
 
     #[test]

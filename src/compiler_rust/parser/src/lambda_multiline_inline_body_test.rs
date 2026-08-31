@@ -30,7 +30,10 @@ mod lambda_multiline_inline_body {
                    \x20   val x = rows.any(\\row: row == 1 and\n\
                    \x20       row == 2)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "backslash lambda inline body with and-continuation as a call arg must parse");
+        assert!(
+            parses(src),
+            "backslash lambda inline body with and-continuation as a call arg must parse"
+        );
     }
 
     /// Same shape as the real spec: multiple `and`-joined continuation lines.
@@ -53,7 +56,10 @@ mod lambda_multiline_inline_body {
                    \x20   val x = rows.any(\\row: row == 1 or\n\
                    \x20       row == 2)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "or-continuation inline lambda body as a call arg must parse");
+        assert!(
+            parses(src),
+            "or-continuation inline lambda body as a call arg must parse"
+        );
     }
 
     /// Two-parameter lambda, still an inline body that continues.
@@ -64,7 +70,10 @@ mod lambda_multiline_inline_body {
                    \x20   val x = rows.reduce(\\acc, row: acc == 1 and\n\
                    \x20       row == 2, 0)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "two-param backslash lambda with continuation body must parse");
+        assert!(
+            parses(src),
+            "two-param backslash lambda with continuation body must parse"
+        );
     }
 
     /// Nested lambdas: the outer lambda's inline body itself contains a call
@@ -77,7 +86,10 @@ mod lambda_multiline_inline_body {
                    \x20           inner == 1) and\n\
                    \x20       row == 2)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "nested backslash lambdas with continuation bodies must parse");
+        assert!(
+            parses(src),
+            "nested backslash lambdas with continuation bodies must parse"
+        );
     }
 
     /// The `fn(...)` lambda spelling shares the same (separately gated) bug
@@ -89,7 +101,10 @@ mod lambda_multiline_inline_body {
                    \x20   val x = rows.any(fn(row): row == 1 and\n\
                    \x20       row == 2)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "fn(...) lambda inline body with and-continuation as a call arg must parse");
+        assert!(
+            parses(src),
+            "fn(...) lambda inline body with and-continuation as a call arg must parse"
+        );
     }
 
     /// `move \x: expr` shares `parse_lambda_body` with plain backslash lambdas.
@@ -100,7 +115,10 @@ mod lambda_multiline_inline_body {
                    \x20   val x = rows.any(move \\row: row == 1 and\n\
                    \x20       row == 2)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "move backslash lambda inline body with continuation must parse");
+        assert!(
+            parses(src),
+            "move backslash lambda inline body with continuation must parse"
+        );
     }
 
     // ---- Controls: shapes that already passed before the fix ----
@@ -151,6 +169,9 @@ mod lambda_multiline_inline_body {
                    \x20   val x = call(\\row: row == 1 and\n\
                    \x20       row == 2, 3)\n\
                    \x20   print(x)\n";
-        assert!(parses(src), "trailing comma after continued inline lambda body must parse");
+        assert!(
+            parses(src),
+            "trailing comma after continued inline lambda body must parse"
+        );
     }
 }

@@ -220,3 +220,85 @@ entry point has not been established.
 
 (The `--no-cover-check` half is separate and benign — a documented preflight gate fires because
 2113 system tests lack `# @cover`, and it announces itself and its bypass properly.)
+
+## ROOT CAUSE FOUND (2026-08-27) — two stacked blockers, both pinned
+
+Reproduced in a **clean `origin/main` worktree** (`7573dc03f7c`) with a two-file directory,
+~15s per iteration. Both blockers are now mechanism-level, not hypotheses.
+
+### Blocker 1: the generated MC/DC prelude imports a module nothing else loads
+
+`strace -f -e trace=openat` over the aborting run shows **zero opens of
+`src/lib/nogc_sync_mut/mcdc/dynamic_probe.spl`** — the file is never even probed. Its sibling
+`analyzer.spl` in the same directory *is* opened, so the directory is reachable; and there is no
+`__init__.spl` in `src/lib/nogc_sync_mut/mcdc/`, so nothing re-exports the package.
+
+The strace also shows **no wrapper file is ever written** (no `.sspec_wrapped_*` path appears) and
+the last source opened is `src/app/test_runner_new/main.spl`. So the wrapper text built by
+`build_coverage_wrapper` is compiled **in-process, from memory**. Its sibling prelude imports
+(`std.io`, `std.spec`, `std.test_runner.…`) resolve only because the runner's own module graph has
+already loaded those modules into the ambient environment; the odd-one-out long-form
+`use std.nogc_sync_mut.mcdc.dynamic_probe.{…}` matches nothing already loaded and **silently
+resolves nothing** — no error on the `use` itself, only the later generic
+`variable … not found` when line 836 calls the symbol.
+
+This also explains why every earlier probe of the import "worked": in a real on-disk file the
+`use` triggers a file load. It is the in-memory wrapper context that cannot.
+
+**Confirmed by fix.** Adding one real top-level import to
+`src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl` —
+`use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_owner}` — so the
+module is genuinely loaded, removes this error entirely and the run advances to blocker 2.
+
+### Blocker 2: `rt_process_run_owned_observed_bounded_value` has no INTERPRETER handler
+
+With blocker 1 fixed the run dies with a *different* message and a different shape:
+
+```
+error: semantic: unknown extern function: rt_process_run_owned_observed_bounded_value
+```
+
+This resolves the clue this record flagged as its sharpest unexplained fact — "it IS registered at
+`runtime_symbols.rs:1901` yet reported unknown". **There are two separate registries and they are
+not the same thing.** `src/compiler_rust/common/src/runtime_symbols.rs` serves native codegen;
+the tree-walk interpreter dispatches through `src/compiler_rust/compiler/src/interpreter_extern/`,
+which has **no handler for `rt_process_run_owned_*` at all** (grep returns nothing across that
+directory). The symbol string is present in the deployed binary (7 occurrences), so this is not
+binary staleness. `src/lib/nogc_sync_mut/io/resource_scope.spl:17` declares the extern and :21
+calls it, which is what the interpreter cannot service.
+
+### Corrections to this record
+
+- **"No wrapper is ever written" is now explained, not merely observed.** The earlier note called
+  it unsafe to infer anything because the error path calls `cleanup_native_generated_files`. The
+  strace settles it: no wrapper path is ever opened for *writing* either. The wrapper is never a
+  file.
+- **The `--keep-artifacts` and out-of-project-path observations were measured on a stale tree.**
+  `/mnt/data/worktrees/simple-main` does not even contain `mcdc/dynamic_probe.spl`; a grep there
+  returned zero hits for both symbols and briefly supported a wrong "these names are synthesized at
+  runtime" theory. Refuted against `origin/main` content. Per
+  `.claude/memory/gate-fail-needs-clean-worktree.md`, evidence for this defect must come from a
+  clean origin worktree only.
+- **MC/DC is not incidental after all.** The "REFRAMED (MC/DC incidental)" framing is wrong for
+  blocker 1: the prelude is emitted only when `mcdc_enabled`, and that prelude's import is the
+  defect. MC/DC *is* incidental to blocker 2, which lives on the `resource_scope` path.
+
+### Why a single-file run survives both
+
+A single-file run does not take the wrapper-generation path, so neither the in-memory prelude nor
+the `resource_scope` extern is ever reached. That is the whole of the single-vs-directory
+discriminator; it is not about file count.
+
+### Suggested fixes
+
+1. **Blocker 1** — the one-line real import above. The alternative (writing the wrapper to disk so
+   its `use` statements resolve normally) is a much larger change and would also mask the general
+   problem that an unresolvable `use` in an in-memory unit fails *silently*. That silence is worth
+   filing separately: a `use` that binds nothing should be an error at the `use`, not a confusing
+   `variable not found` later.
+2. **Blocker 2** — add an `interpreter_extern` handler for `rt_process_run_owned_observed_bounded_value`
+   (and audit its siblings in `runtime_symbols.rs` for the same gap), or stop the startup path from
+   requiring it under the interpreter.
+
+Neither fix is landed here: both touch other sessions' active files, and blocker 2 needs an audit
+of how wide the two-registry gap is rather than a single symbol patched in isolation.

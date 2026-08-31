@@ -190,8 +190,7 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
         "rt_hosted_safe_artifact_root_open_v1" => Some(&[0]),
-        "rt_hosted_safe_artifact_read_v1"
-        | "rt_hosted_safe_artifact_publish_v1" => Some(&[1]),
+        "rt_hosted_safe_artifact_read_v1" | "rt_hosted_safe_artifact_publish_v1" => Some(&[1]),
         "rt_file_write_bytes" => Some(&[0]),
         "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[1, 2, 3, 4]),
         "rt_hosted_safe_artifact_bundle3_begin_v1" => Some(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),

@@ -64,8 +64,10 @@ impl LlvmBackend {
             param_types.push(v.get_type().into());
             args.push(v.into());
         }
-        let out_types: Vec<BasicTypeEnum<'static>> =
-            outputs.iter().map(|(_, ty)| self.llvm_type(ty)).collect::<Result<_, _>>()?;
+        let out_types: Vec<BasicTypeEnum<'static>> = outputs
+            .iter()
+            .map(|(_, ty)| self.llvm_type(ty))
+            .collect::<Result<_, _>>()?;
         let fn_type = match out_types.len() {
             0 => ctx.void_type().fn_type(&param_types, false),
             1 => out_types[0].fn_type(&param_types, false),
@@ -115,13 +117,20 @@ impl LlvmBackend {
     /// barrier (no instruction on any target) — hardware ordering is the job
     /// of the `fence()` / `dmb()` intrinsics.
     #[cfg(feature = "llvm")]
-    pub(in crate::codegen::llvm) fn emit_no_reorder_fence(&self, builder: &Builder<'static>) -> Result<(), CompileError> {
+    pub(in crate::codegen::llvm) fn emit_no_reorder_fence(
+        &self,
+        builder: &Builder<'static>,
+    ) -> Result<(), CompileError> {
         if self.mem_order_mode.get() & MEM_ORDER_NO_REORDER == 0 {
             return Ok(());
         }
         let single_thread = self.context_ref().get_kind_id("singlethread");
         builder
-            .build_fence(inkwell::AtomicOrdering::SequentiallyConsistent, single_thread as i32, "")
+            .build_fence(
+                inkwell::AtomicOrdering::SequentiallyConsistent,
+                single_thread as i32,
+                "",
+            )
             .map_err(|e| crate::error::factory::llvm_build_failed("no_reorder_fence", &e))?;
         Ok(())
     }

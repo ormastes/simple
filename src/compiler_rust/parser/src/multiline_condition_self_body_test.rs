@@ -106,8 +106,14 @@ mod multiline_condition_self_body {
     #[test]
     fn same_line_type_annotations_still_parse() {
         assert!(parses("var g_x: i64 = 1\n"), "same-line typed var regressed");
-        assert!(parses("val g_y: ServiceV1? = nil\n"), "same-line optional type regressed");
-        assert!(parses("fn f() -> i64:\n    val x: i64 = 1\n    x\n"), "local typed val regressed");
+        assert!(
+            parses("val g_y: ServiceV1? = nil\n"),
+            "same-line optional type regressed"
+        );
+        assert!(
+            parses("fn f() -> i64:\n    val x: i64 = 1\n    x\n"),
+            "local typed val regressed"
+        );
     }
 
     /// The fix must not weaken the grammar: a colon with no type after it on

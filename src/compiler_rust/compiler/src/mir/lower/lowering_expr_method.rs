@@ -1773,7 +1773,14 @@ impl<'a> MirLowerer<'a> {
         // so `[T].index_of(v)` above is untouched; the receiver and needle
         // are tagged string handles like the one-arg `rt_index_of` route, and
         // `start` stays a raw i64 as `rt_text_find` expects.
-        if method == "index_of" && args.len() == 2 && !self.receiver_is_array(receiver, receiver_local_ty) {
+        // `find`/`find_str` are aliases of `index_of` and take the same
+        // optional start offset. They previously fell through to the 2-arg
+        // `rt_string_find` route, which DROPPED the offset and answered from
+        // position 0 without ever failing.
+        if matches!(method, "index_of" | "find" | "find_str")
+            && args.len() == 2
+            && !self.receiver_is_array(receiver, receiver_local_ty)
+        {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

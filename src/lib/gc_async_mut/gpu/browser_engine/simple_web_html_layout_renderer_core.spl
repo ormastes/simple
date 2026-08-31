@@ -257,6 +257,73 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         return ""
     text_list_prefix(base_entries, base_entry_i).join("") + text_list_prefix(variant_entries, variant_entry_i).join("")
 
+fn _css_props_contains_name(props: text, name: text) -> bool:
+    """True when `props` (the "--name:value\n" pool) already defines `name`."""
+    if props.len() == 0:
+        return false
+    ("\n" + props).index_of("\n" + name + ":") >= 0
+
+fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
+    """Collect `--name: value` declarations from NON-`:root` rule blocks.
+
+    `_css_collect_custom_props` only harvests `:root` blocks, so a custom
+    property declared on an ordinary selector (`div { --color: #dc2626;
+    background-color: var(--color); }`) was never registered and its `var()`
+    stayed literal. Custom properties inherit, and this engine keeps a single
+    global pool rather than a per-element environment, so a name that ANY
+    `:root` block already defines is left untouched here — the `:root` value
+    keeps winning exactly as before, and this pass is purely additive for
+    names that were previously unresolvable.
+    """
+    var entries: [text] = [""; 400]
+    var entry_i = 0
+    var pool = existing
+    var pos: i64 = 0
+    var guard = 0
+    val css_len = css.len()
+    while pos < css_len and guard < 400:  # cpu-lane-loop-ok: walks `--name:` declarations located by native find_from, hard-capped at 400; once per style invalidation
+        guard = guard + 1
+        val dd = find_from(css, "--", pos)
+        if dd < 0:
+            break
+        val brace = find_from(css, "{", dd)
+        val colon = find_from(css, ":", dd)
+        if colon < 0:
+            break
+        # Only a declaration inside a block counts: if the next "{" comes
+        # before the next ":", this "--" sits in a selector, not a body.
+        if brace >= 0 and brace < colon:
+            pos = dd + 2
+            continue
+        val semi = find_from(css, ";", colon)
+        val close = find_from(css, "}", colon)
+        var val_end = semi
+        if val_end < 0 or (close >= 0 and close < val_end):
+            val_end = close
+        if val_end < 0:
+            val_end = css_len
+        val name = css.substring(dd, colon).trim()
+        val prop_val = css.substring(colon + 1, val_end).trim()
+        if (
+            name.len() > 2 and prop_val.len() > 0 and
+            name.index_of(" ") < 0 and entry_i < entries.len() and
+            not _css_props_contains_name(pool, name)
+        ):
+            val entry = name + ":" + prop_val + "\n"
+            entries[entry_i] = entry
+            entry_i = entry_i + 1
+            pool = pool + entry
+            pos = val_end + 1
+        else:
+            # Advance past the "--" only, never past this candidate's
+            # val_end: a "--" inside a `var(--c)` reference borrows the NEXT
+            # declaration's colon and semicolon, so skipping to val_end would
+            # swallow a real declaration (`div { color: var(--c); --c: red; }`).
+            pos = dd + 2
+    if entry_i == 0:
+        return ""
+    text_list_prefix(entries, entry_i).join("")
+
 fn _css_resolve_vars(
     css: text, state: CssVarResolutionState, resolution_depth: i32,
     active_count: i32, nested: bool
@@ -839,6 +906,9 @@ fn _extract_css_vw_with_rule_limit(
             break
         val pre_css = html.substring(pre_open + 1, pre_close)
         val collected_props = _css_collect_custom_props(pre_css, root_attrs)
+        val scoped_props = _css_collect_scoped_custom_props(
+            pre_css, collected_props
+        )
         # STAGE 1 of the `props=0` chain. `props={state.prop_count}` on the
         # `css-var-unresolved` receipt is NOT this function's return value --
         # it is the end of collect -> join -> re-parse, and a zero there is
@@ -852,6 +922,9 @@ fn _extract_css_vw_with_rule_limit(
             print "[web-style-producer] css-props-stage1 block={pre_guard} pre_css_len={pre_css.len()} collected_len=0"
         if collected_props.len() > 0 and custom_prop_count < custom_prop_parts.len():
             custom_prop_parts[custom_prop_count] = collected_props
+            custom_prop_count = custom_prop_count + 1
+        if scoped_props.len() > 0 and custom_prop_count < custom_prop_parts.len():
+            custom_prop_parts[custom_prop_count] = scoped_props
             custom_prop_count = custom_prop_count + 1
         pre_pos = pre_close + 1
     val custom_props = if custom_prop_count == 0: "" else: custom_prop_parts.join("")

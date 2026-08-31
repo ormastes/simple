@@ -548,12 +548,8 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
             let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
             let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
-            let items: Vec<Value> = if inclusive {
-                (start..=end).map(Value::Int).collect()
-            } else {
-                (start..end).map(Value::Int).collect()
-            };
-            Ok(items)
+            let step = fields.get("step").and_then(|v| v.as_int().ok()).unwrap_or(1);
+            Ok(range_object_values(start, end, inclusive, step))
         }
         other => {
             let ctx = ErrorContext::new()
@@ -565,6 +561,35 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             ))
         }
     }
+}
+
+/// Materialise a range object's integer sequence, honouring an optional `step`.
+///
+/// A missing `step` field means 1 (every range literal `a..b` / `a..=b`).
+/// `range(start, end, step)` stores an explicit, possibly negative, step; a
+/// zero step is rejected at construction, so it is treated as 1 here.
+pub(crate) fn range_object_values(start: i64, end: i64, inclusive: bool, step: i64) -> Vec<Value> {
+    let step = if step == 0 { 1 } else { step };
+    let mut values = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while if inclusive { i <= end } else { i < end } {
+            values.push(Value::Int(i));
+            match i.checked_add(step) {
+                Some(next) => i = next,
+                None => break,
+            }
+        }
+    } else {
+        while if inclusive { i >= end } else { i > end } {
+            values.push(Value::Int(i));
+            match i.checked_add(step) {
+                Some(next) => i = next,
+                None => break,
+            }
+        }
+    }
+    values
 }
 
 /// Helper for binding sequence patterns (Tuple and Array) during comprehensions

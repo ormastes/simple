@@ -285,7 +285,9 @@ pub(crate) fn evaluate_expr(
 ) -> Result<Value, CompileError> {
     // Check watchdog timeout at every expression evaluation (single atomic load, negligible overhead).
     if crate::interpreter::is_timeout_exceeded() {
-        return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+        return Err(CompileError::TimeoutExceeded {
+            timeout_secs: crate::interpreter::timeout_limit_secs(),
+        });
     }
 
     // Phase D dispatch profiler: default OFF (one relaxed atomic load when off).

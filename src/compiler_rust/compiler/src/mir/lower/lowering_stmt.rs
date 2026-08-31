@@ -1162,7 +1162,22 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 let vreg = self.lower_expr(expr)?;
-                // Track the last expression value for implicit returns
+                // Track the last expression value for implicit returns.
+                //
+                // An expression statement in tail position IS the return value
+                // (`lowering_core.rs` turns `last_expr_value` straight into
+                // `Terminator::Return`), so it needs exactly the same tagged-slot
+                // coercion `HirStmt::Return` performs. Without it,
+                // `fn f() -> i64?: 42` returned the RAW word 42 into a tagged
+                // return slot: the caller decoded it through the wrong tag and
+                // printed a denormal f64, `f64?` came back as `bits >> 3`, and
+                // `bool?` came back as `nil` — silently, with `??` unable to
+                // rescue it. `return 42` was already correct, which is what
+                // pinned the defect to this path.
+                // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
+                let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);
                 Ok(())
             }
@@ -2106,8 +2121,7 @@ impl<'a> MirLowerer<'a> {
                 // must reach LLVM as a literal `$$`. This MUST run BEFORE the
                 // `{name}` -> `$N` rewriter below, otherwise the placeholders
                 // the rewriter inserts would themselves be escaped to `$$N`.
-                let escaped: Vec<String> =
-                    instructions.iter().map(|line| escape_raw_asm_dollars(line)).collect();
+                let escaped: Vec<String> = instructions.iter().map(|line| escape_raw_asm_dollars(line)).collect();
                 let rewritten: Vec<String> = escaped
                     .iter()
                     .map(|line| rewrite_asm_placeholders(line, &placeholder_index))

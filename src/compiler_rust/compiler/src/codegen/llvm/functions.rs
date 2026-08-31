@@ -1000,6 +1000,17 @@ impl LlvmBackend {
                 deep_fields,
                 ..
             } => {
+                // TODO(sj-segv-2026-08-27): this arm has the same truncation
+                // defect the Cranelift arm just had — `byte_size` and
+                // `word_index` are the UNSHIFTED MIR layout, so a struct that
+                // implements a trait (and therefore carries an 8-byte vtable
+                // header, per `emit_vtables`) is copied 8 bytes short and its
+                // last field slot lands outside the allocation. Fixing it here
+                // needs a name -> vtable lookup in this scope, which this
+                // backend does not currently thread through (the Cranelift
+                // side uses `InstrContext::vtable_data_ids`). Unfixed and
+                // unverified on this lane; tracked in
+                // doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
                 self.compile_aggregate_copy(*dest, *src, *byte_size, deep_fields, vreg_map, builder)?;
             }
             MirInst::BinOp { dest, op, left, right } => {

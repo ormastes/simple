@@ -317,8 +317,58 @@ pub fn unconditional_example_floor(statements: &[Node]) -> usize {
     count
 }
 
+/// Can executing `node` leave the enclosing block before the next statement?
+///
+/// Only `return` is considered: it is the single form an env-gate uses to bail
+/// out of a `describe` body. A bare `Node::Return` obviously qualifies; an
+/// `if`/`match` qualifies when any of its branches returns, because taking that
+/// branch skips everything after it in the enclosing block.
+///
+/// Loop bodies are deliberately NOT inspected: a `return` inside a `for` is
+/// reachable only if the loop runs, which this analysis already treats as
+/// conditional, and descending there could only lower the floor for no gain.
+fn returns_anywhere(node: &Node) -> bool {
+    matches!(node, Node::Return(_)) || may_exit_block_early(node)
+}
+
+fn may_exit_block_early(node: &Node) -> bool {
+    match node {
+        // A BARE block-level `return` is deliberately NOT treated as a gate.
+        // It is exactly the drop bug this floor exists to catch: it makes every
+        // later `it` unreachable on EVERY run, and stopping the count there
+        // would lower the floor to match the truncation and silently unfail the
+        // spec. Only a CONDITIONAL return (inside `if`/`match`) is a real env
+        // gate. Pinned by the driver's `DROPPING_SPEC` tests.
+        Node::If(if_stmt) => {
+            if_stmt.then_block.statements.iter().any(returns_anywhere)
+                || if_stmt
+                    .elif_branches
+                    .iter()
+                    .any(|(_, _, block)| block.statements.iter().any(returns_anywhere))
+                || if_stmt.else_block.as_ref().is_some_and(|block| {
+                    block.statements.iter().any(returns_anywhere)
+                })
+        }
+        Node::Match(match_stmt) => match_stmt
+            .arms
+            .iter()
+            .any(|arm| arm.body.statements.iter().any(returns_anywhere)),
+        _ => false,
+    }
+}
+
 fn count_unconditional_statements(statements: &[Node], count: &mut usize) {
     for node in statements {
+        // An early `return` (typically an env gate: `if not available(): ...
+        // return`) makes every LATER statement in this block conditional, so
+        // nothing after it belongs in a floor that promises "must run on every
+        // execution". Counting them is what made a correctly-skipped spec look
+        // like it had dropped examples. The gate's own `it` is already counted
+        // above if it precedes the return, so the floor stays a true lower
+        // bound rather than collapsing to zero.
+        if may_exit_block_early(node) {
+            return;
+        }
         match node {
             Node::Expression(expr) => count_unconditional_expr(expr, count),
             // A `val x = describe(...)` is unusual but harmless to follow; the
@@ -370,7 +420,7 @@ fn count_unconditional_expr(expr: &Expr, count: &mut usize) {
 /// through it part of the floor.
 fn count_group_body(expr: &Expr, count: &mut usize) {
     match expr {
-            Expr::DoBlock(statements) | Expr::UnsafeBlock(statements, _) => {
+        Expr::DoBlock(statements) | Expr::UnsafeBlock(statements, _) => {
             count_unconditional_statements(statements, count);
         }
         Expr::Lambda { body, .. } => count_group_body(body, count),
@@ -485,7 +535,7 @@ pub fn merge_content_tags(file_meta: &mut FileTestMeta, content: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Argument, Expr, Node};
+    use crate::ast::{Argument, Block, Expr, IfStmt, Node, ReturnStmt};
     use crate::token::Span;
 
     fn make_test_call(func_name: &str, description: &str) -> Node {
@@ -608,6 +658,103 @@ mod tests {
         )];
 
         assert_eq!(unconditional_example_floor(&statements), 1);
+    }
+
+    /// The inverse of the env-gate case, and the reason `may_exit_block_early`
+    /// excludes a bare `Node::Return`: a block-level `return` truncates the
+    /// group on EVERY run, so the examples after it are dropped, not gated.
+    /// The floor must keep counting them or the drop guard unfails itself.
+    #[test]
+    fn bare_block_level_return_does_not_lower_the_floor() {
+        let statements = vec![
+            make_test_call("it", "a"),
+            Node::Return(ReturnStmt {
+                value: None,
+                span: Span::new(0, 0, 1, 0),
+            }),
+            make_test_call("it", "b"),
+        ];
+        assert_eq!(unconditional_example_floor(&statements), 2);
+    }
+
+    /// The env-gate shape used by every optional-backend spec (LLVM, CUDA,
+    /// WASM, GPU):
+    ///
+    /// ```text
+    /// describe "backend":
+    ///     if not available():
+    ///         it "env_skip: not available": ...
+    ///         return
+    ///     context "real work":
+    ///         it "a" ...
+    ///         it "b" ...
+    /// ```
+    ///
+    /// When the gate fires, exactly one example runs. The examples after the
+    /// gate are NOT unconditionally reachable, so the floor must not count
+    /// them — otherwise a correctly-skipped spec is reported as having dropped
+    /// examples and the file is failed. Before the `may_exit_block_early`
+    /// check this returned 2 and made nine specs red.
+    #[test]
+    fn floor_stops_at_an_env_gate_return() {
+        let gate = Node::If(IfStmt {
+            span: Span::new(0, 0, 0, 0),
+            let_pattern: None,
+            condition: Expr::Identifier("gate_closed".to_string()),
+            then_block: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![Node::Return(ReturnStmt {
+                    span: Span::new(0, 0, 0, 0),
+                    value: None,
+                })],
+            },
+            elif_branches: vec![],
+            else_block: None,
+            is_suspend: false,
+        });
+
+        let statements = [make_group_call(
+            "describe",
+            "backend",
+            vec![
+                gate,
+                make_test_call("it", "after the gate a"),
+                make_test_call("it", "after the gate b"),
+            ],
+        )];
+
+        assert_eq!(unconditional_example_floor(&statements), 0);
+    }
+
+    /// The guard above must not disarm the detector for ordinary specs: an
+    /// `if` with no `return` in it leaves later examples unconditionally
+    /// reachable, so they are still counted and a real drop is still caught.
+    #[test]
+    fn floor_still_counts_examples_after_an_if_that_does_not_return() {
+        let plain_if = Node::If(IfStmt {
+            span: Span::new(0, 0, 0, 0),
+            let_pattern: None,
+            condition: Expr::Identifier("some_flag".to_string()),
+            then_block: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
+            elif_branches: vec![],
+            else_block: None,
+            is_suspend: false,
+        });
+
+        let statements = [make_group_call(
+            "describe",
+            "backend",
+            vec![
+                plain_if,
+                make_test_call("it", "still required a"),
+                make_test_call("it", "still required b"),
+            ],
+        )];
+
+        assert_eq!(unconditional_example_floor(&statements), 2);
     }
 
     /// A file with no BDD DSL at all has a floor of zero, so ordinary programs

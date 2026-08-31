@@ -134,3 +134,41 @@ impl Lowerer {
         Some(indices)
     }
 }
+
+impl Lowerer {
+    /// If `ty` is an optional over a BoxInt-family scalar (`i8..i64`,
+    /// `u8..u32`), return the inner scalar TypeId; otherwise `None`.
+    ///
+    /// `T?` resolves to `HirType::Pointer { kind: PointerKind::Shared, inner }`
+    /// (type_resolver.rs `Type::Optional`), and its runtime slot holds a TAGGED
+    /// RuntimeValue (`mir/lower/lowering_core.rs::slot_holds_tagged_value`).
+    /// Restricted to the BoxInt family deliberately: those payloads are
+    /// BoxInt'd on BOTH representations (raw migration form and boxed
+    /// `Some(x)` enum payloads — see the `lower_builtin_call_expr` note in
+    /// hir/lower/stmt_lowering.rs), so `UnboxInt` is the exact inverse either
+    /// way. `u64` (HeapUInt), `f64`/`f32` (raw enum payload bits vs BoxFloat)
+    /// and `bool` (`rt_value_bool`) each have asymmetric representations and
+    /// stay on the old path.
+    pub(in crate::hir::lower) fn optional_boxint_scalar_inner(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if matches!(
+                *inner,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+            ) =>
+            {
+                Some(*inner)
+            }
+            _ => None,
+        }
+    }
+}

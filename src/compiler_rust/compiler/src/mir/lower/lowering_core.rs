@@ -992,12 +992,13 @@ impl<'a> MirLowerer<'a> {
             if inner.is_empty() {
                 continue;
             }
-            path.push(fname_ty);
+            path.push(fname_ty.clone());
             let nested = Self::struct_deep_fields(registry, type_value_kinds, inner, path);
             path.pop();
             out.push(crate::mir::AggregateFieldCopy {
                 word_index: i as u32,
                 byte_size: (inner.len() as u32) * 8,
+                type_name: Some(fname_ty),
                 nested,
             });
         }
@@ -1358,13 +1359,23 @@ impl<'a> MirLowerer<'a> {
     /// no valid tag at all, printing `<value:0x7>`. Neither `!` nor `??` could
     /// see the corruption because the word was non-nil.
     /// Bug: `doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`.
+    ///
+    /// `Any?` (`Pointer { inner: ANY }`) is the same case one level out: the
+    /// slot must hold either tagged nil or a tagged `RuntimeValue`, so a raw
+    /// scalar stored into it needs boxing exactly as for plain `ANY`. Before
+    /// this arm accepted `inner == ANY`, `fn g() -> Any?: 7` returned the RAW
+    /// word 7 and printed `<value:0x7>`, while the non-optional `-> Any` was
+    /// correct. Only `Pointer{ANY}` is added; `Text?`, `list?` and other
+    /// already-tagged inners are unaffected, and no double-boxing is possible
+    /// because boxing only fires when the VALUE's static type is a raw scalar.
     pub(super) fn slot_holds_tagged_value(&self, ty: TypeId) -> bool {
         if ty == TypeId::ANY {
             return true;
         }
         matches!(
             self.type_registry.and_then(|tr| tr.get(ty)),
-            Some(crate::hir::HirType::Pointer { inner, .. }) if Self::is_raw_scalar_type(*inner)
+            Some(crate::hir::HirType::Pointer { inner, .. })
+                if Self::is_raw_scalar_type(*inner) || *inner == TypeId::ANY
         )
     }
 
@@ -1584,9 +1595,7 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower HIR module to MIR module (main entry point)
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
-        if crate::hir::analysis::unsafe_ffi_deny_enabled()
-            && !hir.extern_fn_names.is_empty()
-        {
+        if crate::hir::analysis::unsafe_ffi_deny_enabled() && !hir.extern_fn_names.is_empty() {
             if let Some(violation) = crate::hir::analysis::check_unsafe_ffi(hir).first() {
                 return Err(MirLowerError::Unsupported(format!(
                     "E-SFFI-002: raw extern call '{}' in '{}' requires lexical unsafe(ffi)",

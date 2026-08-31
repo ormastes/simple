@@ -1515,7 +1515,10 @@ mod imported_module_ast_memo_tests {
 
         std::fs::write(&m, "pub struct Recreated:\n    id: i64\n").expect("recreate module");
         crate::interpreter::clear_module_cache_selective();
-        assert!(parsed_imported_module(&m).is_some(), "recreated module must be reparsed");
+        assert!(
+            parsed_imported_module(&m).is_some(),
+            "recreated module must be reparsed"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

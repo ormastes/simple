@@ -386,7 +386,10 @@ pub(super) fn eval_literal_expr(
                 let tail: Vec<&str> = stack.iter().rev().take(12).map(|s| s.as_str()).collect();
                 let mut avail: Vec<&str> = known_names.clone();
                 avail.sort();
-                eprintln!("[undefined-var] name={} call_stack_top={:?} in_scope={:?}", name, tail, avail);
+                eprintln!(
+                    "[undefined-var] name={} call_stack_top={:?} in_scope={:?}",
+                    name, tail, avail
+                );
             }
             Err(CompileError::semantic_with_context(
                 format!("variable `{}` not found", name),

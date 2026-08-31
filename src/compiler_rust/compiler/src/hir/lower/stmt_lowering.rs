@@ -16,7 +16,6 @@ use super::lowerer::Lowerer;
 /// this must move with it.
 const OPTION_ENUM_ID: i64 = 1;
 
-
 /// Map an augmented-assignment operator to the binary operator it desugars to.
 ///
 /// Returns `None` for a plain `=` and for `~=` — neither carries an arithmetic
@@ -66,8 +65,8 @@ pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
         _ => {}
     }
     const X86: [&str; 24] = [
-        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
-        "r14", "r15", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
     ];
     if X86.contains(&name) {
         return true;
@@ -1222,7 +1221,12 @@ impl Lowerer {
 
             // Context statement: context obj: body
             // Requires expression-level context tracking - mark as unsupported for native codegen
-            Node::Context(_) if !self.lenient_types => Err(LowerError::Unsupported(
+            // Unsupported in LENIENT mode too: the lenient catch-all below is
+            // `_ => Ok(vec![])`, which silently DELETED the whole block, so a
+            // `context obj:` body inside a function never ran on the JIT/native
+            // path (test/feature/usage/classes_spec.spl). Failing here makes the
+            // caller fall back to the interpreter, which implements it.
+            Node::Context(_) => Err(LowerError::Unsupported(
                 "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
@@ -1347,9 +1351,24 @@ impl Lowerer {
                 let Some(&local_index) = ctx.local_map.get(name) else {
                     return binding_stmts;
                 };
+                // `if val n = optional:` binds the PAYLOAD. When the subject is
+                // an optional over a BoxInt-family scalar (`i64?` etc.), type
+                // the binding as the raw inner scalar so the name-keyed unbox
+                // in mir `lower_builtin_call_expr` fires; typed `subject_ty`
+                // (the tagged Pointer) the binding stayed a tagged word and
+                // `n + 1` computed on the shifted bits (337 instead of 43 on
+                // the JIT lane, silently). The local's declared type must
+                // agree, or the raw value would be stored into a tagged slot.
+                // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or(subject_ty);
+                if binding_ty != subject_ty {
+                    if let Some(local) = ctx.locals.get_mut(local_index) {
+                        local.ty = binding_ty;
+                    }
+                }
                 binding_stmts.push(HirStmt::Let {
                     local_index,
-                    ty: subject_ty,
+                    ty: binding_ty,
                     value: Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_unwrap_or_self".to_string(),
@@ -1358,7 +1377,7 @@ impl Lowerer {
                                 ty: subject_ty,
                             }],
                         },
-                        ty: subject_ty,
+                        ty: binding_ty,
                     }),
                 });
             }

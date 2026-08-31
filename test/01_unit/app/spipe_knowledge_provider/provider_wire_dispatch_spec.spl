@@ -1,3 +1,9 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use std.spec.{describe, it, expect}
 use app.spipe_knowledge_provider.protocol.{provider_encode_frame, provider_parse_frame}
 use app.spipe_knowledge_provider.service.{SpipeProviderServiceV1}
@@ -48,13 +54,18 @@ fn dispatch_bound(service: SpipeProviderServiceV1,
     provider_dispatch_frame_bound_owned(service, host_binding(), frame)
 
 describe "SPipe provider closed framed dispatch":
+    # @manual scenario evidence
     it "rejects C0 DEL and C1 controls from IdText":
+        # @req REQ-SSPEC-APP
+        step("rejects C0 DEL and C1 controls from IdText")
         expect(wire_valid_id("visible-id")).to_be(true)
         expect(wire_valid_id("bad\nid")).to_be(false)
         expect(wire_valid_id("bad" + bytes_to_text([127u8]))).to_be(false)
         expect(wire_valid_id("bad" + bytes_to_text([194u8, 133u8]))).to_be(false)
 
     it "uses checked relative deadline boundaries":
+        # @req REQ-SSPEC-APP
+        step("uses checked relative deadline boundaries")
         expect(wire_deadline_exceeded_at(100, 10, 109)).to_equal(false)
         expect(wire_deadline_exceeded_at(100, 10, 110)).to_equal(true)
         expect(wire_deadline_exceeded_at(100, 10, 99)).to_equal(true)
@@ -68,6 +79,8 @@ describe "SPipe provider closed framed dispatch":
         expect(query_deadline_exceeded(boundary, 100, 10)).to_equal(true)
 
     it "locks canonical candidate identity and ProviderGeneration wire text":
+        # @req REQ-SSPEC-APP
+        step("locks canonical candidate identity and ProviderGeneration wire text")
         val uid = provider_candidate_uid("WS-TEST", "spks1-test",
             "sha256:" + "3" * 64, "sha256:" + "0" * 64,
             "sha256:" + "1" * 64,
@@ -84,6 +97,8 @@ describe "SPipe provider closed framed dispatch":
         expect(rejected.outcome.close_transport).to_equal(true)
         expect(rejected.outcome.write_response).to_equal(false)
     it "accepts only a closed authoritative host binding":
+        # @req REQ-SSPEC-APP
+        step("accepts only a closed authoritative host binding")
         expect(ProviderHostBindingV1.create("", "spks1-" + "0" * 64,
             "sha256:" + "1" * 64).is_err()).to_equal(true)
         val dispatched = provider_dispatch_frame_bound_owned(
@@ -94,6 +109,8 @@ describe "SPipe provider closed framed dispatch":
         expect(provider_parse_frame(dispatched.outcome.frame).payload).to_contain("\"request_id\":\"init-stages\"")
 
     it "preserves initialized state at payload and frame ownership boundaries":
+        # @req REQ-SSPEC-APP
+        step("preserves initialized state at payload and frame ownership boundaries")
         val original = SpipeProviderServiceV1.empty()
         val payload_dispatch = provider_dispatch_payload_bound_owned(original, host_binding(),
             provider_parse_frame(init_frame("init-payload-boundary")).payload)
@@ -108,6 +125,8 @@ describe "SPipe provider closed framed dispatch":
         expect(frame_dispatch.service.state.workspace).to_equal("WS-PROVIDER")
 
     it "fails malformed and unknown operations closed with zero response bytes":
+        # @req REQ-SSPEC-APP
+        step("fails malformed and unknown operations closed with zero response bytes")
         var service = SpipeProviderServiceV1.empty()
         val malformed_dispatch = dispatch_bound(service, "00000003{}")
         service = malformed_dispatch.service
@@ -121,6 +140,8 @@ describe "SPipe provider closed framed dispatch":
         expect(unknown.frame).to_equal("")
 
     it "returns handshake_required before initialize":
+        # @req REQ-SSPEC-APP
+        step("returns handshake_required before initialize")
         var service = SpipeProviderServiceV1.empty()
         val dispatched = dispatch_bound(service, bound_frame("req-pre", "stats", "{\"logical_root\":\"sha256:" + "0" * 64 + "\"}"))
         service = dispatched.service
@@ -128,7 +149,18 @@ describe "SPipe provider closed framed dispatch":
         expect(outcome.write_response).to_equal(true)
         expect(provider_parse_frame(outcome.frame).payload).to_contain("\"code\":\"handshake_required\"")
 
-    it "persists one initialized generation and rejects unnegotiated cancellation":
+    it "persists one initialized generation and makes cancellation real":
+        # @req REQ-SSPEC-APP
+        # P6 gap closure: §14.20 freezes `cancel:true`; the provider now
+        # advertises it and wires §14.19's pending->cancelled CAS
+        # (SpipeProviderStateV1.cancel) into the `cancel` operation instead
+        # of a hardcoded `unsupported_capability`. Because this host
+        # dispatches one frame fully before reading the next, a target seen
+        # earlier in this generation is always already-complete by the time
+        # a later cancel frame is decoded -- `cancelled` is unreachable
+        # here, but `already_complete` and `cancel_target_not_found` are
+        # both genuine outcomes of the real CAS.
+        step("persists one initialized generation and makes cancellation real")
         var service = SpipeProviderServiceV1.empty()
         val initialize_dispatch = dispatch_bound(service, init_frame("init-1"))
         service = initialize_dispatch.service
@@ -136,7 +168,7 @@ describe "SPipe provider closed framed dispatch":
         expect(initialized.write_response).to_equal(true)
         expect(provider_parse_frame(initialized.frame).payload).to_contain("\"ok\":true")
         expect(provider_parse_frame(initialized.frame).payload).to_contain(
-            "\"cancel\":false")
+            "\"cancel\":true")
         expect(service.state.initialized).to_equal(true)
 
         val stats_dispatch = dispatch_bound(service, bound_frame("stats-1", "stats", "{\"logical_root\":\"sha256:" + "0" * 64 + "\"}"))
@@ -149,14 +181,15 @@ describe "SPipe provider closed framed dispatch":
         val cancel_dispatch = dispatch_bound(service, bound_frame("cancel-1", "cancel", "{\"target_request_id\":\"stats-1\"}"))
         service = cancel_dispatch.service
         val cancel = cancel_dispatch.outcome
+        expect(provider_parse_frame(cancel.frame).payload).to_contain("\"ok\":true")
         expect(provider_parse_frame(cancel.frame).payload).to_contain(
-            "\"code\":\"unsupported_capability\"")
+            "\"status\":\"already_complete\"")
         expect(service.state.initialized).to_equal(true)
 
         val unknown_cancel = dispatch_bound(service, bound_frame("cancel-2", "cancel", "{\"target_request_id\":\"work-never-admitted\"}"))
         service = unknown_cancel.service
         expect(provider_parse_frame(unknown_cancel.outcome.frame).payload).to_contain(
-            "\"code\":\"unsupported_capability\"")
+            "\"code\":\"cancel_target_not_found\"")
 
         val shutdown_dispatch = dispatch_bound(service, bound_frame("stop-1", "shutdown", "{\"reason\":\"normal\"}"))
         service = shutdown_dispatch.service
@@ -165,6 +198,8 @@ describe "SPipe provider closed framed dispatch":
         expect(provider_parse_frame(shutdown.frame).payload).to_contain("\"status\":\"closing\"")
 
     it "maps invalid index_open shapes separately from missing roots":
+        # @req REQ-SSPEC-APP
+        step("maps invalid index_open shapes separately from missing roots")
         var service = dispatch_bound(SpipeProviderServiceV1.empty(),
             init_frame("init-open-errors")).service
         val invalid_create = dispatch_bound(service, bound_frame("open-invalid-create",
@@ -185,6 +220,8 @@ describe "SPipe provider closed framed dispatch":
             "\"code\":\"snapshot_not_found\"")
 
     it "rejects unsupported semantic surfaces with a bound error":
+        # @req REQ-SSPEC-APP
+        step("rejects unsupported semantic surfaces with a bound error")
         var service = SpipeProviderServiceV1.empty()
         val initialize_dispatch = dispatch_bound(service, init_frame("init-1"))
         service = initialize_dispatch.service
@@ -196,6 +233,8 @@ describe "SPipe provider closed framed dispatch":
         expect(provider_parse_frame(result.frame).payload).to_contain("\"code\":\"unsupported_capability\"")
 
     it "supports OR filters authenticated cursor pages and root-bound field stats":
+        # @req REQ-SSPEC-APP
+        step("supports OR filters authenticated cursor pages and root-bound field stats")
         var seed: [u8] = []
         var seed_index = 0
         while seed_index < 32:
@@ -291,6 +330,8 @@ describe "SPipe provider closed framed dispatch":
             "\"code\":\"snapshot_not_found\"")
 
     it "paginates every ranked match beyond the public thousand-hit page cap":
+        # @req REQ-SSPEC-APP
+        step("paginates every ranked match beyond the public thousand-hit page cap")
         var seed: [u8] = []
         var seed_index = 0
         while seed_index < 32:
@@ -348,6 +389,8 @@ describe "SPipe provider closed framed dispatch":
             "next_cursor"))).to_be_nil()
 
     it "rejects stale policy receipts invalid query shapes and declared token bounds":
+        # @req REQ-SSPEC-APP
+        step("rejects stale policy receipts invalid query shapes and declared token bounds")
         var seed: [u8] = []
         var seed_index = 0
         while seed_index < 32:
@@ -430,6 +473,8 @@ describe "SPipe provider closed framed dispatch":
             "\"code\":\"invalid_request\"")
 
     it "durably signs applies and publishes through injected lifecycle ports":
+        # @req REQ-SSPEC-APP
+        step("durably signs applies and publishes through injected lifecycle ports")
         var seed: [u8] = []
         var seed_index = 0
         while seed_index < 32:

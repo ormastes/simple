@@ -205,11 +205,7 @@ pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
 
 /// Status/out symbol-resolution primitive.
 #[no_mangle]
-pub extern "C" fn spl_dlsym_checked(
-    handle: i64,
-    name_rv: RuntimeValue,
-    out_symbol: *mut i64,
-) -> i64 {
+pub extern "C" fn spl_dlsym_checked(handle: i64, name_rv: RuntimeValue, out_symbol: *mut i64) -> i64 {
     if out_symbol.is_null() {
         return 1;
     }
@@ -406,12 +402,7 @@ pub extern "C" fn spl_wffi_try_call_i64(fptr: i64, args_rv: RuntimeValue, nargs:
 
 /// Allocation-free checked integer transport using caller-owned scalar output.
 #[no_mangle]
-pub extern "C" fn spl_wffi_try_call_i64_out(
-    fptr: i64,
-    args_rv: RuntimeValue,
-    nargs: i64,
-    out_value: *mut i64,
-) -> i64 {
+pub extern "C" fn spl_wffi_try_call_i64_out(fptr: i64, args_rv: RuntimeValue, nargs: i64, out_value: *mut i64) -> i64 {
     if out_value.is_null() {
         return WFFI_INVALID_ARGUMENT;
     }
@@ -664,11 +655,7 @@ pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64
 /// Interpreter/native-equivalent checked float transport. The second element
 /// is the exact IEEE-754 bit pattern and is meaningful only for status zero.
 #[no_mangle]
-pub extern "C" fn spl_wffi_call_f64_checked(
-    fptr: i64,
-    args_rv: RuntimeValue,
-    nargs: i64,
-) -> RuntimeValue {
+pub extern "C" fn spl_wffi_call_f64_checked(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> RuntimeValue {
     match try_call_f64_value(fptr, args_rv, nargs) {
         Ok(value) => checked_i64_result(WFFI_OK, value.to_bits() as i64),
         Err(status) => checked_i64_result(status, 0),
@@ -879,14 +866,23 @@ mod tests {
     #[test]
     fn checked_boolean_transport_preserves_bool_and_failure_identity() {
         let mut value = false;
-        assert_eq!(spl_wffi_call_bool0_checked(bool_true as usize as i64, &mut value), WFFI_OK);
+        assert_eq!(
+            spl_wffi_call_bool0_checked(bool_true as usize as i64, &mut value),
+            WFFI_OK
+        );
         assert!(value);
-        assert_eq!(spl_wffi_call_bool1_checked(bool_is_positive as usize as i64, -1, &mut value), WFFI_OK);
+        assert_eq!(
+            spl_wffi_call_bool1_checked(bool_is_positive as usize as i64, -1, &mut value),
+            WFFI_OK
+        );
         assert!(!value);
         value = true;
         assert_eq!(spl_wffi_call_bool0_checked(0, &mut value), WFFI_NULL_FUNCTION);
         assert!(!value);
-        assert_eq!(spl_wffi_call_bool0_checked(bool_true as usize as i64, std::ptr::null_mut()), WFFI_INVALID_ARGUMENT);
+        assert_eq!(
+            spl_wffi_call_bool0_checked(bool_true as usize as i64, std::ptr::null_mut()),
+            WFFI_INVALID_ARGUMENT
+        );
     }
 
     unsafe extern "C" fn f64_no_args() -> f64 {

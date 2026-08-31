@@ -30,9 +30,10 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             dest,
             src,
             byte_size,
+            type_name,
             deep_fields,
             ..
-        } => emitter.emit_aggregate_copy(*dest, *src, *byte_size, deep_fields),
+        } => emitter.emit_aggregate_copy(*dest, *src, *byte_size, type_name.as_deref(), deep_fields),
         MirInst::BinOp { dest, op, left, right } => emitter.emit_binop(*dest, *op, *left, *right),
         MirInst::UnaryOp { dest, op, operand } => emitter.emit_unary_op(*dest, *op, *operand),
         MirInst::Cast {

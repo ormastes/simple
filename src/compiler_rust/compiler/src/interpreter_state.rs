@@ -41,12 +41,7 @@ pub(crate) fn owned_globals_snapshot() -> OwnedGlobals {
 }
 
 pub(crate) fn owned_global(owner: &str, name: &str) -> Option<Value> {
-    MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        cell.borrow()
-            .get(owner)
-            .and_then(|globals| globals.get(name))
-            .cloned()
-    })
+    MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow().get(owner).and_then(|globals| globals.get(name)).cloned())
 }
 
 pub(crate) fn owned_global_present(owner: &str, name: &str) -> bool {
@@ -384,6 +379,13 @@ thread_local! {
     pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
     /// Maps base unit suffix -> family name for SI prefix detection (e.g., "m" -> "length")
     pub(crate) static SI_BASE_UNITS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Subset of `UNIT_SUFFIX_TO_FAMILY` declared by the PROGRAM under execution
+    /// (`unit ...` nodes), as opposed to the units preloaded from the on-disk
+    /// unit tree. A program-declared suffix is an exact match and must win over
+    /// SI-prefix decomposition; a preloaded one must not.
+    pub(crate) static USER_UNIT_SUFFIX_TO_FAMILY: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Subset of `SI_BASE_UNITS` declared by the program under execution.
+    pub(crate) static USER_SI_BASE_UNITS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     /// Tracks variables that have been moved (for unique pointer move semantics)
     /// When a unique pointer is used (moved out), its name is added here.
     /// Any subsequent access to a moved variable results in a compile error.
@@ -990,6 +992,8 @@ pub fn clear_interpreter_state() {
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
+    USER_SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
 
     // Clear literal functions
     LITERAL_FUNCTIONS.with(|cell| cell.borrow_mut().clear());

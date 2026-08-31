@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type};
+use simple_parser::ast::{
+    AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type,
+};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{strict_mem_enabled, Env, Value};
 use super::core_types::{
@@ -18,7 +20,10 @@ use super::interpreter_control::{
 };
 use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
-use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
+use crate::interpreter_unit::{
+    is_unit_type, register_standalone_unit_locals, register_unit_family_locals, validate_unit_constraints,
+    validate_unit_type,
+};
 use simple_runtime::debug;
 
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
@@ -391,14 +396,30 @@ pub(crate) fn exec_node(
         Node::Function(f) => {
             // Nested function definition - treat as a closure that captures the current scope
             // Store as a Function with the captured env embedded for closure semantics
-            env.insert(
-                f.name.clone(),
-                Value::Function {
-                    name: f.name.clone(),
-                    def: Arc::new(f.clone()),
-                    captured_env: Arc::new(env.clone()), // Capture current scope
-                },
-            );
+            let plain = Value::Function {
+                name: f.name.clone(),
+                def: Arc::new(f.clone()),
+                captured_env: Arc::new(env.clone()), // Capture current scope
+            };
+            env.insert(f.name.clone(), plain.clone());
+            // A user-defined (non-directive) decorator rebinds the name to
+            // `dec(original)`.
+            if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                f,
+                plain,
+                false,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                // Keep the plain definition in `functions` so the original body
+                // can still recurse; the sentinel makes `evaluate_call` prefer
+                // the wrapper for calls from outside it.
+                env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                env.insert(f.name.clone(), decorated);
+            }
             Ok(Control::Next)
         }
         Node::LiteralFunction(lit_fn) => {
@@ -496,6 +517,20 @@ pub(crate) fn exec_node(
                     );
                 }
             }
+            Ok(Control::Next)
+        }
+        // A `unit` declared inside a block (e.g. within a `describe`/`it` body)
+        // must register in the same thread-local registries the module-level
+        // declaration pass uses; otherwise its suffixes are invisible and
+        // literals silently fall back to the preloaded on-disk unit tree.
+        Node::Unit(u) => {
+            register_standalone_unit_locals(u);
+            env.insert(u.name.clone(), Value::Nil);
+            Ok(Control::Next)
+        }
+        Node::UnitFamily(uf) => {
+            register_unit_family_locals(uf);
+            env.insert(uf.name.clone(), Value::Nil);
             Ok(Control::Next)
         }
         Node::Newtype(nt) => {
@@ -682,7 +717,13 @@ pub(crate) fn exec_assignment(
         // and the engines agree. Note the read path already errors (E1001),
         // so this only restores read/write symmetry.
         // See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
-        if is_first_assignment {
+        // `is_first_assignment` alone is not sufficient: method dispatch
+        // pre-binds every receiver field as a local (`exec_method_body`), so a
+        // plain `fn` method's bare `field = ...` was NOT a first assignment and
+        // slipped through. `is_field_prebind` recognises exactly those
+        // pre-bound bindings and is cleared by any genuine local declaration.
+        // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+        if is_first_assignment || env.is_field_prebind(name) {
             if let Some(Value::Object { class, fields }) = env.get("self") {
                 if fields.contains_key(name) {
                     let ctx = ErrorContext::new()
@@ -748,7 +789,7 @@ pub(crate) fn exec_assignment(
                                 if let Some(v) = env.get(name) {
                                     cell.borrow_mut().insert(name.clone(), v.clone());
                                 }
-                                });
+                            });
                             return Ok(Control::Next);
                         }
                     }
@@ -781,7 +822,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                             Some(rhs_val) => {
@@ -812,7 +853,7 @@ pub(crate) fn exec_assignment(
                                     if let Some(v) = env.get(name) {
                                         cell.borrow_mut().insert(name.clone(), v.clone());
                                     }
-                                    });
+                                });
                                 return Ok(Control::Next);
                             }
                         }
@@ -872,7 +913,7 @@ pub(crate) fn exec_assignment(
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
-                    });
+                });
             }
         }
         Ok(Control::Next)
@@ -3048,7 +3089,10 @@ mod nested_assignment_target_tests {
         let mut env = Env::new();
         let row = obj("Row", vec![("cols", Value::array(vec![Value::Int(0), Value::Int(0)]))]);
         env.insert("s".to_string(), obj("S", vec![("rows", Value::array(vec![row]))]));
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
         assert_eq!(
@@ -3097,7 +3141,10 @@ mod nested_assignment_target_tests {
         let alias = read(&env, "s", &["rows"]);
         env.insert("alias".to_string(), alias);
 
-        let target = index(field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"), Expr::Integer(1));
+        let target = index(
+            field(index(field(ident("s"), "rows"), Expr::Integer(0)), "cols"),
+            Expr::Integer(1),
+        );
         exec(&assign(target, Expr::Integer(42)), &mut env).expect("nested assignment must be accepted");
 
         assert_eq!(read(&env, "s", &["rows", "0", "cols", "1"]), Value::Int(42));
@@ -3122,6 +3169,9 @@ mod nested_assignment_target_tests {
             Expr::Integer(0),
         );
         let err = exec(&assign(target, Expr::Integer(1)), &mut env);
-        assert!(err.is_err(), "a call-result index target is not a place and must be an error");
+        assert!(
+            err.is_err(),
+            "a call-result index target is not a place and must be an error"
+        );
     }
 }

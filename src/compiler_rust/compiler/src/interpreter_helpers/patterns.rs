@@ -173,8 +173,16 @@ pub(crate) fn handle_functional_update(
 
 /// Array methods that mutate and should update the binding
 /// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
-const ARRAY_MUTATING_METHODS: &[&str] =
-    &["append", "push", "pop", "insert", "remove", "extend", "clear", "write_span"];
+const ARRAY_MUTATING_METHODS: &[&str] = &[
+    "append",
+    "push",
+    "pop",
+    "insert",
+    "remove",
+    "extend",
+    "clear",
+    "write_span",
+];
 
 /// Apply an array mutating method to a `&mut Vec<Value>` in place.
 ///
@@ -293,7 +301,16 @@ pub(crate) fn try_field_array_mutation_in_place(
     }
 
     let item = match method {
-        "push" | "append" => Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?),
+        "push" | "append" => Some(eval_arg(
+            args,
+            0,
+            Value::Nil,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?),
         "extend" => Some(eval_arg(
             args,
             0,
@@ -308,11 +325,38 @@ pub(crate) fn try_field_array_mutation_in_place(
     };
     let (idx, second) = match method {
         "insert" => (
-            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
-            Some(eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?),
+            Some(eval_arg_usize(
+                args,
+                0,
+                0,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            Some(eval_arg(
+                args,
+                1,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
         ),
         "remove" => (
-            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+            Some(eval_arg_usize(
+                args,
+                0,
+                0,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
             None,
         ),
         _ => (None, None),
@@ -434,6 +478,28 @@ fn release_global_aliases(name: &str, env: &mut Env) -> bool {
     true
 }
 
+/// True when `method` on `class` is declared `me` (a mutating method).
+/// Missing class or method resolves to false: an unknown method cannot
+/// justify writing a chain result back into the receiver variable.
+fn method_is_me(
+    classes: &HashMap<String, Arc<ClassDef>>,
+    impl_methods: &ImplMethods,
+    class: &str,
+    method: &str,
+) -> bool {
+    if let Some(class_def) = classes.get(class) {
+        if let Some(idx) = lookup_class_method_index(class_def, class, method) {
+            return class_def.methods[idx].is_me_method;
+        }
+    }
+    if let Some(methods) = impl_methods.get(class) {
+        if let Some(idx) = lookup_impl_method_index(methods, class, method) {
+            return methods[idx].is_me_method;
+        }
+    }
+    false
+}
+
 fn handle_method_call_with_self_update_inner(
     value_expr: &Expr,
     env: &mut Env,
@@ -448,7 +514,10 @@ fn handle_method_call_with_self_update_inner(
     {
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
-        if let Expr::MethodCall { .. } = receiver.as_ref() {
+        if let Expr::MethodCall {
+            method: inner_method, ..
+        } = receiver.as_ref()
+        {
             // Recursively handle the inner method call first
             let (inner_result, inner_update) =
                 handle_method_call_with_self_update(receiver, env, functions, classes, enums, impl_methods)?;
@@ -487,13 +556,25 @@ fn handle_method_call_with_self_update_inner(
             // If the outer method returned an object of the SAME CLASS, it's likely
             // the modified self from a `me` method
             if let Some((ref obj_name, ref inner_self)) = inner_update {
-                // Only use the outer result as the update if it's the same class as inner_self
-                // This handles chains like m.when("foo").returns(42) where
-                // both methods modify and return self of the same type
+                // Write the OUTER result back into the root variable only when the
+                // chain provably threads one mutable identity through both links:
+                // the inner AND the outer method must be declared `me`. The old
+                // gate was class equality alone ("same type in/out = mutated
+                // self"), which corrupted every non-mutating fluent chain on the
+                // interpreter lane: `val h = t.head(2).head(1)` overwrote the
+                // immutable `t` with the final result (nrows 3 -> 1) while the
+                // split form and the JIT both kept `t` intact. Builder-style
+                // `me` chains (`b.add(1).add(2)`) still write back. Mock chains
+                // (`m.when(..).returns(..)`) never reached this path: mocks are
+                // `Value::Mock` with interior mutability, not `Value::Object`.
+                // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
                 if let (Value::Object { class: inner_class, .. }, Value::Object { class: outer_class, .. }) =
                     (inner_self, &outer_result)
                 {
-                    if inner_class == outer_class {
+                    if inner_class == outer_class
+                        && method_is_me(classes, impl_methods, inner_class, inner_method)
+                        && method_is_me(classes, impl_methods, inner_class, method)
+                    {
                         return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
                     }
                 }
@@ -577,7 +658,9 @@ fn handle_method_call_with_self_update_inner(
                 // The generic path below cloned the field, so every dict write inside
                 // the callee deep-copied that dict (linear in the symbol table).
                 let owned_field_call = match env.get(parent_name) {
-                    Some(Value::Object { fields: parent_fields, .. }) => match parent_fields.get(field) {
+                    Some(Value::Object {
+                        fields: parent_fields, ..
+                    }) => match parent_fields.get(field) {
                         Some(Value::Object { class: field_class, .. }) => {
                             object_method_exists(classes, impl_methods, field_class, method)
                         }
@@ -588,7 +671,9 @@ fn handle_method_call_with_self_update_inner(
                 if owned_field_call {
                     let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     let taken = match env.get_mut(parent_name) {
-                        Some(Value::Object { fields: parent_fields, .. }) => Arc::make_mut(parent_fields).remove(field),
+                        Some(Value::Object {
+                            fields: parent_fields, ..
+                        }) => Arc::make_mut(parent_fields).remove(field),
                         _ => None,
                     };
                     if let Some(Value::Object {
@@ -611,7 +696,10 @@ fn handle_method_call_with_self_update_inner(
                             Some(pair) => pair,
                             None => unreachable!("object_method_exists checked before the field was taken"),
                         };
-                        if let Some(Value::Object { fields: parent_fields, .. }) = env.get_mut(parent_name) {
+                        if let Some(Value::Object {
+                            fields: parent_fields, ..
+                        }) = env.get_mut(parent_name)
+                        {
                             Arc::make_mut(parent_fields).insert(field.clone(), updated_field);
                         }
                         if let Some(updated_parent) = env.get(parent_name).cloned() {
@@ -926,7 +1014,18 @@ fn handle_method_call_with_self_update_inner(
             // Promote the store's handle into the overlay (one Arc clone) so the
             // ownership-gated in-place path below applies; the generic path's own
             // write-back (`calls.rs`) ends in exactly this overlay state anyway.
-            if env.get(obj_name).is_none() && !env.is_local(obj_name) && ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
+            // The store -- not this frame -- is authoritative for a non-local
+            // module-global name: identifier READS already prefer
+            // MODULE_GLOBALS over `env` (interpreter/expr/literals.rs). The
+            // frame's own copy can be an older generation (a `describe` body
+            // env captured before a `before_all` hook in the same group
+            // republished the global), and mutating THAT copy silently
+            // discarded the intervening writes: the hook read `[before_all]`
+            // through the store but pushed onto a stale `[]`, publishing
+            // `[after_all]`. Re-seeding the receiver from the store first makes
+            // the mutation path agree with the read path.
+            // doc/08_tracking/bug/after_all_hook_module_global_write_lost_after_in_group_mutation_2026-08-31.md
+            if !env.is_local(obj_name) && ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
                 let global_arr = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
                     Some(v @ Value::Array(_)) => Some(v.clone()),
                     _ => None,
@@ -961,8 +1060,7 @@ fn handle_method_call_with_self_update_inner(
                     // gives the documented memmove-style overlap semantics (the src Value is
                     // a pre-copy snapshot). Expression result is the COUNT WRITTEN.
                     if method.as_str() == "write_span" {
-                        let src =
-                            eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                        let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
                         let mut ints = [-1i64, -1, 0];
                         for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
                             *slot = match args.get(arg_i) {
@@ -1117,9 +1215,31 @@ fn handle_method_call_with_self_update_inner(
                             crate::perf_counters::trace_array("arr_mut_cow", obj_name, arc.len());
                             if crate::perf_counters::trace_min_len() > 0 {
                                 let mut where_ = Vec::new();
-                                crate::interpreter::MODULE_GLOBALS.with(|c| for (k, v) in c.borrow().iter() { if let Value::Array(o) = v { if Arc::ptr_eq(o, arc) { where_.push(format!("flat:{k}")); } } });
-                                crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|c| for (ow, g) in c.borrow().iter() { for (k, v) in g.iter() { if let Value::Array(o) = v { if Arc::ptr_eq(o, arc) { where_.push(format!("owned:{ow}::{k}")); } } } });
-                                eprintln!("[perf-trace] arr_mut_cow_pins name={obj_name} rc={} store_pins={:?}", Arc::strong_count(arc), where_);
+                                crate::interpreter::MODULE_GLOBALS.with(|c| {
+                                    for (k, v) in c.borrow().iter() {
+                                        if let Value::Array(o) = v {
+                                            if Arc::ptr_eq(o, arc) {
+                                                where_.push(format!("flat:{k}"));
+                                            }
+                                        }
+                                    }
+                                });
+                                crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|c| {
+                                    for (ow, g) in c.borrow().iter() {
+                                        for (k, v) in g.iter() {
+                                            if let Value::Array(o) = v {
+                                                if Arc::ptr_eq(o, arc) {
+                                                    where_.push(format!("owned:{ow}::{k}"));
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                eprintln!(
+                                    "[perf-trace] arr_mut_cow_pins name={obj_name} rc={} store_pins={:?}",
+                                    Arc::strong_count(arc),
+                                    where_
+                                );
                             }
                         }
                         let popped = {
@@ -1373,7 +1493,8 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
             // Only track names that are not module globals (the collision case is
             // legitimately mutable and enforced by the compiler's semantic phase).
             if !is_mutable && !MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
-                crate::interpreter::const_trace("patterns:val-insert", name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                crate::interpreter::const_trace("patterns:val-insert", name);
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
             } else if is_mutable {
                 // CONST_NAMES has function lifetime with no block scoping, so a
                 // `val x` executed in one branch would leave `x` const-poisoned
@@ -1381,12 +1502,14 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
                 // (e.g. layout()'s absolute-child `val child_styles` vs the flex
                 // main loop's `var child_styles`). A mutable re-declaration must
                 // clear the stale entry.
-                crate::interpreter::const_trace("patterns:remove", name); CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
+                crate::interpreter::const_trace("patterns:remove", name);
+                CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
             }
         }
         Pattern::MutIdentifier(name) => {
             env.insert(name.clone(), val);
-            crate::interpreter::const_trace("patterns:remove", name); CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
+            crate::interpreter::const_trace("patterns:remove", name);
+            CONST_NAMES.with(|cell| cell.borrow_mut().remove(name));
         }
         Pattern::MoveIdentifier(name) => {
             // Move pattern - transfers ownership
@@ -1641,7 +1764,11 @@ mod cow_alias_mechanism_tests {
             generic_args: vec![],
         };
         let (result, _) = run(&pop, &mut env);
-        assert!(matches!(result, Value::Int(9)), "pop must return the element, got {:?}", result);
+        assert!(
+            matches!(result, Value::Int(9)),
+            "pop must return the element, got {:?}",
+            result
+        );
         assert_eq!(arr_len(field_of(&env, "o", "xs")), 2, "pop must shrink the field array");
     }
 }

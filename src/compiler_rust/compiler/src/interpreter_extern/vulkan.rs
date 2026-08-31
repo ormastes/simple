@@ -470,7 +470,10 @@ mod tests {
         let mut names: Vec<&str> = VULKAN_FNS.iter().map(|(name, _, _)| *name).collect();
         names.sort_unstable();
         let duplicate = names.windows(2).find(|pair| pair[0] == pair[1]);
-        assert!(duplicate.is_none(), "duplicate Vulkan extern registry row: {duplicate:?}");
+        assert!(
+            duplicate.is_none(),
+            "duplicate Vulkan extern registry row: {duplicate:?}"
+        );
     }
 
     /// Names outside the family are rejected, never silently succeed.

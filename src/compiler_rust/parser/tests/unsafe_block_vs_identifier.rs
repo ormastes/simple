@@ -29,7 +29,9 @@ fn identifier_named_unsafe_as_for_iterable() {
 
 #[test]
 fn identifier_named_unsafe_as_while_condition() {
-    parse_ok("fn f():\n    var unsafe: bool = false\n    while unsafe:\n        break\n    if true:\n        print(\"d\")\n");
+    parse_ok(
+        "fn f():\n    var unsafe: bool = false\n    while unsafe:\n        break\n    if true:\n        print(\"d\")\n",
+    );
 }
 
 #[test]
@@ -61,5 +63,7 @@ fn value_bound_capability_unsafe_block_still_parses() {
 
 #[test]
 fn value_bound_capability_unsafe_block_with_reason_still_parses() {
-    parse_ok("fn f():\n    val v = unsafe(reason: \"raw ffi\", capabilities: [ffi, raw_ptr]):\n        1\n    print(v)\n");
+    parse_ok(
+        "fn f():\n    val v = unsafe(reason: \"raw ffi\", capabilities: [ffi, raw_ptr]):\n        1\n    print(v)\n",
+    );
 }

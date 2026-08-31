@@ -2997,7 +2997,12 @@ pub extern "C" fn rt_cuda_memcpy_htod_async(dst: i64, src: i64, size: i64, strea
         return -(err as i64);
     }
     cuda_status(unsafe {
-        cuMemcpyHtoDAsync_v2(dst as CUdeviceptr, src as *const c_void, size as usize, stream as CUstream)
+        cuMemcpyHtoDAsync_v2(
+            dst as CUdeviceptr,
+            src as *const c_void,
+            size as usize,
+            stream as CUstream,
+        )
     })
 }
 
@@ -3018,7 +3023,12 @@ pub extern "C" fn rt_cuda_memcpy_dtoh_async(dst: i64, src: i64, size: i64, strea
         return -(err as i64);
     }
     cuda_status(unsafe {
-        cuMemcpyDtoHAsync_v2(dst as *mut c_void, src as CUdeviceptr, size as usize, stream as CUstream)
+        cuMemcpyDtoHAsync_v2(
+            dst as *mut c_void,
+            src as CUdeviceptr,
+            size as usize,
+            stream as CUstream,
+        )
     })
 }
 

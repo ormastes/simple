@@ -397,14 +397,7 @@ fn box_for_closure_boundary<M: Module>(
             };
             call_runtime_1(ctx, builder, "rt_value_bool", widened)
         }
-        TypeId::I8
-        | TypeId::I16
-        | TypeId::I32
-        | TypeId::I64
-        | TypeId::U8
-        | TypeId::U16
-        | TypeId::U32
-        | TypeId::U64 => {
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => {
             let widened = match vt {
                 types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
                 types::F64 => builder.ins().bitcast(types::I64, MemFlags::new(), val),
@@ -523,6 +516,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     dest: VReg,
     src: VReg,
     byte_size: u32,
+    type_name: Option<&str>,
     deep_fields: &[crate::mir::AggregateFieldCopy],
 ) {
     let Some(&src_tagged) = ctx.vreg_values.get(&src) else {
@@ -537,7 +531,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
         return;
     }
 
-    let tagged = emit_aggregate_block_copy(ctx, builder, src_tagged, byte_size, deep_fields);
+    let tagged = emit_aggregate_block_copy(ctx, builder, src_tagged, byte_size, type_name, deep_fields);
     ctx.vreg_values.insert(dest, tagged);
 }
 
@@ -552,8 +546,24 @@ fn emit_aggregate_block_copy<M: Module>(
     builder: &mut FunctionBuilder,
     src_tagged: cranelift_codegen::ir::Value,
     byte_size: u32,
+    type_name: Option<&str>,
     deep_fields: &[crate::mir::AggregateFieldCopy],
 ) -> cranelift_codegen::ir::Value {
+    // A struct that implements a trait carries an 8-byte vtable pointer at
+    // offset 0: `StructInit` allocates `struct_size + 8` and shifts every
+    // field offset +8, and `effective_field_offset` mirrors that shift on
+    // every read/write. MIR's `byte_size`/`word_index` are the UNSHIFTED
+    // layout, so this copy must apply the identical correction or it copies
+    // the vtable word plus all-but-the-last field and leaves the final slot
+    // outside the allocation — the caller then reads uninitialised memory as
+    // that field. When the field is a class (a pointer), dereferencing it
+    // SIGSEGVs; when it is a scalar the value is silently wrong.
+    // See doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+    let has_vtable = type_name.is_some_and(|n| ctx.vtable_data_ids.contains_key(n));
+    let byte_size = if has_vtable { byte_size + 8 } else { byte_size };
+    // `word_index` indexes THIS block's layout, so it shifts by one word when
+    // THIS block carries a vtable header (independent of each field's own type).
+    let field_word_shift: u32 = if has_vtable { 1 } else { 0 };
     // Round up to whole 8-byte words and never allocate zero.
     let words = byte_size.div_ceil(8).max(1);
     let alloc_bytes = i64::from(words) * 8;
@@ -580,12 +590,20 @@ fn emit_aggregate_block_copy<M: Module>(
     }
 
     for field in deep_fields {
-        let off = (field.word_index * 8) as i32;
-        if field.word_index >= words {
+        let word_index = field.word_index + field_word_shift;
+        let off = (word_index * 8) as i32;
+        if word_index >= words {
             continue; // descriptor out of range — fail closed, keep shallow
         }
         let word = builder.ins().load(types::I64, MemFlags::new(), new_ptr, off);
-        let inner = emit_aggregate_block_copy(ctx, builder, word, field.byte_size, &field.nested);
+        let inner = emit_aggregate_block_copy(
+            ctx,
+            builder,
+            word,
+            field.byte_size,
+            field.type_name.as_deref(),
+            &field.nested,
+        );
         // Replace only a live tagged heap handle; nil (0) and non-handle
         // words keep their original value (the inner alloc is then unused).
         let tag_bit = builder.ins().band(word, tag_mask);
@@ -1550,8 +1568,8 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         // (`"  42  ".trim().to_i64()`) still returning the intermediate text's
         // HEAP POINTER as a "successful" integer.
         // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
-        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase"
-        | "char_at" | "replace" => Some(TypeId::STRING),
+        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase" | "char_at"
+        | "replace" => Some(TypeId::STRING),
         // `slice`/`substring`/`concat` are shared with array receivers, where
         // the result is an array, not text — so they stay receiver-gated. A
         // wrong entry here could make a previously-correct call worse.
@@ -2613,7 +2631,11 @@ fn try_emit_vtable_type_switch<M: Module>(
         let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
         let sig_ref = builder.func.dfg.ext_funcs[func_ref].signature;
         let sig_params = builder.func.dfg.signatures[sig_ref].params.len();
-        let mut call_args = if sig_params == arg_vals.len() { vec![] } else { vec![recv] };
+        let mut call_args = if sig_params == arg_vals.len() {
+            vec![]
+        } else {
+            vec![recv]
+        };
         call_args.extend(arg_vals.iter().copied());
         let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
         let call = adapted_call(builder, func_ref, &call_args);

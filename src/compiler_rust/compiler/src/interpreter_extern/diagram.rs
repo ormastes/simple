@@ -141,9 +141,7 @@ pub fn rt_diagram_generate_arch(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_diagram_free_string(args: &[Value]) -> Result<Value, CompileError> {
     require_arity(args, 1, "rt_diagram_free_string")?;
     let Value::Int(_handle) = args[0] else {
-        return Err(CompileError::runtime(
-            "rt_diagram_free_string requires an i64 handle",
-        ));
+        return Err(CompileError::runtime("rt_diagram_free_string requires an i64 handle"));
     };
     // No-op in interpreter - memory is managed by Rust
     Ok(Value::Nil)
@@ -156,9 +154,7 @@ pub fn rt_diagram_free_string(args: &[Value]) -> Result<Value, CompileError> {
 #[inline(always)]
 fn require_arity(args: &[Value], expected: usize, name: &str) -> Result<(), CompileError> {
     if args.len() != expected {
-        return Err(CompileError::semantic(format!(
-            "{name} requires {expected} arguments"
-        )));
+        return Err(CompileError::semantic(format!("{name} requires {expected} arguments")));
     }
     Ok(())
 }
@@ -330,12 +326,9 @@ mod contract_tests {
         let extra = [Value::Int(1)];
         assert!(rt_diagram_enable(&extra).is_err());
         assert!(rt_diagram_generate_sequence(&extra).is_err());
-        assert!(rt_diagram_trace_method(&[
-            Value::text("Class"),
-            Value::text("method"),
-            Value::text("extra"),
-        ])
-        .is_err());
+        assert!(
+            rt_diagram_trace_method(&[Value::text("Class"), Value::text("method"), Value::text("extra"),]).is_err()
+        );
         assert!(rt_diagram_trace_method_with_args(&[
             Value::text("Class"),
             Value::text("method"),

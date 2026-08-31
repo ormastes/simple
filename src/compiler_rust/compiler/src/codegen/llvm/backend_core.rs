@@ -169,7 +169,10 @@ impl LlvmBackend {
                 "naked" => {
                     for name in ["naked", "noinline", "nounwind"] {
                         let kind = Attribute::get_named_enum_kind_id(name);
-                        func.add_attribute(AttributeLoc::Function, self.context_ref().create_enum_attribute(kind, 0));
+                        func.add_attribute(
+                            AttributeLoc::Function,
+                            self.context_ref().create_enum_attribute(kind, 0),
+                        );
                     }
                 }
                 "global" => func.set_linkage(inkwell::module::Linkage::External),
@@ -391,8 +394,11 @@ impl LlvmBackend {
             if item.zeroed {
                 global.set_initializer(&array_ty.const_zero());
             } else {
-                let values: Vec<inkwell::values::IntValue> =
-                    item.values.iter().map(|v| elem_ty.const_int(*v as u64, false)).collect();
+                let values: Vec<inkwell::values::IntValue> = item
+                    .values
+                    .iter()
+                    .map(|v| elem_ty.const_int(*v as u64, false))
+                    .collect();
                 global.set_initializer(&elem_ty.const_array(&values).as_basic_value_enum());
             }
             if let Some(section) = &item.section {

@@ -194,9 +194,7 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
-            Expr::UnsafeBlock(statements, capabilities) => {
-                self.lower_unsafe_block(statements, capabilities, ctx)
-            }
+            Expr::UnsafeBlock(statements, capabilities) => self.lower_unsafe_block(statements, capabilities, ctx),
             // Null coalescing: expr ?? default
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)
@@ -803,13 +801,15 @@ impl Lowerer {
         // retains generic method typing and dispatch.
         let tuple_get_return_ty = if method == "get" && hir_args.len() == 1 {
             match &hir_args[0].kind {
-                HirExprKind::Integer(index) => usize::try_from(*index).ok().and_then(|index| {
-                    match self.module.types.get(receiver_hir.ty) {
-                        Some(HirType::Tuple(elements)) => elements.get(index).copied(),
-                        Some(HirType::LabeledTuple(fields)) => fields.get(index).map(|(_, ty)| *ty),
-                        _ => None,
-                    }
-                }),
+                HirExprKind::Integer(index) => {
+                    usize::try_from(*index)
+                        .ok()
+                        .and_then(|index| match self.module.types.get(receiver_hir.ty) {
+                            Some(HirType::Tuple(elements)) => elements.get(index).copied(),
+                            Some(HirType::LabeledTuple(fields)) => fields.get(index).map(|(_, ty)| *ty),
+                            _ => None,
+                        })
+                }
                 _ => None,
             }
         } else {
@@ -1190,6 +1190,25 @@ impl Lowerer {
         if args.is_empty() {
             match method {
                 "unwrap" => {
+                    // `.unwrap()` on an optional over a BoxInt-family scalar
+                    // (`i64?`): the JIT-lane value is a TAGGED word (raw
+                    // migration form), not necessarily an enum, so it must go
+                    // through `rt_unwrap_or_self` (which handles both forms) —
+                    // NOT `rt_enum_payload`, which returns nil for a non-enum.
+                    // Typed as the raw inner scalar, the name-keyed unbox in
+                    // mir `lower_builtin_call_expr` decodes it; before this,
+                    // `f().unwrap() + 1` computed 337 (== (42<<3)+1) on the
+                    // JIT lane while the interpreter said 43.
+                    // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                    if let Some(inner) = self.optional_boxint_scalar_inner(receiver.ty) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: inner,
+                        }));
+                    }
                     if let Some(payload_ty) = self.enum_payload_type_for_builtin_method(receiver.ty) {
                         return Ok(Some(HirExpr {
                             kind: HirExprKind::BuiltinCall {

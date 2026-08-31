@@ -134,7 +134,10 @@ fn codegen_unbox_float_accepts_raw_f64_and_tagged_nil() {
             dest: raw,
             value: f64::from_bits(3),
         });
-        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: raw });
+        block.instructions.push(MirInst::UnboxFloat {
+            dest: unboxed,
+            value: raw,
+        });
         block.instructions.push(MirInst::Cast {
             dest,
             source: unboxed,
@@ -148,8 +151,14 @@ fn codegen_unbox_float_accepts_raw_f64_and_tagged_nil() {
         let unboxed = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: tagged_nil, value: 3 });
-        block.instructions.push(MirInst::UnboxFloat { dest: unboxed, value: tagged_nil });
+        block.instructions.push(MirInst::ConstInt {
+            dest: tagged_nil,
+            value: 3,
+        });
+        block.instructions.push(MirInst::UnboxFloat {
+            dest: unboxed,
+            value: tagged_nil,
+        });
         block.instructions.push(MirInst::Cast {
             dest,
             source: unboxed,

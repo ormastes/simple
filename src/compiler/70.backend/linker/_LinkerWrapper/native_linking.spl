@@ -321,10 +321,16 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
+    var runtime_archives: [text] = []
     if runtime_dir != "" and runtime_dir != "none":
-        args.push("-L")
-        args.push(runtime_dir)
-        args.push("-lsimple_compiler")
+        runtime_archives = native_runtime_archive_inputs(runtime_dir)
+        if runtime_archives.is_empty():
+            args.push("-L")
+            args.push(runtime_dir)
+            args.push("-lsimple_compiler")
+        else:
+            for archive in runtime_archives:
+                args.push(archive)
         args.push("-rpath")
         args.push(runtime_dir)
 
@@ -362,7 +368,10 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("--no-as-needed")
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-    for flag in native_all_gnu_support_args(object_files, os, brew_prefix):
+    var native_support_inputs = object_files
+    for archive in runtime_archives:
+        native_support_inputs.push(archive)
+    for flag in native_all_gnu_support_args(native_support_inputs, os, brew_prefix):
         args.push(flag)
 
     # Libraries from config
@@ -578,13 +587,30 @@ fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir == "" or runtime_dir == "none":
         return []
-    var args: [text] = ["-L", runtime_dir]
-    if file_exists("{runtime_dir}/libsimple_compiler.a"):
-        args.push("-l:libsimple_compiler.a")
+    val archives = native_runtime_archive_inputs(runtime_dir)
+    var args: [text] = []
+    if not archives.is_empty():
+        for archive in archives:
+            args.push(archive)
     else:
+        args.push("-L")
+        args.push(runtime_dir)
         args.push("-lsimple_compiler")
         args.push("-Wl,-rpath,{runtime_dir}")
     args
+
+fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    val names = native_runtime_archive_names(
+        file_exists("{runtime_dir}/libsimple_compiler.a"),
+        file_exists("{runtime_dir}/libsimple_compiler_backfill.a"),
+        file_exists("{runtime_dir}/libsimple_native_all.a")
+    )
+    var inputs: [text] = []
+    for name in names:
+        inputs.push(runtime_dir + "/" + name)
+    inputs
 
 fn cc_fallback_object_args(object_files: [text]) -> [text]:
     var args: [text] = []
@@ -677,7 +703,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("/usr/local/lib")
         for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
             args.push(flag)
-        for flag in native_all_gnu_support_args(object_files, os_name, brew_prefix):
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
+            args.push(flag)
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, brew_prefix):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -694,7 +726,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(obj)
         if not config.pie:
             args.push("-no-pie")
-        for flag in _cc_fallback_runtime_lib_args(config):
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
             args.push(flag)
         args.push("-lc")
         args.push("-lpthread")
@@ -702,7 +735,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lm")
         args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
-        for flag in native_all_gnu_support_args(object_files, os_name, ""):
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -726,12 +762,16 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for obj in object_files:
             args.push(obj)
-        for flag in _cc_fallback_runtime_lib_args(config):
+        val runtime_args = _cc_fallback_runtime_lib_args(config)
+        for flag in runtime_args:
             args.push(flag)
         args.push("-lc")
         args.push("-lpthread")
         args.push("-ldl")
-        for flag in native_all_gnu_support_args(object_files, os_name, ""):
+        var support_inputs = object_files
+        for runtime_arg in runtime_args:
+            support_inputs.push(runtime_arg)
+        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)

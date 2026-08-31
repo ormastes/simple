@@ -60,6 +60,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         dest: VReg,
         src: VReg,
         byte_size: u32,
+        type_name: Option<&str>,
         deep_fields: &[crate::mir::AggregateFieldCopy],
     ) -> Result<(), String> {
         super::instr::closures_structs::compile_aggregate_copy(
@@ -68,6 +69,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             dest,
             src,
             byte_size,
+            type_name,
             deep_fields,
         );
         Ok(())

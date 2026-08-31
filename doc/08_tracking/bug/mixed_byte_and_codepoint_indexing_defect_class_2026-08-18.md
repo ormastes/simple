@@ -263,3 +263,47 @@ the (already-fixed) basename/dirname functions. Concretely:
 - `.../simple_web_html_layout_renderer_style.spl:parse_font_shorthand_family`.
 - `src/app/jupyter_kernel/main.spl:extract_field`, `extract_object_field`
   (same shape and same fix as `_md_lsp_extract_field`, Fix #4).
+
+## Bracket-operator instance (added 2026-08-31, measured on seed `bin/simple`)
+
+The hazard is not only in `src/lib` callers — it is inside the **bracket
+operator itself**. Measured on `"Hello 🌍 World"`:
+
+| expression | result | index space |
+|---|---|---|
+| `s.len()` | `16` | bytes |
+| `s[6]` | `🌍` | codepoints |
+| `s[6:7]` | one broken byte | bytes |
+| `s.substring(6,7)` | one broken byte | bytes |
+| `s.substring(6,10)` | `🌍` | bytes |
+| `s.char_at(6)` | `🌍` | codepoints |
+
+So `s[i]` and `s[i:j]` — the same operator — disagree, which is what
+`test/feature/usage/advanced_indexing_spec.spl:109` ("handles UTF-8
+characters", `expect s[6:7] == "🌍"`) fails on.
+
+**This cannot be fixed by changing the slice arm alone.** Byte-indexed
+slicing is deliberate and load-bearing: see the comments at
+`src/compiler_rust/compiler/src/interpreter/expr/collections.rs:445-456` and
+`:969-979`. It was made byte-indexed to match `rt_slice` (native/JIT lane),
+`.slice()`/`.substring()`, and to fix
+`doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md` (glob
+`_glob_at`, js `string_charAt` for CJK). Every byte-offset scanner in the tree
+bounds `i` by `.len()` (bytes) and slices `[i:i+1]`; making the slice
+codepoint-indexed silently breaks all of them. Scoped scan: **681 files** under
+`src/lib`+`src/app`+`src/compiler` contain both `.len()` and an `[a:b]` slice.
+
+Resolving `advanced_indexing_spec.spl:109` therefore requires the whole-API
+decision already recorded under **Wanted item 3** above (byte/char split in the
+API names, or a codepoint-wide move including `.len()`), not a local patch.
+Filed here rather than fixed, per that item.
+
+## Not a defect: `{...}` inside a string literal
+
+Every double-quoted string in Simple interpolates (no `f` prefix), so raw
+source text containing `{NL2}` must be escaped. Verified working on the seed —
+all three forms already produce the literal `{NL2}`:
+`"\{NL2\}"`, `"{{NL2}}"`, and `r"use std.text.{NL2}"`. A spec that writes a
+bare `"use std.text.{NL2}"` and fails with `variable NL2 not found` is a
+spec-authoring bug, not a product bug. Gap: none of these three escape forms is
+documented in `doc/07_guide/quick_reference/syntax_quick_reference.md`.

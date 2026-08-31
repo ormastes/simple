@@ -9,9 +9,8 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_call_args, evaluate_method_call, exec_function_with_values, exec_method_function,
-    find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums, Env, FunctionDef, ImplMethods,
-    BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
+    find_and_exec_method_with_self, find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums,
+    Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
 };
 
 /// Call a method whose receiver is a *place* — a variable followed by an
@@ -1304,7 +1303,9 @@ fn eval_kernel_launch(
             "kernel launch `<<<>>>` requires `use std.gc_async_mut.gpu_ops.*` in interpreter mode".to_string(),
             ErrorContext::new()
                 .with_code(codes::UNDEFINED_FUNCTION)
-                .with_help(format!("import `{LAUNCHER}` from std.gc_async_mut.gpu_ops (the host executor for `<<<>>>`)")),
+                .with_help(format!(
+                    "import `{LAUNCHER}` from std.gc_async_mut.gpu_ops (the host executor for `<<<>>>`)"
+                )),
         ));
     };
     let grid_v = kernel_launch_dim(
@@ -1325,5 +1326,13 @@ fn eval_kernel_launch(
         capture_all: false,
     };
     let closure = evaluate_expr(&closure_expr, env, functions, classes, enums, impl_methods)?;
-    exec_function_with_values(&launcher, &[grid_v, block_v, closure], env, functions, classes, enums, impl_methods)
+    exec_function_with_values(
+        &launcher,
+        &[grid_v, block_v, closure],
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )
 }

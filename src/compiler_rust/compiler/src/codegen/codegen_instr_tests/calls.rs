@@ -143,7 +143,10 @@ fn codegen_indirect_call_boxes_f32_with_any_param_type() {
         from_ty: TypeId::F64,
         to_ty: TypeId::F32,
     });
-    block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
+    block.instructions.push(MirInst::ConstInt {
+        dest: closure,
+        value: 0,
+    });
     block.instructions.push(MirInst::IndirectCall {
         dest: Some(dest),
         callee: closure,
@@ -169,7 +172,10 @@ fn codegen_indirect_call_keeps_word_shaped_any_argument() {
     let arg = main.new_vreg();
     let dest = main.new_vreg();
     let block = main.block_mut(BlockId(0)).unwrap();
-    block.instructions.push(MirInst::ConstInt { dest: closure, value: 0 });
+    block.instructions.push(MirInst::ConstInt {
+        dest: closure,
+        value: 0,
+    });
     block.instructions.push(MirInst::ConstInt { dest: arg, value: 3 });
     block.instructions.push(MirInst::IndirectCall {
         dest: Some(dest),

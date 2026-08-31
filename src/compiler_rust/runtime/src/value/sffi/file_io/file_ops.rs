@@ -373,7 +373,8 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
         return RuntimeValue::NIL;
     }
     #[cfg(windows)]
-    if metadata.file_attributes() & 0x0000_0400 != 0 { // FILE_ATTRIBUTE_REPARSE_POINT
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        // FILE_ATTRIBUTE_REPARSE_POINT
         return RuntimeValue::NIL;
     }
     let read_limit = match (max_bytes as u64).checked_add(1) {
@@ -554,7 +555,6 @@ pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bo
         Err(_) => false,
     }
 }
-
 
 /// Synchronize the cached write-at handle when it matches `path`.
 ///
@@ -1759,13 +1759,10 @@ mod tests {
         let target_text = target.to_str().unwrap();
         let link_text = link.to_str().unwrap();
         unsafe {
-            let accepted = rt_file_read_regular_no_follow_bounded(
-                target_text.as_ptr(), target_text.len() as u64, 4);
+            let accepted = rt_file_read_regular_no_follow_bounded(target_text.as_ptr(), target_text.len() as u64, 4);
             assert_eq!(extract_string(accepted), "0011");
-            assert!(rt_file_read_regular_no_follow_bounded(
-                target_text.as_ptr(), target_text.len() as u64, 3).is_nil());
-            assert!(rt_file_read_regular_no_follow_bounded(
-                link_text.as_ptr(), link_text.len() as u64, 4).is_nil());
+            assert!(rt_file_read_regular_no_follow_bounded(target_text.as_ptr(), target_text.len() as u64, 3).is_nil());
+            assert!(rt_file_read_regular_no_follow_bounded(link_text.as_ptr(), link_text.len() as u64, 4).is_nil());
             let directory = temp_dir.path().to_str().unwrap();
             assert!(rt_file_fsync(directory.as_ptr(), directory.len() as u64));
         }

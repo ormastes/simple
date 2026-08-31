@@ -168,13 +168,7 @@ pub fn rt_http_request_v2(args: &[Value]) -> Result<Value, CompileError> {
 
     const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
-    fn result_tuple(
-        status: i64,
-        reason: String,
-        headers: String,
-        body: Vec<u8>,
-        error: String,
-    ) -> Value {
+    fn result_tuple(status: i64, reason: String, headers: String, body: Vec<u8>, error: String) -> Value {
         Value::Tuple(vec![
             Value::Int(status),
             Value::text(reason),
@@ -189,9 +183,10 @@ pub fn rt_http_request_v2(args: &[Value]) -> Result<Value, CompileError> {
     }
 
     fn is_http_token(value: &str) -> bool {
-        !value.is_empty() && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
-        })
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
     }
 
     let method = match args.first() {
@@ -244,7 +239,11 @@ pub fn rt_http_request_v2(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(error_tuple("rt_http_request_v2: headers must be an array"));
     }
 
-    let response = if body.is_empty() { request.call() } else { request.send_bytes(body) };
+    let response = if body.is_empty() {
+        request.call()
+    } else {
+        request.send_bytes(body)
+    };
     let response = match response {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(error) => return Ok(error_tuple(format!("rt_http_request_v2 error: {error}"))),
@@ -307,7 +306,9 @@ mod http_v2_tests {
     use super::*;
 
     fn assert_typed_error(value: Value) {
-        let Value::Tuple(fields) = value else { panic!("expected HTTP v2 tuple") };
+        let Value::Tuple(fields) = value else {
+            panic!("expected HTTP v2 tuple")
+        };
         assert_eq!(fields.len(), 5);
         assert!(matches!(fields[0], Value::Int(-1)));
         assert!(matches!(&fields[3], value if value.byte_array_view() == Some(&[][..])));

@@ -83,8 +83,7 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
-        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
-            .is_some_and(|value| value != "0");
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
         // Pre-compile guard against the broken JIT lambda/closure ABI.
         //
         // `compile_closure_create` builds a closure as a bare `rt_alloc` block

@@ -1843,12 +1843,7 @@ mod tests {
             let value = b"ok";
             for name in ["", "TEST=INVALID", "TEST\0INVALID"] {
                 let (name_ptr, name_len) = str_to_ptr(name);
-                assert!(!rt_env_set(
-                    name_ptr,
-                    name_len,
-                    value.as_ptr(),
-                    value.len() as u64
-                ));
+                assert!(!rt_env_set(name_ptr, name_len, value.as_ptr(), value.len() as u64));
             }
 
             let (name_ptr, name_len) = str_to_ptr("TEST_ENV_NUL_SIMPLE");
