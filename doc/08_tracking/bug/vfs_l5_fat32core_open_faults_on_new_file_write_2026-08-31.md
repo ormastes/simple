@@ -306,3 +306,52 @@ lane before now, since everything downstream of `open` was unreachable.
 no longer consulted). It is still exported from `freestanding_value_registry.h`,
 so it was left in place rather than changing that header's surface in a fix
 commit.
+
+### L6 root cause, proven host-side from the gate's own image (no guest run)
+The `VFSRT.TXT` short directory entry in `build/os/vfsrt/fat32-vfsrt.img`
+(offset 540672 = 0x84000):
+
+```
+00084000: 5646 5352 5420 2020 5458 5420 0000 0000  VFSRT   TXT ....
+00084010: 0000 0000 0000 0000 0000 e531 0000 0000  ...........1....
+size field (+28, LE u32) = 0x00000000
+first cluster (+26 lo / +20 hi) = 0x31e5 / 0x0000   -> cluster 12773, allocated
+```
+
+**The file size field is 0 while the data clusters are allocated and written.**
+That is the whole of L6: the read path honors `entry.size`
+(`Fat32Core.open` -> `alloc_file_handle(cluster, entry.size, ...)`), so it
+returns 0 bytes, while L8's raw-image scan finds the payload because the bytes
+really are in cluster 12773.
+
+The write path never writes that field. Every write to directory-entry byte
+`+28` in the whole stdlib FAT32 driver is one of exactly three:
+
+```
+fat32_dir_ops.spl:139   dir_data[slot_off + 28] = 0     # slot init
+fat32_dir_ops.spl:215   dir_data[slot_off + 28] = 0     # slot init
+fat32_dir_ops.spl:446   cdata[off + 28] = ...           # inside fat32_rename only
+```
+
+`Fat32Core.write` (`fat32_write`) and `Fat32Core.close` (`fat32_close`) do not
+update it at all. So `create_file` stamps size 0, the data is written to the
+cluster chain, and the size stays 0 permanently.
+
+**Fix required (a feature gap, not a one-liner):** on write/close, locate the
+file's directory-entry slot and write back the current length to bytes 28..31,
+then flush that directory cluster. `fat32_rename` (:446) already demonstrates
+the slot-locate-and-patch mechanics to reuse. This is a distinct piece of work
+from the L5 runtime fix and is left for a following change.
+
+### On the reproduce-spec rule
+This lane cannot carry a hosted `*_spec.spl` reproduce: the code fixed lives in
+`examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h`,
+a freestanding TU compiled only into the SimpleOS kernel and never linked by the
+hosted lane, so no hosted spec can execute it. The failing-pre-fix evidence is
+the gate itself — `check-simpleos-vfs-server-roundtrip-ovmf.shs` FAILs with
+`missing: L5 L6 L7 L8` on unmodified `origin/main` and moves to `missing: L6 L7`
+with the fix, both measured in-guest under real OVMF pflash and recorded verbatim
+in the table above. The defect-class-neighbour obligation is met inside the fix:
+all three fixed-cap monotonic registries in that file were audited together, and
+the two that were live defects (`simpleos_fv_wide`, `simpleos_fv_structs`) were
+fixed in the same change as the enum one that caused L5.
