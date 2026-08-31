@@ -1110,7 +1110,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_alloc_buffer", gpu::rt_metal_alloc_buffer_fn);
     insert_simple!("rt_metal_begin_render_pass", gpu::rt_metal_begin_render_pass_fn);
     insert_simple!("rt_metal_buffer_download", gpu::rt_metal_buffer_download_fn);
+    insert_simple!("rt_metal_buffer_download_raw", gpu::rt_metal_buffer_download_raw_fn);
     insert_simple!("rt_metal_buffer_upload", gpu::rt_metal_buffer_upload_fn);
+    insert_simple!("rt_metal_buffer_upload_raw", gpu::rt_metal_buffer_upload_raw_fn);
     insert_simple!("rt_metal_commit_command_buffer", gpu::rt_metal_commit_command_buffer_fn);
     insert_simple!("rt_metal_compile_shader", gpu::rt_metal_compile_shader_fn);
     insert_simple!("rt_metal_load_library_array", gpu::rt_metal_load_library_array_fn);
@@ -1169,6 +1171,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_run_compute_frame", gpu::rt_metal_run_compute_frame_fn);
     insert_simple!("rt_metal_set_buffer", gpu::rt_metal_set_buffer_fn);
     insert_simple!("rt_metal_set_bytes", gpu::rt_metal_set_bytes_fn);
+    insert_simple!("rt_metal_set_bytes_raw", gpu::rt_metal_set_bytes_raw_fn);
     insert_simple!("rt_metal_set_scissor", gpu::rt_metal_set_scissor_fn);
     insert_simple!("rt_metal_set_viewport", gpu::rt_metal_set_viewport_fn);
     insert_simple!("rt_metal_wait_completed", gpu::rt_metal_wait_completed_fn);
