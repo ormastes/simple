@@ -1,7 +1,7 @@
 # Coverage-wrapper `Undefined("undefined identifier: X")` — root-cause grouping
 
 Date: 2026-08-31
-Status: PARTIALLY FIXED (3 causes fixed; 3 filed here)
+Status: PARTIALLY FIXED (cause B fixed at 5 sites; causes A, C, D, E filed here)
 Evidence base: `/tmp/suite3.log` (1365 PASS / ~220 FAIL), 69 wrapper compile
 failures across 26 distinct symbol names, 100 unique (symbol, spec) pairs.
 
@@ -30,7 +30,7 @@ even a root-module `panic("x")` fails; on a seed built from `origin/main`
 Action: **redeploy the seed.** No source change is warranted. Any future
 triage of this log must use a freshly built binary as the discriminator.
 
-## Cause B — undeclared cross-file use (FIXED, 3 sites)
+## Cause B — undeclared cross-file use (FIXED, 5 sites)
 
 A module calls a symbol that is defined in a *sibling* file with no `use` and
 no local `extern fn`. The interpreter's program-wide, name-keyed function table
@@ -42,6 +42,7 @@ resolves it anyway; whole-program semantic analysis on the native path does not.
 | `src/lib/nogc_sync_mut/lsp/lsp_protocol.spl:65` | `text_byte_len` (in sibling `lsp_json.spl`) | added `use` |
 | `src/lib/nogc_sync_mut/lsp/lsp_protocol.spl:67,68` | `print_raw` (in `sffi/diag.spl`) | added `use` |
 | `src/os/crypto/aes256_gcm.spl:643` | `rt_tls13_aes256_gcm_encrypt` (declared only in `os/apps/sshd/ssh_cipher_live.spl`) | added local `extern fn` |
+| `src/lib/nogc_sync_mut/compression/gzip/compress.spl:623` | `gzip_stream_compress` (in sibling `stream.spl:83`) | added `use` |
 
 Before/after proof, fresh seed, `use std.nogc_sync_mut.env.variables`:
 - before: `Undefined("undefined identifier: io_runtime")`
@@ -58,6 +59,11 @@ test/feature/lib/mcp/handler_registry_spec.spl --coverage` (one spec from the
 `io_runtime` cluster, one from the `print_raw` cluster) on the fresh seed gives
 `PASS` for both **with the fix applied AND with it reverted**, with zero
 `[mcdc-fallback]` lines and zero `undefined identifier` in either run.
+
+The obvious confound — a wrapper build-cache hit carrying the fixed run's SMF
+into the reverted run — was checked and ruled out: the reverted run was repeated
+with `--force-rebuild` and still PASSes with zero `undefined identifier` and zero
+`[mcdc-fallback]`.
 
 Since PR #157 a coverage run whose wrapper will not compile is an ERROR, so a
 clean PASS with no fallback means the wrapper compiled — in both states. Two
@@ -126,10 +132,19 @@ input needed on whether they were dropped by a bad merge or never written.
 
 ## Unclassified residue
 
-`String` (8, formal-verification/lean specs), `Dict` (6, dbfs facades),
-`value` (6), `NativeTensor`, `Node`, `fs`, `temp_dir`, `float`, `raise`,
-`alloc`, `shared_examples`, `context_def`, `async_mode`, `mul_scalar`,
-`gzip_stream_compress`, `_b64_index`. Full (symbol, spec) map extracted from
+Probes already run on the fresh seed, recorded so they are not repeated:
+
+| probe | result | reading |
+|---|---|---|
+| `use lib.sdn` | clean (no `Undefined`) | `String` (8) / `Dict` (6) / `value` (6) do **not** come from `src/lib/sdn/__init__.spl`'s unqualified `case String(s)` / `case Dict(entries)` patterns, which was the leading hypothesis. Most likely cause A. |
+| `use std.nogc_sync_mut.package.dist` | clean | `Platform` not reproduced from this side |
+| `use compiler.backend.linker.smf_enums` | clean | `Platform` not reproduced from this side either |
+| `use std.nogc_sync_mut.composition.codec` | clean | — |
+| `use std.nogc_sync_mut.compression.gzip.compress` | `Undefined("undefined identifier: gzip_stream_compress")` | live cause B — **now fixed** |
+
+Still unclassified: `String` (8), `Dict` (6), `value` (6), `NativeTensor`, `Node`,
+`fs`, `temp_dir`, `float`, `raise`, `alloc`, `shared_examples`, `context_def`,
+`async_mode`, `mul_scalar`, `_b64_index`. Full (symbol, spec) map extracted from
 suite3 is reproducible with:
 
 ```
