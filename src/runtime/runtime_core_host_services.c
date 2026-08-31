@@ -6,6 +6,17 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* macOS: _POSIX_C_SOURCE alone puts <unistd.h> in strict-POSIX mode, which HIDES
+ * _SC_NPROCESSORS_ONLN (used by rt_cpu_count below) even though unistd.h is
+ * included. Measured on aarch64-apple-darwin: the Stage-2 runtime build failed
+ * with "error: use of undeclared identifier '_SC_NPROCESSORS_ONLN'" at :507.
+ * runtime.c:19-23 documents this same trap and fixes it the same way, noting
+ * that platform_macos.h defines _DARWIN_C_SOURCE too late (after runtime.h) --
+ * a feature-test macro must be defined before any system header is pulled in.
+ */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 
 #include "runtime.h"
 
