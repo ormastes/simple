@@ -241,7 +241,7 @@ char* spl_str_replace(const char* s, const char* old_s, const char* new_s) {
 }
 
 uint64_t spl_str_hash(const char* s) {
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     if (!s) return hash;
     while (*s) {
         hash ^= (unsigned char)*s++;

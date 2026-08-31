@@ -5391,11 +5391,26 @@ int64_t rt_string_trim_end(int64_t value) {
 int64_t rt_string_to_int(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
-    char buf[64];
-    uint64_t n = s->len < sizeof(buf) - 1 ? s->len : sizeof(buf) - 1;
-    if (n > 0) memcpy(buf, s->data, (size_t)n);
-    buf[n] = '\0';
-    return (int64_t)strtoll(buf, NULL, 10);
+    /* Copy into a NUL-terminated buffer sized from s->len -- the old fixed
+     * char buf[64] silently TRUNCATED any input longer than 63 bytes, so a
+     * 64-byte numeric string parsed as its first 63 bytes (a wrong number,
+     * no diagnostic). Stack for the common short case, heap for the rest.
+     * strtoll keeps the documented lenient semantics (whitespace/sign skip,
+     * longest digit prefix, INT64_MAX/MIN clamp on overflow), matching the
+     * Rust crate's uncapped rt_string_to_int_lenient and
+     * simple_core/core_string.spl. */
+    char stack_buf[64];
+    char* buf = stack_buf;
+    if (s->len >= sizeof(stack_buf)) {
+        if (s->len > SIZE_MAX - 1) return 0;
+        buf = (char*)malloc((size_t)s->len + 1);
+        if (!buf) return 0;
+    }
+    if (s->len > 0) memcpy(buf, s->data, (size_t)s->len);
+    buf[s->len] = '\0';
+    int64_t result = (int64_t)strtoll(buf, NULL, 10);
+    if (buf != stack_buf) free(buf);
+    return result;
 }
 
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
@@ -8104,7 +8119,7 @@ void rt_bdd_clear_state(void) {
 int64_t rt_hash_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     for (uint64_t i = 0; i < s->len; i++) {
         hash ^= (uint8_t)s->data[i];
         hash *= 1099511628211ULL;
