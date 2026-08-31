@@ -220,3 +220,70 @@ gate's fixtures rather than by review:
 
 A third, in the gate: a multi-line log excerpt embedded in the `ERROR` verdict
 pushed the verdict off the last line of stdout. Flattened with `tr`.
+
+---
+
+## 2026-08-31 — the 44-symbol link blocker is CLOSED; two later defects now visible
+
+**Status: the blocker this record was opened for is resolved.** Both riscv64
+in-guest kernels build and link with **zero undefined symbols**, and the
+interpreter guest now boots under real OpenSBI `-bios fw_payload` and reaches
+its entry. What the lane reported before —
+
+    ERROR — nothing was checked: interpreter kernel build failed:
+    ld.lld: error: too many errors emitted
+
+— no longer happens. `build-simpleos-riscv64-interpreter-kernel.shs` reports:
+
+    PASS — riscv64 interpreter + build-and-run kernels built by the RUST SEED
+
+### What was measured
+
+The 43 symbols listed in `riscv64_interpreter_missing_rt_symbols_2026-08-31.txt`
+were confirmed on the real link, all ported into
+`arch/riscv64/boot/baremetal_runtime_core.inc.c` as a fourth tranche. Resolving
+them surfaced exactly **one** further symbol, `spl_wffi_call_i64` (the weak-FFI
+integer call thunk, emitted by `compiler.blocks.sugar_registry.apply_rule_ast`),
+also ported. **44 total.** `nm` on both linked ELFs shows every one as a strong
+`T`; `rt_unwrap_or_trap` is a 60-byte real trap body, not an 8-byte weak stub.
+
+A cross-check worth recording, because it wasted time twice: replaying the link
+out of a preserved `.simple/native-objects-*` directory reports **1 undefined
+symbol (`spl_start`) regardless of the tree's true state**. Those directories do
+not contain the entry-closure object, so `--gc-sections` rooted at `_start`
+finds `spl_start` undefined, collects the entire module graph as dead, and never
+reports the `rt_*` references inside it. That is a third member of the
+vacuous-green family already noted for `-e spl_start`. **The real build script is
+the only honest measurement.**
+
+### Defect A — in-guest parser makes no forward progress on a StringLit
+
+The interpreter guest boots, prints its banner, and runs the real frontend
+in-guest. It then fails identically every time:
+
+    [interp] lowering hello-world source through the real frontend
+    [stderr] [parser-module] decl:start i=0 kind=3 text= line=3 col=3
+    [parser_error] line 3:3: parser made no forward progress at this token (StringLit ''); aborting module parse
+    [parser_error_ctx] path  kind 3 text ''
+
+The token is correctly classified (`kind=3`, StringLit) at the right position
+(line 3 col 3), but its **text is empty** — so this is token-text extraction in
+the freestanding lexer, not a grammar problem. The guest then resets and repeats;
+the transcript holds 3,044 identical cycles in ~21 MB.
+
+### Defect B — the build-and-run kernel executes the interpreter row's entry
+
+`buildrun/kernel.elf` links, and the build script's symbol check confirms
+`buildrun_sanity_row` is present in it. But its serial transcript prints the
+**`[interp]`** banners, never the `[buildrun]` ones that
+`buildrun_sanity_entry.spl` actually emits. The gate reports this honestly:
+
+    ERROR — nothing was checked: the build-and-run guest never reached its
+    entry — no boot rungs on serial
+
+So a row symbol being present in the image is not evidence that row's entry is
+what runs. This is entry selection, not a link failure, and it is why the gate's
+verdict is still ERROR rather than FAIL: the interpreter row DID reach its entry
+(it passes the same precondition at line 486), and the run stops at buildrun.
+
+Neither defect is a runtime-symbol gap, and neither is fixed by this change.
