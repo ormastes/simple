@@ -159,17 +159,40 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
     val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
     val scope_raw = native_build_cache_scope_key(
         Some(backend), raw_target, [capability_key], opt_level as i32, compiler_id)
-    # `scope` is a SINGLE directory component, so it is bounded by POSIX
-    # NAME_MAX (255 on ext4/xfs). The `-storage-<sha256>` suffix added to
-    # `compiler_id` above pushed it to 295 chars, and every object write then
-    # failed with ENAMETOOLONG surfacing as "Failed to write ELF bytes to
-    # build/native_cache/..." -- i.e. the AOT lane could not emit any binary.
-    # Keep the readable head for debuggability and fold the whole key into a
-    # digest so the scope stays injective.
-    val scope = if scope_raw.len() <= 200:
-        scope_raw
-    else:
-        scope_raw.substring(0, 160) + ";digest=" + sha256_text(scope_raw)
+    # `scope` is a SINGLE directory component, so it must satisfy every
+    # filesystem's component rules at once:
+    #   - POSIX NAME_MAX (255 on ext4/xfs): the old `-storage-<sha256>` growth
+    #     pushed the raw key to 295 chars and every object write failed with
+    #     ENAMETOOLONG ("Failed to write ELF bytes to build/native_cache/...").
+    #   - Windows MAX_PATH (260 for the WHOLE path, incl. NUL): the previous
+    #     scheme's 160-head + ";digest=" + 64 form was ALWAYS 232 chars at
+    #     stage 3 (scope_raw measures 388 with a real compiler identity), and
+    #     the worst stage-3 object path -- <abs repo>/<stage3 cache dir>/
+    #     <scope>/sources-<i64 hash>n<count>/object.<module>.o with an 84-char
+    #     module name -- carries ~226 chars of overhead BESIDES the scope, so
+    #     the total blew far past 260 and cl.exe exits 1 with NO diagnostic at
+    #     all. The scope's budget is therefore ~33 chars. See
+    #     doc/08_tracking/bug/windows_bootstrap_max_path_262_2026-08-30.md.
+    #   - NTFS forbids : * ? " < > | (and \ /) in a component, and the raw key
+    #     ALWAYS contains ':' via "native-avx2-policy-v1:cpu=...", inside the
+    #     old 160-char head -- the directory could not even be created on
+    #     Windows.
+    # So: ALWAYS fold the FULL raw key into a sha256 digest and name the scope
+    # "s" + its first 128 bits -- fixed 33 chars, alphabet [s0-9a-f], which is
+    # inherently NTFS/POSIX-component-safe (no char needs escaping) and the
+    # same shape the Rust keyer uses (`scope-{:016x}`, native_project/mod.rs).
+    # Identity stays SOUND: a 128-bit sha256 prefix is collision-resistant, so
+    # two different raw keys cannot share a directory, and the same key always
+    # maps to the same one (no time, no randomness, no iteration order).
+    # NOTE: this derivation change renames every existing scope directory on
+    # every platform -- a one-time safe cache miss (stale dirs are simply
+    # never matched again), never a wrong reuse. Nothing parses the directory
+    # NAME back apart: lane ownership rides in the `.cache_scope` marker
+    # CONTENT (see check-cache-scope-ownership.shs), and cached-output
+    # filtering is a plain path-prefix match. To recover WHAT a scope dir was
+    # keyed on, recompute: the raw key is fully determined by the lane env,
+    # backend/target/cpu/opt flags, and the compiler identity above.
+    val scope = "s" + sha256_text(scope_raw).substring(0, 32)
     val cache_scope_root = rt_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
