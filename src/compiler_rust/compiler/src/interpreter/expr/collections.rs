@@ -870,6 +870,16 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
+                // Byte length for an already-raw-bytes text value, matching the
+                // `Value::Str` arm above (which is also byte-indexed) and the
+                // `Value::StrBytes` arm of the dispatch match further below.
+                // That dispatch arm was added on its own, leaving this length
+                // match without a StrBytes case, so a StrBytes receiver fell to
+                // the `_` arm here and errored "cannot slice value of type str
+                // with step" BEFORE it could ever reach the working arm — the
+                // very confusion that arm's own comment describes. Step-slicing
+                // the result of a step-slice therefore still failed.
+                Value::StrBytes(b) => b.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
                 Value::LabeledTuple { values, .. } => values.len() as i64,
                 Value::Object {
