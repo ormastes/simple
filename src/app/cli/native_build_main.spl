@@ -307,7 +307,22 @@ fn eprint_bounded(output: text):
     # native-build's stderr-truncation path, that parse error was emitted
     # INSTEAD of the real build diagnostic. See
     # doc/08_tracking/bug/fstring_nested_quoted_literal_in_interpolation_misparsed_2026-08-17.md
-    val spill_root = env_get("TMPDIR") ?? "/tmp"
+    # Windows has no TMPDIR and no writable "/tmp": the CRT-visible temp dir is
+    # TEMP (or TMP). Falling through to "/tmp" there made file_write fail on
+    # every truncated build, so the FULL stderr was lost and 1.3 MB of
+    # diagnostics were dropped from the middle (measured 2026-08-31 on the
+    # lint_entry native-build). Order matters: TMPDIR first keeps POSIX
+    # behaviour byte-identical (TEMP/TMP are normally unset on Linux/macOS).
+    val tmpdir_env = env_get("TMPDIR") ?? ""
+    val temp_env = env_get("TEMP") ?? ""
+    val tmp_env = env_get("TMP") ?? ""
+    var spill_root = "/tmp"
+    if tmpdir_env != "":
+        spill_root = tmpdir_env
+    elif temp_env != "":
+        spill_root = temp_env
+    elif tmp_env != "":
+        spill_root = tmp_env
     val spill_path = "{spill_root}/native-build-stderr-{getpid()}.log"
     if file_write(spill_path, output):
         eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
