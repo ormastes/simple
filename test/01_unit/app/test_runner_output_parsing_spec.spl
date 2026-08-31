@@ -69,3 +69,64 @@ describe "test runner output parsing":
         expect(failed).to_equal(0)
         expect(skipped).to_equal(0)
         expect(pending).to_equal(0)
+
+    # Reproduces doc/08_tracking/bug/
+    # simpleos_testrun_row_feeds_unsupported_transcript_shape_2026-08-31.md:
+    # `parse_test_output` had no `test result:` branch, so a cargo-style
+    # transcript silently summarised as 0 passed / 0 failed — indistinguishable
+    # from "no tests ran". The SimpleOS in-guest `testrun` component row on all
+    # three arches feeds exactly this shape and was red on every one of them
+    # because the HOST answer was already wrong.
+    it "parses a cargo-style failing test result summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "running 3 tests\n" +
+            "test arithmetic adds ... ok\n" +
+            "test arithmetic subtracts ... ok\n" +
+            "test arithmetic divides by zero ... FAILED\n" +
+            "\n" +
+            "test result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(1)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "parses a cargo-style all-green test result summary with ignored tests":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "running 5 tests\n" +
+            "test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out\n"
+        )
+        expect(passed).to_equal(3)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(2)
+        expect(pending).to_equal(0)
+
+    it "lets a later canonical summary win over an earlier cargo summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "test result: ok. 9 passed; 0 failed; 0 ignored\n" +
+            "Results: 3 total, 2 passed, 1 failed\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(1)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "lets a later cargo summary win over an earlier canonical summary":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "Results: 3 total, 2 passed, 1 failed\n" +
+            "test result: ok. 9 passed; 0 failed; 0 ignored\n"
+        )
+        expect(passed).to_equal(9)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)
+
+    it "ignores a test-authored line that merely mentions a test result":
+        val (passed, failed, skipped, pending) = parse_test_output(
+            "test result: inconclusive, see log\n" +
+            "Results: 2 total, 2 passed, 0 failed\n"
+        )
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(0)
+        expect(skipped).to_equal(0)
+        expect(pending).to_equal(0)

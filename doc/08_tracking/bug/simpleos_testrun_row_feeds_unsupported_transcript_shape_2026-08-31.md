@@ -75,3 +75,50 @@ parser stops summarising correctly.
 
 Until one is chosen, the `testrun` row is expected-red on both arches, and its
 redness carries no information about in-guest execution.
+
+## RESOLUTION 2026-08-31 — resolution 1 chosen: teach the parser the cargo form
+
+Resolution 1 ("teach `parse_test_output` the cargo `test result:` form") was
+picked over resolution 2, and the fixture was deliberately left byte-identical
+on all three arches. The deciding evidence is that a *sibling product module*
+already consumes exactly this shape:
+`src/lib/nogc_sync_mut/test_runner/rust_test_runner.spl:60,69` parses
+`"test result: ok. N passed; M failed; K ignored;"` with its own
+`starts_with("test result:")` branch. So the runner IS expected to consume cargo
+output; the shape was not imagined, and `parse_test_output` — the *general*
+entry point the composite executor and the in-guest rows call — was simply
+missing the branch its sibling already had. Swapping the fixture would have left
+that hole open and made three gates green over it.
+
+Implementation (`src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl`):
+the cargo line is folded into the SAME "results family" the canonical
+`Results:` line already forms — same segment reset, same `results_*` state, same
+`results_pos` ordering — so all existing precedence rules (a later direct
+`Passed:`/`Failed:` pair wins, a later BDD `N examples, M failures` wins, the
+last summary of the file wins) apply unchanged to it with no new return path.
+`ignored` maps to skipped; pending is 0. Recognition requires
+`starts_with("test result:")` AND `contains(" passed")` AND `contains(" failed")`,
+so authored prose such as `test result: inconclusive, see log` is not mistaken
+for a summary — the same discrimination the canonical branch gets from its
+` total`/` passed`/` failed` requirement.
+
+### On failing loudly instead of returning zeros
+
+Considered and deliberately NOT done in this change. `parse_test_output` returns
+a bare `(i64, i64, i64, i64)`; there is no channel in that signature for "I did
+not understand this transcript", and widening it ripples through
+`make_result_from_output`, `test_executor_composite`, the outer runner, and all
+three freestanding in-guest entries (which cannot format integers, let alone
+carry an error type). The honest scope of this fix is that it removes *this*
+instance of silent degradation rather than the class. The general remedy — a
+recognised/unrecognised discriminant on the parse result, so "no tests ran" and
+"unknown format" stop being the same answer — remains open and is the reason
+this record stays filed rather than being closed outright.
+
+### Regression cover
+
+`test/01_unit/app/test_runner_output_parsing_spec.spl` gained five examples,
+including the exact in-guest transcript. They were verified RED on the pre-fix
+parser and GREEN after; the two precedence examples (cargo-then-canonical and
+canonical-then-cargo) and the authored-prose example exist so the row keeps its
+discriminating power rather than merely turning green.
