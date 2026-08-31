@@ -369,3 +369,69 @@ Gate verdict, honestly RED:
 full `simpleos-native-build.shs` of `src/compiler`+`src/lib`+`src/app`, behind a
 Stage2 admission-receipt check. Not attempted this session; L6-equivalent for
 the interpreter row was NOT reached and must not be claimed.
+
+---
+
+## B8 RESOLVED, B9 found (same session, later)
+
+### B8 — RESOLVED: an extern declaration suppressed the SFFI alias
+Root cause was NOT in `rt_file_write_bytes` itself. `compile_call`
+(`codegen/instr/calls.rs`) decided whether to apply the SFFI alias table
+(`rt_file_write_bytes` -> `rt_file_write_bytes_array`) using
+`ctx.func_ids.contains_key(name)`. `func_ids` **also holds `extern fn`
+DECLARATIONS**, registered with `Linkage::Import`. So a user declaring the
+runtime symbol as an extern counted as "a user function shadowing the builtin",
+the alias was suppressed, and codegen emitted a direct call to the raw symbol
+under the SFFI convention: a `text` arg split into `(ptr, len)` plus the array
+value = **3 arguments against the 4-argument C ABI**
+`rt_file_write_bytes(path_ptr, path_len, data_ptr, data_len)`. The length came
+from a stale register (constantly 3), which is why every call wrote the same 3
+bytes and still returned true.
+
+This was **general to every alias in the table** (`rt_file_read_text`,
+`rt_file_delete`, `rt_dict_insert`, ...) whenever a user declares that runtime
+symbol extern — not specific to this one function.
+
+Fix (one line): use the existing `has_defined_local_function` predicate, which
+tests `Linkage != Import`. A real `fn len` body is still defined-local and still
+shadows, so the `module_fn_shadowed_by_builtin_name_2026-08-21` fix is
+preserved.
+
+Effect: the guest volume is now a real FAT32 filesystem. Sector 0 is
+`EB 58 90 "SIMPLEOS"` with the `55 aa` signature, and the in-guest driver parses
+the BPB correctly:
+`[fat32-c] BPS=0200 SPC=40 reserved=20 FATs=01 FAT_size=09 root_cluster=02 data_start=29`
+
+### B9 — OPEN: `text[i] as u8` yields 0 when `i` is a u64 VARIABLE
+Now blocking L4. The root directory entries are written with the correct
+cluster and size but **blank 8.3 names**: the entry for the payload carries
+cluster `0x000d` (13) and size `0x1ae8` (6888) — both correct — while its
+11-byte name field is all `00`/`20`. `[hello] FAIL fat32 open /FSEXEC.ELF rc=-1`
+follows, because the guest cannot match a nameless entry.
+
+Minimal reproducer (`simple run`, JIT/Cranelift path):
+```
+fn _pad_ascii(s: text, width: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < width:
+        if i < s.len():
+            out.push(s[i] as u8)
+        else:
+            out.push(0x20u8)
+        i = i + 1u64
+    out
+_pad_ascii("FSEXEC", 8u64)
+```
+OBSERVED `pad=0 0 0 0 0 0 32 32` — EXPECTED `pad=70 83 69 88 69 67 32 32`.
+The `0x20` padding is correct, so the loop, the bounds test and `push` all work;
+only `s[i] as u8` with the u64 loop variable produces 0. Indexing with a
+LITERAL is fine: a separate probe gives `s[0] as u8 = 70` ('F') and
+`s.bytes()[0] = 70`.
+
+Silent zero rather than a diagnostic is the dangerous part: it produced a
+structurally valid filesystem whose files are simply invisible.
+
+NOTE for whoever fixes it: `text` here is documented as `.len()` counts BYTES
+while `[]` indexes CHARS. Preserve that contract; do not resolve this by
+redefining either.
