@@ -228,7 +228,9 @@ impl<'a> MirLowerer<'a> {
             return Ok(());
         }
         for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
-            if params.get(i).copied() == Some(TypeId::ANY) {
+            // `Any?` params are tagged-value slots too -- see
+            // `slot_holds_tagged_value`.
+            if params.get(i).copied().is_some_and(|p| self.slot_holds_tagged_value(p)) {
                 if let Some(arg_expr) = args.get(i) {
                     *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
                 }
