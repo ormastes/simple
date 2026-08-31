@@ -205,3 +205,211 @@ rather than something scoped to the MSVC calling convention specifically.
 - `doc/08_tracking/bug/stage3_freestanding_struct_by_value_corrupts_pmm_2026-07-11.md`
 - `doc/08_tracking/bug/bootstrap_lane_dict_global_uninitialized_alloca_2026-07-27.md`
 - `doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
+
+## 2026-08-31 follow-up: minimal-repro attempt + analytical mechanism lead (NOT fixed, NOT independently reproduced)
+
+Goal for this session: build a minimal standalone `.spl` repro outside the
+full driver/bootstrap machinery (per "Suggested next steps" #1 above), isolate
+the trigger axis, and locate the mechanism.
+
+### Minimal repro: blocked by unrelated toolchain defects (all newly found, all real)
+
+Attempted to use the already-built Rust seed
+(`src/compiler_rust/target/bootstrap/simple.exe`) to `native-build`/`compile
+--native` small `.spl` fixtures directly, bypassing the full bootstrap
+pipeline. Could not get a working native-build+run cycle in this session.
+Three independent blockers hit, in order:
+
+1. `SIMPLE_RUNTIME_PATH` bundle detection requires both runtime libs in ONE
+   directory, but the seed's own build splits them.
+   `NativeBinaryBuilder::has_target_runtime_bundle`
+   (`compiler/src/linker/native_binary/builder.rs:20-28`) only accepts a
+   bundle when `simple_runtime.lib` AND `simple_native_all.lib` both exist in
+   the same `library_paths` entry. The seed's own cargo build puts them in
+   different directories: `target/bootstrap/deps/simple_runtime.lib` vs.
+   `target/bootstrap/simple_native_all.lib`. With `--target
+   x86_64-pc-windows-msvc --native` and `SIMPLE_RUNTIME_PATH` pointed at
+   `target/bootstrap`, this fails with "missing target runtime/sysroot ...".
+   Workaround: copy `deps/simple_runtime.lib` next to
+   `simple_native_all.lib`; then the runtime-bundle check passes.
+2. With the bundle fixed, `--target x86_64-pc-windows-msvc` produces a
+   linker-flavor/executable mismatch that was NOT the struct-ABI bug. The
+   final link step invokes `lld-link.exe` (the MSVC-mode LLD front end) but
+   feeds it GNU-style argv (`-o`, `-L`, `-Bstatic`, `-lsimple_runtime`,
+   `-Bdynamic`, `-lc`, `-lmsvcrt`, ...): `lld-link` logs "ignoring unknown
+   argument" for every one of them and then fails to open the output path.
+   This happened with `SIMPLE_LINKER_FLAVOR=msvc` and `SIMPLE_WINDOWS_ABI=msvc`
+   both exported, which per `Target::linker_flavor()`
+   (`common/src/target.rs:772-800`) should force `LinkerFlavor::Msvc`, and an
+   explicit `--target ...-msvc` also sets `linker_flavor_hint =
+   Some(Msvc)` via `from_triple` (`common/src/target.rs:661-668`) — so
+   `LinkerFlavor::Msvc` should have been selected either way. Did not
+   root-cause which code path actually decided to emit GNU-style tokens
+   (candidates: `linker/builder.rs:214 fn link`, or the argv assembly in
+   `native_binary/linker.rs` upstream of the two `match linker_flavor` arms
+   at lines 180 and 211, which only special-case `/WHOLEARCHIVE:` and
+   `/FORCE:UNRESOLVED`, not the base `-o`/`-L`/`-l` tokens). This is a
+   genuine, separate, reproducible defect in the ad hoc `compile --native
+   --target=x86_64-pc-windows-msvc` CLI path off the Rust seed — worth its
+   own bug record — but it is not the struct-corruption bug from the top of
+   this doc; it prevents even producing an executable at all, let alone
+   running one to observe field corruption.
+3. Compiling for host with no `--target` instead auto-selects
+   `LinkerFlavor::Gnu` (because `MSYSTEM=MINGW64` is set — see the
+   `linker_flavor()` fallback branch), and links with real GNU `ld`
+   successfully accepting the argv this time — but the platform default
+   library list hardcodes `vec!["c".to_string(), "msvcrt", "kernel32", ...]`
+   for `TargetOS::Windows` regardless of flavor
+   (`native_binary/linker.rs:106-109`). MinGW has no `libc.a` (that name is
+   MSVC-only; MinGW's libc is `libmsvcrt.a`), so raw `ld` fails with `cannot
+   find -lc`. Workaround: copied `mingw64/lib/libmsvcrt.a` to
+   `mingw64/lib/libc.a` as a local alias. That cleared the `-lc` error but
+   then hit a missing `__main` symbol (MinGW's CRT startup glue, normally
+   supplied by the `gcc`/`clang` driver's default objects, absent because the
+   compiler invokes raw `ld.exe` directly rather than through a CRT-aware
+   driver). Did not chase further.
+
+Net: the sanctioned bootstrap script (`run_s2final.sh` ->
+`scripts/bootstrap/bootstrap-windows.sh`) evidently gets all of the above
+right end-to-end (it is what produced the working, 108 MB
+`simple.exe.rejected`), but none of the ad hoc single-file CLI invocations
+attempted here reproduced that success. A real minimal-fixture repro on this
+host most likely needs to either fix these three items, or borrow whatever
+the bootstrap script does differently rather than inventing a new invocation.
+
+### Re-confirmation (no new repro needed — the existing artifact still trips it on demand)
+
+The rejected Stage 2 binary from the prior session still carries its
+diagnostic prints (not reverted from *this* binary, only from source — the
+record's own note "temporary diagnostic print statements have been reverted"
+refers to the `.spl` source, not this already-built artifact). Every
+invocation of it — `compile` or `native-build`, on any input, including a
+trivial `fn main(): print "hi"` — prints the same three `DIAG` lines and then
+fails on the MC/DC gate before doing anything else:
+
+```
+DIAG after from_env: owner=140714796318720 global=140714796487808
+DIAG options: owner=2297553734337 global=1 mode_text=
+DIAG after cli-apply: owner=2297553734337 global=140714796487808
+```
+
+A fourth independent measurement (see the table above for the first three),
+again non-repeating and address-shaped (`140714796318720` = `0x7FF9...`
+range, a plausible Windows user-mode VA). This confirms the corruption is
+unconditional for this binary — it fires on every command, not just `compile
+--format=smf` — which was already implied but not stated explicitly in the
+original record.
+
+### Analytical mechanism lead (source-reading only — NOT run or verified this session)
+
+Traced how a Simple struct value is represented and copied in the LLVM
+backend, looking specifically for a Win64-vs-SysV aggregate-classification
+bug (the task's leading hypothesis). Two findings:
+
+1. The calling-convention theory looks wrong for this call. Every struct or
+   class value in this backend is represented as a single heap-boxed, tagged
+   64-bit pointer ("tagged-value ABI"), never as a real LLVM aggregate
+   crossing a call boundary:
+   - `create_function_signature` (`compiler/src/codegen/llvm/backend_core.rs:1183-1216`)
+     builds a function's LLVM type from `ret_llvm = self.llvm_type(return_type)`
+     matched only against `IntType | FloatType | PointerType` —
+     `_ => return Err(unsupported_return_type())`. Since compiling the real
+     driver (which returns `CompilerConfig` by value from several functions)
+     succeeds, `llvm_type()` must already lower every struct return type to
+     one of those three, never to a genuine `StructType`.
+   - `Terminator::Return(Some(vreg))` (`codegen/llvm/instructions.rs:678-696`)
+     unconditionally coerces the return value to `i64` — comment: "All
+     functions return i64 in the tagged-value ABI".
+   - `compile_struct_init` (`codegen/llvm/functions/objects.rs:14-106`)
+     allocates the struct via `rt_alloc` (heap) and returns a tagged pointer
+     (`ptr | 1`), never a stack aggregate.
+
+   A value that only ever crosses call boundaries as a single scalar i64
+   (pointer or inline bit pattern) is immune to the SysV-vs-Win64
+   aggregate-register-classification mismatch the task brief flagged as the
+   leading suspect — that class of bug needs a real multi-register/indirect
+   aggregate ABI in play, which this internal convention does not have. This
+   is evidence against a Win64-ABI-specific explanation for calls that stay
+   inside Simple-to-Simple codegen (which `CompilerConfig.from_env()` calling
+   into `CompileContext.create()` is) — though it does not rule out the
+   Win64 ABI mattering at some other boundary (e.g. a genuine `extern "C"`
+   call into a C runtime function, which was not traced this session).
+
+2. Field layout is computed by a self-admittedly wrong, uniform
+   8-bytes-per-field formula, with a comment flagging exactly this class of
+   risk. `lower_struct_init_expr`
+   (`compiler/src/mir/lower/lowering_expr_struct.rs:136-151`) computes each
+   field's offset as `field_index * 8`, with its own comment: "For now, use
+   simple sequential layout (simplified, may not match actual layout)" /
+   "Assume 8-byte fields for simplicity (pointer-sized)". The struct-field
+   READ path, `lower_field_access_expr` (same file, `byte_offset =
+   (field_index as u32) * 8` at line ~326), uses the identical formula, so
+   within this one file reads and writes are self-consistent — no read/write
+   mismatch was found inside `lowering_expr_struct.rs` itself. However, both
+   offset computations carry the comment "Native-project lowering replaces
+   this with an authoritative collision-free module-qualified layout
+   decision" (referring to `pipeline/native_project/compiler.rs:1697 fn
+   qualify_native_struct_layouts`) — tracing that function shows it patches
+   only `owner_has_vtable` (a bool), not the byte offsets themselves. So for
+   a native build, offsets stay on the naive per-field-index formula
+   everywhere traced this session. A third offset-computation site (e.g.
+   `self.field` access inside an `impl CompilerConfig:` method body, which
+   may lower through different code than `lower_field_access_expr`) was not
+   found but also not ruled out — that is the most promising untraced lead
+   for a future session with a working repro loop.
+3. `rt_alloc` zero-initializes (`calloc`), which refutes the simplest
+   "truncated copy leaves stale/uninitialized tail bytes" theory. `rt_alloc`
+   (`src/runtime/runtime_memory.c:265-291`, all three paths:
+   guarded/hardened/plain) allocates via `calloc`. A struct copy that wrote
+   fewer words than it should would read back as zero in the missing slots,
+   not as the address-shaped garbage actually measured (`2456074614833`,
+   `140714796318720`, etc. — all in plausible Windows heap/stack VA ranges).
+   This favors a field-slot misalignment theory (some field's real, valid
+   pointer-shaped payload landing in a different field's slot) over an
+   "uninitialized memory" theory, and is consistent with heap-address-shaped
+   values differing per run simply because heap addresses themselves vary
+   run to run (ASLR / allocator state) even when the underlying bug is fully
+   deterministic in which slot gets which field's value.
+
+### Windows-specific vs. general: still unresolved, same as the original record
+
+Every file read this session (`codegen/llvm/**`,
+`mir/lower/lowering_expr_struct.rs`, `pipeline/native_project/compiler.rs`,
+`runtime/runtime_memory.c`) is shared across every LLVM target — no
+`#[cfg(target_os = "windows")]` or triple-string branching was found in any
+of the mechanisms traced above. If the field-layout-mismatch lead above is
+the actual cause, it would most likely be a general defect, not
+Windows/MSVC-specific — but, as with the original record, this is inferred
+from reading code, not measured on a second platform, and this session had
+no means to run a Linux/macOS build to check.
+
+### What was NOT done
+
+No source files were changed. No fix was attempted (per task guidance: a
+broad/uncertain core-codegen change should stop at diagnosis). The two new
+`.spl` fixtures written this session (`repro/t0_hello.spl`,
+`repro/r1_struct2.spl`) never successfully compiled to a runnable native
+binary due to the toolchain blockers above, so they produced no new
+empirical data point beyond the re-confirmation above.
+
+### Recommended next steps (revised)
+
+1. Fix the toolchain blockers above first (co-locate the two runtime `.lib`
+   files or fix `has_target_runtime_bundle`'s single-directory assumption;
+   root-cause the `lld-link.exe`-vs-GNU-argv mismatch for explicit `--target
+   x86_64-pc-windows-msvc` builds) so a real edit-compile-run loop is
+   possible on this host without going through the ~5-minute full bootstrap
+   each time.
+2. Once that loop works, instrument `compile_struct_init` and
+   `compile_field_get` (`codegen/llvm/functions/objects.rs`) with the same
+   temporary-print technique the prior session used, on a fixture that
+   mirrors `CompilerConfig`'s actual shape: several scalar fields, then a
+   `Dict<text,text>` field, then more scalar fields after it (matching
+   `profile, log_level, type_inference, values: Dict<>, use_rust_types, ...,
+   mcdc_owner_bytes, mcdc_global_bytes, ...`) — print the offset and the
+   pointer/bit-pattern actually stored and actually loaded for each field
+   name, and check for a duplicate or skipped offset.
+3. Separately, check whether `self.field` reads inside an `impl` method body
+   (as opposed to external `receiver.field` reads, which is what
+   `lower_field_access_expr` traced above covers) go through a different MIR
+   lowering function with its own, possibly-divergent offset formula.
