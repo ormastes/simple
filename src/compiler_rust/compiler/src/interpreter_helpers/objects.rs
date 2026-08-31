@@ -14,11 +14,20 @@ use super::super::{
 };
 
 pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
+    create_range_object_step(start, end, bound, 1)
+}
+
+/// Create a range object carrying an explicit iteration step.
+///
+/// `step` may be negative (a descending range). A zero step is rejected by the
+/// caller; iteration helpers treat a missing `step` field as 1.
+pub(crate) fn create_range_object_step(start: i64, end: i64, bound: RangeBound, step: i64) -> Value {
     let mut fields = HashMap::new();
     fields.insert("start".into(), Value::Int(start));
     fields.insert("end".into(), Value::Int(end));
     // Store as boolean for runtime iteration compatibility
     fields.insert("inclusive".into(), Value::Bool(bound.is_inclusive()));
+    fields.insert("step".into(), Value::Int(step));
     Value::Object {
         class: BUILTIN_RANGE.into(),
         fields: Arc::new(fields),

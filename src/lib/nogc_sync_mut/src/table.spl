@@ -142,7 +142,7 @@ impl Column:
         """Apply function to each element."""
         var result: [Any] = []
         for item in self.data:
-            result = result.push(f(item))
+            result.push(f(item))
         Column(name: self.name, dtype: self.dtype, data: result)
 
     fn filter(predicate: fn(Any) -> bool) -> Column:
@@ -150,7 +150,7 @@ impl Column:
         var result: [Any] = []
         for item in self.data:
             if predicate(item):
-                result = result.push(item)
+                result.push(item)
         Column(name: self.name, dtype: self.dtype, data: result)
 
     # ========================================================================
@@ -161,14 +161,14 @@ impl Column:
         """Convert to integer array."""
         var result: [i64] = []
         for item in self.data:
-            result = result.push(item as i64)
+            result.push(item as i64)
         result
 
     fn as_floats() -> [f64]:
         """Convert to float array."""
         var result: [f64] = []
         for item in self.data:
-            result = result.push(item as f64)
+            result.push(item as f64)
         result
 
     fn as_tensor() -> Vector<f64>:
@@ -183,12 +183,12 @@ impl Column:
 
     fn unique() -> Column:
         """Get unique values."""
-        var seen: Set<Any> = Set.new()
+        var seen: Dict<Any, bool> = {}
         var result: [Any] = []
         for item in self.data:
             if not seen.has(item):
-                seen.insert(item)
-                result = result.push(item)
+                seen[item] = true
+                result.push(item)
         Column(name: self.name, dtype: self.dtype, data: result)
 
     fn value_counts() -> Table:
@@ -203,8 +203,8 @@ impl Column:
         var values: [Any] = []
         var count_vals: [i64] = []
         for item, count in counts:
-            values = values.push(item)
-            count_vals = count_vals.push(count)
+            values.push(item)
+            count_vals.push(count)
 
         Table.from_columns([
             Column(name: self.name, dtype: self.dtype, data: values),
@@ -239,7 +239,7 @@ impl Table:
 
         for col in cols:
             columns[col.name] = col
-            order = order.push(col.name)
+            order.push(col.name)
             if col.len() > row_count:
                 row_count = col.len()
 
@@ -259,7 +259,7 @@ impl Table:
                     case bool: ColumnType.Bool
                     case text: ColumnType.Text
                     case _: ColumnType.Text
-            cols = cols.push(Column(name: name, dtype: dtype, data: values))
+            cols.push(Column(name: name, dtype: dtype, data: values))
         Table.from_columns(cols)
 
     # ========================================================================
@@ -321,7 +321,7 @@ impl Table:
         """Get first n rows."""
         var cols: [Column] = []
         for name in self.column_order:
-            cols = cols.push(self.columns[name].slice_rows(0, min(n, self.row_count)))
+            cols.push(self.columns[name].slice_rows(0, min(n, self.row_count)))
         Table.from_columns(cols)
 
     fn tail(n: i64 = 5) -> Table:
@@ -329,7 +329,7 @@ impl Table:
         val start = max(0, self.row_count - n)
         var cols: [Column] = []
         for name in self.column_order:
-            cols = cols.push(self.columns[name].slice_rows(start, self.row_count))
+            cols.push(self.columns[name].slice_rows(start, self.row_count))
         Table.from_columns(cols)
 
     # ========================================================================
@@ -341,7 +341,7 @@ impl Table:
         var cols: [Column] = []
         for name in names:
             if self.has_column(name):
-                cols = cols.push(self.columns[name])
+                cols.push(self.columns[name])
         Table.from_columns(cols)
 
     fn drop(names: [text]) -> Table:
@@ -349,7 +349,7 @@ impl Table:
         var cols: [Column] = []
         for name in self.column_order:
             if not names.contains(name):
-                cols = cols.push(self.columns[name])
+                cols.push(self.columns[name])
         Table.from_columns(cols)
 
     fn rename(old_name: text, new_name: text) -> Table:
@@ -358,9 +358,9 @@ impl Table:
         for name in self.column_order:
             val col = self.columns[name]
             if name == old_name:
-                cols = cols.push(Column(name: new_name, dtype: col.dtype, data: col.data))
+                cols.push(Column(name: new_name, dtype: col.dtype, data: col.data))
             else:
-                cols = cols.push(col)
+                cols.push(col)
         Table.from_columns(cols)
 
     # ========================================================================
@@ -377,15 +377,15 @@ impl Table:
         for i in 0..self.row_count:
             val row = self.row(i)
             if predicate(row):
-                indices = indices.push(i)
+                indices.push(i)
 
         var cols: [Column] = []
         for name in self.column_order:
             val col = self.columns[name]
             var data: [Any] = []
             for idx in indices:
-                data = data.push(col.get(idx))
-            cols = cols.push(Column(name: name, dtype: col.dtype, data: data))
+                data.push(col.get(idx))
+            cols.push(Column(name: name, dtype: col.dtype, data: data))
 
         Table.from_columns(cols)
 
@@ -408,17 +408,31 @@ impl Table:
         # Get sorted indices
         var indices: [i64] = []
         for i in 0..self.row_count:
-            indices = indices.push(i)
+            indices.push(i)
 
-        # Sort indices by column values
-        indices = indices.sorted_by(\i, j:
-            val a = col.get(i)
-            val b = col.get(j)
-            if ascending:
-                a < b
-            else:
-                a > b
-        )
+        # Sort indices by column values (stable insertion sort, in place).
+        # `[i64]` has no `sorted_by`, and mutating through a temporary alias
+        # would deep-copy the array on every write, so sort the owner directly.
+        var i = 1
+        while i < indices.len():
+            val cur = indices[i]
+            val cur_val = col.get(cur)
+            var j = i - 1
+            var placed = false
+            while j >= 0 and not placed:
+                val prev_val = col.get(indices[j])
+                var out_of_order = false
+                if ascending:
+                    out_of_order = prev_val > cur_val
+                else:
+                    out_of_order = prev_val < cur_val
+                if out_of_order:
+                    indices[j + 1] = indices[j]
+                    j = j - 1
+                else:
+                    placed = true
+            indices[j + 1] = cur
+            i = i + 1
 
         # Reorder all columns
         var cols: [Column] = []
@@ -426,8 +440,8 @@ impl Table:
             val c = self.columns[name]
             var data: [Any] = []
             for idx in indices:
-                data = data.push(c.get(idx))
-            cols = cols.push(Column(name: name, dtype: c.dtype, data: data))
+                data.push(c.get(idx))
+            cols.push(Column(name: name, dtype: c.dtype, data: data))
 
         Table.from_columns(cols)
 
@@ -468,8 +482,8 @@ impl Table:
             val key = self.columns[on].get(i)
             if right_index.has(key):
                 for j in right_index[key]:
-                    left_indices = left_indices.push(i)
-                    right_indices = right_indices.push(j)
+                    left_indices.push(i)
+                    right_indices.push(j)
 
         # Build result columns
         var cols: [Column] = []
@@ -479,8 +493,8 @@ impl Table:
             val col = self.columns[name]
             var data: [Any] = []
             for idx in left_indices:
-                data = data.push(col.get(idx))
-            cols = cols.push(Column(name: name, dtype: col.dtype, data: data))
+                data.push(col.get(idx))
+            cols.push(Column(name: name, dtype: col.dtype, data: data))
 
         # Add right table columns (except join key)
         for name in other.column_order:
@@ -488,8 +502,8 @@ impl Table:
                 val col = other.columns[name]
                 var data: [Any] = []
                 for idx in right_indices:
-                    data = data.push(col.get(idx))
-                cols = cols.push(Column(name: name, dtype: col.dtype, data: data))
+                    data.push(col.get(idx))
+                cols.push(Column(name: name, dtype: col.dtype, data: data))
 
         Table.from_columns(cols)
 
@@ -508,7 +522,7 @@ impl Table:
     me add_column(col: Column):
         """Add a new column."""
         self.columns[col.name] = col
-        self.column_order = self.column_order.push(col.name)
+        self.column_order.push(col.name)
         if col.len() > self.row_count:
             self.row_count = col.len()
 
@@ -519,13 +533,13 @@ impl Table:
 
         for n in self.column_order:
             if n == name:
-                cols = cols.push(Column(name: name, dtype: ColumnType.Float, data: values))
+                cols.push(Column(name: name, dtype: ColumnType.Float, data: values))
                 found = true
             else:
-                cols = cols.push(self.columns[n])
+                cols.push(self.columns[n])
 
         if not found:
-            cols = cols.push(Column(name: name, dtype: ColumnType.Float, data: values))
+            cols.push(Column(name: name, dtype: ColumnType.Float, data: values))
 
         Table.from_columns(cols)
 
@@ -537,7 +551,7 @@ impl Table:
         """
         var values: [Any] = []
         for i in 0..self.row_count:
-            values = values.push(f(self.row(i)))
+            values.push(f(self.row(i)))
         self.with_column(name, values)
 
     # ========================================================================
@@ -575,7 +589,7 @@ impl Table:
                 case "std": col.std()
                 case _: 0.0
 
-            result_cols = result_cols.push(
+            result_cols.push(
                 Column.from_floats("{col_name}_{agg_type}", [value])
             )
 
@@ -590,18 +604,18 @@ impl Table:
         var lines: [text] = []
 
         # Header
-        lines = lines.push(self.column_order.join(" | "))
-        lines = lines.push("-".repeat(lines[0].len()))
+        lines.push(self.column_order.join(" | "))
+        lines.push("-".repeat(lines[0].len()))
 
         # Rows
         for i in 0..min(10, self.row_count):
             var row_strs: [text] = []
             for name in self.column_order:
-                row_strs = row_strs.push(self.columns[name].get(i).to_string())
-            lines = lines.push(row_strs.join(" | "))
+                row_strs.push(self.columns[name].get(i).to_string())
+            lines.push(row_strs.join(" | "))
 
         if self.row_count > 10:
-            lines = lines.push("... ({self.row_count - 10} more rows)")
+            lines.push("... ({self.row_count - 10} more rows)")
 
         lines.join("\n")
 
@@ -629,7 +643,7 @@ impl GroupedTable:
             # Build group key
             var key_parts: [text] = []
             for col_name in self.group_columns:
-                key_parts = key_parts.push(self.table.columns[col_name].get(i).to_string())
+                key_parts.push(self.table.columns[col_name].get(i).to_string())
             val key = key_parts.join("|")
 
             if groups.has(key):
@@ -661,7 +675,7 @@ impl GroupedTable:
                 val col = self.table.columns[col_name]
                 var values: [f64] = []
                 for idx in indices:
-                    values = values.push(col.get(idx) as f64)
+                    values.push(col.get(idx) as f64)
 
                 val agg_value = match agg_type:
                     case "sum": values.sum()

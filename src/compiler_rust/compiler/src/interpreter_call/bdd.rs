@@ -99,6 +99,16 @@ thread_local! {
     // after_each hooks for current context (stack of hook lists for nesting)
     pub(crate) static BDD_AFTER_EACH: RefCell<Vec<Vec<Value>>> = RefCell::new(vec![vec![]]);
 
+    // after_all hooks for the current group (stack of hook lists for nesting).
+    //
+    // `describe`/`context` are intercepted by THIS builtin runner, so
+    // `std.spec`'s pure-Simple `describe` -- the only place that drained its
+    // own `after_all_hooks` list -- never runs in interpreter mode. A spec that
+    // registered `after_all` therefore parked the hook in a list nothing ever
+    // read, and the hook silently never fired. Registration is mirrored here so
+    // the drain happens where the group actually ends.
+    pub(crate) static BDD_AFTER_ALL: RefCell<Vec<Vec<Value>>> = RefCell::new(vec![vec![]]);
+
     // TEST-012: Memoized lazy values (name -> (block, Option<cached_value>))
     pub(crate) static BDD_LAZY_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
 
@@ -689,6 +699,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
             BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
             BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+            BDD_AFTER_ALL.with(|cell| cell.borrow_mut().push(vec![]));
             // Invalidate hook cache when entering new context
             invalidate_hook_caches();
 
@@ -699,6 +710,27 @@ pub(super) fn eval_bdd_builtin(
             }
 
             let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
+
+            // Drain this group's `after_all` hooks: the body (and therefore
+            // every example in it, which this runner executes eagerly) has
+            // finished, and the group has not been popped yet. Hooks run in
+            // registration order. A hook failure must not mask a body failure,
+            // so the body's result is kept and a hook error only surfaces when
+            // the body succeeded.
+            let after_all_hooks = BDD_AFTER_ALL.with(|cell| cell.borrow_mut().pop().unwrap_or_default());
+            let mut hook_err = None;
+            for hook in after_all_hooks {
+                if let Err(e) = exec_block_value(hook, env, functions, classes, enums, impl_methods) {
+                    if hook_err.is_none() {
+                        hook_err = Some(e);
+                    }
+                }
+            }
+            let result = match (result, hook_err) {
+                (Ok(v), None) => Ok(v),
+                (Ok(_), Some(e)) => Err(e),
+                (err, _) => err,
+            };
 
             BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().pop());
             BDD_AFTER_EACH.with(|cell| cell.borrow_mut().pop());
@@ -1224,6 +1256,26 @@ pub(super) fn eval_bdd_builtin(
                     ))
                 }
             }
+        }
+        // Suite-scoped `after_all`. `before_all` is deliberately NOT intercepted
+        // here: `std.spec`'s own `before_all` already runs its block at the
+        // declaration point and that half worked, whereas intercepting it here
+        // ran the block against a different env and cost the LATER `after_all`
+        // hook its write-back to the module global.
+        //
+        // This runner has no separate collect-then-execute phase (a `describe`
+        // body EXECUTES as it is read), so `after_all` is deferred onto a
+        // per-group stack and drained when the enclosing group's body ends.
+        // Same contract as `std.spec` (src/lib/nogc_sync_mut/spec.spl).
+        "after_all" => {
+            let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            BDD_AFTER_ALL.with(|cell| {
+                let mut hooks = cell.borrow_mut();
+                if let Some(current) = hooks.last_mut() {
+                    current.push(block);
+                }
+            });
+            Ok(Some(Value::Nil))
         }
         "before_each" => {
             let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -1996,6 +2048,7 @@ pub fn clear_bdd_state() {
     BDD_CONTEXT_DEFS.with(|cell| cell.borrow_mut().clear());
     BDD_BEFORE_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     BDD_AFTER_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
+    BDD_AFTER_ALL.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     // Clear hook caches when resetting BDD state
     invalidate_hook_caches();
     BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());

@@ -206,7 +206,7 @@ fn provider_initialize_result(service: SpipeProviderServiceV1, request_id: text)
     # This stdio host completes one frame before reading the next, so it cannot
     # honestly cancel an in-flight request. Cancellation remains a known but
     # unnegotiated operation until a worker/queued host exists.
-    "{\"ok\":true,\"operation\":\"initialize\",\"request_id\":" + _json_string(request_id) + ",\"result\":{\"analyzer_ids\":[\"spipe-unicode-lex-v1\"],\"capabilities\":{\"cancel\":false,\"duplicate\":false,\"explain\":true,\"index_delta\":true,\"lexical\":true,\"phrase\":false,\"regex\":false,\"scope_partition\":\"independent\",\"semantic\":false,\"shutdown\":true,\"stats\":" + stats_available + ",\"symbols\":false,\"wildcard\":false},\"explanation_ids\":[\"bm25-explain-v1\"],\"implementation_digest\":" + _json_string(digest) + ",\"limits\":{\"max_deadline_ms\":30000,\"max_delta_documents\":1000,\"max_explanation_bytes_per_hit\":65536,\"max_explanation_fields\":5,\"max_explanation_terms\":128,\"max_field_value_bytes\":1048576,\"max_fields_per_document\":5,\"max_filters\":32,\"max_frame_bytes\":1048576,\"max_hits\":1000,\"max_page_bytes\":524288,\"max_query_bytes\":4096,\"max_query_tokens\":128,\"max_values_per_filter\":64,\"min_deadline_ms\":1},\"logical_index_ids\":[\"spipe-lexical-snapshot-v1\"],\"optional_fields\":[],\"protocol\":{\"major\":1,\"minor\":0},\"provider\":\"spipe-search-provider/1.0\",\"provider_ids\":[\"spipe-search-provider/1.0\"],\"score_ids\":[\"bm25-fixed-v1\"]}" + "}"
+    "{\"ok\":true,\"operation\":\"initialize\",\"request_id\":" + _json_string(request_id) + ",\"result\":{\"analyzer_ids\":[\"spipe-unicode-lex-v1\"],\"capabilities\":{\"cancel\":true,\"duplicate\":false,\"explain\":true,\"index_delta\":true,\"lexical\":true,\"phrase\":false,\"regex\":false,\"scope_partition\":\"independent\",\"semantic\":false,\"shutdown\":true,\"stats\":" + stats_available + ",\"symbols\":false,\"wildcard\":false},\"explanation_ids\":[\"bm25-explain-v1\"],\"implementation_digest\":" + _json_string(digest) + ",\"limits\":{\"max_deadline_ms\":30000,\"max_delta_documents\":1000,\"max_explanation_bytes_per_hit\":65536,\"max_explanation_fields\":5,\"max_explanation_terms\":128,\"max_field_value_bytes\":1048576,\"max_fields_per_document\":5,\"max_filters\":32,\"max_frame_bytes\":1048576,\"max_hits\":1000,\"max_page_bytes\":524288,\"max_query_bytes\":4096,\"max_query_tokens\":128,\"max_values_per_filter\":64,\"min_deadline_ms\":1},\"logical_index_ids\":[\"spipe-lexical-snapshot-v1\"],\"optional_fields\":[],\"protocol\":{\"major\":1,\"minor\":0},\"provider\":\"spipe-search-provider/1.0\",\"provider_ids\":[\"spipe-search-provider/1.0\"],\"score_ids\":[\"bm25-fixed-v1\"]}" + "}"
 
 fn provider_valid_initialize(root: any) -> bool:
     if not _has_exact_keys(root, ["request_id", "operation", "protocol", "client", "required", "limits"]):
@@ -754,9 +754,30 @@ fn provider_dispatch_initialized(mut service: SpipeProviderServiceV1, root: any,
         if not _valid_id(target):
             return _owned_response(service.bound_error(request_id, operation,
                 "invalid_request", "invalid cancel payload"), false, service)
-        return _owned_response(service.bound_error(request_id, operation,
-            "unsupported_capability", "cancellation is not negotiated"), false,
-            service)
+        # Real §14.19 pending -> cancelled CAS via SpipeProviderStateV1.cancel:
+        # `known_request_ids`/`pending_request_ids`/`completed_request_ids`
+        # are populated at the single dispatch chokepoint
+        # (wire_dispatch.spl's admit_request/complete_request around every
+        # bound operation, cancel included), so this reflects genuine request
+        # history rather than a hardcoded outcome. Because this host reads
+        # and fully answers one frame before reading the next, no target can
+        # ever be observed mid-flight: a request already seen in this
+        # generation is always "already_complete" by the time a later cancel
+        # frame is decoded, and "cancelled" is unreachable under this
+        # concurrency model. That is the honest divergence filed for
+        # correction §2.4 -- the CAS and its states are real, only the
+        # "still running" disposition is unreachable here.
+        var owned_cancel = service
+        val outcome = owned_cancel.state.cancel(target)
+        if val Err(reason) = outcome:
+            return _owned_response(owned_cancel.bound_error(request_id,
+                operation, reason,
+                "target request never existed in this generation"), false,
+                owned_cancel)
+        return _owned_response(_success(owned_cancel, request_id, operation,
+            "{\"status\":" + _json_string(outcome.unwrap()) +
+                ",\"target_request_id\":" + _json_string(target) + "}"),
+            false, owned_cancel)
     elif operation == "shutdown":
         if not _has_exact_keys(payload, ["reason"]):
             return _owned_response(service.bound_error(request_id, operation, "invalid_request", "invalid shutdown payload"), false, service)

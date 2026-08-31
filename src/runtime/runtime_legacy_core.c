@@ -22,6 +22,21 @@
 #include <io.h>
 #include <process.h>
 #include <windows.h>
+#if defined(_MSC_VER)
+/* rt_legacy_stop_group's SIGNATURE takes pid_t while its body is
+ * `#if !defined(_WIN32)`, so the type leaks into the Windows build. MinGW
+ * declares pid_t and compiled fine; MSVC does not, and the core-C archive
+ * failed with `unknown type name 'pid_t'`, which stopped the whole Stage 2
+ * runtime supplement from building.
+ *
+ * The MSVC CRT spells it _pid_t and only exposes the POSIX alias when
+ * _CRT_DECLARE_NONSTDC_NAMES is on, so alias it explicitly. Gated on
+ * _MSC_VER, never _WIN32 -- widening would shadow MinGW's own declaration. */
+#if !defined(_PID_T_) && !defined(pid_t)
+typedef int pid_t;
+#define _PID_T_
+#endif
+#endif
 #else
 #include <dirent.h>
 #include <signal.h>

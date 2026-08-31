@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use simple_common::target::LinkerFlavor;
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
+use super::config::runtime_bundle_requests_core_c_bootstrap;
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
@@ -21,8 +22,33 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
-fn clang_cl_whole_archive_args(path: &Path) -> [String; 2] {
-    ["-Xlinker".to_string(), format!("/WHOLEARCHIVE:{}", path.display())]
+/// The whole-archive argument for the **clang-cl** driver, WITHOUT `/link`.
+///
+/// clang-cl is an MSVC-compatible driver and rejects both GNU spellings.
+/// Measured against clang-cl 18.1.8, linking a real archive (with MSYS
+/// argument conversion disabled -- Git Bash rewrites `/`-prefixed args and
+/// fakes every result otherwise):
+///
+/// | form | result |
+/// |---|---|
+/// | `-Xlinker /WHOLEARCHIVE:lib` | FAILS -- flag dropped, value taken as a filename |
+/// | `-Wl,/WHOLEARCHIVE:lib` | FAILS -- parsed as a WARNING option, never reaches the linker |
+/// | `/WHOLEARCHIVE:lib` (bare) | FAILS -- "no such file or directory" |
+/// | `/link /WHOLEARCHIVE:lib` | works |
+///
+/// `/link` forwards *the remainder of the command line* to the linker, so it
+/// must appear EXACTLY ONCE and last. A second `/link` is passed to the linker
+/// as an option, which answers `LNK4044: unrecognized option '/link'` and
+/// DISCARDS it -- and with it the archive that followed. That is not
+/// hypothetical: emitting one `/link` per archive left the runtime archive
+/// unlinked and produced `LNK1120: 99 unresolved externals` (72 distinct
+/// `rt_*` symbols). Callers therefore accumulate these and emit a single
+/// trailing `/link` group; see `clang_cl_link_args` in `link_objects`.
+///
+/// The sibling `else if is_msvc` branches keep `-Wl,/WHOLEARCHIVE:`: those run
+/// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
+fn clang_cl_whole_archive_arg(path: &Path) -> String {
+    format!("/WHOLEARCHIVE:{}", path.display())
 }
 
 /// Linker stdout+stderr, with source attribution appended for any undefined
@@ -1274,6 +1300,11 @@ int main(int argc, char** argv) {
             cmd.arg("-fmemory-profile");
         }
 
+        // clang-cl linker arguments are accumulated and emitted ONCE, after
+        // every compiler argument, because `/link` consumes the rest of the
+        // command line (see clang_cl_whole_archive_arg).
+        let mut clang_cl_link_args: Vec<String> = Vec::new();
+
         if is_clang_cl {
             cmd.arg(&main_o);
             if let Some(ref init) = init_o {
@@ -1350,7 +1381,7 @@ int main(int argc, char** argv) {
                 #[cfg(target_os = "windows")]
                 {
                     if is_clang_cl {
-                        cmd.args(clang_cl_whole_archive_args(&archive_path));
+                        clang_cl_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else if is_msvc {
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
@@ -1414,14 +1445,63 @@ int main(int argc, char** argv) {
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        if is_clang_cl {
-                            cmd.args(clang_cl_whole_archive_args(runtime_lib));
-                        } else if is_msvc {
-                            cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                        // Windows used to whole-archive this unconditionally,
+                        // which is why the link failed with LNK2005 on
+                        // __IMPORT_DESCRIPTOR_kernel32: the archive bundles
+                        // rustc-synthesized raw-dylib import libraries (measured:
+                        // 4,606 members, 582 named kernel32.dll, the descriptor
+                        // defined 4x) and whole-archive forces every one in.
+                        // Lazy resolution pulls exactly one.
+                        //
+                        // Linux has never done this -- it uses retention roots
+                        // and gates whole-archive behind
+                        // SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE. This mirrors that,
+                        // including the escape hatch, so the two platforms now
+                        // agree.
+                        if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") {
+                            if is_clang_cl {
+                                clang_cl_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
+                            } else if is_msvc {
+                                cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                            } else {
+                                cmd.arg("-Wl,--whole-archive");
+                                cmd.arg(runtime_lib);
+                                cmd.arg("-Wl,--no-whole-archive");
+                            }
                         } else {
-                            cmd.arg("-Wl,--whole-archive");
+                            let roots = Self::runtime_retention_symbols(
+                                object_paths,
+                                &main_o,
+                                init_o.as_ref(),
+                                runtime_lib,
+                                imports,
+                            )?;
+                            // read_defined_symbol_set FAILS OPEN: it returns an
+                            // empty set when `nm` cannot be run, which would
+                            // silently yield zero roots and drop the whole
+                            // archive. On this host llvm-nm dies rc=127 under
+                            // DLL shadowing, so that is a live hazard, not a
+                            // theoretical one. Refuse rather than emit a binary
+                            // missing its runtime.
+                            if roots.is_empty() {
+                                return Err(format!(
+                                    "no runtime retention roots resolved from {} -- refusing to link                                      without whole-archive, since that would drop the runtime silently.                                      Check that nm is runnable (SIMPLE_TRACE_RUNTIME_ROOTS=1 to trace),                                      or set SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1 to restore the old behaviour.",
+                                    runtime_lib.display()
+                                ));
+                            }
+                            // x64 `extern "C"` names are undecorated -- measured
+                            // with nm on the real archive (`T rt_api_surface_extract`,
+                            // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
+                            for root in &roots {
+                                if is_clang_cl {
+                                    clang_cl_link_args.push(format!("/INCLUDE:{root}"));
+                                } else if is_msvc {
+                                    cmd.arg(format!("-Wl,/INCLUDE:{root}"));
+                                } else {
+                                    cmd.arg(format!("-Wl,-u,{root}"));
+                                }
+                            }
                             cmd.arg(runtime_lib);
-                            cmd.arg("-Wl,--no-whole-archive");
                         }
                     }
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1446,6 +1526,90 @@ int main(int argc, char** argv) {
                         let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
                             .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
+                    } else if cfg!(target_os = "windows")
+                        && runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle)
+                    {
+                        // WINDOWS ONLY. Without this guard the branch ran on
+                        // Linux, macOS and FreeBSD too, because the sanctioned
+                        // bootstrap invokes Stage 2/3 with exactly
+                        // `--entry bootstrap_main.spl --runtime-bundle
+                        // core-c-bootstrap` on every platform. Three regressions
+                        // followed, none of them theoretical:
+                        //   * macOS: the else-arm emits
+                        //     `-Wl,--allow-multiple-definition`, which Apple ld
+                        //     does not have (native_all/src/lib.rs:1550 says so
+                        //     outright) -- a hard link failure.
+                        //   * Linux/FreeBSD: that flag disables duplicate-symbol
+                        //     detection for the WHOLE link, permanently masking
+                        //     the ~475-symbol collision class instead of
+                        //     surfacing it.
+                        //   * any platform: build_core_c_runtime_library
+                        //     returning None now aborts a previously-working
+                        //     build.
+                        // The Windows lane needs this supplement because
+                        // native_all there lacks the C-only rt_* entry points;
+                        // Unix does not have that gap and must keep its
+                        // existing link semantics untouched.
+                        // Stage 2 asks for --runtime-bundle core-c-bootstrap, but
+                        // the bootstrap_main entry short-circuits lane selection
+                        // (config.rs:357) and pins the runtime to native_all,
+                        // which does NOT define the C-only entry points.
+                        // Measured on simple_native_all.lib (354 MB):
+                        //   rt_io_udp_bind        1
+                        //   rt_iocp_create        0
+                        //   rt_event_ports_create 0
+                        //   rt_cpu_count          0
+                        // leaving 103 distinct rt_* undefined at the Stage 2 link.
+                        //
+                        // Those live in runtime_native.c, which the core-C
+                        // archive compiles and nothing else in this build does.
+                        // Supply it as an ADDITIONAL archive, exactly like the
+                        // Stage 4 supplement above, rather than replacing
+                        // native_all -- bootstrap_main needs rt_native_build
+                        // from native_all, so swapping would just trade one
+                        // undefined set for another.
+                        //
+                        // Safe against duplicate definitions BECAUSE the branch
+                        // above no longer whole-archives: with lazy resolution a
+                        // member is pulled only to satisfy a still-undefined
+                        // symbol, so the ~560 symbols defined in both archives
+                        // resolve from native_all (listed first) and the core-C
+                        // copies are never pulled. This is also why
+                        // 8ca87866c6's "just add runtime_native.c to the Rust
+                        // build" attempt failed with 475 collisions: compiling
+                        // it INTO the crate gives the linker no such choice.
+                        let core_c_runtime =
+                            build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
+                                .ok_or_else(|| {
+                                    "failed to build the core-c-bootstrap runtime supplement".to_string()
+                                })?;
+                        cmd.arg(core_c_runtime);
+                        // Archive members resolve at OBJECT granularity, not
+                        // symbol granularity: pulling runtime_native.obj to
+                        // satisfy rt_iocp_create also drags in every other
+                        // symbol it defines, ~514 of which native_all defines
+                        // too (measured -- the same class 8ca87866c6 recorded
+                        // as 475 collisions). Lazy resolution alone therefore
+                        // does NOT avoid the duplicates.
+                        //
+                        // /FORCE:MULTIPLE takes the first definition, so
+                        // native_all (listed first) wins for every shared
+                        // symbol and the core-C copies are ignored -- exactly
+                        // the precedence the two-archive layering intends.
+                        //
+                        // Deliberately NOT /FORCE:MULTIPLE,UNRESOLVED: the
+                        // UNRESOLVED half would launder genuinely missing
+                        // symbols into NULL calls at runtime, which is the
+                        // repo's known rt_unwrap_or_trap SEGV class. Undefined
+                        // symbols must still fail the link, and they do --
+                        // LNK1120 still fires.
+                        if is_clang_cl {
+                            clang_cl_link_args.push("/FORCE:MULTIPLE".to_string());
+                        } else if is_msvc {
+                            cmd.arg("-Wl,/FORCE:MULTIPLE");
+                        } else {
+                            cmd.arg("-Wl,--allow-multiple-definition");
+                        }
                     }
                 } else {
                     #[cfg(target_os = "macos")]
@@ -1596,7 +1760,26 @@ int main(int argc, char** argv) {
         }
         #[cfg(target_os = "windows")]
         if is_clang_cl && !strict_no_stub_fallback {
-            cmd.arg("/link").arg("/WHOLEARCHIVE").arg("/FORCE:MULTIPLE,UNRESOLVED");
+            // Into the accumulator, NOT its own `/link`: `/link` consumes the
+            // rest of the command line, so a second group is handed to the
+            // linker as an option, answered with `LNK4044: unrecognized option
+            // '/link'`, and DISCARDED together with everything after it -- here
+            // that would silently drop the trailing group's whole-archive
+            // arguments and `/OPT:REF,ICF`. Measured; see
+            // clang_cl_whole_archive_arg.
+            //
+            // Only reachable when stub fallback is permitted; the bootstrap
+            // sets SIMPLE_NO_STUB_FALLBACK=1, which is why the two-group bug
+            // has been latent rather than fatal.
+            //
+            // NOTE (not changed here): the bare `/WHOLEARCHIVE` has no `:lib`
+            // argument, so it whole-archives EVERY input archive, which is what
+            // multiplies duplicate import descriptors such as
+            // __IMPORT_DESCRIPTOR_kernel32 (measured 4x in
+            // simple_native_all.lib). Narrowing that is a linker-contract
+            // change and is deliberately left for its own commit.
+            clang_cl_link_args.push("/WHOLEARCHIVE".to_string());
+            clang_cl_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
         } else if is_msvc && !strict_no_stub_fallback {
             cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
         }
@@ -1608,12 +1791,20 @@ int main(int argc, char** argv) {
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
             if is_clang_cl {
-                cmd.arg("/link").arg("/DEBUG:NONE").arg("/OPT:REF,ICF");
+                clang_cl_link_args.push("/DEBUG:NONE".to_string());
+                clang_cl_link_args.push("/OPT:REF,ICF".to_string());
             } else if is_msvc {
                 cmd.arg("-Wl,/DEBUG:NONE").arg("-Wl,/OPT:REF,ICF");
             } else {
                 cmd.arg("-Wl,--gc-sections").arg("-Wl,-s");
             }
+        }
+
+        // Single `/link` group, last: everything after it belongs to the
+        // linker, so this must follow every compiler argument above.
+        if is_clang_cl && !clang_cl_link_args.is_empty() {
+            cmd.arg("/link");
+            cmd.args(&clang_cl_link_args);
         }
 
         if self.config.verbose {
@@ -2498,8 +2689,8 @@ mod linker_tests {
     #[test]
     fn clang_cl_retains_each_required_archive() {
         assert_eq!(
-            clang_cl_whole_archive_args(Path::new("simple_native_all.lib")),
-            ["-Xlinker", "/WHOLEARCHIVE:simple_native_all.lib"]
+            clang_cl_whole_archive_arg(Path::new("simple_native_all.lib")),
+            "/WHOLEARCHIVE:simple_native_all.lib"
         );
     }
 

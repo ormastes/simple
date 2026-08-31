@@ -1,0 +1,100 @@
+"""
+# Decorator Application
+
+**Feature ID:** #DECO-001
+**Category:** Language | Functions
+**Status:** Implemented
+
+Reproduce spec for the defect where `@dec fn f(x)` parsed the decorator but
+never applied it: `add_one(5)` returned 6 instead of 12. The interpreter's
+call resolution consults the `functions` map before the variable environment,
+so the decorated closure stored in `env` was shadowed by the original
+definition, and nested `fn` statements never evaluated decorators at all.
+
+Directive/metadata decorators (`@inline`, `@deprecated`, `@simd`, `@test`)
+must keep their metadata-only behaviour and must NOT be called as wrappers.
+"""
+use std.spec.{step}
+# REQ-FEATURE-USAGE-001
+
+describe "Decorator application":
+
+    it "wraps the function with a bare decorator":
+        fn double_result(f):
+            fn wrapper(x):
+                return f(x) * 2
+            return wrapper
+
+        @double_result
+        fn add_one(x):
+            return x + 1
+
+        expect add_one(5) == 12   # (5 + 1) * 2
+
+    it "wraps the function with a parameterised decorator":
+        fn multiply_by(factor):
+            fn decorator(f):
+                fn wrapper(x):
+                    return f(x) * factor
+                return wrapper
+            return decorator
+
+        @multiply_by(3)
+        fn increment(x):
+            return x + 1
+
+        expect increment(10) == 33   # (10 + 1) * 3
+
+    it "applies stacked decorators bottom-to-top":
+        fn add_ten(f):
+            fn wrapper(x):
+                return f(x) + 10
+            return wrapper
+
+        fn double(f):
+            fn wrapper(x):
+                return f(x) * 2
+            return wrapper
+
+        @add_ten
+        @double
+        fn identity(x):
+            return x
+
+        expect identity(5) == 20   # 5 -> double -> 10 -> add_ten -> 20
+
+    it "keeps a decorated function recursive":
+        # Regression guard: an earlier fix removed the plain definition from
+        # the interpreter's function map so the env binding would win, which
+        # broke self-recursion inside the ORIGINAL body ("function `fact` not
+        # found"). The wrapper applies once at the outermost call; the inner
+        # recursion runs the undecorated original.
+        fn double_result(f):
+            fn wrapper(n):
+                return f(n) * 2
+            return wrapper
+
+        @double_result
+        fn fact(n):
+            if n <= 1:
+                return 1
+            return n * fact(n - 1)
+
+        expect fact(3) == 12   # 2 * (3 * 2 * 1)
+
+    it "leaves directive decorators as metadata":
+        @inline
+        fn fast_add(a, b):
+            return a + b
+        expect fast_add(3, 4) == 7
+
+        @deprecated
+        fn old_api(x):
+            return x * 2
+        expect old_api(10) == 20
+
+        @inline
+        @deprecated
+        fn both(x):
+            return x * 2
+        expect both(21) == 42

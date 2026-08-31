@@ -127,34 +127,6 @@ pub struct Lowerer {
     /// Keyed by local name only: two importers binding the same local name
     /// from different sources clobber each other here.
     pub(super) import_alias_bindings: HashMap<String, String>,
-    /// Cross-module duplicate free-function resolution — the codegen half of
-    /// keying the co-compiled registry on (module path, name) instead of the
-    /// bare name (see `warn_duplicate_private_signatures`'s doc comment in
-    /// `pipeline/module_loader.rs`). When two flattened-in modules both define
-    /// `fn who()`, each definition is emitted under its owner-mangled symbol
-    /// (`flatten_owner_mangled_name`), and a bare-name call site is rewritten
-    /// per CALLER: the caller's own module's definition first, then its
-    /// explicit `use m.{who}` binding, then a unique glob source. Populated by
-    /// `collect_flattened_import_aliases`, consumed by `lower_identifier` and
-    /// `lower_function`.
-    ///
-    /// Keys/owners are the `normalize_path_key` strings the flatten pass
-    /// stamps into `FLATTEN_MODULE_OWNER_ATTR_PREFIX` attributes; functions of
-    /// the entry file carry no attribute and use the `"<entry>"` sentinel,
-    /// matching `append_root_import_binding_markers`.
-    pub(super) duplicate_fn_owner_symbols: HashMap<(String, String), String>,
-    /// Bare names with 2+ top-level free-function definitions in the flattened unit.
-    pub(super) duplicate_fn_names: std::collections::HashSet<String>,
-    /// (importer, local name) -> (source owner, source name), from the import
-    /// binding markers. Unlike `import_alias_bindings` this is keyed per
-    /// importer, so two modules importing the same name from different sources
-    /// cannot clobber each other.
-    pub(super) importer_fn_bindings: HashMap<(String, String), (String, String)>,
-    /// importer -> glob (`use m.*`) source owners.
-    pub(super) importer_glob_sources: HashMap<String, Vec<String>>,
-    /// Owner (normalized path or "<entry>") of the function body currently
-    /// being lowered; drives per-caller duplicate resolution.
-    pub(super) current_function_owner: Option<String>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -258,11 +230,6 @@ impl Lowerer {
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
             import_alias_bindings: HashMap::new(),
-            duplicate_fn_owner_symbols: HashMap::new(),
-            duplicate_fn_names: std::collections::HashSet::new(),
-            importer_fn_bindings: HashMap::new(),
-            importer_glob_sources: HashMap::new(),
-            current_function_owner: None,
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -318,11 +285,6 @@ impl Lowerer {
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
             import_alias_bindings: HashMap::new(),
-            duplicate_fn_owner_symbols: HashMap::new(),
-            duplicate_fn_names: std::collections::HashSet::new(),
-            importer_fn_bindings: HashMap::new(),
-            importer_glob_sources: HashMap::new(),
-            current_function_owner: None,
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -401,11 +363,6 @@ impl Lowerer {
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
             import_alias_bindings: HashMap::new(),
-            duplicate_fn_owner_symbols: HashMap::new(),
-            duplicate_fn_names: std::collections::HashSet::new(),
-            importer_fn_bindings: HashMap::new(),
-            importer_glob_sources: HashMap::new(),
-            current_function_owner: None,
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -766,10 +723,7 @@ impl Lowerer {
     /// This is the codegen-side consumer whose absence made aliased imports
     /// lower to unresolved external symbols.
     pub(super) fn collect_flattened_import_aliases(&mut self, ast_module: &simple_parser::Module) {
-        use crate::interpreter::{
-            decode_import_binding_marker, flatten_owner_mangled_name,
-            FLATTEN_MODULE_OWNER_ATTR_PREFIX,
-        };
+        use crate::interpreter::{decode_import_binding_marker, flatten_owner_mangled_name};
 
         // Flattening merges every imported module's items into one namespace. An
         // imported free function whose bare name cannot survive that merge is
@@ -790,10 +744,6 @@ impl Lowerer {
         // compared to silently binding the wrong function. See
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
-        // (module owner, bare name) -> definition count. This restores the
-        // owner census that commit 8bd39cd5 was built on before the later
-        // snapshot commit dropped it from main.
-        let mut owner_definition_counts: HashMap<(&str, &str), usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
         // callable/global lookups (see there for why), so an entry recorded here
@@ -806,13 +756,6 @@ impl Lowerer {
                 simple_parser::Node::Function(f) => {
                     *definition_counts.entry(f.name.as_str()).or_insert(0) += 1;
                     declared_names.insert(f.name.as_str());
-                    if let Some(owner) = f
-                        .attributes
-                        .iter()
-                        .find_map(|a| a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX))
-                    {
-                        *owner_definition_counts.entry((owner, f.name.as_str())).or_insert(0) += 1;
-                    }
                 }
                 simple_parser::Node::Const(c) => {
                     declared_names.insert(c.name.as_str());
@@ -832,100 +775,11 @@ impl Lowerer {
             }
         }
 
-        // Every import/re-export edge in the flattened unit, keyed by the module
-        // that WROTE it. `std.io_runtime` is a facade
-        // (`src/lib/io_runtime.spl`) that re-exports the real
-        // `src/lib/nogc_sync_mut/io_runtime.spl`, so a marker's `source_owner`
-        // frequently names the facade, not the module that actually declares the
-        // function. Following these edges is what turns the facade into the
-        // declaring module.
-        let mut reexport_edges: HashMap<(&str, &str), (&str, &str)> = HashMap::new();
-        // Duplicate free-function census: every bare name defined by 2+
-        // top-level functions gets one owner-mangled symbol PER definition, so
-        // the flattened unit stops silently keeping only the first-import
-        // winner. Owners come from the flatten pass's owner attribute; entry
-        // functions carry none and use the "<entry>" sentinel (matching
-        // `append_root_import_binding_markers`).
-        self.duplicate_fn_names.clear();
-        self.duplicate_fn_owner_symbols.clear();
-        self.importer_fn_bindings.clear();
-        self.importer_glob_sources.clear();
-        // A name is a cross-module duplicate only when 2+ DISTINCT owners
-        // define it: same-module arity overloads (`it(desc, block)` /
-        // `it(desc, enabled, block)`) keep their existing behavior untouched.
-        // The FIRST owner (in flattened order) keeps the bare name so a caller
-        // with no resolution route — no own definition, no import binding, no
-        // glob source, e.g. the 350-symbol same-signature sync/async stdlib
-        // mirror family (co_compiled_symbol_collision_decision_2026-08-09.md
-        // §3) reached through the spec prelude — degrades to the historical
-        // first-import-wins pick instead of an unresolved symbol. Every LATER
-        // owner's definition is emitted owner-mangled, and routed callers are
-        // rewritten per caller by `resolve_duplicate_fn_symbol`.
-        {
-            let mut owners_in_order: HashMap<&str, Vec<&str>> = HashMap::new();
-            for item in &ast_module.items {
-                let simple_parser::Node::Function(f) = item else { continue };
-                if f.name.contains('.') || definition_counts.get(f.name.as_str()).copied() <= Some(1) {
-                    continue;
-                }
-                let owner = f
-                    .attributes
-                    .iter()
-                    .find_map(|a| a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX))
-                    .unwrap_or("<entry>");
-                let owners = owners_in_order.entry(f.name.as_str()).or_default();
-                if !owners.contains(&owner) {
-                    owners.push(owner);
-                }
-            }
-            for (name, owners) in owners_in_order {
-                if owners.len() < 2 {
-                    continue;
-                }
-                self.duplicate_fn_names.insert(name.to_string());
-                for (index, owner) in owners.iter().enumerate() {
-                    let symbol = if index == 0 {
-                        name.to_string()
-                    } else {
-                        flatten_owner_mangled_name(owner, name)
-                    };
-                    self.duplicate_fn_owner_symbols
-                        .insert((owner.to_string(), name.to_string()), symbol);
-                }
-            }
-        }
-        for item in &ast_module.items {
-            if let simple_parser::Node::Const(marker) = item {
-                if let Some((importer, local_name, source_owner, source_name)) =
-                    decode_import_binding_marker(&marker.name)
-                {
-                    // Per-importer binding tables for duplicate-function
-                    // resolution (`resolve_duplicate_fn_symbol`).
-                    if local_name == "*" {
-                        self.importer_glob_sources
-                            .entry(importer.to_string())
-                            .or_default()
-                            .push(source_owner.to_string());
-                    } else {
-                        self.importer_fn_bindings
-                            .entry((importer.to_string(), local_name.to_string()))
-                            .or_insert((source_owner.to_string(), source_name.to_string()));
-                    }
-                    if local_name != "*" && source_name != "*" {
-                        reexport_edges
-                            .entry((importer, local_name))
-                            .or_insert((source_owner, source_name));
-                    }
-                }
-            }
-        }
-
         for item in &ast_module.items {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
-            let Some((_importer, local_name, source_owner, source_name)) =
-                decode_import_binding_marker(&marker.name)
+            let Some((importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
             };
@@ -943,67 +797,12 @@ impl Lowerer {
             // the module the `use` names, so it is unambiguous by construction
             // and is checked for existence before it is trusted.
             let owner_mangled = flatten_owner_mangled_name(source_owner, source_name);
-            let resolved = if definition_counts.get(owner_mangled.as_str()).copied() == Some(1)
-                // A duplicated bare name is emitted under exactly this
-                // owner-mangled symbol by `lower_function` (see
-                // `duplicate_fn_owner_symbols`), so the alias may trust it even
-                // though the AST still carries the bare name.
-                || self
-                    .duplicate_fn_owner_symbols
-                    .get(&(source_owner.to_string(), source_name.to_string()))
-                    == Some(&owner_mangled)
-            {
+            let resolved = if definition_counts.get(owner_mangled.as_str()).copied() == Some(1) {
                 owner_mangled
             } else if definition_counts.get(source_name).copied() == Some(1) {
                 // Unmangled and unique in the flattened unit: the bare name is
                 // the only candidate, so binding it is safe.
                 source_name.to_string()
-            } else if let Some((decl_owner, decl_sym)) = {
-                // Walk the re-export chain from the module the `use` names to
-                // the module that actually DECLARES the function, then check
-                // that the declaration is unique there. Bounded so a cyclic
-                // facade graph cannot hang lowering.
-                let mut owner = source_owner;
-                let mut sym = source_name;
-                let mut found = None;
-                for _ in 0..16 {
-                    if owner_definition_counts.get(&(owner, sym)).copied() == Some(1) {
-                        found = Some((owner, sym));
-                        break;
-                    }
-                    match reexport_edges.get(&(owner, sym)) {
-                        Some(&(next_owner, next_sym)) => {
-                            owner = next_owner;
-                            sym = next_sym;
-                        }
-                        None => break,
-                    }
-                }
-                found
-            } {
-                // The bare name is ambiguous across the flattened unit (e.g.
-                // FOUR modules define `file_rename`), but exactly one of them is
-                // the module this `use` names, identified by the flattener's own
-                // module-owner tag. Bind the bare name.
-                //
-                // This is not a guess and it cannot bind "the wrong function"
-                // any more than the non-aliased form already does: a plain
-                // `use std.io_runtime.{file_rename}` -- which the tree already
-                // relies on (`src/lib/nogc_sync_mut/shell/file.spl:22`) --
-                // lowers to exactly this bare name today. Refusing only the
-                // ALIASED spelling made the two forms disagree and produced an
-                // unresolvable `Linkage::Import` (`runtime_file_rename`) that
-                // de-JITted the whole stage1 module. See
-                // `doc/08_tracking/bug/jit_unresolved_rt_native_build_and_runtime_file_rename_2026-08-22.md`.
-                //
-                // With per-owner mangling of duplicated names now live
-                // (`duplicate_fn_owner_symbols`), a duplicated declaration no
-                // longer exists under its bare name — bind the declaring
-                // module's mangled symbol instead; otherwise keep the bare name.
-                self.duplicate_fn_owner_symbols
-                    .get(&(decl_owner.to_string(), decl_sym.to_string()))
-                    .cloned()
-                    .unwrap_or_else(|| source_name.to_string())
             } else {
                 // Absent or ambiguous. Do NOT guess -- leave the alias
                 // unresolved so the lane reports an unresolved symbol instead of
@@ -1017,65 +816,6 @@ impl Lowerer {
     /// Resolve a selective-import alias (`use m.{f as g}`) to its original symbol.
     pub(super) fn resolve_import_alias(&self, name: &str) -> Option<&str> {
         self.import_alias_bindings.get(name).map(|s| s.as_str())
-    }
-
-    /// Per-caller resolution of a bare name that has 2+ co-compiled
-    /// definitions: the CALLING function's own module first, then its explicit
-    /// `use m.{name}` binding, then a unique glob source. `Ok(None)` when
-    /// `name` is not a duplicate or no route resolves (the bare symbol is then
-    /// undefined — every definition was emitted owner-mangled — so the lane
-    /// reports an unresolved symbol instead of silently calling the
-    /// first-import winner). `Err` names a genuine ambiguity (2+ glob sources
-    /// both provide the name).
-    pub(super) fn resolve_duplicate_fn_symbol(&self, name: &str) -> Result<Option<String>, super::error::LowerError> {
-        if !self.duplicate_fn_names.contains(name) {
-            return Ok(None);
-        }
-        let owner = self.current_function_owner.as_deref().unwrap_or("<entry>");
-        if let Some(symbol) = self.duplicate_fn_owner_symbols.get(&(owner.to_string(), name.to_string())) {
-            return Ok(Some(symbol.clone()));
-        }
-        // Follow the caller's explicit import binding, walking re-export
-        // facade chains to the declaring module (bounded against cycles).
-        let mut key = (owner.to_string(), name.to_string());
-        for _ in 0..16 {
-            let Some((source_owner, source_name)) = self.importer_fn_bindings.get(&key) else {
-                break;
-            };
-            if let Some(symbol) = self
-                .duplicate_fn_owner_symbols
-                .get(&(source_owner.clone(), source_name.clone()))
-            {
-                return Ok(Some(symbol.clone()));
-            }
-            key = (source_owner.clone(), source_name.clone());
-        }
-        if let Some(globs) = self.importer_glob_sources.get(owner) {
-            let mut matches: Vec<&String> = Vec::new();
-            let mut matched_owners: Vec<&str> = Vec::new();
-            for source_owner in globs {
-                if let Some(symbol) = self
-                    .duplicate_fn_owner_symbols
-                    .get(&(source_owner.clone(), name.to_string()))
-                {
-                    if !matched_owners.contains(&source_owner.as_str()) {
-                        matched_owners.push(source_owner);
-                        matches.push(symbol);
-                    }
-                }
-            }
-            match matches.len() {
-                1 => return Ok(Some(matches[0].clone())),
-                n if n >= 2 => {
-                    return Err(super::error::LowerError::Unsupported(format!(
-                        "ambiguous call to `{name}` in module `{owner}`: glob imports of {} each define it; import it explicitly",
-                        matched_owners.join(", ")
-                    )))
-                }
-                _ => {}
-            }
-        }
-        Ok(None)
     }
 
     /// Resolve a function alias to its original function name

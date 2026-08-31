@@ -322,12 +322,12 @@ pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::runtime("rt_open_fd path must be text")),
     };
     let flags = args[1].as_int()? as libc::c_int;
-    let mode = args[2].as_int()? as libc::mode_t;
-    // `mode` must be passed as c_uint, not mode_t. libc::open is VARIADIC, and
-    // macOS defines mode_t as u16 -- a type smaller than c_int cannot be passed
-    // through C default-argument promotion, so this is a hard E0617 there. On
-    // Linux mode_t is already u32, making the cast a no-op rather than a change.
-    let fd = unsafe { libc::open(path.as_ptr(), flags, mode as libc::c_uint) };
+    // `open` is variadic, so the mode argument undergoes C default argument
+    // promotion. `libc::mode_t` is `u32` on Linux but `u16` on macOS/*BSD, and
+    // Rust rejects passing a sub-`int` type to a variadic function (E0617).
+    // Promote explicitly to `c_uint`, which is what C would do implicitly.
+    let mode = args[2].as_int()? as libc::mode_t as libc::c_uint;
+    let fd = unsafe { libc::open(path.as_ptr(), flags, mode) };
     Ok(Value::Int(i64::from(fd)))
 }
 
@@ -3096,13 +3096,11 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
                 && before.st_size == after.st_size
                 && before.st_mtime == after.st_mtime
                 && before.st_ctime == after.st_ctime;
-            // macOS folded in with linux/android rather than kept separate. The
-            // macos arm read `st_mtimespec`/`st_ctimespec`, which the `libc`
-            // crate's darwin `stat` does NOT expose -- those are the C struct's
-            // field names, but libc names them `st_mtime_nsec`/`st_ctime_nsec`
-            // on every unix it supports. The separate arm therefore could not
-            // compile on the platform it was written for.
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+            // The `libc` crate exposes the sub-second stamps under the same
+            // `st_{m,c}time_nsec` names on Apple targets as on Linux/Android --
+            // Apple's native `st_mtimespec`/`st_ctimespec` `timespec` fields are
+            // flattened by the crate and are NOT reachable by those names.
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
             {
                 ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec;
             }

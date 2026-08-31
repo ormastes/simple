@@ -53,6 +53,13 @@ use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
 
 val SIMPLEOS_EVIDENCE_ADMISSION_OWNER: text = "simpleos-evidence-service"
 
+# Read-only diagnostic projection.  `admissible` describes only the bounded
+# performance contract; it is never cryptographic or ledger authority.
+struct SimpleOsPerformanceProjectionV1:
+    applicable: bool
+    admissible: bool
+    reason: text
+
 fn _bounded_text(value: text, maximum: i64, required: bool) -> bool:
     if required and value.len() == 0:
         return false
@@ -219,6 +226,38 @@ fn _performance_evidence(
         max_rss_bytes: max_rss_bytes,
         baseline_rss_bytes: context.performance_baseline_rss_bytes))
 
+fn _performance_projection(
+    row: SimpleOsCapabilityRowV1,
+    receipt: SimpleOsEvidenceReceiptV1,
+    context: SimpleOsCapabilityAdmissionContextV1
+) -> SimpleOsPerformanceProjectionV1:
+    if not _requires_performance_evidence(row):
+        return SimpleOsPerformanceProjectionV1(
+            applicable: false, admissible: false, reason: "not-applicable")
+    val evidence_option = _performance_evidence(receipt, context)
+    val evidence = match evidence_option:
+        case Some(value): value
+        case nil:
+            return SimpleOsPerformanceProjectionV1(
+                applicable: true, admissible: false,
+                reason: "performance-evidence")
+    val admission = simpleos_performance_admit(evidence)
+    SimpleOsPerformanceProjectionV1(
+        applicable: true,
+        admissible: admission.ok,
+        reason: if admission.ok: "" else: "performance-admission")
+
+fn simpleos_capability_performance_projection(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    context: SimpleOsCapabilityAdmissionContextV1
+) -> SimpleOsPerformanceProjectionV1:
+    val candidate_check = simpleos_capability_candidate_validate(candidate)
+    if not candidate_check.ok:
+        return SimpleOsPerformanceProjectionV1(
+            applicable: false, admissible: false,
+            reason: "candidate:" + candidate_check.reason)
+    _performance_projection(candidate.row, candidate.receipt, context)
+
 fn _row_fields_valid(row: SimpleOsCapabilityRowV1) -> SimpleOsCapabilityLedgerCheckV1:
     if not _key_component(row.requirement_id, true):
         return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "requirement-id")
@@ -351,14 +390,8 @@ fn _admission_context_valid(
         or not context.config_hash_verified or not context.artifacts_verified:
         return SimpleOsCapabilityLedgerCheckV1(ok: false, reason: "verification-outcome")
     if _requires_performance_evidence(row):
-        val evidence_option = _performance_evidence(receipt, context)
-        val evidence = match evidence_option:
-            case Some(value): value
-            case nil:
-                return SimpleOsCapabilityLedgerCheckV1(
-                    ok: false, reason: "performance-admission")
-        val performance_admission = simpleos_performance_admit(evidence)
-        if not performance_admission.ok:
+        val projection = _performance_projection(row, receipt, context)
+        if not projection.admissible:
             return SimpleOsCapabilityLedgerCheckV1(
                 ok: false, reason: "performance-admission")
     # Fail closed until the evidence service owns a trust-root registry and
@@ -567,12 +600,14 @@ fn simpleos_capability_ledger_commit_with_admission(
 
 export simpleos_capability_candidate_validate
 export simpleos_capability_candidate_validate_with_admission
+export simpleos_capability_performance_projection
 export simpleos_capability_ledger_commit
 export simpleos_capability_ledger_commit_with_admission
 export simpleos_capability_ledger_v1
 export SimpleOsCapabilityStatus, SimpleOsCapabilityRowV1
 export SimpleOsCapabilityLedgerV1, SimpleOsCapabilityLedgerCandidateV1
 export SimpleOsCapabilityAdmissionContextV1, SimpleOsCapabilityLedgerFailure
+export SimpleOsPerformanceProjectionV1
 export SimpleOsCapabilityLedgerCheckV1, SimpleOsCapabilityLedgerCommitResultV1
 export simpleos_capability_status_to_text, simpleos_capability_row_key
 export SIMPLEOS_EVIDENCE_ADMISSION_OWNER

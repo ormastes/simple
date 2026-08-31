@@ -20,7 +20,10 @@ use super::interpreter_control::{
 };
 use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
-use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
+use crate::interpreter_unit::{
+    is_unit_type, register_standalone_unit_locals, register_unit_family_locals, validate_unit_constraints,
+    validate_unit_type,
+};
 use simple_runtime::debug;
 
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
@@ -393,14 +396,30 @@ pub(crate) fn exec_node(
         Node::Function(f) => {
             // Nested function definition - treat as a closure that captures the current scope
             // Store as a Function with the captured env embedded for closure semantics
-            env.insert(
-                f.name.clone(),
-                Value::Function {
-                    name: f.name.clone(),
-                    def: Arc::new(f.clone()),
-                    captured_env: Arc::new(env.clone()), // Capture current scope
-                },
-            );
+            let plain = Value::Function {
+                name: f.name.clone(),
+                def: Arc::new(f.clone()),
+                captured_env: Arc::new(env.clone()), // Capture current scope
+            };
+            env.insert(f.name.clone(), plain.clone());
+            // A user-defined (non-directive) decorator rebinds the name to
+            // `dec(original)`.
+            if let Some(decorated) = crate::decorator_apply::apply_runtime_decorators(
+                f,
+                plain,
+                false,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                // Keep the plain definition in `functions` so the original body
+                // can still recurse; the sentinel makes `evaluate_call` prefer
+                // the wrapper for calls from outside it.
+                env.insert(crate::decorator_apply::decorated_fn_key(&f.name), Value::Bool(true));
+                env.insert(f.name.clone(), decorated);
+            }
             Ok(Control::Next)
         }
         Node::LiteralFunction(lit_fn) => {
@@ -498,6 +517,20 @@ pub(crate) fn exec_node(
                     );
                 }
             }
+            Ok(Control::Next)
+        }
+        // A `unit` declared inside a block (e.g. within a `describe`/`it` body)
+        // must register in the same thread-local registries the module-level
+        // declaration pass uses; otherwise its suffixes are invisible and
+        // literals silently fall back to the preloaded on-disk unit tree.
+        Node::Unit(u) => {
+            register_standalone_unit_locals(u);
+            env.insert(u.name.clone(), Value::Nil);
+            Ok(Control::Next)
+        }
+        Node::UnitFamily(uf) => {
+            register_unit_family_locals(uf);
+            env.insert(uf.name.clone(), Value::Nil);
             Ok(Control::Next)
         }
         Node::Newtype(nt) => {
@@ -684,7 +717,13 @@ pub(crate) fn exec_assignment(
         // and the engines agree. Note the read path already errors (E1001),
         // so this only restores read/write symmetry.
         // See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
-        if is_first_assignment {
+        // `is_first_assignment` alone is not sufficient: method dispatch
+        // pre-binds every receiver field as a local (`exec_method_body`), so a
+        // plain `fn` method's bare `field = ...` was NOT a first assignment and
+        // slipped through. `is_field_prebind` recognises exactly those
+        // pre-bound bindings and is cleared by any genuine local declaration.
+        // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+        if is_first_assignment || env.is_field_prebind(name) {
             if let Some(Value::Object { class, fields }) = env.get("self") {
                 if fields.contains_key(name) {
                     let ctx = ErrorContext::new()

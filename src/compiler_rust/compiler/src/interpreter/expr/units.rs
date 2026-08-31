@@ -3,7 +3,8 @@ use simple_parser::lexer::numbers::lookup_seed_unit;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::UNIT_SUFFIX_TO_FAMILY;
-use crate::interpreter_unit::decompose_si_prefix;
+use crate::interpreter::USER_UNIT_SUFFIX_TO_FAMILY;
+use crate::interpreter_unit::{decompose_si_prefix, decompose_si_prefix_user};
 use crate::value::Value;
 
 /// Convert a suffix string to potential type names.
@@ -62,7 +63,15 @@ pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
     // win on conflict. See `crate::units::registry`.
     crate::units::ensure_loaded();
 
-    // First try direct lookup
+    // Program-declared units win outright, then SI decomposition over the units
+    // the program declared, and only then the preloaded on-disk registry.
+    if let Some(family) = USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
+        return Some(family);
+    }
+    if let Some((_multiplier, _base, family)) = decompose_si_prefix_user(suffix) {
+        return Some(family);
+    }
+    // Direct lookup in the full registry
     if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
         return Some(family);
     }
@@ -86,7 +95,14 @@ pub(super) fn lookup_unit_family_with_si(suffix: &str) -> (Option<String>, Optio
     // (`src/unit/simple-lang/`). See `crate::units::registry`.
     crate::units::ensure_loaded();
 
-    // First try direct lookup
+    // Program-declared units win outright (see `decompose_si_prefix_user`).
+    if let Some(family) = USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
+        return (Some(family), None, None);
+    }
+    if let Some((multiplier, base, family)) = decompose_si_prefix_user(suffix) {
+        return (Some(family), Some(multiplier), Some(base));
+    }
+    // Direct lookup in the full registry
     if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
         return (Some(family), None, None);
     }

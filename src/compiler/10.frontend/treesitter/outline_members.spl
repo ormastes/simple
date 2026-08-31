@@ -13,7 +13,7 @@
 # Split from outline_decls.spl for modularity.
 
 use compiler.frontend.core.lexer.*
-use compiler.frontend.lexer_types.{TokenKind}
+use compiler.frontend.core.lexer_types.{TokenKind}
 use compiler.frontend.treesitter_types.*
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.block_types.{span_empty, span_new}
@@ -210,7 +210,7 @@ me treesitter_parse_bitfield_field_outline(self: TreeSitter) -> BitfieldFieldOut
 
         if is_reserved:
             # Reserved field: expect just a number
-            if self.check(TokenKind.IntLit):
+            if self.check(TokenKind.Integer):
                 bits = self.parse_int_literal()
             else:
                 # Allow type for reserved fields too
@@ -226,7 +226,7 @@ me treesitter_parse_bitfield_field_outline(self: TreeSitter) -> BitfieldFieldOut
                     if self.current.text == "bits":
                         self.advance()  # consume 'bits'
                         self.expect(TokenKind.LParen, "expected '(' after @bits")
-                        if self.check(TokenKind.IntLit):
+                        if self.check(TokenKind.Integer):
                             bits = self.parse_int_literal()
                         self.expect(TokenKind.RParen, "expected ')' after bit count")
 
@@ -241,13 +241,38 @@ me treesitter_parse_bitfield_field_outline(self: TreeSitter) -> BitfieldFieldOut
         )
 
 
+fn _outline_parse_hex_digits(digits: text) -> i64:
+    """Parse hex digits into an i64, stopping at the first non-hex character.
+
+    `text.parse_int_radix(16)` — the previous spelling here — has no
+    implementation anywhere: no runtime symbol, no interpreter arm, no
+    stdlib function. It reached the Stage 2 link verbatim as the undefined
+    symbol `str.parse_int_radix` (this file is its ONLY call site in the
+    tree). Parse locally with `char_code_at`, which is routed on every
+    backend, instead of stubbing a runtime entry."""
+    var value = 0
+    var i = 0
+    while i < digits.len():
+        val c = digits.char_code_at(i)
+        if c >= 48 and c <= 57:
+            value = value * 16 + (c - 48)
+        elif c >= 97 and c <= 102:
+            value = value * 16 + (c - 87)
+        elif c >= 65 and c <= 70:
+            value = value * 16 + (c - 55)
+        else:
+            return value
+        i = i + 1
+    value
+
+
 me treesitter_parse_int_literal(self: TreeSitter) -> i64:
         """Parse integer literal and return its value."""
         val text = self.current.text
         self.advance()
         # Simple integer parsing - handle both decimal and hex
         if text.starts_with("0x") or text.starts_with("0X"):
-            text[2:].parse_int_radix(16) ?? 0
+            _outline_parse_hex_digits(text[2:])
         else:
             text.parse_int() ?? 0
 

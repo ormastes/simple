@@ -343,6 +343,18 @@ fn compile_c_runtime_sources() {
     // Bootstrap-only compatibility: the seed cannot link the canonical Pure
     // Simple timestamp module. Stage4 never enables this provider.
     build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_env == "msvc" {
+        // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks
+        // are __attribute__((weak)) so the Rust accounting wins whenever both
+        // are linked. MSVC has no weak attribute, so on this lane the C
+        // fallbacks are STRONG and collide with the Rust definitions in
+        // value::heap -- LNK2005, measured on x86_64-pc-windows-msvc. The Rust
+        // runtime always provides them here (mem_snapshot.rs imports both), so
+        // suppress the C fallbacks rather than duplicate them. Gated to msvc:
+        // the GNU/Darwin lanes keep the weak fallbacks byte-unchanged.
+        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
+    }
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     } else {

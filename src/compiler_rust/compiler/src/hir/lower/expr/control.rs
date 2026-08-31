@@ -1967,6 +1967,19 @@ impl Lowerer {
             expr_hir.ty
         };
 
+        // `a ?? d` over an optional BoxInt-family scalar (`i64?` etc.) yields
+        // the RAW inner scalar, not the tagged optional. Typing the result as
+        // the `T?` Pointer kept the coalesced value in its tagged form, and
+        // every downstream consumer decoded it as a raw word: on the JIT lane
+        // `(f() ?? 0)` printed 336 (== 42 << 3, the tagged bits) and
+        // `(f() ?? 0) + 1` computed 337 — silently wrong by x8 — while the
+        // interpreter printed 42/43. With the result typed as the inner
+        // scalar, `lower_builtin_call_expr` (mir) unboxes the then-branch by
+        // its name+type, and the raw default on the else-branch needs no
+        // boxing, so both edges are raw and agree with the static type.
+        // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+        let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
+
         // Unwrap the then-branch: if expr is Some(x), return x, not Some(x).
         // Use rt_unwrap_or_self which handles both enum and raw values.
         let unwrapped_expr = HirExpr {

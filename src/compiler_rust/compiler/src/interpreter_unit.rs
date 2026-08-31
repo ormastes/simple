@@ -15,7 +15,7 @@ use crate::value::Value;
 // Thread-local references needed by this module
 use crate::interpreter::{
     BASE_UNIT_DIMENSIONS, COMPOUND_UNIT_DIMENSIONS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
-    UNIT_SUFFIX_TO_FAMILY,
+    UNIT_SUFFIX_TO_FAMILY, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
 };
 
 /// SI prefix definitions: (prefix_char, multiplier)
@@ -63,6 +63,34 @@ pub(crate) fn decompose_si_prefix(suffix: &str) -> Option<(f64, String, String)>
                 }
 
                 // Check if base unit is registered for SI prefixes
+                if let Some(family) = base_units.get(base) {
+                    return Some((multiplier, base.to_string(), family.clone()));
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Decompose a suffix against the units the PROGRAM declared, ignoring the
+/// units preloaded from the on-disk unit tree.
+///
+/// This is what makes `5_km` scale to 5000 after `unit length(base: f64): m = 1.0`
+/// while leaving `42_km` alone in a program that declares no length family: the
+/// preloaded registry has a direct `km` entry that short-circuits decomposition,
+/// so the prefix multiplier was never applied (interpreter_unit.rs SI_PREFIXES;
+/// only `M` worked, because `Mm` has no preloaded entry). Program-declared
+/// suffixes still win outright, so `unit length(base: f64): m = 1.0, km = 1000.0`
+/// keeps `km` as an exact unit rather than kilo-metre.
+pub(crate) fn decompose_si_prefix_user(suffix: &str) -> Option<(f64, String, String)> {
+    if USER_UNIT_SUFFIX_TO_FAMILY.with(|c| c.borrow().contains_key(suffix)) {
+        return None;
+    }
+    USER_SI_BASE_UNITS.with(|cell| {
+        let base_units = cell.borrow();
+        for &(prefix, multiplier) in SI_PREFIXES {
+            if suffix.starts_with(prefix) && suffix.len() > prefix.len() {
+                let base = &suffix[prefix.len()..];
                 if let Some(family) = base_units.get(base) {
                     return Some((multiplier, base.to_string(), family.clone()));
                 }
@@ -571,4 +599,71 @@ pub(crate) fn check_unit_unary_op(family: &str, op: UnaryOp) -> Result<Option<St
             Ok(Some(family.to_string()))
         }
     })
+}
+
+/// Register a `unit family(...)` declaration in the interpreter's thread-local
+/// unit registries.
+///
+/// Shared by the module-level declaration pass (`interpreter_eval`) and the
+/// block statement executor (`interpreter/node_exec`). Before this existed only
+/// the module-level pass registered anything, so a `unit` declared inside a
+/// `describe`/`it` block (the shape every spec uses) was invisible and literals
+/// fell back to the preloaded on-disk unit tree.
+pub(crate) fn register_unit_family_locals(uf: &simple_parser::ast::UnitFamilyDef) {
+    // Redeclaring a family REPLACES it: drop the suffixes a previous
+    // declaration of the same family name registered. Without this, a spec
+    // that declares `unit length(base: f64): m = 1.0, km = 1000.0` in one
+    // example and `unit length(base: f64): m = 1.0` in another leaves the
+    // stale `km` entry behind, and the second example's `5_km` is then read as
+    // an exact unit instead of kilo-metre — an order-dependent result.
+    UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+        cell.borrow_mut().retain(|_, family| family != &uf.name);
+    });
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+        cell.borrow_mut().retain(|_, family| family != &uf.name);
+    });
+    SI_BASE_UNITS.with(|cell| {
+        cell.borrow_mut().retain(|_, family| family != &uf.name);
+    });
+    USER_SI_BASE_UNITS.with(|cell| {
+        cell.borrow_mut().retain(|_, family| family != &uf.name);
+    });
+    let mut conversions = HashMap::new();
+    for variant in &uf.variants {
+        conversions.insert(variant.suffix.clone(), variant.factor);
+        UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+        });
+        USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+        });
+    }
+    UNIT_FAMILY_CONVERSIONS.with(|cell| {
+        cell.borrow_mut().insert(uf.name.clone(), conversions);
+    });
+    BASE_UNIT_DIMENSIONS.with(|cell| {
+        cell.borrow_mut()
+            .insert(uf.name.clone(), Dimension::base(&uf.name));
+    });
+    for variant in &uf.variants {
+        if (variant.factor - 1.0).abs() < f64::EPSILON {
+            SI_BASE_UNITS.with(|cell| {
+                cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+            });
+            USER_SI_BASE_UNITS.with(|cell| {
+                cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+            });
+            break;
+        }
+    }
+}
+
+/// Register a standalone `unit Name: T as sfx` declaration's suffix.
+pub(crate) fn register_standalone_unit_locals(u: &simple_parser::ast::UnitDef) {
+    UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+        cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+    });
+    USER_UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+        cell.borrow_mut().insert(u.suffix.clone(), u.name.clone());
+    });
 }

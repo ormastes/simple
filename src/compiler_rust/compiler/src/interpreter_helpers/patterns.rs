@@ -478,6 +478,28 @@ fn release_global_aliases(name: &str, env: &mut Env) -> bool {
     true
 }
 
+/// True when `method` on `class` is declared `me` (a mutating method).
+/// Missing class or method resolves to false: an unknown method cannot
+/// justify writing a chain result back into the receiver variable.
+fn method_is_me(
+    classes: &HashMap<String, Arc<ClassDef>>,
+    impl_methods: &ImplMethods,
+    class: &str,
+    method: &str,
+) -> bool {
+    if let Some(class_def) = classes.get(class) {
+        if let Some(idx) = lookup_class_method_index(class_def, class, method) {
+            return class_def.methods[idx].is_me_method;
+        }
+    }
+    if let Some(methods) = impl_methods.get(class) {
+        if let Some(idx) = lookup_impl_method_index(methods, class, method) {
+            return methods[idx].is_me_method;
+        }
+    }
+    false
+}
+
 fn handle_method_call_with_self_update_inner(
     value_expr: &Expr,
     env: &mut Env,
@@ -492,7 +514,10 @@ fn handle_method_call_with_self_update_inner(
     {
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
-        if let Expr::MethodCall { .. } = receiver.as_ref() {
+        if let Expr::MethodCall {
+            method: inner_method, ..
+        } = receiver.as_ref()
+        {
             // Recursively handle the inner method call first
             let (inner_result, inner_update) =
                 handle_method_call_with_self_update(receiver, env, functions, classes, enums, impl_methods)?;
@@ -531,13 +556,25 @@ fn handle_method_call_with_self_update_inner(
             // If the outer method returned an object of the SAME CLASS, it's likely
             // the modified self from a `me` method
             if let Some((ref obj_name, ref inner_self)) = inner_update {
-                // Only use the outer result as the update if it's the same class as inner_self
-                // This handles chains like m.when("foo").returns(42) where
-                // both methods modify and return self of the same type
+                // Write the OUTER result back into the root variable only when the
+                // chain provably threads one mutable identity through both links:
+                // the inner AND the outer method must be declared `me`. The old
+                // gate was class equality alone ("same type in/out = mutated
+                // self"), which corrupted every non-mutating fluent chain on the
+                // interpreter lane: `val h = t.head(2).head(1)` overwrote the
+                // immutable `t` with the final result (nrows 3 -> 1) while the
+                // split form and the JIT both kept `t` intact. Builder-style
+                // `me` chains (`b.add(1).add(2)`) still write back. Mock chains
+                // (`m.when(..).returns(..)`) never reached this path: mocks are
+                // `Value::Mock` with interior mutability, not `Value::Object`.
+                // doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
                 if let (Value::Object { class: inner_class, .. }, Value::Object { class: outer_class, .. }) =
                     (inner_self, &outer_result)
                 {
-                    if inner_class == outer_class {
+                    if inner_class == outer_class
+                        && method_is_me(classes, impl_methods, inner_class, inner_method)
+                        && method_is_me(classes, impl_methods, inner_class, method)
+                    {
                         return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
                     }
                 }
@@ -977,10 +1014,18 @@ fn handle_method_call_with_self_update_inner(
             // Promote the store's handle into the overlay (one Arc clone) so the
             // ownership-gated in-place path below applies; the generic path's own
             // write-back (`calls.rs`) ends in exactly this overlay state anyway.
-            if env.get(obj_name).is_none()
-                && !env.is_local(obj_name)
-                && ARRAY_MUTATING_METHODS.contains(&method.as_str())
-            {
+            // The store -- not this frame -- is authoritative for a non-local
+            // module-global name: identifier READS already prefer
+            // MODULE_GLOBALS over `env` (interpreter/expr/literals.rs). The
+            // frame's own copy can be an older generation (a `describe` body
+            // env captured before a `before_all` hook in the same group
+            // republished the global), and mutating THAT copy silently
+            // discarded the intervening writes: the hook read `[before_all]`
+            // through the store but pushed onto a stale `[]`, publishing
+            // `[after_all]`. Re-seeding the receiver from the store first makes
+            // the mutation path agree with the read path.
+            // doc/08_tracking/bug/after_all_hook_module_global_write_lost_after_in_group_mutation_2026-08-31.md
+            if !env.is_local(obj_name) && ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
                 let global_arr = MODULE_GLOBALS.with(|cell| match cell.borrow().get(obj_name) {
                     Some(v @ Value::Array(_)) => Some(v.clone()),
                     _ => None,

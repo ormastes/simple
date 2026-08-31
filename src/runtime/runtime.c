@@ -2141,8 +2141,19 @@ typedef struct {
     int64_t cap;
 } rt_dir_listing;
 
-int64_t rt_readdir(const char* path) {
-    if (!path) return 0;
+/* Tagged-text ABI (2026-08-31): rt_readdir/rt_mkdir/rt_readdir_entry are
+ * absent from text_arg_indices (50.mir/text_extern_abi.spl + the Rust twin),
+ * so generated code passes `text` as ONE tagged value and reads a `text`
+ * return as a tagged value. The old `const char*` shapes never matched any
+ * generated caller. Mirrors runtime_core_exports.c (which serves the lanes
+ * that do NOT compile this file). */
+int64_t rt_readdir(int64_t path_value) {
+    int64_t plen = rt_string_len(path_value);
+    const uint8_t* pdata = rt_string_data(path_value);
+    if (plen <= 0 || plen >= 4096 || !pdata) return 0;
+    char path[4096];
+    memcpy(path, pdata, (size_t)plen);
+    path[plen] = '\0';
     DIR* d = opendir(path);
     if (!d) return 0;
     rt_dir_listing* dl = (rt_dir_listing*)calloc(1, sizeof(rt_dir_listing));
@@ -2166,11 +2177,12 @@ int64_t rt_readdir_count(int64_t handle) {
     if (!handle) return 0;
     return ((rt_dir_listing*)(uintptr_t)handle)->count;
 }
-const char* rt_readdir_entry(int64_t handle, int64_t index) {
-    if (!handle) return "";
+int64_t rt_readdir_entry(int64_t handle, int64_t index) {
+    if (!handle) return rt_string_new(NULL, 0);
     rt_dir_listing* dl = (rt_dir_listing*)(uintptr_t)handle;
-    if (index < 0 || index >= dl->count) return "";
-    return dl->entries[index];
+    if (index < 0 || index >= dl->count) return rt_string_new(NULL, 0);
+    const char* name = dl->entries[index];
+    return rt_string_new((const uint8_t*)name, (uint64_t)strlen(name));
 }
 void rt_readdir_free(int64_t handle) {
     if (!handle) return;
@@ -2180,8 +2192,13 @@ void rt_readdir_free(int64_t handle) {
     free(dl);
 }
 
-int64_t rt_mkdir(const char* path, int64_t mode) {
-    if (!path) return -1;
+int64_t rt_mkdir(int64_t path_value, int64_t mode) {
+    int64_t plen = rt_string_len(path_value);
+    const uint8_t* pdata = rt_string_data(path_value);
+    if (plen <= 0 || plen >= 4096 || !pdata) return -(int64_t)EINVAL;
+    char path[4096];
+    memcpy(path, pdata, (size_t)plen);
+    path[plen] = '\0';
     if (mode == 0) mode = 0755;
     return mkdir(path, (mode_t)mode) == 0 ? 0 : -(int64_t)errno;
 }
@@ -2195,15 +2212,33 @@ int64_t rt_remove(const char* path) {
     return unlink(path) == 0 ? 0 : -(int64_t)errno;
 }
 #else
-int64_t rt_readdir(const char* p) { (void)p; return 0; }
+/* Windows stubs keep the tagged ABI (real Windows support lives in
+ * runtime_core_exports.c, which the Windows core-C lane compiles instead). */
+int64_t rt_readdir(int64_t p) { (void)p; return 0; }
 int64_t rt_readdir_count(int64_t h) { (void)h; return 0; }
-const char* rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return ""; }
+int64_t rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return rt_string_new(NULL, 0); }
 void rt_readdir_free(int64_t h) { (void)h; }
-int64_t rt_mkdir(const char* p, int64_t m) { (void)p; (void)m; return -1; }
+int64_t rt_mkdir(int64_t p, int64_t m) { (void)p; (void)m; return -(int64_t)EINVAL; }
 int64_t rt_remove(const char* p) { (void)p; return -1; }
 #endif
 
-const char* rt_shell_output(const char* cmd) { return spl_shell_output(cmd); }
+/* Tagged-text ABI (see runtime.h): decode the command, delegate to
+ * spl_shell_output, box the captured stdout. Empty text on failure. */
+int64_t rt_shell_output(int64_t cmd_value) {
+    int64_t len = rt_string_len(cmd_value);
+    const uint8_t* data = rt_string_data(cmd_value);
+    if (len < 0 || (!data && len != 0)) return rt_string_new(NULL, 0);
+    char* cmd = (char*)malloc((size_t)len + 1u);
+    if (!cmd) return rt_string_new(NULL, 0);
+    if (len != 0) memcpy(cmd, data, (size_t)len);
+    cmd[len] = '\0';
+    char* out = spl_shell_output(cmd);
+    free(cmd);
+    if (!out) return rt_string_new(NULL, 0);
+    int64_t result = rt_string_new((const uint8_t*)out, (uint64_t)strlen(out));
+    SPL_FREE(out);
+    return result;
+}
 
 __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();

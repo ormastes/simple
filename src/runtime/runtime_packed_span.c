@@ -39,6 +39,33 @@ int64_t rt_array_bytes_basis_len(SplArray* array) SIMPLE_PACKED_SPAN_WEAK;
 /* data pointer iff BYTES-basis and non-empty; 0 otherwise. */
 int64_t rt_array_bytes_basis_ptr(SplArray* array) SIMPLE_PACKED_SPAN_WEAK;
 
+#if defined(_MSC_VER)
+/* COFF has no weak-UNDEFINED symbol, so the declarations above are plain
+ * externals under MSVC and the link fails outright when this file is built
+ * into a runtime flavour that omits the accessors (measured 2026-08-30:
+ * LNK2019 x2, referenced from rt_packed_span_v1_resolve, on
+ * x86_64-pc-windows-msvc). `/alternatename` is COFF's weak-external: the
+ * symbol resolves to the fallback ONLY if nothing else defines it, which is
+ * exactly the ELF weak-undefined semantic.
+ *
+ * Behaviour is identical to the ELF path, by a different route: there the
+ * address is NULL and the `!rt_array_bytes_basis_len` test refuses with
+ * NO_BASE; here the address is never NULL (so that test is dead code on this
+ * lane) and the fallback returns -1, which rt_packed_span_v1_resolve_raw
+ * refuses with WRONG_BASIS at the `basis_len < 0` guard. Both fail closed --
+ * a non-bytes array can never project a base pointer. */
+int64_t rt_array_bytes_basis_len_packed_span_default(SplArray* array) {
+    (void)array;
+    return -1;
+}
+int64_t rt_array_bytes_basis_ptr_packed_span_default(SplArray* array) {
+    (void)array;
+    return 0;
+}
+#pragma comment(linker,     "/alternatename:rt_array_bytes_basis_len=rt_array_bytes_basis_len_packed_span_default")
+#pragma comment(linker,     "/alternatename:rt_array_bytes_basis_ptr=rt_array_bytes_basis_ptr_packed_span_default")
+#endif
+
 /* ------------------------------------------------------------------ *
  * Process-wide honest counters. A refusal is COUNTED and TYPED.
  * ------------------------------------------------------------------ */

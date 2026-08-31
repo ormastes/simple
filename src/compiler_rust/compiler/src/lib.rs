@@ -21,6 +21,7 @@ pub mod blocks;
 pub mod build_mode;
 pub mod codegen;
 pub mod compilability;
+pub mod decorator_apply;
 pub mod compilation_context;
 pub mod concurrent_providers;
 pub mod context_pack;

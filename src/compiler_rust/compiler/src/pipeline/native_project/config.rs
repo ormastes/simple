@@ -33,7 +33,7 @@ fn runtime_bundle_requests_simple_core(value: &str) -> bool {
     matches!(value, "simple-core" | "simple_core")
 }
 
-fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
+pub(super) fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
     matches!(
         value,
         "core-c-bootstrap" | "core_c_bootstrap" | "runtime" | "core" | "core-c" | "core_c"

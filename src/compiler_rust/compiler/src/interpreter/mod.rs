@@ -66,7 +66,7 @@ pub(crate) use interpreter_state::{
     EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, IMMUTABLE_VARS,
     IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
     MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
@@ -146,7 +146,7 @@ pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, updat
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
-    create_range_object_opt, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
+    create_range_object_opt, create_range_object_step, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
     eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_for_each, eval_dict_map_values,
     eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then,
     eval_result_map, eval_result_map_err, eval_result_or_else, find_and_exec_method, handle_functional_update,
@@ -167,7 +167,7 @@ pub(crate) use interpreter_call::{
 pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_bound_args,
-    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH,
+    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_ALL, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };
 
@@ -197,6 +197,9 @@ pub(crate) use interpreter_types::get_type_name;
 #[path = "../interpreter_eval.rs"]
 mod interpreter_eval;
 pub use interpreter_eval::PRELUDE_UNSHADOWABLE;
+// Re-exported so crate::decorator_apply can invoke a Value as a callable when
+// applying runtime function decorators.
+pub(crate) use interpreter_eval::call_value_with_args;
 
 #[path = "../interpreter_method/mod.rs"]
 mod interpreter_method;
