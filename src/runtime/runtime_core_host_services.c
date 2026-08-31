@@ -375,7 +375,16 @@ static int64_t core_host_parse_timestamp(const char* s) {
     if (*p != '-') return -1;
     p++;
     if (!core_host_scan_digits(&p, 2, 2, &day)) return -1;
-    if (month < 1 || month > 12 || day < 1 || day > 31) return -1;
+    if (month < 1 || month > 12 || day < 1) return -1;
+    {
+        static const int64_t month_days[12] = {31, 28, 31, 30, 31, 30,
+                                               31, 31, 30, 31, 30, 31};
+        int64_t day_limit = month_days[month - 1];
+        if (month == 2 &&
+            (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)))
+            day_limit = 29;
+        if (day > day_limit) return -1;
+    }
     if (*p == 'T' || *p == 't' || *p == ' ') {
         p++;
         if (!core_host_scan_digits(&p, 2, 2, &hour)) return -1;
@@ -409,9 +418,13 @@ static int64_t core_host_parse_timestamp(const char* s) {
         int64_t off_hour, off_minute = 0;
         p++;
         if (!core_host_scan_digits(&p, 2, 2, &off_hour)) return -1;
-        if (*p == ':') p++;
-        if (*p >= '0' && *p <= '9' &&
-            !core_host_scan_digits(&p, 2, 2, &off_minute)) return -1;
+        if (*p == ':') {
+            p++;
+            if (!core_host_scan_digits(&p, 2, 2, &off_minute)) return -1;
+        } else if (*p >= '0' && *p <= '9' &&
+                   !core_host_scan_digits(&p, 2, 2, &off_minute)) {
+            return -1;
+        }
         if (off_hour > 23 || off_minute > 59) return -1;
         offset_seconds = sign * (off_hour * 3600 + off_minute * 60);
     }
