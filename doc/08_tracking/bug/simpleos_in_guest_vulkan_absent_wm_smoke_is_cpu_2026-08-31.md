@@ -107,3 +107,69 @@ gated by `simpleos_admitted_runtime_verify_auto`
 and a bare `cargo build --release --bin simple` seed cannot satisfy it either —
 it has no receipts. Producing WM pixel evidence in a fresh worktree therefore
 requires a full bootstrap first.
+
+## Measured this session (2026-08-31)
+
+Base: worktree merged `goal/simpleos-b1-merge-clobber-restore-20260831` (`91b6b9f28dd`)
+onto `b0be388ec46`. Seed rebuilt from source (`cargo build --release --bin simple`,
+green, 61,018,016 bytes).
+
+| arch | kernel built | booted (real firmware) | WM up | pixels | renderer |
+|---|---|---|---|---|---|
+| riscv64 | yes | **PASS** | not attempted | none | n/a |
+| x86_64 | not attempted | blocked | blocked | none | n/a |
+| arm64 | **FAIL (link)** | blocked | blocked | none | n/a |
+
+riscv64 verdict line, verbatim:
+
+```
+[guest-boot] selftest OK (4 fixtures)
+PASS — 8 marker(s) checked, riscv64 guest kernel (real crt0.S + linker.ld) booted
+under real OpenSBI v1.4 firmware via -bios fw_payload (no -kernel, no isa-debug-exit;
+live SBI ecall + FDT handover verified;
+serial: build/verify/simpleos-riscv64-opensbi-guest-boot/serial.log)
+```
+
+`check-rv64-display-smoke-qmp-evidence.shs` ran to completion but produced **no
+pixels**: `rv64_wm_font_region_rgb_bytes=0`, empty sha256, and every WM marker
+(`rv64_wm_guest_font_marker`, `rv64_wm_keyboard_correlated`,
+`rv64_wm_pointer_correlated`, `rv64_wm_input_frame_changed`) is `0`. It is
+therefore not usable as WM pixel evidence today, and it separately boots with
+`-bios default` **plus** `-kernel` (line 514-515).
+
+`check-simpleos-arm64-efi-real-firmware-boot.shs` correctly returned
+`ERROR — nothing was checked` (fail-closed) for a missing
+`build/os/aarch64_limine/kernel.elf`.
+
+### New defect found: the C runtime is compiled for the HOST arch during a cross native-build
+
+`scripts/os/build-simpleos-aarch64-limine-kernel.shs` passes
+`--target aarch64-unknown-none-elf`, but the C-runtime step inside `native-build`
+compiles `libsimple_runtime.a` for **x86_64** anyway:
+
+```
+clang: warning: 'x86_64' does not support '-mno-outline-atomics'; flag ignored
+...
+ld.lld: error: .../core_c_runtime/libsimple_runtime.a(runtime_native.o) is
+        incompatible with .../_boot_freestanding_runtime.o
+```
+
+17 archive members are rejected as incompatible; the link fails and no
+`kernel.elf` is produced. **Reproduced on two independent compilers** — the
+freshly built cargo seed and the admitted Stage-2 binary from
+`/mnt/data/worktrees/phase1-rerun` — with `.simple/native-objects-*` cleared in
+between, so this is a build-system defect, not a stale artifact. It blocks the
+entire aarch64 real-firmware lane (kernel -> ESP -> EDK2/AAVMF boot -> WM ->
+pixels) at step one.
+
+### Correction to the blocker scope
+
+The admitted-Stage-2 requirement is specific to the **x86_64 WM lifecycle lane**.
+The arm64 and riscv64 gates call no admission verifier
+(`grep -c admitted_runtime_verify` = 0 on all four of
+`check-simpleos-riscv64-opensbi-guest-boot.shs`,
+`check-rv64-display-smoke-qmp-evidence.shs`,
+`check-simpleos-arm64-efi-real-firmware-boot.shs`,
+`check-simpleos-arm64-qmp-input-evidence.shs`) and need only a kernel artifact
+that any working compiler can produce — which is why riscv64 reached a real PASS
+this session and arm64 got as far as a link error rather than an admission wall.
