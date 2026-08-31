@@ -2663,7 +2663,13 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_read_bytes"
         | "rt_file_mmap_read_text"
         | "rt_file_mmap_len"
-        | "rt_file_mmap_read_bytes" => Some(&[0]),
+        | "rt_file_mmap_read_bytes"
+        // rt_file_lock is (path_ptr, path_len, timeout_secs) — file_ops.rs:679.
+        // Missing here meant the `text` path argument was never split into
+        // (ptr, len) before the call, misaligning the (ptr, len, timeout)
+        // ABI. Mirrors the LLVM backend fix in
+        // codegen/llvm/functions/calls.rs.
+        | "rt_file_lock" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         // rt_file_write_text / rt_file_append_text take (ptr,len) PAIRS
         // (see runtime file_ops.rs); they were wrongly in text_cstr_arg_indices,

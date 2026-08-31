@@ -181,7 +181,17 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_read_bytes"
         | "rt_file_mmap_read_text"
         | "rt_file_mmap_len"
-        | "rt_file_mmap_read_bytes" => Some(&[0]),
+        | "rt_file_mmap_read_bytes"
+        // rt_file_lock is (path_ptr, path_len, timeout_secs) —
+        // file_ops.rs:679. Missing from this table meant the `text` path
+        // argument was never split into (ptr, len) before the call, so the
+        // second Simple-level argument (timeout_secs) landed in the ABI slot
+        // the callee reads as path_len, and the callee's third slot
+        // (timeout_secs) was left with whatever was in that register —
+        // corrupting the pointer/length pair fed to UTF-8 validation deeper
+        // in the call chain. See
+        // doc/08_tracking/bug/windows_stage2_parse_shard_file_lock_arg_corruption_2026-08-31.md.
+        | "rt_file_lock" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
         "rt_file_copy"
         | "rt_file_rename"
