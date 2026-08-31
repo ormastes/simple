@@ -11890,11 +11890,24 @@ int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }
 
 int64_t rt_iocp_create(void) { return -1; }
 int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+/* Omitted when this family was written: create/register/poll/close were all
+ * present but deregister was not, while the kqueue family above defines all
+ * five. The gap is invisible until a NATIVE link -- the interpreter resolves
+ * externs by name at call time -- so it first surfaced as an undefined symbol
+ * at the Windows Stage 2 link, referenced from
+ * src/lib/nogc_async_mut/io/platform_event.spl:364.
+ * Returns -1 (failure) to match every other entry point in this
+ * unavailable-backend family; it must NOT report success. */
+int64_t rt_iocp_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 int64_t rt_iocp_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_iocp_close(int64_t h) { (void)h; return -1; }
 
 int64_t rt_event_ports_create(void) { return -1; }
 int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+/* Same omission as the IOCP family above; referenced from
+ * src/lib/nogc_async_mut/io/platform_event.spl:365. Returns -1 to match the
+ * rest of this unavailable-backend family. */
+int64_t rt_event_ports_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 int64_t rt_event_ports_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
 
