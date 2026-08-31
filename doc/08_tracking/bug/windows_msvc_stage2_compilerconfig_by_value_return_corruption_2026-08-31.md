@@ -780,3 +780,272 @@ bootstrap) should pick that up directly, or instrument
 `SIMPLE_PERF_COUNTERS`-style level-gated tracing this repo already favors
 (see `.claude/rules/commands.md`) to observe the real `byte_size`/`words`
 values `CompilerConfig`'s own copy computes at runtime.
+
+## 2026-08-31 follow-up #3: the "flattening" hypothesis KILLED (arithmetic + non-execution); copy/transport family closed; strong NEW lead found — field-name-ambiguity mis-resolved index, not a copy defect at all
+
+Task for this session: check whether `struct_deep_fields` flattens a nested
+struct's own fields into the parent's word count, causing the declared field
+count and the byte-offset formula to disagree for `CompilerConfig` (which has
+a `Dict<text,text>` field and a nested `TypeInferenceConfig` struct field).
+
+### Numbers requested by the task, measured by direct source reading (no rebuild needed — these are compile-time-constant formulas, not runtime values)
+
+- `CompilerConfig` (`src/compiler/00.common/config.spl:67-85`) has **14**
+  declared fields, in order: `profile(0) log_level(1) type_inference(2)
+  values(3) use_rust_types(4) use_rust_interp(5) use_rust_lexer(6)
+  deterministic(7) coverage_enabled(8) mcdc_mode(9) mcdc_owner_bytes(10)
+  mcdc_global_bytes(11) mcdc_include(12) mcdc_exclude(13)`.
+- (a) declared field count = **14**.
+- (c) byte size used by the copy (`copy_if_value_type`,
+  `mir/lower/lowering_core.rs:935`) = `fields.len() as u32 * 8` = **112**,
+  computed directly from the SAME 14-entry enumeration as (a) — not from (b).
+- (d) offsets: `mcdc_owner_bytes` = field index 10 → byte offset **80**;
+  `mcdc_global_bytes` = field index 11 → byte offset **88**. Same formula
+  `field_index * 8` at all three other sites (struct-literal init, field
+  read, field write) — already independently confirmed self-consistent in
+  Follow-up #2's Task 1.
+- (b) what `struct_deep_fields` returns (`lowering_core.rs:972-1011`) is
+  **not a count that should equal (a)** — it is a *sparse, filtered*
+  `Vec<AggregateFieldCopy>` containing, for `CompilerConfig`, exactly **one**
+  entry: `{ word_index: 2, byte_size: 40 (TypeInferenceConfig's own 5 fields
+  × 8), nested: [] }`. `values: Dict<text,text>` at index 3 is correctly
+  excluded (`registry.get(fty)` does not match `HirType::Struct` for a
+  `Dict`, so it stays shallow — one word, consistent with COW value
+  semantics for `Dict` elsewhere in this codebase).
+
+### Flattening mismatch: DOES NOT EXIST — arithmetic kill
+
+`struct_deep_fields`'s `word_index` is the OUTER struct's own
+`fields.iter().enumerate()` index (`i` in the loop at
+`lowering_core.rs:982`), never a running/flattened counter across a nested
+struct's own field count. The returned `Vec<AggregateFieldCopy>` is consumed
+by `emit_aggregate_block_copy` (`codegen/llvm/functions/objects.rs:246-306`)
+as an ADDITIONAL, purely side-effecting rewrite of specific words *after* the
+flat `byte_size`-driven word copy loop already ran — it never feeds back into
+`byte_size` or into any other field's offset. So (a)=14 and
+(c)=112=14×8 **agree by construction**, and no field after index 2 is
+shifted by the nested descriptor. This is a real, complete arithmetic
+refutation, not an inference: (a) and (c) are the same formula evaluated
+twice, not two independent computations that could drift.
+
+### Correlation cross-check (task item 3): skipped, with reason
+
+The size/offset math is composition-independent — it would produce the
+identical `byte_size`/offsets for a hypothetical struct with no nested struct
+and no `Dict` field, since neither is consulted. Running the check would
+therefore mechanically prove "no difference" without adding information; not
+worth the build-slot cost given the four concurrent bootstraps in this tree.
+
+### A second, stronger kill: `AggregateCopy` is never even reached on this path
+
+Independent of the arithmetic: `HirStmt::Return`
+(`mir/lower/lowering_stmt.rs:1014-1031`) never calls `copy_if_value_type` —
+it only boxes/unboxes for the tagged-value slot and hands back whatever
+register `lower_expr` produced, so `return config` returns the SAME aliased
+heap handle `config` already held. And the caller's
+`var compiler_config = CompilerConfig.from_env()` has a **call** expression
+as its RHS, so `Self::hir_expr_is_place(&val.kind)` is `false`
+(`lowering_stmt.rs:382`) and the local-binding copy site is skipped too. **No
+`AggregateCopy` executes anywhere on the `from_env()` → `compiler_config`
+path.** This retroactively explains why leads 1-4 (offset-formula
+divergence, vtable-header omission, Dict/nested-struct flattening) all
+turned out to be dead ends: every one of them was a hypothesis about the
+COPY mechanism, and the copy mechanism is not in the loop for this specific
+symptom at all. This closes the whole copy/transport family, not just this
+session's assigned member of it.
+
+(Sub-investigation, also closed clean: since `emit_function_drops`
+[`lowering_stmt.rs:2209-2257`] emits a `Drop` on every local, including
+`config`, in the SAME block right before the `Return` terminator is set, a
+use-after-free-via-premature-drop theory was checked and killed —
+`MirInst::Drop` is an explicit no-op in the LLVM backend:
+`codegen/llvm/functions.rs:1363` — `"Drop and scope tracking not yet
+implemented"`. Windows MSVC Stage 2 is the LLVM backend, so this cannot fire
+here. Real, but a dead end for this symptom.)
+
+### Re-confirmation run (5th independent measurement, same rejected artifact)
+
+```
+DIAG after from_env: owner=770048 global=4325440
+DIAG options: owner=1136643962305 global=1 mode_text=
+DIAG after cli-apply: owner=1136643962305 global=4325440
+error: in-process SMF compile: MC/DC global byte budget must be at least the owner byte budget
+```
+
+Correction to the prior session's characterization: `770048` (`0xBC040`) and
+`4325440` (`0x420040`) are **not** 47-bit-VA-shaped like the earlier
+`140714796318720` reading — they're ~10^5-10^6 magnitude and share the same
+low 12 bits (`0x040`), which looks like allocator-rounded size/offset words,
+not heap pointers. Don't file this run as "matches the established VA-shaped
+pattern" — the garbage is not one consistent distribution across runs, which
+itself is a data point (see below). (Also: read `$?` for the compile
+invocation directly, not through the `head` pipe used to capture this
+excerpt — the prior "rc=0" claims in this doc file's history were `head`'s
+status, not the binary's, exactly the pipe-status trap
+`.claude/rules/commands.md` warns about generally.)
+
+### THE NEW LEAD: field-name ambiguity mis-resolving to a WRONG STRUCT's field index — not a copy/transport bug at all
+
+Since no copy occurs, only three things remain: the store wrote a wrong
+value, the load reads through a wrong pointer/base, or the load uses a wrong
+**offset**. The data discriminates: `options.mcdc_global_bytes` reads as `1`
+in every one of 5 independent runs — stable, small, sane-looking — sitting
+right next to `options.mcdc_owner_bytes`, which is garbage and different
+every run. A wrong base pointer or a stray heap overwrite would corrupt
+*both* neighbors together (or neither); one stable-looking slot beside one
+garbage slot next to it is the signature of each field independently reading
+the **wrong offset**, not of a wrong pointer or overwritten memory.
+
+**`mcdc_owner_bytes`/`mcdc_global_bytes` are genuinely ambiguous field
+names across two real, unrelated structs in this tree**, with DIFFERENT
+indices:
+
+| struct | file | field count | `mcdc_owner_bytes` index | `mcdc_global_bytes` index |
+|---|---|---|---|---|
+| `CompilerConfig` | `00.common/config.spl:67-85` | 14 | 10 (offset 80) | 11 (offset 88) |
+| `CompileOptions` | `00.common/driver_compile_options.spl:3-46` | 35 | 22 (offset 176) | 23 (offset 184) |
+
+By the codebase's own definition of "ambiguous" (`native_project/compiler.rs`
+~line 690: *"a field name is ambiguous only when two structs disagree on its
+index within the struct"*), this pair qualifies exactly.
+
+**This exact failure mode is independently documented, already found once,
+and partially fixed, in this very file** —
+`hir/lower/expr/access.rs:709-717`, a standing comment on the "last resort"
+receiver-struct-name-inference fallback:
+
+> "...a PARAMETER still carries its AUTHORED type name... Using it here is
+> what keeps a declared-type receiver off the receiver-blind 'most fields
+> wins' fallback: `CompileContext.create(options: CompileOptions)` was
+> resolving `options.mcdc_owner_bytes` through that fallback to MirLowering's
+> index 26 (0xd0, past the end of the object) instead of CompileOptions' 22
+> (0xb0)."
+
+This is not circumstantial — it names the exact two fields this bug report
+is about, and it names the exact "prefer the struct with the most fields"
+un-typed-receiver fallback (`type_resolver.rs:629-681`,
+`get_field_info`, triggered when `recv_hir.ty == TypeId::ANY`: it scans every
+known struct for a field with the matching NAME and picks whichever
+candidate struct has the MOST total fields — a receiver-blind guess). The
+mitigations that exist (`type_name_hint` for parameters,
+`ctx.static_call_type_hints` for locals bound from a static call — both in
+`try_resolve_receiver_struct_name_from_expr`,
+`access.rs:698-726`) are gated behind `is_ambiguous_global_field(field)` at
+the call site (`access.rs:232`), which is only consulted when
+`recv_hir.ty == TypeId::ANY` in the first place — i.e. the guard rail exists,
+but only fires once the receiver type has already been erased to ANY.
+
+**The +4 index-shift arithmetic this comment names lines up exactly with the
+CompileOptions field list and reproduces BOTH measured symptoms:**
+`CompileOptions` field 26 is `cli_mode_text` (a `text`, i.e. a pointer —
+would print as a large, run-varying, address-shaped integer when
+misinterpreted as `i64`) and field 27 is `bootstrap_input_count` (an `i64`
+that `run_compile_bootstrap` explicitly sets to `1`, matching the
+consistently-`1` `options.mcdc_global_bytes` reading in every one of the 5
+measured runs — this was flagged as "plausible but not independently proven"
+in the very first version of this doc, and is now proven by exact field
+identity, not just plausibility). If the same wrong-struct/wrong-index
+resolution applies to `compiler_config` (the smaller, 14-field/112-byte
+`CompilerConfig`) rather than `options` (the larger, 35-field
+`CompileOptions`), reading at word-index 22 or 26 means reading **176 or 208
+bytes into a 112-byte allocation — past the end of the object**, exactly the
+phrase the standing comment already uses, and exactly consistent with the
+wilder, less-patterned garbage (including the near-full-range
+`8243126012946380655` reading) seen for `compiler_config.*` versus the more
+patterned garbage seen for `options.*`.
+
+**Also newly found while checking this: `CompileOptions` is itself a
+duplicated bare name.** `grep -rn "^struct CompileOptions" src/` finds a
+SECOND, unrelated 3-field struct (`debug, optimize, verify`, no `mcdc_*`
+fields at all) at
+`src/compiler_rust/lib/std/src/tooling/compile_commands.spl` — a
+completely different "compile options" concept (for a `compile_commands.json`
+style tool) that happens to share the bare name. This does not by itself
+explain index 26 (it has no `mcdc_owner_bytes` field to collide on), but it
+independently confirms that cross-module same-bare-name struct collision is
+a live, present hazard for this exact type name, which is exactly the class
+of bug `duplicate_struct_defs`/`unique_struct_owners`/`struct_module_owners`
+(`native_project/compiler.rs:708-711`) exist to guard against.
+
+**Not verified this session (no build slot — 4 concurrent bootstraps
+running, matching this and prior sessions' constraint):** whether
+`populate_global_struct_defs` (which gates `ambiguous_field_names`,
+`native_project/mod.rs:875,931,952`) is actually `true` for the Windows
+Stage 2 self-hosting build. The gating condition in the CURRENT tree is
+`!self.config.no_mangle` (default `no_mangle: false`, so the guard rail
+should be ON by default) — **this contradicts the comment directly above it
+at `native_project/compiler.rs:686`, which still says "Gated on
+`--entry-closure`."** That comment is stale relative to the code it
+describes (worth its own tiny doc-only fix, not attempted here since it is
+unrelated to this bug). Given the guard rail's default is ON and the
+Windows bootstrap script does not pass `--no-mangle`
+(`grep -rn "no-mangle" scripts/bootstrap/bootstrap-windows.sh` = no hits),
+the mitigation should be active — yet the corruption still reproduces on the
+real Stage 2 artifact (5 independent measurements now). This is the
+concrete, falsifiable gap for the next session: **either the mitigation
+IS active and still insufficient for this specific case (`compiler_config`,
+a local bound from a cross-module static call, vs. `options`, a directly
+annotated parameter — the two code paths in
+`try_resolve_receiver_struct_name_from_expr` are different and the local
+path was not proven to work, only shown to exist), or it is not actually
+active for this build for a reason not found this session (e.g. a build flag
+this session didn't check, or the self-hosting compile-of-the-compiler path
+not routing through `native_project` the same way user code does).**
+
+### Recommended next step (concrete, cheap, no full bootstrap required)
+
+The compiled-in tracing already exists and is exactly what this needs
+(`hir/lower/expr/access.rs:316-348`, `type_resolver.rs:647-679`): set
+`SIMPLE_FIELD_INDEX_COUNT_ONLY=1` (or enable `trace_field_get_enabled()`,
+check `hir/lower/mod.rs:221` for its own env var) while COMPILING
+`driver_types.spl`/`config.spl` — i.e. during a Stage 1→Stage 2 build step,
+not while running the already-built Stage 2 binary against a hello-world
+(the trace fires at HIR-lowering time, which already happened once to
+produce the `.rejected` artifact; running that artifact again cannot
+reproduce the trace). This needs either the sanctioned bootstrap script with
+the env var exported, or reconstructing its Stage-1-compiles-Stage-2 command
+line to compile just the driver module tree standalone — the latter was
+attempted and blocked by three unrelated toolchain defects in Follow-up #1
+(runtime-bundle single-directory assumption, `lld-link` GNU-argv mismatch,
+missing `-lc`/`__main` for a raw `ld` MinGW link) — those blockers apply to
+producing a RUNNABLE binary, but do NOT block a `--format=smf`-only compile
+that never needs to link, which is a promising unexplored shortcut for next
+time. Grep the resulting stderr for `[FIELD-TRACE]`/`[FT2]` lines naming
+`mcdc_owner_bytes`/`mcdc_global_bytes` and read off the actual chosen struct
+name and index directly — this settles the lead with a real number instead
+of an inferred one.
+
+### Windows-specific vs. general — verdict for THIS lead
+
+**Inferred, not proved, same as every prior session.** Every mechanism in
+this lead (`get_field_info`'s ANY-typed fallback, `is_ambiguous_global_field`,
+`try_resolve_receiver_struct_name_from_expr`, `populate_global_struct_defs`)
+is in the shared HIR-lowering front end, upstream of and shared by every
+codegen backend and every target — nothing branches on `target_os` or
+triple anywhere in the files read this session. If this lead is confirmed,
+it is very likely a GENERAL defect (any target, any backend, whenever a
+field name collides across two structs with different indices), not an
+MSVC-ABI-specific one — but, as with every prior session, this repo offers
+no way to run a second-platform measurement from here, so this stays a
+source-reading inference, not a proof. Do not upgrade it without a real
+non-Windows measurement.
+
+**Explicitly not chased, flagged so nobody spends a day on it:** a Win64
+register-allocation/calling-convention theory (distinct from the
+already-refuted aggregate-classification theory) was briefly considered
+mid-session as an alternative explanation for the field reads, but dropped
+for lack of any evidence — nothing in this session's reading pointed at the
+register allocator, and the field-ambiguity lead above already explains both
+measured symptoms without it. Unevidenced; do not treat as a lead.
+
+### What was NOT done
+
+No source files were changed (read-only investigation this session; the one
+executable invocation was re-running the ALREADY-BUILT, ALREADY-diagnosed
+`.rejected` artifact for a 5th confirmation, not a new build). No fix
+attempted, per task guidance and because the exact mechanism (which struct
+the fallback picks, and why the existing `type_name_hint`/
+`static_call_type_hints` mitigation doesn't prevent it here) is still not
+directly observed, only inferred from static analysis converging with an
+existing code comment describing the same symptom for a sibling field
+access. Zero behavior change on any target.
