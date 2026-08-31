@@ -1351,9 +1351,24 @@ impl Lowerer {
                 let Some(&local_index) = ctx.local_map.get(name) else {
                     return binding_stmts;
                 };
+                // `if val n = optional:` binds the PAYLOAD. When the subject is
+                // an optional over a BoxInt-family scalar (`i64?` etc.), type
+                // the binding as the raw inner scalar so the name-keyed unbox
+                // in mir `lower_builtin_call_expr` fires; typed `subject_ty`
+                // (the tagged Pointer) the binding stayed a tagged word and
+                // `n + 1` computed on the shifted bits (337 instead of 43 on
+                // the JIT lane, silently). The local's declared type must
+                // agree, or the raw value would be stored into a tagged slot.
+                // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or(subject_ty);
+                if binding_ty != subject_ty {
+                    if let Some(local) = ctx.locals.get_mut(local_index) {
+                        local.ty = binding_ty;
+                    }
+                }
                 binding_stmts.push(HirStmt::Let {
                     local_index,
-                    ty: subject_ty,
+                    ty: binding_ty,
                     value: Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_unwrap_or_self".to_string(),
@@ -1362,7 +1377,7 @@ impl Lowerer {
                                 ty: subject_ty,
                             }],
                         },
-                        ty: subject_ty,
+                        ty: binding_ty,
                     }),
                 });
             }

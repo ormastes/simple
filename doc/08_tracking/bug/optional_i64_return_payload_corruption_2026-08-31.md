@@ -72,3 +72,35 @@ guard does not narrow.
 The fix is in the seed's optional value representation
 (`src/compiler_rust/compiler/src/...`), which is a compiler design decision and
 out of scope for a stdlib bugfix.
+
+## Resolution — consumer half (2026-08-31, fix/optional-narrowing-divergence)
+
+PR #138 fixed the producer (tail-return boxing). This change fixes the
+CONSUMER half plus the lane divergence:
+
+1. **Unwrap idioms now yield the raw payload on the JIT lane** (interpreter was
+   already correct). `f() ?? d` (hir `lower_coalesce`), `if val n = f():`
+   (`build_if_let_binding_stmts`) and `f().unwrap()` are typed as the raw
+   inner scalar when the subject is `T?` over a BoxInt-family scalar
+   (i8..i64, u8..u32), and mir `lower_builtin_call_expr` unboxes
+   `rt_unwrap_or_self` by name+type — the same mechanism `rt_enum_payload`
+   already had. Before: `(f()??0)` printed 336 (= 42<<3), `+1` gave 337,
+   `.unwrap()+1` 337, `if val n: n+1` 337. After: 42/43 on both lanes.
+   Probe: `test/01_unit/compiler/interpreter/probe_optional_unwrap_idioms_jit.spl`
+   (4 FAILURES on the pre-fix binary, ALL PASS after, both lanes).
+
+2. **Arithmetic on an UNNARROWED optional now fails closed on the JIT lane
+   too.** `if v != nil:` does not narrow (flow_sensitive_narrowing_design.md
+   is a PROPOSAL, not implemented); the interpreter faulted at runtime while
+   the JIT silently computed `42 << 3 = 2688` on the tagged bits. HIR
+   `lower_binary` now rejects arithmetic/bit/shift/ordered-compare when an
+   operand is an optional BoxInt-family scalar, with a message naming the
+   working idioms. Eq/NotEq/Is (nil checks) stay allowed. Both lanes now end
+   in the same "cannot convert enum to int" interpreter fault for the R2
+   repro.
+
+Deliberately NOT covered (unchanged behavior, representations are
+asymmetric): `u64?` (HeapUInt), `f64?`/`f32?` (raw enum payload bits vs
+BoxFloat), `bool?` (rt_value_bool), and `Any?` (known_bugs R4). Whether
+`!= nil` should narrow remains the design decision tracked by the PROPOSAL
+doc — narrowing was not invented here.

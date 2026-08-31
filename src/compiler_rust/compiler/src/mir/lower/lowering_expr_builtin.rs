@@ -280,6 +280,70 @@ impl<'a> MirLowerer<'a> {
             return result;
         }
 
+        // `rt_unwrap_or_self` returns a tagged RuntimeValue. When the HIR site
+        // typed the RESULT as a BoxInt-family scalar while the ARGUMENT is a
+        // tagged optional slot (`T?` over a scalar — never plain ANY, whose
+        // pre-existing call sites keep their behavior), decode it here, the
+        // same name-keyed unbox `rt_enum_payload` gets below. Both optional
+        // representations are BoxInt'd for this family (raw migration form via
+        // `box_scalar_for_tagged_slot`, enum `Some(x)` int payloads at
+        // construction), so `UnboxInt` is the exact inverse either way.
+        // Producers: `??` (hir lower_coalesce), `if val` bindings
+        // (build_if_let_binding_stmts), `.unwrap()`.
+        // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
+        if name == "rt_unwrap_or_self"
+            && args.len() == 1
+            && args[0].ty != TypeId::ANY
+            && self.slot_holds_tagged_value(args[0].ty)
+            && matches!(
+                expr_ty,
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
+            )
+        {
+            let arg_reg = self.lower_expr(&args[0])?;
+            let raw_result = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_unwrap_or_self"),
+                    args: vec![arg_reg],
+                });
+                dest
+            })?;
+            let (to_bits, signed_opt): (u8, Option<bool>) = match expr_ty {
+                TypeId::U8 => (8, Some(false)),
+                TypeId::U16 => (16, Some(false)),
+                TypeId::U32 => (32, Some(false)),
+                TypeId::I8 => (8, Some(true)),
+                TypeId::I16 => (16, Some(true)),
+                TypeId::I32 => (32, Some(true)),
+                _ => (0, None),
+            };
+            return self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let narrowed_opt = signed_opt.map(|_| func.new_vreg());
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxInt {
+                    dest: unboxed,
+                    value: raw_result,
+                });
+                if let (Some(narrowed), Some(signed)) = (narrowed_opt, signed_opt) {
+                    block.instructions.push(MirInst::UnitNarrow {
+                        dest: narrowed,
+                        value: unboxed,
+                        from_bits: 64,
+                        to_bits,
+                        signed,
+                        overflow: UnitOverflowBehavior::Wrap,
+                    });
+                    narrowed
+                } else {
+                    unboxed
+                }
+            });
+        }
+
         // Special handling for rt_enum_payload - returns tagged RuntimeValue
         // that needs unboxing when the payload type is a native type
         if name == "rt_enum_payload" && args.len() == 1 {
