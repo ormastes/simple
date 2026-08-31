@@ -3659,7 +3659,7 @@ int64_t rt_sosix_collector_nonce_echo(void) {
     if (fat32_read_file("/SOSIXNON.TXT", nonce_file, sizeof(nonce_file),
                         &bytes_read) != 0)
         return 0;
-    size_t line_len = x86_64_collector_nonce_slot_line_length(nonce_file, bytes_read);
+    size_t line_len = x86_64_nonce_slot_line_length(nonce_file, bytes_read);
     if (line_len == 0U) return 0;
     for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
     return 1;

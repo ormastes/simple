@@ -152,9 +152,15 @@ fn vmm_clone_kernel_low_private(user_phys_root: u64) -> bool:
     TSS and syscall trampoline mapped after `mov cr3` while letting user
     PT_LOADs at low VAs (e.g. clang_static at 0x40000000, PML4[0]) install
     private 4K user mappings without corrupting the kernel's page tables."""
+    # These three refusals used to be indistinguishable: the function returns a
+    # bare bool, so a caller could only report "clone failed" and every
+    # diagnosis needed a fresh kernel build to find out which branch fired.
+    # Naming the branch costs nothing on the success path.
     if user_phys_root == 0 or user_phys_root == 1:
+        log_raw_println("[vmm] clone_kernel_low_private: bad user root {user_phys_root}")
         return false
     if vmm_kernel_pml4_phys() == 0:
+        log_raw_println("[vmm] clone_kernel_low_private: kernel PML4 unpublished (vmm_publish_kernel_pml4 never called for the VMM impl that ran)")
         return false
     val user_pml4_virt = _phys_to_virt(user_phys_root)
     val existing = _read_pte(user_pml4_virt, 0)
@@ -166,10 +172,12 @@ fn vmm_clone_kernel_low_private(user_phys_root: u64) -> bool:
     val kernel_pml4_virt = _phys_to_virt(vmm_kernel_pml4_phys())
     val kentry = _read_pte(kernel_pml4_virt, 0)
     if not _pte_is_present(kentry):
+        log_raw_println("[vmm] clone_kernel_low_private: kernel PML4[0] not present (entry={kentry})")
         return false
     val kpdpt_virt = _phys_to_virt(_pte_phys_addr(kentry))
     val new_pdpt_phys = _clone_table(kpdpt_virt)
     if new_pdpt_phys == 0:
+        log_raw_println("[vmm] clone_kernel_low_private: _clone_table page allocation failed")
         return false
     _write_pte(user_pml4_virt, 0, new_pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER)
     true
