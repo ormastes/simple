@@ -129,3 +129,52 @@ defect (a well-formed HirType whose `kind` is raw 0). So:
 The `E-MIR-TYPE-ZeroKind` diagnostic added in `a32bccaf866a` is what makes these
 two distinguishable at a glance; previously both surfaced as the same opaque
 `disc=-1: 0`.
+
+## DECISIVE 2026-08-31: the Aggregate IS in the builder at the end of the Let handler
+
+An instruction-count probe was added at two points in the Let handler (arm A) and
+run under `SIMPLE_MIRB_TRACE=1` on `var parts: [text] = ["a", "b"]`:
+
+```
+[mir-let-instcount] after-lower-expr      count=1 init=2
+[mir-let-instcount] after-copy-writeback  count=2 local=3
+[mir-let-instcount] after-lower-expr      count=3 init=4
+[mir-let-instcount] after-copy-writeback  count=4 local=5
+```
+
+Every pair increases by exactly +1 (the copy). Two conclusions:
+
+1. **The `b2` snapshot/write-back window (:1206-:1268) discards NOTHING.** The
+   value-semantics hypothesis is REFUTED for this path — that window was the
+   prime suspect in the previous entry and is now cleared. `MirBuilder` IS a
+   struct, but the emissions survive here.
+2. **`count=1` after lowering `["a", "b"]` IS the Aggregate.** String elements
+   ride inline as constant operands rather than as separate instructions, so one
+   instruction is the expected count. The Aggregate is therefore PRESENT in
+   `builder.instructions` when the Let handler finishes.
+
+Therefore the loss happens **downstream of MIR lowering** — in block finalization,
+function assembly, or the handoff to the backend — not in the Let path and not in
+`lower_array_lit`. Combined with the earlier eliminations, MIR construction is now
+fully exonerated.
+
+## Next area: block finalization
+
+`MirBuilder.finalize_block` (`mir_data.spl:412`) is the prime candidate, and there
+is a PRIOR bug on exactly this statement --
+`bootstrap_stage2_empty_mir_bodies_2026-07-05` -- whose in-code comment reads:
+
+> the Stage-2 instruction loss is localised to this ONE statement -- `self.builder`
+> holds 3 finalized instructions immediately before `end_function`, and
+> `end_function`'s own trace, one call later, reports 0.
+
+Note `block.instructions = self.instructions` (:443) OVERWRITES rather than appends,
+and `MirBlock` is copied out, mutated, and written back (`self.blocks[i] = block`).
+
+**Do NOT conclude from a silent trace that `finalize_block` did not run.** Its
+`MIRB finalize` trace uses `print` (stdout) on a separate gate, and NO print-based
+trace appears in these logs at all -- including `[mir-lower] real-lower:end`, which
+is known to be on the executed path. This is the same class of mistake as the
+`SIMPLE_BOOTSTRAP_DEBUG` probe recorded above: **a probe that cannot fire proves
+nothing.** Any future work here must first establish that its probe is capable of
+producing output.
