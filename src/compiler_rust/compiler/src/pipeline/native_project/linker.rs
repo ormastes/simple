@@ -1526,7 +1526,30 @@ int main(int argc, char** argv) {
                         let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
                             .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
                         cmd.arg(core_c_runtime);
-                    } else if runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle) {
+                    } else if cfg!(target_os = "windows")
+                        && runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle)
+                    {
+                        // WINDOWS ONLY. Without this guard the branch ran on
+                        // Linux, macOS and FreeBSD too, because the sanctioned
+                        // bootstrap invokes Stage 2/3 with exactly
+                        // `--entry bootstrap_main.spl --runtime-bundle
+                        // core-c-bootstrap` on every platform. Three regressions
+                        // followed, none of them theoretical:
+                        //   * macOS: the else-arm emits
+                        //     `-Wl,--allow-multiple-definition`, which Apple ld
+                        //     does not have (native_all/src/lib.rs:1550 says so
+                        //     outright) -- a hard link failure.
+                        //   * Linux/FreeBSD: that flag disables duplicate-symbol
+                        //     detection for the WHOLE link, permanently masking
+                        //     the ~475-symbol collision class instead of
+                        //     surfacing it.
+                        //   * any platform: build_core_c_runtime_library
+                        //     returning None now aborts a previously-working
+                        //     build.
+                        // The Windows lane needs this supplement because
+                        // native_all there lacks the C-only rt_* entry points;
+                        // Unix does not have that gap and must keep its
+                        // existing link semantics untouched.
                         // Stage 2 asks for --runtime-bundle core-c-bootstrap, but
                         // the bootstrap_main entry short-circuits lane selection
                         // (config.rs:357) and pins the runtime to native_all,
