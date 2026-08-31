@@ -1,8 +1,7 @@
 # Scalar support boundaries for the CompilerDriver HIR pipeline.
 
 use compiler.driver.driver_types.{CompileContext}
-use std.io_runtime.{exit}
-use compiler.driver.driver_mem_snapshot.{mem_snapshot_record}
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_module_count,
@@ -18,21 +17,20 @@ use compiler.hir.hir_lowering.items.{
 use compiler.hir.hir_lowering.types.{LoweringError, LoweringErrorKind}
 use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.frontend.effect_registry.{effect_registry_reset}
-use compiler.frontend.rt_criticality_registry.{rt_criticality_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
 use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
-use compiler.semantics.rt_criticality_validation.{validate_rt_criticality}
-use compiler.semantics.forbidden_io_validation.{validate_forbidden_io_contexts}
-use compiler.semantics.rt_hal_tag.{validate_rt_hal_tags}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 
-extern fn rt_path_absolute(path: text) -> text
 extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_exit(code: i64)
+
 pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
     val actual_count = bootstrap_hir_module_count()
     if actual_count == expected_count:
@@ -40,12 +38,11 @@ pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
     if actual_count == expected_count + 1:
         if bootstrap_hir_modules_rollback_last(expected_count):
             return
-    exit(1)
+    rt_exit(1)
 
 fn reset_frontend_registries_after_scope():
     aspect_registry_reset()
     effect_registry_reset()
-    rt_criticality_reset()
     layer_eq_registry_reset()
 
 pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
@@ -56,7 +53,7 @@ pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
     if not driver_promote_frontend_registry_owners():
         val _ended = driver_end_transient_parse_scope()
         reset_frontend_registries_after_scope()
-        exit(1)
+        rt_exit(1)
         return "parse error in {source_path} (see [parser_error] output above); frontend registry promotion failed"
     if not driver_end_transient_parse_scope():
         reset_frontend_registries_after_scope()
@@ -64,8 +61,13 @@ pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
     "parse error in {source_path} (see [parser_error] output above)"
 
 fn driver_normalized_source_path(source_path: text) -> text:
-    val physical_path = rt_path_absolute(source_path)
-    (if physical_path != "": physical_path else: source_path).replace("\\", "/")
+    # The surface side of every identity/content comparison below stores
+    # `module_surface_canonical_path(source.path)`. Both sides MUST go through
+    # the one canonical mapping: a private near-copy here diverged on Windows,
+    # where `rt_path_absolute` returns extended-length `\\?\C:\...` paths that
+    # the canonicalizer rewrites (`C:/...`) but the old copy left as `//?/C:/...`,
+    # failing every Stage-3 surface identity check.
+    module_surface_canonical_path(source_path)
 
 pub fn driver_stage3_surface_identity_matches(
     surface_source_index: i64,
@@ -139,6 +141,13 @@ pub fn driver_hir_mem_snapshot(
         bootstrap_hir_module_structs_outer_len(),
         bootstrap_hir_module_classes_outer_len())
 
+pub fn driver_hir_promotion_snapshot(
+    phase: text, source_index: i64, source_path: text,
+    promoted_nodes: i64, promoted_bytes: i64
+) -> bool:
+    mem_snapshot_record_promotion(
+        phase, source_index, source_path, promoted_nodes, promoted_bytes)
+
 fn format_hir_lowering_error(name: text, err: LoweringError) -> text:
     if err.span.file != "":
         "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
@@ -169,7 +178,7 @@ pub fn driver_dict_entry_count(entries: Dict<SymbolId, HirFunction>) -> i64:
 pub fn driver_validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule],
-    hir_modules: Dict<text, HirModule>, rt_hal_plan: text = ""
+    hir_modules: Dict<text, HirModule>
 ) -> [text]:
     var errors: [text] = []
     for error in validate_value_struct_layouts(module_keys, module_values):
@@ -178,14 +187,6 @@ pub fn driver_validate_value_struct_layouts(
         errors = errors.push(layer_eq_error)
     for effect_error in validate_effect_contracts(hir_modules):
         errors = errors.push(effect_error)
-    # Run beside RT validation while the same parse-to-semantics claims are in
-    # scope, before later validators can mutate their own transient registries.
-    for forbidden_io_error in validate_forbidden_io_contexts(hir_modules):
-        errors = errors.push(forbidden_io_error)
-    for rt_error in validate_rt_criticality(hir_modules):
-        errors = errors.push(rt_error)
-    for rt_hal_error in validate_rt_hal_tags(hir_modules, rt_hal_plan):
-        errors = errors.push(rt_hal_error)
     val aspect_errors = validate_aspect_contracts(hir_modules)
     for aspect_error in aspect_errors:
         errors = errors.push(aspect_error)
