@@ -172,3 +172,22 @@ fabrication, not recovery.
 that hides a crashed worker by grepping the log for
 `^error: native-build worker exited with code ` — worker status `4294967295`
 means signal-or-wait-failure, NOT SIGSEGV.
+
+## RESOLVED 2026-08-31 — Stage 2 ADMITTED
+
+The bootstrap now exits `rc=0` with "Stage 2 admitted; stopping before Stage 3 as
+requested." Verified N=10: `rc=0` 10/10, `lines=12` (non-vacuous) 10/10,
+`bootstrap_stage2_struct_receiver=PASS` 10/10.
+
+Nine defects were fixed to get here: seed positional entry; 3x Stage-2 SIGSEGV
+chains; `rt_heap_ref_wellformed` lost to a stale-snapshot clobber; `(24<<32)`
+LocalId corruption from an un-unwrapped `LocalId?`; cross-file trait no-op
+shadowing; MC/DC probes emitted with no runtime backing; text `+` merged as an
+array; the stolen `unwrap` making every call-result return emit `ret 0`; and
+`print` not newline-terminating.
+
+Stage 3 is no longer blocked by admission. It requires its own planner-admission-v2
+receipt with typed reason `verify-landed-compiler-fix` (target `//bootstrap:stage3`),
+produced by `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`.
+Stage 4 needs a DIFFERENT reason -- one of `self-host-convergence-check`,
+`release-trust-verification`, `diverse-double-compilation`.

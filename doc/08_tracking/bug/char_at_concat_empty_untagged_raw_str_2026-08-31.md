@@ -1,7 +1,7 @@
 # `text + char_at(i)` yields EMPTY on the Stage-2 native lane
 
 - **Filed:** 2026-08-31
-- **Status:** OPEN — mechanism measured, one fix attempted and REVERTED (made it worse)
+- **Status:** RESOLVED 2026-08-31 — see resolution section below
 - **Blocks:** Stage-2 admission arm 2 (`stage2 positional Stage-3 route returned unexpected output:`), therefore Stages 3/4/5
 - **Platform:** aarch64-apple-darwin. **NOT shown to be macOS-specific.**
 - **Upstream:** no existing fix — `main@origin` log and all PRs checked for
@@ -83,3 +83,31 @@ Compare how a KNOWN-WORKING text-returning builtin (e.g. `substring`, proven
 correct above) represents its result against `char_at`, and make `char_at` match
 that representation rather than adding a tag on top. `substring` flows through
 concat correctly, so its representation is the reference.
+
+## RESOLVED 2026-08-31 — two defects, neither one `char_at`
+
+The title is REFUTED: `char_at` was never the defect. Two separate causes, both fixed.
+
+1. `8ba2c3873b8` — `collection_desugar.spl` rewrites `x = x + y` into a BARE
+   `x.merge(y)`; its gate recognises only literal AST shapes, so identifiers and
+   method calls slipped through and lowered to `rt_array_extend_i64` on a TEXT
+   receiver. Fixed in MIR (the first layer that knows the type): route text
+   receivers to `rt_strcat_tagged` AND copy the result back into the receiver,
+   since the desugared statement discards it.
+
+2. `b1e65036e4d` — the actual keystone. `mark_instruction_dest_defined_at` marked
+   Call destinations via `dest.unwrap()`, the STOLEN UNWRAP that returns raw 0 on
+   this lane, so it recorded local 0 instead of the real destination. The
+   terminator then took its `requires_fallback` path and emitted `ret i64 0`. The
+   IR computed the right value and threw it away. That single defect explains the
+   whole chain: empty strings, zero-length splits, broken joins -- all while the
+   identical code worked inlined in `main`, where no cross-function return exists.
+
+Verified: `[splitparam]3 [splitlit]3 [joinparam]a-b-c [joinlit]a-b-c` (was 0, 0,
+empty, empty); `ret i64 0` fallbacks 3 -> 1.
+
+FIVE hypotheses were refuted by measurement before this landed, recorded so they
+are not retried: cross-module call ABI, arrays broken, the for loop dropping
+pushes, implicit tail-expression return lowering, and parameter-vs-literal
+receiver. What broke the deadlock: after five probe-visibility dead ends, reading
+the emitted LLVM IR settled it in one look.

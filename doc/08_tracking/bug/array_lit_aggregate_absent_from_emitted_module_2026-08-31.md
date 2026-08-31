@@ -1,7 +1,7 @@
 # An array literal's Aggregate instruction is absent from the emitted LLVM module
 
 - **Filed:** 2026-08-31
-- **Status:** OPEN — isolated to a 6-line repro, five hypotheses refuted by measurement
+- **Status:** RESOLVED 2026-08-31 — see resolution section below
 - **Blocks:** Stage-2 admission (`bootstrap_stage2_struct_receiver`, positional arm), therefore Stages 3/4/5
 - **Platform:** aarch64-apple-darwin. **NOT shown to be macOS-specific** — nothing in the
   mechanism is platform-dependent; it has simply not been reproduced elsewhere yet.
@@ -229,3 +229,16 @@ The defect is inside `translate_aggregate` or in what it reads before its `match
 kind:`. Note it computes `self.local_id_value(dest)` and `self.get_local(dest_id)`
 BEFORE the match; a failure there would explain silence on every arm including the
 fallback.
+
+## RESOLVED 2026-08-31 — cross-file trait no-op shadowing
+
+Fixed in `404f3d8d78c` / `75ecfaa465d`. `common/mir_text_codegen.spl` declares 19
+`translate_*` methods with a body of `()`. A `self.translate_X()` call resolves to
+that silent no-op when the override lives in a DIFFERENT file; same-file overrides
+resolve correctly. Emitted opcode counts split exactly on that line: translators in
+`core_codegen.spl` emitted 49 alloca / 146 load / 79 store, those in
+`aggregate_intrinsics.spl` emitted ZERO.
+
+Fix: renamed the 14 cross-file impls to names the trait cannot shadow and redirected
+the call sites. Verified: `call ptr @rt_array_new` now emitted where nothing was
+before, and the `use of undefined value` llc failure is gone.
