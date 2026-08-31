@@ -87,3 +87,53 @@ discriminant test against the optional's TAG, not its payload.
 Grep for `!= nil` / `== nil` on optional float-typed values across `src/`, and
 add a codegen regression test asserting that fixture (a) compiles — a
 verifier-rejected body must be a hard error for this pattern, not a stub.
+
+---
+
+## CORRECTION (same day): the trigger is the EARLY RETURN, not `!= nil`
+
+The characterisation above ("the trigger is specifically the `!= nil` comparison
+on an optional float") is **wrong**, and the workaround derived from it did not
+work: rewriting `parse_pct_value` to `?? 0.0` while keeping its branch-and-
+early-return shape reproduced the identical error on the identical function.
+
+Proper bisection, each a standalone fixture built with
+`native-build --backend cranelift`:
+
+| fixture | shape | result |
+|---|---|---|
+| (a) | `!= nil` unwrap, inside branch with early `return` | **ICMP_IMM** |
+| (b) | `?? 0.0`, single, tail position, no branch | CLEAN |
+| (c) | `?? 0.0` x2, inside branch with early `return` (the failed workaround) | **ICMP_IMM** |
+| (d) | as (c) but with `parse_f64()` bound to a `val` first | **ICMP_IMM** |
+| (e) | `?? 0.0` **x2**, no branch, no early return | CLEAN |
+| (f) | `?? 0.0` **x1**, inside branch with early `return` | **ICMP_IMM** |
+| (g) | branch chooses the *string*; one `?? 0.0` in tail position | CLEAN |
+
+(e) vs (f) is the decisive pair: two unwraps with no branch are fine, one unwrap
+inside a branch that returns early is not. So the defect is **not** in the
+unwrap operator (`??` and `!= nil` behave identically — both are fine in tail
+position, both fail inside an early-returning branch), and **not** in the number
+of unwrap sites.
+
+**Correct statement of the bug:** unwrapping an optional FLOAT inside a
+conditional branch that performs an early `return` emits the optional's
+discriminant test as `icmp_imm` against the **float payload** instead of the
+tag. The multi-exit control flow is what moves the test onto the wrong value;
+in single-exit tail position the same source lowers correctly.
+
+## Corrected workaround
+
+`parse_pct_value` is now written in the (g) shape: the branch selects the
+*string* to parse, and there is exactly one optional-float unwrap, in tail
+position, with no early return. Semantics are unchanged (a `%` suffix is
+stripped; an unparseable value still yields `0.0`).
+
+## Method note, worth keeping
+
+The first workaround was adopted from a two-fixture comparison — (a) fails,
+(b) is clean — and the difference was attributed to the operator when the
+fixtures ALSO differed in control flow. It cost a full ~1 hour rebuild to
+discover. When two fixtures differ in more than one dimension, the bisection is
+not finished. The pair that actually isolates a variable here is (e)/(f), which
+hold the operator and the site count fixed and vary only the early return.

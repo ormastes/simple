@@ -617,22 +617,20 @@ pub fn parse_hsl_func_checked(s: text, is_hsla: bool) -> u32?:
 
 pub fn parse_pct_value(s: text) -> f32:
     """Parse a percentage value like '75%' to float (75.0)."""
-    # The explicit `if n != nil:` guard was removed from both branches below to
-    # work around a CODEGEN BUG, not for style: an optional-FLOAT nil-check
-    # lowers to `icmp_imm.f32 eq vN, 3` (an integer discriminant compare applied
-    # to the float payload), which cranelift's verifier rejects, and native-build
-    # then stubs this whole function out. `?? 0.0` is exactly equivalent here --
-    # a nil parse yields 0.0, which is the same value the removed `return 0.0`
-    # fallthrough produced -- and it compiles clean (verified by fixture).
+    # Written as a SINGLE tail-position optional-float unwrap with no early
+    # `return`, to work around a CODEGEN BUG -- not for style. Unwrapping an
+    # optional float (via `?? x` or `!= nil`) inside a conditional branch that
+    # returns early lowers to `icmp_imm.f32 eq vN, 3` -- an integer discriminant
+    # compare applied to the float payload -- which cranelift's verifier
+    # rejects; native-build then STUBS this whole function out, so every
+    # percentage would silently parse as 0. Bisected by fixture: the same
+    # unwrap in tail position with no early return compiles clean.
     # Bug + minimal reproduction:
     # doc/08_tracking/bug/cranelift_optional_float_nil_check_icmp_imm_2026-08-31.md
     val trimmed = s.trim()
-    if trimmed.ends_with("%"):
-        val num_str = trimmed.slice(0, trimmed.len() - 1)
-        val pct_val = num_str.parse_f64() ?? 0.0
-        return pct_val.to_f32()
-    val plain_val = trimmed.parse_f64() ?? 0.0
-    plain_val.to_f32()
+    val num_str = if trimmed.ends_with("%"): trimmed.slice(0, trimmed.len() - 1) else: trimmed
+    val parsed = num_str.parse_f64() ?? 0.0
+    parsed.to_f32()
 
 pub fn f32_abs(v: f32) -> f32:
     if v < 0.0: 0.0 - v else: v
