@@ -21,13 +21,36 @@ The fatals are NOT spread evenly over types. They concentrate on types whose
 | `TargetCapsKind` | 32 | `compiler.backend.feature_caps_arch32` | **no** |
 | `X86Caps` | 31 | `compiler.backend.feature_caps_types` | **no** |
 | `CompileError` | 20 | `compiler.common.error` | **no** |
-| `BlockValue` | 18 | `compiler.blocks.value` | **no** |
 | `CacheCheckResult` | 12 | `compiler.driver.cache.cache_types` | **no** |
+| `BlockValue` | 18 | `compiler.blocks.blocks.value` | yes — see correction |
 | `ConcreteType` | 20 | `compiler.mono.monomorphize.types` | yes |
 | `BackendKind` | 18 | `compiler.backend.backend_types` | yes |
 
-Roughly **764 of 1,064** fatals are attributable to a missing owner module. The
+Roughly **730 of 1,064** fatals are attributable to a missing owner module. The
 remainder have owners that ARE loaded and are a separate question.
+
+### Correction (2026-09-01, after the tracing run)
+
+The first version of this table was partly wrong. Module names in this tree
+**double the layer segment** — `src/compiler/70.backend/backend/codegen_types.spl`
+is `compiler.backend.backend.codegen_types`, not `compiler.backend.codegen_types`
+— and the script that built the table collapsed repeated segments, so it looked
+up names that never existed and scored them "missing". Re-checked against the
+real names from the closure trace:
+
+- `compiler.blocks.blocks.value` — **loaded** (2 hits). `BlockValue`, 18 fatals.
+- `compiler.backend.backend.codegen_types` — **loaded** (2 hits).
+  `CodegenOutput`/`CodegenOutputKind`, 15 fatals.
+
+Those ~33 fatals are NOT missing-owner cases and belong with the residue.
+`compiler.hir.hir_operators`, `compiler.backend.feature_caps_types`,
+`compiler.backend.feature_caps_arch32`, `compiler.common.error` and
+`compiler.driver.cache.cache_types` were re-checked under both the doubled and
+undoubled spellings and are genuinely absent.
+
+The `Option` / `Dict` / `Result` rows (225 fatals) come from the same
+first-match heuristic and are **not** established — those are builtins and their
+attribution is almost certainly wrong. They are excluded from every count here.
 
 `compiler.hir.hir_operators` is the clearest case and was verified by hand:
 
@@ -139,3 +162,55 @@ names the dropped module directly instead of requiring it to be inferred.
 This does not fix the drop. It makes the drop self-reporting, which is the
 precondition for fixing it — and for noticing the next one.
 
+
+## Tracing run 1: both closure-skip hypotheses refuted, real cause relocated (2026-09-01)
+
+With the two skip branches traced, the run produced 17 `already-loaded` lines and
+3 `unresolved` lines (all three prose false-positives: `this`, `ast`, `of`), so
+the trace is live and non-vacuous. **`compiler.hir.hir_operators` appears on
+neither branch** — it is never attempted. The third exit added afterwards
+(`closure:excluded`) fired **zero** times in the following run, so that branch is
+ruled out too.
+
+Both remaining forms of hypothesis A are therefore refuted alongside B.
+
+### Where the defect actually is
+
+The per-file scan trace shows the importers ARE scanned, but their import lists
+come back short:
+
+| file | `use` lines in source | extracted by the running compiler |
+|---|---|---|
+| `20.hir/generated/hir_codec.spl` | 12 | **1** |
+| `20.hir/hir_definitions.spl` | 9 | **6** |
+
+A faithful line-by-line simulation of
+`_driver_entry_import_module_paths_text_fallback` (including the docstring
+toggle, the comment strip, the `lazy` handling, the delimiter cut, and
+`_driver_import_path_is_valid`, which accepts alnum/`_`/`.` and so rejects
+none of these) returns **12** and **9** — the algorithm as written is correct.
+
+So the compiled extractor does not do what its source says, and every module
+missing from the closure is missing because its importer's import list was
+silently truncated. `hir_operators` is at line 11 of `hir_codec.spl` and line 39
+of `hir_definitions.spl` — both past the truncation point.
+
+Note `hir_codec.spl` is a 230 KB generated file whose line 9 ends at byte 486 and
+line 10 at byte 515, so `imports=1` is consistent with the content being cut near
+a 512-byte boundary. That is a numeric coincidence worth testing, **not** an
+established cause: no size cap was found in `rt_file_read_text`
+(`src/runtime/runtime.c:1728`), though its `rt_string_new(content, strlen(content))`
+would truncate at any embedded NUL.
+
+### Next step
+
+The trace now also prints `content_len` per scanned file and one line per
+extracted module path. That distinguishes a short READ (content_len far below the
+real file size) from a short PARSE (full content, truncated list), and shows
+whether the survivors are a prefix or a scattered subset.
+
+### Method note
+
+Three root-cause stories have been adopted and two discarded in this
+investigation. Each was discarded by a measurement, not by argument, and each
+discard is recorded above rather than edited away.
