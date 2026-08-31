@@ -86,6 +86,32 @@ survives. That is precisely the observed signature.
   `to_int()` defect is real but is **not** this one — reported as a
   disagreement, not silently dropped.
 
+## It is codegen, not missing boot-side wiring — checked
+
+The natural alternative explanation is that codegen DOES emit a module-init
+function (scalars go straight into `.data`; array literals need runtime
+allocation, so they would have to be initialized by a ctor) and the freestanding
+boot path simply never calls it — hosted builds get that for free from libc's
+crt walking `.init_array`. **That is not what is happening.** On the probe ELF:
+
+* `objdump -h` shows **no `.init_array` and no `.ctors` section at all** (only
+  `.data`, 8 bytes, and `.bss`).
+* `nm` over all 782 symbols finds **no module-init / globals-init / ctor symbol**
+  — the only `global`-ish names are the probe's own two functions and RISC-V's
+  `__global_pointer$`.
+* `linker.ld` mentions neither `init_array` nor `ctors`, but that is downstream:
+  there is nothing to keep.
+
+So there is no initializer to call. The fix belongs in global-initializer
+emission for the freestanding target, not in `crt0.S`.
+
+Refined statement: module-level global INITIALIZERS are never executed at all
+here. Scalar globals only *appear* to work because product code assigns them at
+runtime (the probe's 12a passes because `probe_globals_write` stores into it) —
+that proves scalar global STORES work, not that the initializer ran. An array
+global is left as a nil/garbage handle, so its `len()` is wrong and element
+stores go nowhere.
+
 ## Next step
 
 Fix global array-literal initializer emission for the freestanding target. Note

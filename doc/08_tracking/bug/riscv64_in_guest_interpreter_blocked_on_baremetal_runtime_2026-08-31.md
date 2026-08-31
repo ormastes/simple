@@ -387,3 +387,20 @@ line — kind 3, line 3, col 3 — round-trips correctly); and the flat-Optional
 in-band-sentinel decode, which a parallel freestanding lane proved broken for
 `text.to_int()` in-guest and which would produce exactly this signature if the
 token->text path crosses an Optional.
+
+### Defect A is ROOT-CAUSED — see the dedicated record
+
+`doc/08_tracking/bug/freestanding_riscv64_module_level_array_globals_uninitialized_2026-08-31.md`.
+
+Module-level global initializers are never executed in a freestanding riscv64
+native build: there is no `.init_array`, no ctor section and no module-init
+symbol anywhere in the linked ELF. Array-literal globals are therefore left as
+nil/garbage handles — wrong `len()`, empty element reads, dropped element
+stores — which is exactly the `core_last_token_*_slot` shape `lexer_struct.spl`
+captures token text through, and exactly why the in-guest parser sees a
+correctly classified `kind 3` at the right `line 3 col 3` with empty text.
+Scalar globals survive only because product code assigns them at runtime.
+
+That is a compiler codegen defect, not a runtime-symbol gap and not a boot-side
+wiring gap; it is out of scope for this lane and is tracked separately. This
+record's Defect A section above is superseded by it.
