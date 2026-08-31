@@ -271,7 +271,7 @@ The token is correctly classified (`kind=3`, StringLit) at the right position
 the freestanding lexer, not a grammar problem. The guest then resets and repeats;
 the transcript holds 3,044 identical cycles in ~21 MB.
 
-### Defect B — the build-and-run kernel executes the interpreter row's entry
+### Defect B — the OpenSBI payload wrap is not rebuilt per row, so both rows boot the SAME image
 
 `buildrun/kernel.elf` links, and the build script's symbol check confirms
 `buildrun_sanity_row` is present in it. But its serial transcript prints the
@@ -281,9 +281,41 @@ the transcript holds 3,044 identical cycles in ~21 MB.
     ERROR — nothing was checked: the build-and-run guest never reached its
     entry — no boot rungs on serial
 
-So a row symbol being present in the image is not evidence that row's entry is
-what runs. This is entry selection, not a link failure, and it is why the gate's
-verdict is still ERROR rather than FAIL: the interpreter row DID reach its entry
-(it passes the same precondition at line 486), and the run stops at buildrun.
+Root-caused: the buildrun kernel is NOT at fault. `nm` on
+`buildrun/kernel.elf` shows exactly one row symbol —
+`...buildrun_sanity_entry__buildrun_sanity_row` — with `interpreter_hello_row`
+ABSENT and a single `spl_start`, so there is no entry-closure pollution and the
+right entry is linked. The two `kernel.Image` files also differ
+(`79829008…` vs `744a0979…`).
+
+The defect is in the OpenSBI wrap step: the two payloads are **byte-identical**
+(`b214f3f2652786909e113b915521aff1` for both `interp-fw_payload.bin` and
+`buildrun-fw_payload.bin`), and `buildrun-opensbi-build.log` reads
+
+    make: Nothing to be done for 'all'.
+
+The OpenSBI `make` treats its output as up to date across rows because nothing
+in its dependency set changed — `FW_PAYLOAD_PATH` pointing at a different kernel
+Image is not something make sees. So the buildrun row boots the INTERPRETER
+payload, which is exactly why `[interp]` banners appear in the buildrun
+transcript. The fix is to force a rebuild (or clean the payload output) between
+rows; a row symbol being present in the ELF is not evidence that row's image is
+what was booted.
+
+This is why the gate's verdict is still ERROR rather than FAIL: the interpreter
+row DID reach its entry (it passes the same precondition at line 486), and the
+run stops at the buildrun boot-rung check.
+
+### Defect A is NOT caused by the port's behavioural choices
+
+Checked explicitly, because this change chose `rt_env_get` -> nil,
+`rt_env_get_i64` -> default and `rt_is_debug_mode_enabled` -> 0, and those now
+define every env/config gate inside the guest. Token text is stored by
+`lexer_core_cur_text_set` (`10.frontend/core/_Ast/module_state.spl:351`), a
+plain string store; there is no `env_get` / `is_debug_mode` / `getenv` read
+anywhere under `10.frontend`'s lexer path. The empty StringLit text is therefore
+not a consequence of those answers. Recorded because there is no pre-port
+baseline to compare against — the image never linked before — so attribution had
+to be established by inspection rather than by bisection.
 
 Neither defect is a runtime-symbol gap, and neither is fixed by this change.
