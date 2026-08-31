@@ -34,6 +34,7 @@ struct DuplicationConfig:
     semantic_model: text          # Ollama model (default: nomic-embed-text)
     ollama_url: text              # Ollama base URL
     rebuild_embeddings: bool      # Force rebuild embedding cache
+    use_lsh_prefilter: bool       # Opt-in LSH/MinHash candidate pre-pass (default false)
 
 fn analysis_mode(config: DuplicationConfig) -> text:
     if config.selected_mode.len() > 0:
@@ -172,7 +173,8 @@ fn default_config() -> DuplicationConfig:
         semantic_drift_threshold: 0.40,
         semantic_model: "nomic-embed-text",
         ollama_url: "http://localhost:11434",
-        rebuild_embeddings: false
+        rebuild_embeddings: false,
+        use_lsh_prefilter: false
     )
 
 fn parse_config_file(content: text) -> DuplicationConfig:
@@ -204,6 +206,7 @@ fn parse_config_file(content: text) -> DuplicationConfig:
     config.quiet = get_config_bool(section, "quiet", config.quiet)
     config.show_progress = get_config_bool(section, "progress", config.show_progress)
     config.rebuild_embeddings = get_config_bool(section, "rebuild-embeddings", config.rebuild_embeddings)
+    config.use_lsh_prefilter = get_config_bool(section, "use-lsh-prefilter", config.use_lsh_prefilter)
 
     config.similarity_threshold = get_config_float(section, "similarity-threshold", config.similarity_threshold)
     config.semantic_threshold = get_config_float(section, "semantic-threshold", config.semantic_threshold)
@@ -276,7 +279,10 @@ use std.config_parser.{ConfigSection}
 fn compute_config_hash(config: DuplicationConfig) -> text:
     """Compute hash of config fields that affect detection results."""
     val config_str = "{analysis_mode(config)}|{config.min_tokens}|{config.min_lines}|{config.ignore_identifiers}|{config.ignore_literals}|{config.ignore_comments}|{config.ignore_whitespace}|{config.similarity_threshold}|{config.min_impact}|{config.exclude_patterns.join(',')}|{config.use_ast_features}|{config.use_cosine_similarity}|{config.use_semantic}|{config.semantic_threshold}|{config.semantic_drift_threshold}|{config.semantic_model}|{config.ollama_url}|{config.rebuild_embeddings}"
-    hash_string(config_str)
+    # Appended ONLY when enabled, so the default config hash stays byte-identical
+    # to what it was before the opt-in prefilter existed (cache keys unchanged).
+    val suffixed = if config.use_lsh_prefilter: config_str + "|lsh" else: config_str
+    hash_string(suffixed)
 
 fn load_config() -> DuplicationConfig:
     val config_path = "simple.duplicate-check.sdn"
