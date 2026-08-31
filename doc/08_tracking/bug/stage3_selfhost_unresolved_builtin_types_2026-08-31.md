@@ -150,3 +150,59 @@ Determine where builtin/prelude types (`Option`, `Dict`, `Result`) are registere
 for a self-host compile and why that registration is absent or unreachable in
 Stage 3. Fix that first: 115+67+44 = 226 of the 1,088 fatals are builtins, and the
 re-export-hop failures may share the same root.
+
+# ROOT A LOCALISED 2026-08-31 — silent "already satisfied" skip, 203-module gap
+
+Phase 1's own trace gives the discrepancy directly:
+
+```
+[BOOTSTRAP-PHASE] phase1:load_sources:closure:done scanned=538 logical=741
+```
+
+**741 logical module paths marked seen, 538 physical files loaded — a 203-module
+gap.** That is the population the 117 dotted missing targets belong to (203
+includes single-segment/prose pseudo-imports that are deliberately skipped).
+
+The branch is identified by elimination, not inference:
+
+- The LOUD path at `driver_source_pipeline_loading.spl:330` emits
+  `unresolved import '<mp>' (used in <path>)` whenever the resolver returns "" for
+  a DOTTED module path. The Stage-3 log contains **zero** such lines
+  (`grep -c "unresolved import '"` = 0). So `_driver_resolve_entry_import` never
+  failed — the resolver is NOT the problem, and the earlier open question about
+  which branch fired is now answered.
+- That leaves the two silent `continue`s at `:313-320`. The first
+  (`closure_seen_mods`) cannot account for it: it fires only on a genuine repeat,
+  and it runs BEFORE the logical counter is incremented for that path.
+- The second is the culprit shape:
+
+```
+    closure_seen_mods[closure_mp] = true          # logical++
+    if closure_loaded_mods.contains_key(closure_mp):
+        # Already satisfied by an explicit --source root (or an
+        # earlier closure step): nothing to resolve, not an error.
+        continue                                   # no physical load
+```
+
+A module counted logical, skipped as "already satisfied", and never actually
+compiled into the set produces exactly the observed signature: logical > physical,
+no error, and a later hard `unresolved type` when its declarations are needed.
+
+## Why this explains hir_operators.spl specifically
+
+Stage 3 runs with `--source src/compiler --source src/app --source src/lib`, which
+pre-populates `closure_loaded_mods`. `src/compiler/20.hir/hir_operators.spl` lives
+under one of those roots, so it is claimed as already satisfied — yet it has ZERO
+mentions anywhere in the Stage-3 log, i.e. it was never loaded. Its 429 dependent
+fatals (HirBinOp 159 + HirUnaryOp 145 + HirAssignOp 125) follow.
+
+## Next step for whoever continues
+
+Find where `closure_loaded_mods` is populated from the `--source` roots and
+determine whether membership means "file present under a source root" or "file
+actually loaded into the compile set". If it is the former, the fix is to make the
+check mean the latter (or to load on miss rather than assume). Note the keys are
+LOGICAL module names, so `module_logical_name_from_path` is on this path — two
+physical files that normalise to one logical name would also mark the second as
+already satisfied.
+
