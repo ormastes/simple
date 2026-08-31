@@ -32,11 +32,14 @@ fn _say_num(label: text, n: i64, expect: i64):
 var g_probe_text: text = ""
 var g_probe_text_slot: [text] = [""]
 var g_probe_num: i64 = 0
+var g_probe_num_slot: [i64] = [0]
+var g_probe_text_slot2: [text] = [""]
 
 fn probe_globals_write():
     g_probe_text = "GLOBAL_OK"
     g_probe_text_slot[0] = "SLOT_OK"
     g_probe_num = 4242
+    g_probe_num_slot[0] = 777
 
 fn probe_globals_read() -> text:
     g_probe_text
@@ -337,6 +340,34 @@ fn spl_start():
     serial_println("[probe] 13b present = " + (opt_present ?? "EMPTY"))
     val opt_absent: text? = nil
     serial_println("[probe] 13b absent = " + (opt_absent ?? "EMPTY"))
+
+    # --- Step 14 (added 2026-08-31): pin 12b's axis --------------------------
+    # 12b FAILED: a module-level [text] one-slot global written in
+    # probe_globals_write() reads back EMPTY in spl_start, while the plain text
+    # global (12a/12d) and the i64 global (12c) both survive. That is exactly
+    # the core_last_token_text_slot / core_last_token_line_slot / _col_slot
+    # shape in lexer_struct.spl — and exactly Defect A's signature, where kind,
+    # line and col (all i64) print correctly and only the TEXT is empty.
+    # 14 splits the two axes 12b confounds.
+    #
+    # 14a: [i64] global slot, same cross-function write. If this SURVIVES while
+    #      [text] does not, the defect is text-in-a-global-array, not global
+    #      array element stores in general.
+    serial_println("[probe] step 14a: [i64] global slot, cross-function write")
+    _say_num("[probe] 14a i64 slot", g_probe_num_slot[0], 777)
+
+    # 14b: [text] global slot written and read in the SAME function. If this
+    #      SURVIVES while 12b does not, the store is fine and what is lost is
+    #      the global's identity across a function boundary; if it FAILS too,
+    #      the element store into a global [text] is itself dropped.
+    serial_println("[probe] step 14b: [text] global slot, same-function write")
+    g_probe_text_slot2[0] = "SAME_FN_OK"
+    serial_println("[probe] 14b same-fn = " + g_probe_text_slot2[0])
+
+    # 14c: the 12b slot again, re-read after 14b. Says whether the empty read is
+    #      stable or whether the slot was merely not yet written.
+    serial_println("[probe] 14c re-read of the 12b slot = " + g_probe_text_slot[0])
+    _say_num("[probe] 14c 12b slot len", g_probe_text_slot.len(), 1)
 
     serial_println("PROBE_TEXT_PRIMITIVES_SIMPLEOS_RISCV64_DONE")
     serial_println("[probe] parking")
