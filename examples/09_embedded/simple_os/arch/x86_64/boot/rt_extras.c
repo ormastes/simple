@@ -592,42 +592,194 @@ RuntimeValue rt_field_set(RuntimeValue object, RuntimeValue field_index, Runtime
 }
 
 
-/* ---- rt_closure_* (closure introspection) ---- */
+/* ---- rt_closure_* (first-class closures) ----
+ *
+ * PORT, not a new symbol. All four names are declared in
+ * src/runtime/runtime.h:664-667 and defined for the hosted target in
+ * src/runtime/runtime_native.c (rt_closure_new at :8042). The riscv64
+ * freestanding sibling carries the same port at
+ * examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:1317.
+ *
+ * Until now x86_64 had the three ACCESSORS but no allocator: baremetal_stubs.c
+ * deliberately left `rt_closure_new` unresolved, so it bound to auto_stubs.c's
+ * WEAK 8-argument `return NIL_VALUE` catch-all. The image linked clean and then
+ * faulted at 0x080059f1 the moment a closure was called, because every closure
+ * value was NIL and the indirect call went through a NULL func_ptr. That is the
+ * mcp component row. A stub here is precisely the failure mode, so this is a
+ * real allocator.
+ *
+ * PARAMETER WIDTHS ARE NOT FREE CHOICES — they are the codegen ABI, declared in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:678-681:
+ *   rt_closure_new         (I64, I32)      -> I64
+ *   rt_closure_set_capture (I64, I32, I64) -> I8
+ *   rt_closure_get_capture (I64, I32)      -> I64
+ *   rt_closure_func_ptr    (I64)           -> I64
+ * and matched by the Rust runtime (value/objects.rs:177,198,213,227), whose
+ * index/count parameters are `u32`. The accessors below previously declared
+ * those parameters as 64-bit RuntimeValue, which leaves the upper half of the
+ * register undefined; the same defect trapped the riscv64 lane and is recorded
+ * in that file's port comment.
+ *
+ * Differences from the hosted definition, and why each is correct here:
+ *   * `rt_core_register_closure` is dropped: this runtime has no collector and
+ *     never frees, so every closure is already immortal.
+ *   * captures are filled with NIL_VALUE explicitly rather than relying on
+ *     zeroing — NIL_VALUE is TAG_SPECIAL (0x3), not 0.
+ *   * func_ptr is stored RAW (untagged): codegen passes and expects a bare code
+ *     address, and tagging it would corrupt the indirect call.
+ *
+ * Layout is the one the pre-existing accessors already assumed, kept verbatim
+ * so nothing that reads a closure has to change:
+ *   HeapHeader | func_ptr i64 @+0 | capture_count u32 @+8 | pad | captures @+16
+ */
+
+typedef struct {
+    HeapHeader   hdr;
+    int64_t      func_ptr;
+    uint32_t     capture_count;
+    uint32_t     _pad;
+    RuntimeValue captures[];
+} RuntimeClosure;
+
+_Static_assert(offsetof(RuntimeClosure, func_ptr) == sizeof(HeapHeader),
+               "closure func_ptr must follow the header immediately");
+_Static_assert(offsetof(RuntimeClosure, captures) == sizeof(HeapHeader) + 16,
+               "closure captures must sit 16 bytes past the header: the accessors read them there");
+
+/* Reject a handle that is not a closure rather than reading a foreign field. */
+static RuntimeClosure *_as_closure(RuntimeValue value) {
+    if (!IS_HEAP(value)) return (RuntimeClosure *)0;
+    RuntimeClosure *c = (RuntimeClosure *)DECODE_PTR(value);
+    if (!c || c->hdr.type != HEAP_CLOSURE) return (RuntimeClosure *)0;
+    return c;
+}
+
+RuntimeValue rt_closure_new(RuntimeValue func_ptr, uint32_t capture_count) {
+    int64_t count = (int64_t)capture_count;
+    if (!func_ptr || count < 0) return NIL_VALUE;
+    /* Bounded like every other allocation in this file. */
+    if (count > 4096) return NIL_VALUE;
+    RuntimeClosure *c = (RuntimeClosure *)malloc(
+        sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
+    if (!c) return NIL_VALUE;
+    c->hdr.type = HEAP_CLOSURE;
+    c->hdr.size = (uint32_t)(sizeof(RuntimeClosure) + (size_t)count * sizeof(RuntimeValue));
+    c->func_ptr = (int64_t)func_ptr;
+    c->capture_count = (uint32_t)count;
+    c->_pad = 0;
+    for (int64_t i = 0; i < count; i++) c->captures[i] = NIL_VALUE;
+    return ENCODE_PTR(c);
+}
 
 RuntimeValue rt_closure_func_ptr(RuntimeValue closure) {
-    if (!IS_HEAP(closure)) return 0;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(closure);
-    if (!h || h->type != HEAP_CLOSURE) return 0;
-    /* Closure layout: HeapHeader + func_ptr(i64) + capture_count(u32) + captures[] */
-    int64_t *func = (int64_t *)(h + 1);
-    return (RuntimeValue)*func;
+    RuntimeClosure *c = _as_closure(closure);
+    return c ? (RuntimeValue)c->func_ptr : 0;
 }
 
-RuntimeValue rt_closure_get_capture(RuntimeValue closure, RuntimeValue index) {
-    if (!IS_HEAP(closure)) return NIL_VALUE;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(closure);
-    if (!h || h->type != HEAP_CLOSURE) return NIL_VALUE;
-    /* func_ptr(8 bytes) + capture_count(4 bytes) + padding(4 bytes) + captures[] */
-    uint8_t *base = (uint8_t *)(h + 1);
-    uint32_t cap_count = *(uint32_t *)(base + 8);
-    RuntimeValue *captures = (RuntimeValue *)(base + 16);
-    uint32_t idx = (uint32_t)(int64_t)index;
-    if (idx >= cap_count) return NIL_VALUE;
-    return captures[idx];
+RuntimeValue rt_closure_get_capture(RuntimeValue closure, uint32_t index) {
+    RuntimeClosure *c = _as_closure(closure);
+    if (!c || index >= c->capture_count) return NIL_VALUE;
+    return c->captures[index];
 }
 
-RuntimeValue rt_closure_set_capture(RuntimeValue closure, RuntimeValue index, RuntimeValue value) {
-    if (!IS_HEAP(closure)) return 0;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(closure);
-    if (!h || h->type != HEAP_CLOSURE) return 0;
-    uint8_t *base = (uint8_t *)(h + 1);
-    uint32_t cap_count = *(uint32_t *)(base + 8);
-    RuntimeValue *captures = (RuntimeValue *)(base + 16);
-    uint32_t idx = (uint32_t)(int64_t)index;
-    if (idx >= cap_count) return 0;
-    captures[idx] = value;
+/* Returns I8 per the codegen spec, not a tagged RuntimeValue. */
+int8_t rt_closure_set_capture(RuntimeValue closure, uint32_t index, RuntimeValue value) {
+    RuntimeClosure *c = _as_closure(closure);
+    if (!c || index >= c->capture_count) return 0;
+    c->captures[index] = value;
     return 1;
 }
+
+
+/* ---- rt_string_builder_* (loop string accumulation) ----
+ *
+ * PORT of hosted names (runtime.h:403-407, runtime_native.c), mirroring the
+ * riscv64 freestanding port. Found by probe there, not by reading codegen:
+ * `acc = acc + x` inside a loop does NOT lower to repeated rt_string_concat —
+ * codegen rewrites it into a builder. x86_64 freestanding had none of these, so
+ * every such call bound to auto_stubs.c's weak nil stub and every accumulated
+ * string came back empty.
+ *
+ * rt_string_builder_push takes TWO arguments and the second is a tagged string
+ * HANDLE, not a raw char* plus length (runtime.h:405). Getting that wrong is
+ * what produced NUL bytes and a hang on riscv64.
+ */
+
+#define HEAP_STRING_BUILDER 13
+
+typedef struct {
+    HeapHeader hdr;
+    uint32_t   len;
+    uint32_t   cap;
+    char      *data;
+} RuntimeStringBuilder;
+
+RuntimeValue rt_string_builder_new(void) {
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)malloc(sizeof(RuntimeStringBuilder));
+    if (!b) return NIL_VALUE;
+    /* DISTINCT heap type so a builder handle can never be read back as a
+     * RuntimeString by rt_string_len / rt_string_data. */
+    b->hdr.type = HEAP_STRING_BUILDER;
+    b->hdr.size = (uint32_t)sizeof(RuntimeStringBuilder);
+    b->len = 0;
+    b->cap = 64;
+    b->data = (char *)malloc(b->cap);
+    if (!b->data) return NIL_VALUE;
+    b->data[0] = 0;
+    return ENCODE_PTR(b);
+}
+
+RuntimeValue rt_string_builder_len(RuntimeValue builder) {
+    if (!IS_HEAP(builder)) return 0;
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) return 0;
+    return (RuntimeValue)(int64_t)b->len;
+}
+
+RuntimeValue rt_string_builder_push(RuntimeValue builder, RuntimeValue string) {
+    if (!IS_HEAP(builder)) return builder;
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) return builder;
+
+    RuntimeString *s = IS_HEAP(string) ? (RuntimeString *)DECODE_PTR(string) : (RuntimeString *)0;
+    if (!s || s->hdr.type != HEAP_STRING) return builder;
+    uint32_t add = (uint32_t)s->len;
+    const char *src = s->data;
+    if (add == 0) return builder;
+
+    if (b->len + add + 1U > b->cap) {
+        /* DOUBLE rather than reallocating per push: the freestanding heap does
+         * not free, so per-append reallocation exhausts it. */
+        uint32_t want = b->cap ? b->cap : 64U;
+        while (want < b->len + add + 1U) want *= 2U;
+        char *grown = (char *)malloc(want);
+        if (!grown) return builder;
+        for (uint32_t i = 0; i < b->len; i++) grown[i] = b->data[i];
+        b->data = grown;
+        b->cap = want;
+    }
+    for (uint32_t i = 0; i < add; i++) b->data[b->len + i] = src[i];
+    b->len += add;
+    b->data[b->len] = 0;
+    return builder;
+}
+
+RuntimeValue rt_string_builder_finish(RuntimeValue builder) {
+    if (!IS_HEAP(builder)) return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    RuntimeStringBuilder *b = (RuntimeStringBuilder *)DECODE_PTR(builder);
+    if (!b || b->hdr.type != HEAP_STRING_BUILDER) {
+        return rt_string_new((RuntimeValue)(uintptr_t)"", 0);
+    }
+    return rt_string_new((RuntimeValue)(uintptr_t)b->data, (RuntimeValue)(int64_t)b->len);
+}
+
+RuntimeValue rt_string_builder_free(RuntimeValue builder) {
+    /* This heap never frees; this exists so the symbol resolves. */
+    (void)builder;
+    return NIL_VALUE;
+}
+
+
 
 
 /* ---- rt_generator_* (coroutine state machine) ---- */
