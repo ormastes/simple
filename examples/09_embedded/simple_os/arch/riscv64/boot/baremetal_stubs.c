@@ -44,11 +44,15 @@ typedef struct {
     uint32_t size;
 } HeapHeader;
 
+/* len MUST be uint64_t / data at offset 16 — codegen inlines .len() as an
+ * i64 load at offset 8. See arch/common/baremetal_runtime.h. */
 typedef struct {
     HeapHeader hdr;
-    uint32_t len;
+    uint64_t len;
     char data[];
 } RuntimeString;
+_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must sit at offset 8");
+_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must sit at offset 16");
 
 typedef struct {
     HeapHeader hdr;

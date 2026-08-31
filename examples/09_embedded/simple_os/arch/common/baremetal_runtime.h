@@ -72,11 +72,21 @@ typedef struct {
     uint32_t size;
 } HeapHeader;
 
+/* len MUST be uint64_t (data therefore at offset 16). Codegen inlines
+ * `text.len()` as an i64 load at offset 8 and emits string objects with a
+ * 64-bit length, so a uint32_t here makes every .len() read the low 4 bytes
+ * of data as the high half of the length, and shifts every data access 4
+ * bytes early. Fixed 2026-07-12 (x86_64), silently reverted by the tree wipe
+ * 6f86ff32a7d, re-applied 2026-08-31 after the same defect stalled the
+ * riscv64 in-guest components lane.
+ * See doc/08_tracking/bug/x64_rt_extras_runtime_string_layout_mismatch.md */
 typedef struct {
     HeapHeader hdr;
-    uint32_t   len;
+    uint64_t   len;
     char       data[];
 } RuntimeString;
+_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must sit at offset 8: codegen inlines .len() as an i64 load there");
+_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must sit at offset 16 to match compiler-emitted string objects");
 
 typedef struct {
     HeapHeader   hdr;

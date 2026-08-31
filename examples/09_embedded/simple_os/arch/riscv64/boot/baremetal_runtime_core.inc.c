@@ -46,9 +46,11 @@ typedef struct {
 
 typedef struct {
     HeapHeader hdr;
-    uint32_t len;
+    uint64_t len;   /* MUST be uint64_t: codegen inlines .len() as an i64 load at offset 8 and places data at offset 16 (see doc/08_tracking/bug/x64_rt_extras_runtime_string_layout_mismatch.md) */
     char data[];
 } RuntimeString;
+_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString.len must sit at offset 8: codegen inlines .len() as an i64 load there");
+_Static_assert(offsetof(RuntimeString, data) == 16, "RuntimeString.data must sit at offset 16 to match compiler-emitted string objects");
 
 typedef struct {
     HeapHeader hdr;
