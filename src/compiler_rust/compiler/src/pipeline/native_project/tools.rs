@@ -394,6 +394,18 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // tolerated-undefined-then-SIGSEGV class as rt_unwrap_or_trap
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         "runtime_terminal.c",
+        // Group E of stage2_windows_unresolved_inventory_2026-08-31: the only
+        // definitions of rt_mkdir / rt_random_i64 / rt_readdir{,_count,_entry,
+        // _free} / rt_shell_output live in runtime.c, which is NOT in this list
+        // and cannot be added wholesale (measured: 53 symbol collisions with
+        // this archive, 69 with the Rust runtime libs -- same class as the
+        // disproved runtime_native.c wholesale fix, 475 collisions). This TU
+        // carries exactly those seven, self-contained, all helpers static.
+        // Re-verified against THIS list's members 2026-08-31 (nm, 956 defined
+        // symbols incl. runtime_native.c: zero overlap). Tagged-text ABI --
+        // see the TU header; behavioural tests in
+        // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
+        "runtime_core_exports.c",
         "runtime_value.h",
         "runtime.h",
         "runtime_packed_span.h",

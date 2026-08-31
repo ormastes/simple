@@ -140,6 +140,31 @@ static int64_t core_io_empty_text(void) {
     return rt_string_new(NULL, 0);
 }
 
+#ifdef _WIN32
+/* Paths cross this ABI as UTF-8. The ANSI A-functions interpret bytes in
+ * the active codepage, which only matches UTF-8 on hosts with ACP 65001 --
+ * measured 2026-08-31: this exact mismatch made _stat64/FindFirstFileA
+ * fail on non-ASCII names under a legacy ACP. Convert and use the W APIs
+ * (same fix as runtime_core_exports.c). Malloc'd result, NULL on failure. */
+static wchar_t* core_io_utf8_to_wide(const char* utf8) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (wlen <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc(sizeof(wchar_t) * (size_t)wlen);
+    if (!wide) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, wlen) <= 0) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+/* UTF-16 -> UTF-8 into buf; returns 0 when it does not fit. */
+static int core_io_wide_to_utf8_buf(const wchar_t* wide, char* buf, size_t buf_size) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, buf, (int)buf_size, NULL, NULL);
+    return len > 0;
+}
+#endif
+
 /* Build a tagged [u8] array from raw bytes: rt_array_new + per-element
  * inline tagged ints (byte << 3), mirroring Rust rt_text_to_bytes. */
 static int64_t core_io_bytes_to_array(const uint8_t* bytes, size_t len) {
@@ -180,7 +205,12 @@ int64_t rt_stdin_read(int64_t size) {
     core_io_stdin_binary();
     int n = _read(_fileno(stdin), buf, (unsigned int)size);
 #else
-    ssize_t n = read(0, buf, (size_t)size);
+    /* EINTR must not read as EOF: Stdin.read_exact (pipe.spl) treats a
+     * 0-length chunk as end-of-stream, so a signal would truncate input. */
+    ssize_t n;
+    do {
+        n = read(0, buf, (size_t)size);
+    } while (n < 0 && errno == EINTR);
 #endif
     int64_t result = (n > 0)
         ? core_io_bytes_to_array(buf, (size_t)n)
@@ -208,6 +238,7 @@ int64_t rt_stdin_read_all(void) {
         int n = _read(_fileno(stdin), buf + len, (unsigned int)(cap - len));
 #else
         ssize_t n = read(0, buf + len, cap - len);
+        if (n < 0 && errno == EINTR) continue; /* signal, not EOF */
 #endif
         if (n <= 0) break;
         len += (size_t)n;
@@ -239,8 +270,12 @@ int32_t rt_term_flush(void) {
 /* st_mtime as whole seconds since the Unix epoch; -1 on failure. */
 static int64_t core_io_mtime_seconds(const char* path) {
 #ifdef _WIN32
+    wchar_t* wpath = core_io_utf8_to_wide(path);
+    if (!wpath) return -1;
     struct __stat64 st;
-    if (_stat64(path, &st) != 0) return -1;
+    int rc = _wstat64(wpath, &st);
+    free(wpath);
+    if (rc != 0) return -1;
     return (int64_t)st.st_mtime;
 #else
     struct stat st;
@@ -274,22 +309,27 @@ static void core_io_list_dir_impl(const char* path, const char* suffix, int64_t*
     if (depth > 64) return; /* symlink-cycle / runaway-nesting guard */
 #ifdef _WIN32
     char pattern[4096];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (snprintf(pattern, sizeof(pattern), "%s\\*", path) >= (int)sizeof(pattern)) return;
+    wchar_t* wpattern = core_io_utf8_to_wide(pattern);
+    if (!wpattern) return;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wpattern, &fd);
+    free(wpattern);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        char name[1024];
+        if (!core_io_wide_to_utf8_buf(fd.cFileName, name, sizeof(name))) continue;
         char full[4096];
-        snprintf(full, sizeof(full), "%s\\%s", path, fd.cFileName);
+        if (snprintf(full, sizeof(full), "%s\\%s", path, name) >= (int)sizeof(full)) continue;
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
             !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
             core_io_list_dir_impl(full, suffix, result, depth + 1);
-        } else if (core_io_has_suffix(fd.cFileName, suffix)) {
+        } else if (core_io_has_suffix(name, suffix)) {
             rt_array_push((SplArray*)(uintptr_t)*result,
                           rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 #else
     DIR* dir = opendir(path);
@@ -298,7 +338,8 @@ static void core_io_list_dir_impl(const char* path, const char* suffix, int64_t*
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
         char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", path, ent->d_name);
+        /* Truncation would silently stat/emit the WRONG path -- skip. */
+        if (snprintf(full, sizeof(full), "%s/%s", path, ent->d_name) >= (int)sizeof(full)) continue;
         struct stat st;
         if (lstat(full, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
