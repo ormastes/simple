@@ -1380,6 +1380,26 @@ bootstrap_stage_sanity() (
   fi
   if [ "${sanity_status}" != pass ]; then
     echo "bootstrap-sanity-error: version_status=${version_status} version_output=${version} unsupported_status=${unsupported_status} frontend_status=${frontend_status} candidate_unchanged=$([ "${candidate_sha_before}" = "${candidate_sha_after}" ] && echo true || echo false)" >&2
+    # The frontend log used to be unconditionally rm'd below with nothing ever
+    # having printed its content -- only its sha256 landed in the evidence
+    # file. That is what made a failing frontend smoke UNDIAGNOSABLE: the gate
+    # reported frontend_status=1 with no error text of any kind. Preserve a
+    # durable copy next to the evidence file (never in $TMPDIR, which this
+    # subshell's own caller may clean up) and echo a bounded excerpt to
+    # stderr so the real compiler/linker error is visible in the run's own
+    # log, not just inferable from a hash.
+    if [ -s "${frontend_log}" ]; then
+      echo "bootstrap-sanity-error: frontend smoke log follows (first 65536 bytes of ${frontend_log}):" >&2
+      head -c 65536 "${frontend_log}" >&2
+      echo "" >&2
+      if [ -n "${evidence_path}" ]; then
+        frontend_log_durable="${evidence_path}.frontend-failure.log"
+        cp -f "${frontend_log}" "${frontend_log_durable}" 2>/dev/null &&
+          echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
+      fi
+    else
+      echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
+    fi
   fi
   rm -f "${frontend_log}"
   [ "${sanity_status}" = pass ]
