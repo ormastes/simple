@@ -263,6 +263,26 @@ pub struct MirLowerer<'a> {
     pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// Locals whose DECLARED type is type-erased (unnamed / `Any`) but whose
+    /// single reaching definition is a named CLASS type, recomputed per
+    /// function by `compute_single_assignment_class_types`.
+    ///
+    /// Exists for one narrow purpose: a BARE method call on such a local whose
+    /// name collides with codegen's builtin-collection set
+    /// (`is_bare_builtin_collection_method` — `find`, `get`, `has`, `remove`,
+    /// `slice`, ...) is claimed by a tag-dispatching runtime helper BEFORE any
+    /// user-method resolution runs. Those helpers untag the receiver and read a
+    /// 32-bit type header that class instances DO NOT CARRY (`compile_struct_init`
+    /// tags with the plain heap tag and writes fields from offset 0). On
+    /// riscv64/freestanding that misread TRAPS; on x86_64/aarch64 it silently
+    /// answers the helper's `-1` miss sentinel instead of running the user's
+    /// method. Recovering the class here lets the call lower QUALIFIED so it
+    /// never reaches that heuristic.
+    ///
+    /// Only SINGLE-assignment locals are recorded, so a genuinely polymorphic
+    /// `Any` local is never statically pinned to one class.
+    /// See doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
+    pub(super) erased_local_class_types: HashMap<usize, TypeId>,
     /// F1/S5 — declaration kind per type name, carried from HIR by S3.
     /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
     /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
@@ -358,6 +378,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            erased_local_class_types: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -400,6 +421,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            erased_local_class_types: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -1959,6 +1981,11 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower a single HIR function to MIR function
     pub(super) fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
+        // Per-function: local indices are function-scoped, so this MUST be
+        // recomputed (not accumulated) or one function's locals would be read
+        // as another's.
+        self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
 
         // Populate metadata for AOP join point matching
@@ -2107,4 +2134,113 @@ impl<'a> Default for MirLowerer<'a> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Collect every write to a local in `stmts`, as `(local_index, assigned type)`.
+///
+/// `HirStmt::Let` with an initializer and `HirStmt::Assign` to a bare
+/// `HirExprKind::Local` are the two write forms. Every nested block is walked,
+/// so a write inside a loop or branch still counts — that is what makes the
+/// caller's "exactly one write" test a sound single-assignment check rather
+/// than a peephole.
+///
+/// A `For` loop's `pattern_local` is recorded as a write with the ITERABLE's
+/// type, which is deliberately not the element type: it only has to be a write
+/// so the loop variable can never look single-assigned to a class.
+fn collect_local_writes(stmts: &[HirStmt], out: &mut Vec<(usize, TypeId)>) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } => out.push((*local_index, value.ty)),
+            HirStmt::Assign { target, value } => {
+                if let HirExprKind::Local(idx) = &target.kind {
+                    out.push((*idx, value.ty));
+                }
+            }
+            HirStmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_local_writes(then_block, out);
+                if let Some(else_block) = else_block {
+                    collect_local_writes(else_block, out);
+                }
+            }
+            HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
+                collect_local_writes(body, out)
+            }
+            HirStmt::For {
+                pattern_local,
+                iterable,
+                body,
+                ..
+            } => {
+                if let Some(idx) = pattern_local {
+                    out.push((*idx, iterable.ty));
+                }
+                collect_local_writes(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Locals whose DECLARED type is type-erased but whose SINGLE reaching
+/// definition is a named class/struct type.
+///
+/// Conservative by construction — an entry is produced only when all of:
+/// * the local is written exactly once anywhere in the function body, so a
+///   genuinely polymorphic `Any` local (reassigned with a second type, or
+///   assigned in a loop) is never pinned;
+/// * the local's own declared type does NOT already resolve to a name, so this
+///   only ever ADDS information and can never override a real annotation;
+/// * the assigned type resolves to a named `HirType::Struct`. Arrays, dicts and
+///   tuples are excluded on purpose: they share the same TypeId range as
+///   classes (measured: array `TypeId(18)`, dict `TypeId(19)`, class
+///   `TypeId(16)`), and they are exactly the receivers the builtin-collection
+///   routing exists to serve, so pinning one would regress bug #62.
+fn compute_single_assignment_class_types(
+    func: &HirFunction,
+    registry: Option<&crate::hir::TypeRegistry>,
+) -> HashMap<usize, TypeId> {
+    let Some(registry) = registry else {
+        return HashMap::new();
+    };
+
+    let mut writes: Vec<(usize, TypeId)> = Vec::new();
+    collect_local_writes(&func.body, &mut writes);
+
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for (idx, _) in &writes {
+        *counts.entry(*idx).or_insert(0) += 1;
+    }
+
+    let nparams = func.params.len();
+    let mut out = HashMap::new();
+    for (idx, ty) in writes {
+        if counts.get(&idx).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        // A parameter is bound by the caller, not by this body; its declared
+        // type is authoritative and must not be second-guessed.
+        if idx < nparams {
+            continue;
+        }
+        // Never override a local that already carries a resolvable name.
+        let declared = func.locals.get(idx - nparams).map(|l| l.ty);
+        if declared.is_some_and(|d| registry.get_type_name(d).is_some()) {
+            continue;
+        }
+        if registry.get_type_name(ty).is_none() {
+            continue;
+        }
+        if matches!(registry.get(ty), Some(crate::hir::HirType::Struct { .. })) {
+            out.insert(idx, ty);
+        }
+    }
+    out
 }
