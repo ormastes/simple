@@ -717,7 +717,13 @@ pub(crate) fn exec_assignment(
         // and the engines agree. Note the read path already errors (E1001),
         // so this only restores read/write symmetry.
         // See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
-        if is_first_assignment {
+        // `is_first_assignment` alone is not sufficient: method dispatch
+        // pre-binds every receiver field as a local (`exec_method_body`), so a
+        // plain `fn` method's bare `field = ...` was NOT a first assignment and
+        // slipped through. `is_field_prebind` recognises exactly those
+        // pre-bound bindings and is cleared by any genuine local declaration.
+        // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+        if is_first_assignment || env.is_field_prebind(name) {
             if let Some(Value::Object { class, fields }) = env.get("self") {
                 if fields.contains_key(name) {
                     let ctx = ErrorContext::new()
