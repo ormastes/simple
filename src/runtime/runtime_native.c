@@ -2300,6 +2300,44 @@ int64_t stdin_read_char(void) {
     return rt_string_new(&byte, 1);
 }
 
+#if defined(_WIN32)
+/*
+ * Windows CRT stdio defaults to TEXT mode, which rewrites every '
+' written to
+ * stdout into "
+" (and strips '' on read). That silently corrupts any
+ * byte-counted protocol carried over stdio: a JSON-RPC / MCP "Content-Length"
+ * frame terminated by CRLFCRLF leaves the process as CR CR LF CR CR LF, so the
+ * header separator no longer matches and the announced byte count no longer
+ * describes the bytes on the wire. Measured 2026-08-31 on the deployed native
+ * bin/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe: it emitted
+ * "Content-Length: 381
+
+{...}". The Rust seed does not have this
+ * defect because Rust's std never translates, which is exactly why the same
+ * server answers correctly when run from source and corruptly when built native.
+ *
+ * The guard is _WIN32 rather than _MSC_VER on purpose: text-mode translation is
+ * a property of the Windows C RUNTIME, not of the compiler, so a MinGW/UCRT
+ * build is affected identically. Only the constructor-registration mechanism
+ * below differs per compiler.
+ */
+static void rt_win_set_binary_stdio(void) {
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((constructor))
+static void rt_win_set_binary_stdio_ctor(void) { rt_win_set_binary_stdio(); }
+#elif defined(_MSC_VER)
+#pragma section(".CRT$XCU", read)
+static void __cdecl rt_win_set_binary_stdio_ctor(void) { rt_win_set_binary_stdio(); }
+__declspec(allocate(".CRT$XCU"))
+void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor;
+#endif
+#endif /* _WIN32 */
+
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
@@ -5344,11 +5382,26 @@ int64_t rt_string_trim_end(int64_t value) {
 int64_t rt_string_to_int(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
-    char buf[64];
-    uint64_t n = s->len < sizeof(buf) - 1 ? s->len : sizeof(buf) - 1;
-    if (n > 0) memcpy(buf, s->data, (size_t)n);
-    buf[n] = '\0';
-    return (int64_t)strtoll(buf, NULL, 10);
+    /* Copy into a NUL-terminated buffer sized from s->len -- the old fixed
+     * char buf[64] silently TRUNCATED any input longer than 63 bytes, so a
+     * 64-byte numeric string parsed as its first 63 bytes (a wrong number,
+     * no diagnostic). Stack for the common short case, heap for the rest.
+     * strtoll keeps the documented lenient semantics (whitespace/sign skip,
+     * longest digit prefix, INT64_MAX/MIN clamp on overflow), matching the
+     * Rust crate's uncapped rt_string_to_int_lenient and
+     * simple_core/core_string.spl. */
+    char stack_buf[64];
+    char* buf = stack_buf;
+    if (s->len >= sizeof(stack_buf)) {
+        if (s->len > SIZE_MAX - 1) return 0;
+        buf = (char*)malloc((size_t)s->len + 1);
+        if (!buf) return 0;
+    }
+    if (s->len > 0) memcpy(buf, s->data, (size_t)s->len);
+    buf[s->len] = '\0';
+    int64_t result = (int64_t)strtoll(buf, NULL, 10);
+    if (buf != stack_buf) free(buf);
+    return result;
 }
 
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
@@ -8399,7 +8452,7 @@ void rt_bdd_clear_state(void) {
 int64_t rt_hash_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     for (uint64_t i = 0; i < s->len; i++) {
         hash ^= (uint8_t)s->data[i];
         hash *= 1099511628211ULL;

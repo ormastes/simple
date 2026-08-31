@@ -85,6 +85,25 @@ pub fn rt_cli_file_exists(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(std::path::Path::new(&path).exists()))
 }
 
+/// Read file contents as text (parity with runtime `rt_cli_read_file`:
+/// missing/unreadable file yields the empty string, never an error).
+pub fn rt_cli_read_file(args: &[Value]) -> Result<Value, CompileError> {
+    let path = match args.first() {
+        Some(Value::Str(s)) => s.as_ref().clone(),
+        _ => return Ok(Value::text(String::new())),
+    };
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    Ok(Value::text(content))
+}
+
+/// Dispatch a CLI command. Real dispatch needs the full driver, which the
+/// interpreter does not embed; report "not supported" and return exit code 1
+/// (nonzero, matching the interpreter_not_supported convention below).
+pub fn rt_cli_dispatch_rust(_args: &[Value]) -> Result<Value, CompileError> {
+    eprintln!("error: cli_dispatch_rust is not supported in interpreter mode");
+    Ok(Value::Int(1))
+}
+
 /// Exit with code
 pub fn rt_cli_exit(args: &[Value]) -> Result<Value, CompileError> {
     let code = match args.first() {

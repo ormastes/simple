@@ -17,6 +17,20 @@ use app.cli.native_build_warm_receipt.{
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
+    # argv[0] first: it names the running compiler on EVERY platform and needs
+    # neither /proc (Linux-only) nor `ps -o comm=` (POSIX-only). Windows has
+    # neither, so before this probe self_exe() returned "" there and
+    # resolve_simple_binary() fell through to the literal "bin/simple" -- a
+    # name that does not exist on Windows (the binary is bin/simple.exe),
+    # producing "The filename, directory name, or volume label syntax is
+    # incorrect." from CreateProcess and a native-build worker spawn failure.
+    # Same shape as the existing probe in
+    # src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl:119.
+    val argv = get_args() ?? []
+    if argv.len() > 0:
+        val argv0 = argv[0]
+        if argv0 != "" and (argv0.ends_with("/simple") or argv0.ends_with("simple.exe")) and file_exists(argv0):
+            return argv0
     val pid = getpid()
     val (out, _err, code) = process_run_timeout("readlink", ["-f", "/proc/{pid}/exe"], 2000)
     if code == 0 and out != "":
@@ -34,11 +48,44 @@ fn abs_path(rel: text) -> text:
     val here = cwd()
     if here == "" or here == ".":
         return rel
-    "{here}/{rel}"
+    # cwd() can come back in MSYS form ("/c/Users/...") when launched from an
+    # MSYS2/Git-bash shell (PWD-derived); normalize so CreateProcess can spawn
+    # the result. Verified-rewrite only — a no-op on Unix (see
+    # windows_native_path).
+    windows_native_path("{here}/{rel}")
+
+# A Windows drive-absolute path ("C:\..." or "C:/..."). Detected by the
+# drive-colon at index 1 so this needs no backslash literal.
+fn is_drive_absolute(p: text) -> bool:
+    if p.len() < 3:
+        return false
+    p.substring(1).starts_with(":")
+
+# MSYS2/Git-bash hand argv[0] in POSIX form ("/c/Users/.../simple.exe").
+# CreateProcess cannot parse that — the spawn dies with "The filename,
+# directory name, or volume label syntax is incorrect." — so rewrite
+# "/<drive>/rest" to "<DRIVE>:/rest", but only when the rewritten path is
+# VERIFIED to exist (never assume the mapping). On Unix a real path like
+# "/c/foo" never has an existing "C:/foo" twin, so this is a no-op there;
+# no env probe is involved.
+fn windows_native_path(p: text) -> text:
+    if p.len() >= 3 and p.starts_with("/") and p.substring(2).starts_with("/"):
+        val drive = p.substring(1, 2)
+        val lower = drive.lower()
+        if lower >= "a" and lower <= "z":
+            val candidate = drive.upper() + ":" + p.substring(2)
+            if file_exists(candidate):
+                return candidate
+    p
 
 fn abs_if_needed(p: text) -> text:
-    if p.starts_with("/"):
-        return p
+    # A leading "/" is the POSIX absolute form; a drive-colon is the Windows
+    # one. Testing only for "/" made abs_path() prepend the cwd to an ALREADY
+    # absolute Windows path, so an explicit SIMPLE_BINARY=C:/.../simple.exe was
+    # rewritten to "/c/Users/.../simple/C:/Users/.../simple.exe" and the worker
+    # spawn failed.
+    if p.starts_with("/") or is_drive_absolute(p):
+        return windows_native_path(p)
     abs_path(p)
 
 # Resolve the compiler binary used to run the native-build worker. The old
@@ -60,6 +107,10 @@ fn resolve_simple_binary() -> text:
     val se = self_exe()
     if se != "" and file_exists(se):
         return abs_if_needed(se)
+    # Windows deploys the compiler as bin/simple.exe; probe it before the
+    # extensionless POSIX name so the fallback names a file that exists.
+    if file_exists("bin/simple.exe"):
+        return abs_path("bin/simple.exe")
     if file_exists("bin/simple"):
         return abs_path("bin/simple")
     if file_exists("src/compiler_rust/target/bootstrap/simple"):
@@ -256,7 +307,22 @@ fn eprint_bounded(output: text):
     # native-build's stderr-truncation path, that parse error was emitted
     # INSTEAD of the real build diagnostic. See
     # doc/08_tracking/bug/fstring_nested_quoted_literal_in_interpolation_misparsed_2026-08-17.md
-    val spill_root = env_get("TMPDIR") ?? "/tmp"
+    # Windows has no TMPDIR and no writable "/tmp": the CRT-visible temp dir is
+    # TEMP (or TMP). Falling through to "/tmp" there made file_write fail on
+    # every truncated build, so the FULL stderr was lost and 1.3 MB of
+    # diagnostics were dropped from the middle (measured 2026-08-31 on the
+    # lint_entry native-build). Order matters: TMPDIR first keeps POSIX
+    # behaviour byte-identical (TEMP/TMP are normally unset on Linux/macOS).
+    val tmpdir_env = env_get("TMPDIR") ?? ""
+    val temp_env = env_get("TEMP") ?? ""
+    val tmp_env = env_get("TMP") ?? ""
+    var spill_root = "/tmp"
+    if tmpdir_env != "":
+        spill_root = tmpdir_env
+    elif temp_env != "":
+        spill_root = temp_env
+    elif tmp_env != "":
+        spill_root = tmp_env
     val spill_path = "{spill_root}/native-build-stderr-{getpid()}.log"
     if file_write(spill_path, output):
         eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
@@ -592,6 +658,13 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         return 1
     if code != 0:
         eprint_bounded(stderr)
+        # On Windows process_run_timeout_live degrades to a captured (non-live)
+        # run, so on failure the worker's stdout — which carries the [build]
+        # step log and the real error line — would otherwise be discarded.
+        # Bounded, failure-path only.
+        if stdout.trim() != "":
+            eprint "--- worker stdout (bounded) ---"
+            eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
         if code == -1 and not stderr.contains("[TIMEOUT:"):

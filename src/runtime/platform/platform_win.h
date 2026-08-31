@@ -273,8 +273,14 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking (stub)
  * ---------------------------------------------------------------- */
 
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    /* (ptr, len) `text` contract per runtime.h: a Simple text is not
+     * NUL-terminated, so build a terminated local copy first. */
+    if (!path_ptr || path_len == 0) return -1;
+    char* path = (char*)malloc((size_t)path_len + 1);
     if (!path) return -1;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
 
     /* Open or create file for locking */
     HANDLE hFile = CreateFileA(
@@ -286,6 +292,7 @@ int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
         FILE_ATTRIBUTE_NORMAL,
         NULL
     );
+    free(path);  /* only CreateFileA needed the C string */
 
     if (hFile == INVALID_HANDLE_VALUE) {
         return -1;
@@ -447,8 +454,14 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
-    if (!path || size <= 0 || offset < 0) return NULL;
+int64_t rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly) {
+    /* (ptr, len) `text` contract per runtime.h; returns the mapped address as
+     * int64_t (0 on failure), matching the POSIX implementation. */
+    if (!path_ptr || path_len == 0 || size <= 0 || offset < 0) return 0;
+    char* path = (char*)malloc((size_t)path_len + 1);
+    if (!path) return 0;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
 
     DWORD access = readonly != 0 ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
     DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
@@ -456,12 +469,13 @@ void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) 
     DWORD map_access = readonly != 0 ? FILE_MAP_READ : FILE_MAP_WRITE;
 
     HANDLE hFile = CreateFileA(path, access, share, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return NULL;
+    free(path);  /* only CreateFileA needed the C string */
+    if (hFile == INVALID_HANDLE_VALUE) return 0;
 
     HANDLE hMapping = CreateFileMappingA(hFile, NULL, protect, 0, 0, NULL);
     if (!hMapping) {
         CloseHandle(hFile);
-        return NULL;
+        return 0;
     }
 
     DWORD offset_high = (DWORD)(offset >> 32);
@@ -472,16 +486,16 @@ void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) 
     CloseHandle(hMapping);
     CloseHandle(hFile);
 
-    return addr;
+    return (int64_t)(intptr_t)addr;
 }
 
-bool rt_munmap(void* addr, int64_t size) {
+bool rt_munmap(int64_t addr, int64_t size) {
     (void)size;  /* Not needed on Windows */
     if (!addr) return false;
-    return UnmapViewOfFile(addr) != 0;
+    return UnmapViewOfFile((void*)(intptr_t)addr) != 0;
 }
 
-bool rt_madvise(void* addr, int64_t size, int64_t advice) {
+bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (!addr || size <= 0) return false;
 
     /* Windows doesn't have direct equivalent - use PrefetchVirtualMemory for WILLNEED */
@@ -492,9 +506,9 @@ bool rt_madvise(void* addr, int64_t size, int64_t advice) {
     return true;  /* Other advice types not supported, but not an error */
 }
 
-bool rt_msync(void* addr, int64_t size) {
+bool rt_msync(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return FlushViewOfFile(addr, (SIZE_T)size) != 0;
+    return FlushViewOfFile((void*)(intptr_t)addr, (SIZE_T)size) != 0;
 }
 
 /* ----------------------------------------------------------------
