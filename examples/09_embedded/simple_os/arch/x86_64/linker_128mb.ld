@@ -135,99 +135,23 @@ SECTIONS
      * brittle against --entry-closure pruning.  PROVIDE is evaluated only when
      * the alias is actually referenced and still undefined.
      *
-     * Mangled names below were derived from the kernel objects built by the
-     * Rust seed at 91b6b9f28dd; regenerate if the mangling scheme changes.
-     * Note this script is shared with the SSH lane, which carried the same
-     * latent link failure.
+     * UPDATE: the regenerated PROVIDE table is gone too. Regenerating a static
+     * table from one build's `nm` output only resets the rot clock -- the
+     * mangling carries an entry-specific prefix, so the table is correct for
+     * exactly the entry and seed it was generated against.
+     *
+     * The aliasing is now DERIVED at link time by the compiler:
+     * NativeLinker::freestanding_weak_boot_defsyms
+     * (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs) reads
+     * the boot objects' weak-DEFINED spl_handle_* symbols with `nm`, finds the
+     * unique strongly defined `*__spl_handle_X` among the Simple objects --
+     * whatever module it now lives in -- and passes
+     * `--defsym=spl_handle_X=<real symbol>` to lld. Split-agnostic, entry
+     * agnostic, seed agnostic.
+     *
+     * This script is shared with the SSH lane. Do not re-add a static table;
+     * guarded by scripts/check/check-simpleos-x86-64-linker-alias-derived.shs.
      */
-    PROVIDE(spl_handle_alloc_dma = src__os__kernel__abi__syscall_shim_device__spl_handle_alloc_dma);
-    PROVIDE(spl_handle_brk = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_brk);
-    PROVIDE(spl_handle_cap_grant = src__os__kernel__abi__syscall_shim_file__spl_handle_cap_grant);
-    PROVIDE(spl_handle_chdir = src__os__kernel__abi__syscall_shim_file__spl_handle_chdir);
-    PROVIDE(spl_handle_clock_gettime = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_clock_gettime);
-    PROVIDE(spl_handle_debug_write = src__os__kernel__abi__syscall_shim_process__spl_handle_debug_write);
-    PROVIDE(spl_handle_dev_enumerate = src__os__kernel__abi__syscall_shim_device__spl_handle_dev_enumerate);
-    PROVIDE(spl_handle_dev_get_info = src__os__kernel__abi__syscall_shim_device__spl_handle_dev_get_info);
-    PROVIDE(spl_handle_device_grant = src__os__kernel__abi__syscall_shim_device__spl_handle_device_grant);
-    PROVIDE(spl_handle_dup = src__os__kernel__abi__syscall_shim_file__spl_handle_dup);
-    PROVIDE(spl_handle_dup2 = src__os__kernel__abi__syscall_shim_file__spl_handle_dup2);
-    PROVIDE(spl_handle_enter_user_blocking = src__os__kernel__abi__syscall_shim_process__spl_handle_enter_user_blocking);
-    PROVIDE(spl_handle_exec = src__os__kernel__abi__syscall_shim_file__spl_handle_exec);
-    PROVIDE(spl_handle_exit = src__os__kernel__abi__syscall_shim_process__spl_handle_exit);
-    PROVIDE(spl_handle_fcntl = src__os__kernel__abi__syscall_shim_file__spl_handle_fcntl);
-    PROVIDE(spl_handle_file_close = src__os__kernel__abi__syscall_shim_file__spl_handle_file_close);
-    PROVIDE(spl_handle_file_mkdir = src__os__kernel__abi__syscall_shim_file__spl_handle_file_mkdir);
-    PROVIDE(spl_handle_file_open = src__os__kernel__abi__syscall_shim_file__spl_handle_file_open);
-    PROVIDE(spl_handle_file_read = src__os__kernel__abi__syscall_shim_file__spl_handle_file_read);
-    PROVIDE(spl_handle_file_readdir = src__os__kernel__abi__syscall_shim_file__spl_handle_file_readdir);
-    PROVIDE(spl_handle_file_stat = src__os__kernel__abi__syscall_shim_file__spl_handle_file_stat);
-    PROVIDE(spl_handle_file_sync = src__os__kernel__abi__syscall_shim_file__spl_handle_file_sync);
-    PROVIDE(spl_handle_file_write = src__os__kernel__abi__syscall_shim_file__spl_handle_file_write);
-    PROVIDE(spl_handle_fork = src__os__kernel__abi__syscall_shim_file__spl_handle_fork);
-    PROVIDE(spl_handle_free_dma = src__os__kernel__abi__syscall_shim_device__spl_handle_free_dma);
-    PROVIDE(spl_handle_fs_pread_registered_v1 = src__os__kernel__abi__syscall_shim_positioned__spl_handle_fs_pread_registered_v1);
-    PROVIDE(spl_handle_fs_pwrite_registered_v1 = src__os__kernel__abi__syscall_shim_positioned__spl_handle_fs_pwrite_registered_v1);
-    PROVIDE(spl_handle_ftruncate = src__os__kernel__abi__syscall_shim_file__spl_handle_ftruncate);
-    PROVIDE(spl_handle_getcwd = src__os__kernel__abi__syscall_shim_file__spl_handle_getcwd);
-    PROVIDE(spl_handle_get_hostname = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_get_hostname);
-    PROVIDE(spl_handle_get_parent_pid = src__os__kernel__abi__syscall_shim_process__spl_handle_get_parent_pid);
-    PROVIDE(spl_handle_getpid = src__os__kernel__abi__syscall_shim_process__spl_handle_getpid);
-    PROVIDE(spl_handle_get_task_info = src__os__kernel__abi__syscall_shim_process__spl_handle_get_task_info);
-    PROVIDE(spl_handle_ipc_connect = src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_connect);
-    PROVIDE(spl_handle_ipc_create_port = src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_create_port);
-    PROVIDE(spl_handle_ipc_recv = src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_recv);
-    PROVIDE(spl_handle_ipc_send = src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_send);
-    PROVIDE(spl_handle_list_tasks = src__os__kernel__abi__syscall_shim_process__spl_handle_list_tasks);
-    PROVIDE(spl_handle_log_read = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_log_read);
-    PROVIDE(spl_handle_log_write = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_log_write);
-    PROVIDE(spl_handle_lseek = src__os__kernel__abi__syscall_shim_file__spl_handle_lseek);
-    PROVIDE(spl_handle_map_bar = src__os__kernel__abi__syscall_shim_device__spl_handle_map_bar);
-    PROVIDE(spl_handle_mem_grant = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_mem_grant);
-    PROVIDE(spl_handle_mem_revoke = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_mem_revoke);
-    PROVIDE(spl_handle_mmap = src__os__kernel__abi__syscall_shim_process__spl_handle_mmap);
-    PROVIDE(spl_handle_mount = src__os__kernel__abi__syscall_shim_file__spl_handle_mount);
-    PROVIDE(spl_handle_mprotect = src__os__kernel__abi__syscall_shim_process__spl_handle_mprotect);
-    PROVIDE(spl_handle_munmap = src__os__kernel__abi__syscall_shim_process__spl_handle_munmap);
-    PROVIDE(spl_handle_net_accept = src__os__kernel__abi__syscall_shim_net__spl_handle_net_accept);
-    PROVIDE(spl_handle_net_bind = src__os__kernel__abi__syscall_shim_net__spl_handle_net_bind);
-    PROVIDE(spl_handle_net_connect = src__os__kernel__abi__syscall_shim_net__spl_handle_net_connect);
-    PROVIDE(spl_handle_net_if_config = src__os__kernel__abi__syscall_shim_net__spl_handle_net_if_config);
-    PROVIDE(spl_handle_net_listen = src__os__kernel__abi__syscall_shim_net__spl_handle_net_listen);
-    PROVIDE(spl_handle_net_recv_from = src__os__kernel__abi__syscall_shim_net__spl_handle_net_recv_from);
-    PROVIDE(spl_handle_net_send_to = src__os__kernel__abi__syscall_shim_net__spl_handle_net_send_to);
-    PROVIDE(spl_handle_net_socket = src__os__kernel__abi__syscall_shim_net__spl_handle_net_socket);
-    PROVIDE(spl_handle_notification_create = src__os__kernel__abi__syscall_shim_ipc__spl_handle_notification_create);
-    PROVIDE(spl_handle_notification_destroy = src__os__kernel__abi__syscall_shim_ipc__spl_handle_notification_destroy);
-    PROVIDE(spl_handle_notification_poll = src__os__kernel__abi__syscall_shim_ipc__spl_handle_notification_poll);
-    PROVIDE(spl_handle_notification_signal = src__os__kernel__abi__syscall_shim_ipc__spl_handle_notification_signal);
-    PROVIDE(spl_handle_notification_wait = src__os__kernel__abi__syscall_shim_ipc__spl_handle_notification_wait);
-    PROVIDE(spl_handle_notification_wait_any = src__os__kernel__abi__syscall_shim_ipc__spl_handle_notification_wait_any);
-    PROVIDE(spl_handle_pipe = src__os__kernel__abi__syscall_shim_file__spl_handle_pipe);
-    PROVIDE(spl_handle_pledge = src__os__kernel__abi__syscall_shim_file__spl_handle_pledge);
-    PROVIDE(spl_handle_poll = src__os__kernel__abi__syscall_shim_file__spl_handle_poll);
-    PROVIDE(spl_handle_privctl = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_privctl);
-    PROVIDE(spl_handle_rename = src__os__kernel__abi__syscall_shim_file__spl_handle_rename);
-    PROVIDE(spl_handle_rmdir = src__os__kernel__abi__syscall_shim_file__spl_handle_rmdir);
-    PROVIDE(spl_handle_safecopy_from = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_safecopy_from);
-    PROVIDE(spl_handle_safecopy_to = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_safecopy_to);
-    PROVIDE(spl_handle_schedctl = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_schedctl);
-    PROVIDE(spl_handle_schedule = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_schedule);
-    PROVIDE(spl_handle_set_hostname = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_set_hostname);
-    PROVIDE(spl_handle_set_priority = src__os__kernel__abi__syscall_shim_process__spl_handle_set_priority);
-    PROVIDE(spl_handle_signal = src__os__kernel__abi__syscall_shim_process__spl_handle_signal);
-    PROVIDE(spl_handle_sleep = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_sleep);
-    PROVIDE(spl_handle_spawn = src__os__kernel__abi__syscall_shim_process__spl_handle_spawn);
-    PROVIDE(spl_handle_spawn_binary = src__os__kernel__abi__syscall_shim_process__spl_handle_spawn_binary);
-    PROVIDE(spl_handle_sysinfo = src__os__kernel__abi__syscall_shim_time_log_sysinfo__spl_handle_sysinfo);
-    PROVIDE(spl_handle_sys_mmap = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_sys_mmap);
-    PROVIDE(spl_handle_sys_munmap = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_sys_munmap);
-    PROVIDE(spl_handle_system_reboot = src__os__kernel__abi__syscall_shim_g11g12g13__spl_handle_system_reboot);
-    PROVIDE(spl_handle_unlink = src__os__kernel__abi__syscall_shim_file__spl_handle_unlink);
-    PROVIDE(spl_handle_unmount = src__os__kernel__abi__syscall_shim_file__spl_handle_unmount);
-    PROVIDE(spl_handle_unveil = src__os__kernel__abi__syscall_shim_file__spl_handle_unveil);
-    PROVIDE(spl_handle_wait = src__os__kernel__abi__syscall_shim_process__spl_handle_wait);
-    PROVIDE(spl_handle_waitpid = src__os__kernel__abi__syscall_shim_file__spl_handle_waitpid);
-    PROVIDE(spl_handle_yield = src__os__kernel__abi__syscall_shim_process__spl_handle_yield);
 
     /* Debug sections */
     .debug_info 0 : { *(.debug_info) }
