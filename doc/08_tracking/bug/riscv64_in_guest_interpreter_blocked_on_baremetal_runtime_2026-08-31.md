@@ -1,4 +1,4 @@
-# riscv64 in-guest Simple interpreter blocked on ~390 missing baremetal `rt_*` symbols
+# riscv64 in-guest Simple interpreter blocked on 43 missing baremetal `rt_*` symbols
 
 Date: 2026-08-31
 Status: OPEN — lane landed, honestly RED (gate exits 2, `ERROR — nothing was checked`)
@@ -54,46 +54,91 @@ ld.lld: error: too many errors emitted, stopping now (use --error-limit=0 to see
 ```
 
 **The log names exactly 20 undefined symbols, and that number is lld's default
-error limit, not the size of the gap.** Reading it as "20 symbols to port" is
-the trap here. Two independent measurements agree on the real magnitude:
+error limit, not the size of the gap.** Reading it as "20 symbols to port" is a
+trap — but so is the opposite error, which this record made on its first pass
+and which is corrected here.
 
-| measurement | value |
-|---|---|
-| compiler's own freestanding precheck (`kernel-build.log`) | `405 unexpected symbol(s)` |
-| `nm` over the emitted objects, undefined minus defined minus what `arch/riscv64/boot/` defines | **390** |
+### The measurement, and the correction
 
-The 390-symbol list is committed alongside this record as
-`riscv64_interpreter_missing_rt_symbols_2026-08-31.txt`. Bucketed by subsystem:
+Three numbers, only one of which is the answer:
 
-| bucket | count | bucket | count |
-|---|---|---|---|
-| `rt_file_*` | 30 | `rt_array_*` | 20 |
-| `rt_time_*` | 22 | `rt_math_*` | 19 |
-| `rt_process_*` | 18 | `rt_string_*` | 11 |
-| `rt_text_*` | 7 | `rt_env_*` | 7 |
-| `rt_dict_*` | 5 | `rt_value_*` | 5 |
-| `rt_atomic_*` | 3 | `rt_any_*`, `rt_thread_*`, `rt_browser_*` | 2 each |
-| remainder (unprefixed / long tail) | ~237 | | |
+| measurement | value | what it actually is |
+|---|---|---|
+| `ld.lld` errors in `kernel-build.log` | 20 | lld's default `--error-limit`. A floor, nothing more. |
+| compiler's freestanding precheck | 405 | static, pre-`--gc-sections` |
+| `nm` over emitted objects, undefined minus defined | 390 | static upper bound — **not the answer** |
+| **replayed link, `--gc-sections` from the real entry, `--error-limit=0`** | **43** | **the true link-blocking set** |
 
-Notably `rt_unwrap_or_trap` is in the set — the exact symbol behind the
-`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18` SIGSEGV, where
-a tolerated undefined symbol became a NULL GOT slot at runtime. That is why this
-lane fails at link rather than being coerced into linking: a green link here
-would reproduce that incident.
+The first version of this record cited 390 and concluded "porting is a project,
+not a step." **That was wrong, and the error is worth naming**: 390 counts every
+`rt_*` referenced anywhere in the 498 emitted objects, with no reachability
+pruning. The link that actually runs applies `--gc-sections` from the entry, so
+most of those references are in code the linker discards.
+
+The correct measurement replays the real link over the build's own object
+directory:
+
+```
+ld.lld -T examples/09_embedded/simple_os/arch/riscv64/linker.ld \
+  --gc-sections --error-limit=0 --allow-multiple-definition \
+  -e examples__09_embedded__simple_os__arch__riscv64__interpreter_hello_entry__spl_start \
+  -o /tmp/probe.elf .simple/native-objects-<id>/*.o
+```
+
+Two things make this replay valid where earlier attempts were not, both worth
+recording because each silently produced a wrong number:
+
+* **The entry must be the MANGLED symbol.** Passing `-e spl_start` finds
+  nothing, so `--gc-sections` discards the entire graph and the link reports
+  **0** undefined — a vacuous green that looks like success.
+* **`.inc.o` objects must be INCLUDED.** They are `#include`d fragments that
+  also get compiled standalone by boot autodiscovery, so they duplicate symbols
+  (`--allow-multiple-definition` absorbs that) — but they are also where PR
+  #179's ~30 ported symbols actually live. Excluding them reports **65**
+  instead of 43, double-counting symbols the tree already has.
+
+### The real gap: 43 symbols
+
+| bucket | n | symbols |
+|---|---|---|
+| file | 7 | `rt_file_exists`, `_probe_begin`, `_probe_end`, `rt_file_is_regular_no_follow`, `rt_file_read_text_rv`, `rt_file_remove`, `rt_file_write_text` |
+| diagnostics / print | 8 | `rt_print_value`, `rt_println_value`, `rt_eprint_value`, `rt_panic`, `rt_function_not_found`, `rt_unwrap_or_trap`, `rt_is_debug_mode_enabled`, `rt_platform_name` |
+| dict | 4 | `rt_dict_new`, `rt_dict_keys`, `rt_dict_values`, `rt_dict_contains` |
+| transient heap | 4 | `rt_transient_array_scope_{begin,end,pause}`, `rt_transient_heap_promote` |
+| env | 4 | `rt_env_{get,get_i64,set,remove}` |
+| array / collection | 8 | `rt_array_copy`, `rt_array_extend_i64`, `rt_array_free`, `rt_push`, `rt_pop`, `rt_clear`, `rt_sort`, `rt_index_of`, `rt_collection_remove` |
+| value / convert | 5 | `rt_value_as_int`, `rt_value_as_float`, `rt_value_float`, `rt_string_to_float`, `rt_raw_i64_to_string` |
+| time | 2 | `rt_time_now_unix_micros`, `rt_time_now_monotonic_ms` |
+
+The full list is committed as
+`riscv64_interpreter_missing_rt_symbols_2026-08-31.txt`.
+
+`rt_unwrap_or_trap` is in the set — the exact symbol behind the
+`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18` NULL-GOT
+SIGSEGV. That is why this lane fails at link rather than being coerced into
+linking: a green link here would reproduce that incident.
 
 ## Why this was not ported in-session
 
-PR #179 ported ~30 `rt_*` symbols to the riscv64 baremetal runtime in +712 lines
-of `baremetal_runtime_core.inc.c`, under the constraint its commit title records
-— **closure runtime ports must use the I32 codegen ABI**. The gap here is an
-order of magnitude larger (~390 vs ~30) and spans subsystems a freestanding
-S-mode image has no business implementing wholesale (`rt_process_*`,
-`rt_file_*`, `rt_time_*`, `rt_browser_*`). Porting it is a project, not a step.
+**Not because it is too large — because the session ran out of build cycles.**
+43 symbols is roughly 1.4x PR #179's own port (~30 symbols, +712 lines in
+`baremetal_runtime_core.inc.c`), so this is a #179-sized step, not a project.
+The earlier "order of magnitude larger" framing was an artifact of the 390
+miscount and is retracted.
+
+What makes it more than an afternoon: each build-and-verify cycle on this host
+is ~15 minutes, the ports must follow #179's load-bearing constraint —
+**closure runtime ports must use the I32 codegen ABI**, per its commit title —
+and roughly a third of the set (`rt_file_*`, `rt_env_*`, `rt_time_*`) needs
+*honest* freestanding semantics rather than pass-throughs: a file probe that
+truthfully reports "not present", a monotonic clock off the RISC-V `time` CSR.
+Those must not be nil stubs; a nil stub here is the failure mode the whole lane
+exists to detect.
 
 Explicitly NOT done, and why:
 * `SIMPLE_ALLOW_STUB_FALLBACK` / `SIMPLE_ALLOW_UNRESOLVED_RUNTIME` — never set.
-  Either one would produce a linking image that faults at runtime, which is the
-  silent-lie class this whole lane exists to prevent.
+  Either would produce a linking image that faults at runtime, the silent-lie
+  class this lane exists to prevent.
 * Weakening the gate to allowlist "probably dead" undefined symbols — the
   weak-nil-stub check exists precisely because a clean link is not evidence.
 
@@ -135,14 +180,25 @@ known-good and will report truthfully the moment an image links.
 
 ## Next step, concretely
 
-Get the exact link-blocking set (not the static-reference upper bound) by
-re-linking with `--error-limit=0`, then port that set into
-`baremetal_runtime_core.inc.c` following PR #179's pattern and its I32
-codegen-ABI constraint. Reducing the closure is the cheaper lever worth trying
-first: the entry currently pulls `parse_and_build_module` + full desugar +
-`HirLowering`; a probe importing only `InterpreterBackendImpl` and the HIR types
-would show whether the frontend or the interpreter is the heavy half, and
-whether a pre-lowered HIR fixture lets row 1 land far sooner than row 2.
+The measurement the previous version of this record listed as "next step" is
+**done** — the answer is 43, and the list is committed. The remaining work is
+the port itself:
+
+1. Port the 43 symbols into
+   `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c`
+   following PR #179's pattern and its I32 codegen-ABI constraint. Start with
+   the 21 pure-computation ones (dict, array/collection, value/convert) — they
+   have no host dependency and unblock the largest share of the graph.
+2. Give the 13 host-surface ones (`rt_file_*`, `rt_env_*`, `rt_time_*`) honest
+   freestanding semantics, never nil stubs.
+3. Rebuild and run the gate. It is already wired end to end and its evaluator is
+   proven, so the first linking image produces a real verdict with no further
+   gate work.
+
+Closure reduction is no longer worth doing first: at 43 symbols the port is
+cheaper than restructuring the entry to feed the interpreter a pre-lowered HIR
+fixture, and the full-frontend path is the one that matches what
+`simpleos_interpret_file` actually does.
 
 ## Two defects found and fixed in this lane's own scripts
 
