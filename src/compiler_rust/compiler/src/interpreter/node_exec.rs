@@ -20,7 +20,10 @@ use super::interpreter_control::{
 };
 use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
-use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
+use crate::interpreter_unit::{
+    is_unit_type, register_standalone_unit_locals, register_unit_family_locals, validate_unit_constraints,
+    validate_unit_type,
+};
 use simple_runtime::debug;
 
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
@@ -514,6 +517,20 @@ pub(crate) fn exec_node(
                     );
                 }
             }
+            Ok(Control::Next)
+        }
+        // A `unit` declared inside a block (e.g. within a `describe`/`it` body)
+        // must register in the same thread-local registries the module-level
+        // declaration pass uses; otherwise its suffixes are invisible and
+        // literals silently fall back to the preloaded on-disk unit tree.
+        Node::Unit(u) => {
+            register_standalone_unit_locals(u);
+            env.insert(u.name.clone(), Value::Nil);
+            Ok(Control::Next)
+        }
+        Node::UnitFamily(uf) => {
+            register_unit_family_locals(uf);
+            env.insert(uf.name.clone(), Value::Nil);
             Ok(Control::Next)
         }
         Node::Newtype(nt) => {
