@@ -33,6 +33,26 @@ describe "native entry closure gate":
         expect(imports).to_contain("real.one")
         expect(imports).to_contain("real.two")
 
+    it "keeps collecting imports after a non-ASCII byte":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps collecting imports after a non-ASCII byte")
+        # Regression: _driver_line_end walked lines with char_code_at (CHARACTER
+        # indexed, decodes UTF-8) under a len() bound (BYTE length). Indices
+        # agree across an ASCII prefix and diverge at the first multi-byte
+        # character, so every later line was sliced from the wrong offsets and
+        # dropped. The em dash below is exactly the shape that broke Stage 3:
+        # hir_definitions.spl lost the `export use ...hir_operators` on line 39
+        # because of one em dash in a comment on line 34, which cost 1064
+        # unresolved-type fatals across 200 files.
+        # doc/08_tracking/bug/stage3_closure_omits_definition_owner_modules_2026-09-01.md
+        val imports = _driver_entry_import_module_paths(
+            "use before.the_dash\n# a comment with an em dash — like this\nuse after.the_dash\nexport use also.after_it.{Name}\n"
+        )
+        expect(imports.len()).to_equal(3)  # oracle: 3 — one before the dash, two after
+        expect(imports).to_contain("before.the_dash")
+        expect(imports).to_contain("after.the_dash")
+        expect(imports).to_contain("also.after_it")
+
     it "imports the concrete driver owner instead of the ambiguous facade":
         # @req REQ-SSPEC-COMPILER
         step("imports the concrete driver owner instead of the ambiguous facade")
