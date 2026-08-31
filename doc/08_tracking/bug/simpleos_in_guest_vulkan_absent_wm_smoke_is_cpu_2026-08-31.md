@@ -351,3 +351,46 @@ itself flags as "unsafe — binary will silently misbehave").
 **Consequence for the earlier "53 undefined symbols" finding:** that was the
 HOST daemon. This is the GUEST half. They are independent, and the guest half is
 now fixed.
+
+### CAVEAT on every build result above: the borrowed compiler read stdlib from ITS OWN tree
+
+After fixing `parse_pct_value` in `src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl`
+in THIS worktree, the rebuild reported **the identical error on the identical
+function**. The edit was verified present (`parse_pct_value` contains no
+`!= nil`), so the compiler was not reading this tree's copy:
+
+| tree | `grep -c "if n != nil"` in dom_color.spl |
+|---|---|
+| this worktree (edited) | 1 (an unrelated site at line 423) |
+| `/mnt/data/worktrees/phase1-rerun` (compiler's own tree) | 3 (the original) |
+
+The count in phase1-rerun matches the error exactly. This is the known hazard
+"binary reads stdlib from build worktree": the borrowed Stage-2 compiler lives
+under `/mnt/data/worktrees/phase1-rerun/build/...` and resolves `std.*` imports
+against **its own** `src/lib`, regardless of this build's `--source src/lib`
+(which governs explicit source roots, not stdlib resolution). The fix is to pin
+`SIMPLE_LIB="$PWD/src"`, as the admission verifier itself does
+(`simpleos-admitted-runtime.shs`: `SIMPLE_LIB="${SIMPLEOS_ADMITTED_RUNTIME_ROOT:-.}/src"`).
+
+**What this does and does not invalidate:**
+
+- **Still valid — the `src/os` restores.** `HostGpuIvshmemDrawIrResult` and
+  `capability_mask` live under `src/os`, passed as an explicit `--source` root
+  relative to this worktree's cwd, and the errors naming them disappeared after
+  the edit (3 failed files -> 1). The declarations were genuinely missing here,
+  confirmed independently by `grep -rn "struct HostGpuIvshmemDrawIrResult" src/`
+  returning nothing.
+- **Still valid — the cranelift `icmp_imm.f32` bug**, which was reproduced on
+  standalone fixtures in the scratchpad, not through stdlib resolution.
+- **Now DOUBTFUL — the "53 undefined `rt_*` symbols" daemon finding.** That build
+  also ran on the borrowed compiler, so the referenced symbol set was computed
+  against phase1-rerun's `src/lib` and runtime, not this tree's. The earlier
+  caveat ("the referenced set is compiler-dependent") now has a concrete
+  mechanism. That finding must be re-measured with `SIMPLE_LIB` pinned before it
+  is treated as a property of this tree. The `nm`/`grep` evidence that those
+  names are undefined **in this tree** stands; the claim that the daemon
+  *requires* them does not.
+
+Operational rule for anyone continuing this lane: **always export
+`SIMPLE_LIB="$PWD/src"` when driving a compiler binary that lives in another
+worktree**, and re-verify any prior result that did not.
