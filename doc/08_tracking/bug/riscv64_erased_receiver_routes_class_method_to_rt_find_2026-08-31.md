@@ -135,8 +135,11 @@ of those is on the same footing.
   `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`** — not
   `baremetal_stubs.c` and not `baremetal_runtime_core.inc.c`. It defines
   `rt_index_get`, `rt_array_get`, `rt_for_iterable`, `rt_value_int`,
-  `rt_index_arg`. It does **not** define `rt_find`, whose provenance was not
-  identified.
+  `rt_index_arg`. It does **not** define `rt_find` — that comes from
+  `src/runtime/runtime_native.c:8328`, the HOSTED runtime — and it does **not**
+  define `rt_string_bytes` either. How a freestanding link ends up served by the
+  hosted runtime for these two entry points is unresolved, and is the leading
+  question for the residual `.bytes()` defect recorded below.
 
 ## Fix directions, in preference order
 
@@ -150,3 +153,81 @@ of those is on the same footing.
    user's approval before anyone starts.
 3. **NOT acceptable**: renaming the product method `find`. That normalizes a
    workaround and leaves the whole defect class live.
+
+
+## Confirmed in-guest by a controlled experiment (2026-08-31)
+
+Changing ONLY the receiver's typing in the entry —
+
+```
+-    var reg = DispatchRegistry.new_for_test()
++    var reg: DispatchRegistry = DispatchRegistry.new_for_test()
+```
+
+— makes MIR store the local as `TypeId(88)` instead of `TypeId(14)`/ANY and
+lowers **both** calls qualified (`DispatchRegistry.find`,
+`DispatchRegistry.register`). In-guest the trap disappears completely: the
+serial log drops from **409,392 lines to 102**, and the row advances through
+every previously-unreachable step:
+
+```
+[mcp] probe m3f me-method self-field READ ok (miss, as expected)
+[mcp] probe m4 register ok
+[mcp] probe m5 AuthorityToken.root_for ok
+[mcp] request  tool=echo args=[MCP_RTT_PAYLOAD]
+[mcp] response {"status":"ok","body":"MC
+[mcp] request  tool=no_such_tool_xyz (must be refused)
+[mcp] response {"status":"error","code":"unregistered_tool","reason":"no handler for: no_such_tool_xyz"}
+[mcp] FAIL registered dispatch lost the payload
+```
+
+This is the causal proof: the ANY-erasure is the whole cause of the **trap**.
+
+**The annotation is a DIAGNOSTIC ONLY and was reverted.** It is not committed
+and must not be adopted as an idiom — it hides a compiler defect at one call
+site and leaves the whole class live.
+
+## The trap is not the last rung — a SECOND, independent defect remains
+
+With the receiver typed, mcp still FAILs, and the reason is now precisely
+visible and is the original "string content" symptom, narrowed to one path:
+
+```
+[mcp] response {"status":"ok","body":"MC
+```
+
+The echoed body is `MC` — the first two bytes of `MCP_RTT_PAYLOAD` — and the
+envelope's own trailing `"}` never prints, with no `\r` terminating the line.
+The whole `_ok_envelope` string stops mid-way, which is the signature of an
+embedded NUL reached by `serial_println`, not of a short body. The suspect path
+is `_echo_handler`'s `s.bytes()` -> `_gate_filtered` -> `_bytes_text`
+(`src/lib/nogc_async_mut/mcp/dispatch.spl:161-167`), whose loop is
+`while i < b.len(): result = result + char_from_code(b[i] as i64)`. Note that
+`rt_string_bytes` is **not defined in the winning freestanding TU**, so `.bytes()`
+is served by a translation unit that may not share this runtime's array/string
+layout — the same provenance question as `rt_find`.
+
+`devtool`, `caret` and `testrun` never take that path, which is why they are green.
+
+## Corrected fix targets
+
+Fix direction 1 in the list above named
+`hir/lower/expr/simd.rs::lower_static_method_call` as the site that erases the
+local to ANY. **That is wrong and was measured wrong**: an instrumented build
+(`SIMPLE_DEBUG_STATIC_RET`) shows that function is **never entered** during this
+compile — zero probe lines. The MIR emits
+`Call Pure("lib__nogc_async_mut__mcp__dispatch__DispatchRegistry_dot_new_for_test")`,
+a fully module-qualified symbol, not the `"{class}.{method}"` shape that
+function builds, so an IMPORTED static method takes a different lowering path.
+A candidate fix that consulted `resolve_type`'s `global_struct_defs` fallback
+there was written, compiled, and **reverted after measuring it had no effect** —
+it was dead code for this path. Finding the import-aware static-call lowering
+site is the first task for whoever picks this up.
+
+So closing all four rows needs **both**:
+
+1. Type the local from an IMPORTED static method's declared return type, in
+   whichever lowering path actually handles it, so the call lowers qualified.
+2. Fix the `.bytes()` / `_bytes_text` round-trip on this lane (or resolve the
+   TU-provenance question that makes `rt_string_bytes` and `rt_find` come from
+   the hosted runtime).
