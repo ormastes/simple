@@ -72,11 +72,27 @@ casualty of clobber `4edef8fab8e` — 525 lines against 589 pre-clobber:
    The source is correct — `Arm64VirtioInputBackend.create(i64, i64) ->
    Arm64VirtioInputBackend` is declared at
    `src/os/compositor/arm64_virtio_input_backend.spl:108` and
-   `delivered_key_sequence: i64` is a real field at `:78`. An explicit type
-   annotation on the binding does **not** help (the guess changes from
-   `RocmFfi` to `ANY` and it still fails), so this is a genuine seed HIR
-   inference limitation, not a source problem. The annotation was reverted
-   rather than left in as a workaround that does not work.
+   `delivered_key_sequence: i64` is a real field at `:78`.
+
+   Two candidate workarounds were tried and **both failed**, which is what
+   makes this a compiler limitation rather than a source problem:
+
+   - An explicit type annotation on the binding
+     (`var input_backend: Arm64VirtioInputBackend = ...`). The compiler's
+     guess merely changed from `RocmFfi` to `ANY`; it still failed.
+   - Restoring the pre-clobber call form
+     `create_with_poller(w, h, arm64_virtio_input_poll, false)` — the
+     hypothesis being that `create` collides with the `static fn create` on
+     other structs (e.g. `HostedInputBackend`) while `create_with_poller` is
+     unique, so the pre-clobber form would resolve. It **fails identically**,
+     with the same `struct 'ANY' field 'delivered_key_sequence'`. The
+     name-collision hypothesis is therefore **disproven**: inference fails on
+     this struct regardless of which constructor is called.
+
+   Both experiments were reverted rather than left in as workarounds that do
+   not work. (Note in passing: the file still imports `arm64_virtio_input_poll`
+   at line 17 and never uses it — more evidence the rewrite is unfinished — but
+   wiring it changes nothing here.)
 
    This is consistent with, and is the concrete mechanism behind,
    `check-simpleos-arm64-unified-live.shs:70` refusing a `Rust-built` compiler
