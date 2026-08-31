@@ -2305,14 +2305,17 @@ int64_t stdin_read_char(void) {
  * Windows CRT stdio defaults to TEXT mode, which rewrites every '
 ' written to
  * stdout into "
-" (and strips '' on read). That silently corrupts any
+" (and strips '
+' on read). That silently corrupts any
  * byte-counted protocol carried over stdio: a JSON-RPC / MCP "Content-Length"
  * frame terminated by CRLFCRLF leaves the process as CR CR LF CR CR LF, so the
  * header separator no longer matches and the announced byte count no longer
  * describes the bytes on the wire. Measured 2026-08-31 on the deployed native
  * bin/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe: it emitted
- * "Content-Length: 381
-
+ * "Content-Length: 381
+
+
+
 {...}". The Rust seed does not have this
  * defect because Rust's std never translates, which is exactly why the same
  * server answers correctly when run from source and corruptly when built native.
@@ -5503,6 +5506,47 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
 __attribute__((weak)) void rt_set_args(int argc, char** argv) {
     spl_init_args(argc, argv);
 }
+
+#if defined(_WIN32)
+/* Wide-argv counterpart used by the generated MSVC wmain() entry point
+ * (compile_main_stub in linker.rs). wmain receives argv as UTF-16;
+ * convert each element to UTF-8 and hand it to the same argv storage
+ * rt_set_args uses, so downstream CLI-arg access is unaffected by which
+ * entry point ran. Previously undeclared/undefined -- any native-build
+ * output linking this MSVC main stub failed with LNK2019 for
+ * rt_set_args_wide (unresolved external referenced by wmain). */
+__attribute__((weak)) void rt_set_args_wide(int argc, const wchar_t** argv) {
+    if (argc <= 0 || !argv) {
+        spl_init_args(argc > 0 ? argc : 0, NULL);
+        return;
+    }
+    char** utf8_argv = (char**)calloc((size_t)argc, sizeof(char*));
+    if (!utf8_argv) {
+        spl_init_args(0, NULL);
+        return;
+    }
+    for (int i = 0; i < argc; i++) {
+        const wchar_t* wide = argv[i];
+        if (!wide) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        int needed = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+        if (needed <= 0) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        char* converted = (char*)malloc((size_t)needed);
+        if (!converted) {
+            utf8_argv[i] = _strdup("");
+            continue;
+        }
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1, converted, needed, NULL, NULL);
+        utf8_argv[i] = converted;
+    }
+    spl_init_args(argc, utf8_argv);
+}
+#endif /* _WIN32 */
 
 __attribute__((weak)) int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
