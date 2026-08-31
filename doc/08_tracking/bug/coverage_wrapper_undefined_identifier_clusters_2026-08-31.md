@@ -48,9 +48,33 @@ Before/after proof, fresh seed, `use std.nogc_sync_mut.env.variables`:
 - after: no `Undefined`; fails later on the pre-existing, unrelated
   "cannot compile to standalone SMF: 32 function(s) require the interpreter".
 
-`env/variables.spl` is in the closure of essentially every spec, so this one
-site accounts for the whole 18-wrapper `io_runtime` cluster and gated an unknown
-number of the others.
+### Scope of this proof — read before quoting a cluster size
+
+The before/after above is on a **probe file**, not on a generated wrapper. An
+attempt to close that loop produced an honest negative and it is recorded here
+rather than omitted: running
+`SIMPLE_MCDC_MODE=on bin/simple test test/feature/scilib/linalg_norm_spec.spl
+test/feature/lib/mcp/handler_registry_spec.spl --coverage` (one spec from the
+`io_runtime` cluster, one from the `print_raw` cluster) on the fresh seed gives
+`PASS` for both **with the fix applied AND with it reverted**, with zero
+`[mcdc-fallback]` lines and zero `undefined identifier` in either run.
+
+Since PR #157 a coverage run whose wrapper will not compile is an ERROR, so a
+clean PASS with no fallback means the wrapper compiled — in both states. Two
+conclusions follow, and neither may be skipped:
+
+1. The four fixes are **real and independently proven** at the module level;
+   the probe before/after is unambiguous.
+2. The **mapping from a fixed site to a wrapper count is NOT established.**
+   `env/variables.spl` is in nearly every spec's *runtime* closure, but that is
+   not the same set as a wrapper's *compile* closure, and the experiment above
+   is direct evidence they differ. The "18 wrappers" figure is the suite3 log's
+   symbol count, not a measured effect of this fix. Do not quote it as one.
+
+Reproducing a failing wrapper on demand is the missing capability here. The
+runner deletes the artifact on success and `--keep-artifacts` did not preserve
+one in these runs; a way to retain the generated wrapper unconditionally would
+have made this a one-command check and should be added.
 
 ## Cause C — colliding module-private names across files (FILED, needs a decision)
 
