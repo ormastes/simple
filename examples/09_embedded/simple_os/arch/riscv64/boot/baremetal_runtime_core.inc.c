@@ -948,14 +948,35 @@ RuntimeValue rt_for_iterable(RuntimeValue collection)
     return collection;
 }
 
-/* This runtime has no separate boxed-integer representation: rt_array_len and
- * friends above hand back raw int64 and simpleos_raw_or_encoded_int is the
- * single place that tolerates either form. Box/unbox therefore normalise
- * rather than re-tag — anything else would introduce a second encoding that
- * nothing else in this file agrees with. */
+/* rt_value_int MUST tag. The comment that used to sit here claimed "this
+ * runtime has no separate boxed-integer representation" and returned `value`
+ * verbatim. That premise was false, and the identity body was the root cause of
+ * `for x in <array>` binding a good element on iteration 1 and nil on every
+ * later iteration in freestanding riscv64
+ * (doc/08_tracking/bug/freestanding_riscv64_for_in_array_yields_nil_after_first_element_2026-08-31.md).
+ *
+ * The link this file participates in also contains baremetal_stubs.c, whose
+ * rt_index_get opens with `if (!IS_INT(index)) return NIL_VALUE;` — i.e. it
+ * REQUIRES a TAG_INT-encoded index, using the very TAG_MASK/TAG_INT/DECODE_INT
+ * macros this file defines at lines 22-32 and then declined to use here. MIR
+ * lowering of a counted `for` emits BoxInt on the induction variable, cranelift
+ * lowers BoxInt to `call rt_value_int`, and the identity body handed
+ * rt_index_get a RAW index:
+ *
+ *   raw 0 -> 0 & 7 == 0 -> IS_INT true  -> DECODE_INT(0) == 0 -> element 0, CORRECT
+ *   raw 1..6            -> IS_INT false -> NIL_VALUE
+ *
+ * which is exactly the observed "correct once, nil thereafter" signature.
+ *
+ * Tagging here matches the hosted runtime contract, under which rt_index_get
+ * takes a TAGGED index and rt_array_get takes a RAW one (runtime_native.c
+ * calls `rt_array_get(arr, i)` with a bare loop counter). rt_index_get already
+ * bridges the two by DECODE_INT-ing before it delegates. The unbox side needs
+ * no change: rt_value_unbox_int below routes through
+ * simpleos_raw_or_encoded_int, which accepts either form. */
 RuntimeValue rt_value_int(RuntimeValue value)
 {
-    return value;
+    return ENCODE_INT(value);
 }
 
 RuntimeValue rt_value_unbox_int(RuntimeValue value)
