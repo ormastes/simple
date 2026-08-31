@@ -4670,7 +4670,22 @@ impl MirLowering:
                 return self.lower_enum_construct_named("Option", direct_name, args)
 
         if is_direct:
-            if direct_name == "print" or direct_name == "_cli_eprint":
+            # `print` MUST newline-terminate. The interpreter treats print and
+            # println identically -- both go through the host `print` statement,
+            # which appends a newline (95.interp/mir_interpreter.spl:1162-1171)
+            # -- so the native lane mapping `print` to the non-newline rt_print
+            # diverged from the language semantics the interpreter defines.
+            # Measured: the Stage-2 gate fixture calls print() three times and
+            # expects three LINES; the native binary emitted all three values
+            # correctly but run together as
+            # "app.cli.bootstrap_maincompiler.driver.driverapp.cli.main",
+            # failing the gate on formatting alone once every value was right.
+            # `_cli_eprint` is deliberately left on rt_print: it is a separate
+            # CLI helper, not the language builtin, and nothing measured here
+            # covers its contract.
+            if direct_name == "print":
+                return self.lower_bootstrap_print_call(args, "rt_println")
+            if direct_name == "_cli_eprint":
                 return self.lower_bootstrap_print_call(args, "rt_print")
             if direct_name == "eprint":
                 return self.lower_bootstrap_print_call(args, "rt_eprintln")

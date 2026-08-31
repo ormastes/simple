@@ -80,19 +80,17 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        let bytes = std::fs::read(runtime_root.join(input))
-            .map_err(|e| {
-                // A silent None here surfaces far away as "could not build the
-                // core-C runtime archive" with no compile ever attempted (seen
-                // 2026-08-18: a stale staged compiler listed the since-deleted
-                // runtime_mcp_core.c). Name the offending input.
-                eprintln!(
-                    "native-build: core-C runtime input `{}` unreadable in {}: {e}",
-                    input,
-                    runtime_root.display()
-                );
-            })
-            .ok()?;
+        let bytes = std::fs::read(runtime_root.join(input)).map_err(|e| {
+            // A silent None here surfaces far away as "could not build the
+            // core-C runtime archive" with no compile ever attempted (seen
+            // 2026-08-18: a stale staged compiler listed the since-deleted
+            // runtime_mcp_core.c). Name the offending input.
+            eprintln!(
+                "native-build: core-C runtime input `{}` unreadable in {}: {e}",
+                input,
+                runtime_root.display()
+            );
+        }).ok()?;
         for byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -153,7 +151,7 @@ fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
     None
 }
 
-fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
+pub(crate) fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
     if path.is_dir() {
         return archive_from_dir(path, stem);
     }
@@ -359,10 +357,6 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
-        "runtime_process_owned.c",
-        "runtime_coverage_core.c",
-        "runtime_core_host_services.c",
-        "runtime_memory.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
@@ -375,6 +369,17 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // would create duplicate pool definitions.
         "runtime_thread.c",
         "runtime_simd_utf8.c",
+        // ASCII/case SIMD kernels backing rt_text_is_ascii (std.common.encoding
+        // simd_text_ffi). Same never-an-archive-member class as
+        // runtime_terminal.c below: the pure-Simple backend's own source list
+        // (src/compiler/70.backend/backend/runtime_compiler.spl) has always
+        // carried runtime_simd_case, but this seed-side list never did, so a
+        // core-C native link of any tool whose closure reaches std text
+        // helpers left rt_text_is_ascii undefined -- the tolerated-undefined
+        // then NULL-GOT SIGSEGV class of rt_unwrap_or_trap
+        // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
+        // Compiles with zero symbol collisions against the existing members.
+        "runtime_simd_case.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",
@@ -396,6 +401,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // this archive, 69 with the Rust runtime libs -- same class as the
         // disproved runtime_native.c wholesale fix, 475 collisions). This TU
         // carries exactly those seven, self-contained, all helpers static.
+        // Re-verified against THIS list's members 2026-08-31 (nm, 956 defined
+        // symbols incl. runtime_native.c: zero overlap). Tagged-text ABI --
+        // see the TU header; behavioural tests in
+        // src/runtime/test/rt_core_exports_behaviour_selfcheck.c.
         "runtime_core_exports.c",
         "runtime_value.h",
         "runtime.h",
@@ -462,9 +471,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
-            .arg("-D_GNU_SOURCE")
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
-            .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
@@ -942,12 +949,20 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
-    let output = nm_command()
-        .arg("-g")
-        .arg("-p")
-        .arg(path)
-        .output()
-        .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+    // Mach-O POSIX nm prints weak *definitions* as 'T' — the weakness only
+    // appears in the `-m` flag field as `weak external`. GNU/ELF nm prints
+    // them as 'W'/'V'. Request the Mach-O flag field on macOS hosts and
+    // accept BOTH formats below, so the stage-4 runtime capsule check does
+    // not misread Apple weak fallbacks (e.g. rt_heap_live_bytes) as STRONG.
+    let output = {
+        let mut cmd = nm_command();
+        cmd.arg("-g").arg("-p");
+        if cfg!(target_os = "macos") {
+            cmd.arg("-m");
+        }
+        cmd.arg(path).output()
+    }
+    .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
         return Err(format!(
             "failed to inspect archive {}: {}",
@@ -957,6 +972,13 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
     }
     let mut weak = BTreeSet::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
+        // Mach-O `-m` form: `0000000000000000 (__TEXT,__text) weak external _f`
+        if line.contains(" weak external ") || line.contains(" weak reference ") {
+            if let Some(name) = line.split_whitespace().next_back() {
+                weak.insert(name.to_string());
+            }
+            continue;
+        }
         let fields: Vec<&str> = line.split_whitespace().collect();
         let (kind, name) = match fields.as_slice() {
             [kind, name] if kind.len() == 1 => (*kind, *name),
@@ -965,6 +987,34 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
         };
         if matches!(kind, "W" | "V") {
             weak.insert(name.to_string());
+        }
+    }
+    // Mach-O carries weakness in the N_WEAK_DEF bit, which `nm -p`'s one-letter
+    // kind column does NOT surface: a weak definition prints as `T`, byte for
+    // byte identical to a strong one. So the ELF-shaped W/V parse above finds
+    // nothing on macOS and every weak fallback looks strong to the caller —
+    // which made the Stage-4 capsule guard reject the core-C archive's
+    // deliberately-weak rt_heap_live_bytes/rt_heap_peak_bytes and fail Stage 2.
+    // Apple's `nm -m` does report it, as "weak external". Names keep their
+    // leading underscore here, matching archive_global_symbols' raw keys.
+    if cfg!(target_os = "macos") {
+        let detailed = nm_command()
+            .arg("-g")
+            .arg("-m")
+            .arg(path)
+            .output()
+            .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
+        if detailed.status.success() {
+            for line in String::from_utf8_lossy(&detailed.stdout).lines() {
+                if !line.contains("weak external") && !line.contains("weak definition") {
+                    continue;
+                }
+                if let Some(name) = line.split_whitespace().last() {
+                    // "... weak external automatically hidden _sym" also ends in
+                    // the symbol, so taking the last field is correct for both.
+                    weak.insert(name.to_string());
+                }
+            }
         }
     }
     Ok(weak)
@@ -1051,12 +1101,20 @@ struct Stage4CliCProviderSpec {
 }
 
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
-    "rt_progress_clock_now_nanos",
-    "rt_progress_tls_clear",
-    "rt_progress_tls_is_initialized",
-    "rt_progress_tls_start_nanos",
-    "rt_progress_tls_store_start_nanos",
+    "rt_progress_get_elapsed_seconds",
+    "rt_progress_init",
+    "rt_progress_reset",
     "rt_time_now_seconds_f64",
+    "rt_timestamp_add_days",
+    "rt_timestamp_diff_days",
+    "rt_timestamp_from_components",
+    "rt_timestamp_get_day",
+    "rt_timestamp_get_hour",
+    "rt_timestamp_get_microsecond",
+    "rt_timestamp_get_minute",
+    "rt_timestamp_get_month",
+    "rt_timestamp_get_second",
+    "rt_timestamp_get_year",
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
@@ -1230,11 +1288,7 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         // project_stage4_archive_closure), whose output is re-checked. Rejecting
         // them here made every capsule build fail on a core that the projection
         // was designed to sanitize (test_stage4_runtime_capsule_keeps_only_requested_globals).
-        let forbidden_sections = if *label == "core" {
-            Vec::new()
-        } else {
-            forbidden_archive_sections(archive)?
-        };
+        let forbidden_sections = if *label == "core" { Vec::new() } else { forbidden_archive_sections(archive)? };
         if !forbidden_sections.is_empty() {
             return Err(format!(
                 "Stage4 archive {label} retained constructor/destructor sections: {}",
@@ -1815,10 +1869,7 @@ fn project_stage4_archive_closure(
                 temp_dir.display()
             )
         })?;
-        // The closure object must use the same object format as its archive
-        // inputs.  In particular, a Linux-hosted MinGW build must not feed PE
-        // members to the host compiler's ELF `ld -r` driver.
-        let cc = target_c_compiler(effective_target());
+        let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]

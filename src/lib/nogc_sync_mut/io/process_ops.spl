@@ -361,7 +361,23 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     # command_line is single-quoted per part; inside the double-quoted inner
     # `sh -c` string the outer shell must not expand anything, so escape \ " $ `.
     val inner_cmd = command_line.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
-    val redirected_cmd = "exec setsid -w sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
+    # `setsid` is util-linux and does NOT exist on macOS, where this line failed
+    # with `/bin/sh: line 0: exec: setsid: not found` and exit 127 -- which
+    # surfaced as an UNDIAGNOSABLE Stage-2 capability failure after a ~25 min
+    # compile, because the probe itself had already reported PASS.
+    # perl ships with macOS and POSIX::setsid() is the same syscall, so the
+    # fallback keeps the session-leader property this code depends on: the inner
+    # `$$` written to pgid_file must be a process-GROUP leader or
+    # _process_kill_group's `kill -- -PGID` cannot reap the tree.
+    # Detected in the shell rather than via std.nogc_sync_mut.platform.is_macos()
+    # on purpose: host_os() shells out to `uname`, and this IS the process
+    # runner, so importing it here would recurse. `command -v setsid` also keeps
+    # Linux byte-identical (it resolves, so the exact previous command runs) and
+    # covers any Unix lacking setsid rather than just Darwin.
+    # Note the perl form needs no `-w`: it execs in-place, so the exit status
+    # propagates through the same process chain instead of via a wait layer.
+    val sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- \"$@\"; fi; }; "
+    val redirected_cmd = "{sid_fn}sid sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
     val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])

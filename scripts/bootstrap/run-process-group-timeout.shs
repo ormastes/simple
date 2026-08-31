@@ -9,7 +9,26 @@ timeout_seconds=$1
 grace_seconds=$2
 shift 2
 case "$timeout_seconds:$grace_seconds" in *[!0-9:]*|0:*) exit 2 ;; esac
-command -v setsid >/dev/null 2>&1 || { echo "setsid is required for process containment" >&2; exit 125; }
+# `setsid` is util-linux and is absent on macOS, where this hard requirement
+# made every phase-verification run exit 125 before doing any work. perl ships
+# with macOS and POSIX::setsid() is the same syscall, so it provides the session
+# leader this script's `kill -- -$leader` group termination depends on. Prefer
+# real setsid wherever it exists, so Linux behaviour is unchanged.
+# NOTE the `exec` in both branches, which is load-bearing rather than an
+# optimisation. This function is invoked as `spl_setsid "$@" <&3 &`, so the
+# shell forks a subshell and `leader=$!` records THAT subshell's pid. Without
+# `exec` the real session leader would be a grandchild, leaving `leader` in the
+# OLD process group -- so `kill -- -$leader` in cleanup() would signal the wrong
+# group and the timed-out tree would survive. Verified: the selftest hangs
+# without `exec` and passes with it.
+if command -v setsid >/dev/null 2>&1; then
+  spl_setsid() { exec setsid "$@"; }
+elif command -v perl >/dev/null 2>&1; then
+  spl_setsid() { exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- "$@"; }
+else
+  echo "setsid (or perl) is required for process containment" >&2
+  exit 125
+fi
 
 state_dir=${TMPDIR:-/tmp}/simple-process-group-timeout.$$
 mkdir -p "$state_dir" || exit 125
@@ -36,7 +55,7 @@ trap cleanup EXIT
 # pipe/file on a dedicated descriptor so protocol servers can be contained
 # without observing an immediate EOF.
 exec 3<&0
-setsid "$@" <&3 &
+spl_setsid "$@" <&3 &
 leader=$!
 exec 3<&-
 (

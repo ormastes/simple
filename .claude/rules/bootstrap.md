@@ -16,7 +16,9 @@ alwaysApply: false
 > is GREEN (`Results: 1 total, 1 passed, 0 failed`), and a minimal
 > `use std.binary_io.{ByteOrder}` lazy-import probe resolves and runs clean
 > under `bin/simple run` (see `scripts/check/check-bootstrap-preflight.shs`,
-> which fences it). The BGS1 fix (`module_lowering.spl:952-955`) and the
+> which fences it). The BGS1 fix (`module_import_registration.spl:577-580` —
+> the long-standing `module_lowering.spl:952-955` citation here was WRONG; that
+> file is 503 lines and contains no such code, re-verified 2026-08-30) and the
 > `Effect` facade collision fix are on main; a 2026-08-09 full bootstrap
 > compiled all 803 Stage-2 files with 0 failures (125 MB non-vacuous binary).
 > Per the bug doc's final update, the live bootstrap concern is no longer this

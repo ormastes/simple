@@ -569,6 +569,15 @@ pub fn process_kill(pid: i64) -> bool:
 # ============================================================================
 
 pub fn host_os() -> text:
+    # Windows first, via environment: NT always sets OS=Windows_NT, and the
+    # uname fallback below spawns "/bin/sh", which CreateProcess cannot start
+    # from a native-Windows process — the failed spawn used to yield "" here
+    # ("Native linking is unsupported on host architecture '' for OS ''").
+    # On Linux/macOS/BSD the OS variable is unset, so this branch never fires
+    # and the uname path below is byte-identical to before for their outputs.
+    val os_env = env_get("OS")
+    if os_env.lower().contains("windows"):
+        return "windows"
     val os = shell_output("uname -s")
     if os == "Linux":
         return "linux"
@@ -576,7 +585,11 @@ pub fn host_os() -> text:
         return "macos"
     if os == "FreeBSD":
         return "freebsd"
-    os.lower()
+    val os_low = os.lower()
+    # MSYS2/MinGW/Cygwin uname reports e.g. MINGW64_NT-10.0-26200: still Windows.
+    if os_low.starts_with("mingw") or os_low.starts_with("msys") or os_low.starts_with("cygwin") or os_low.starts_with("windows_nt"):
+        return "windows"
+    os_low
 
 # `rt_platform_name` returns a compiled-in platform string and yields nil only
 # if the runtime bridge produced no value at all. TOTAL with the documented
@@ -615,6 +628,21 @@ pub fn hash_text(s: text) -> i64:
         rt_hash_text(s)
 
 pub fn host_arch() -> text:
+    # Windows first, via environment, for the same reason as host_os() above:
+    # the "/bin/sh -c uname -m" fallback cannot spawn on native Windows and
+    # used to return "" here. Unset on Linux/macOS/BSD, so this is a no-op there.
+    val os_env = env_get("OS")
+    if os_env.lower().contains("windows"):
+        val pa = env_get("PROCESSOR_ARCHITECTURE").lower()
+        if pa == "amd64" or pa == "x64":
+            return "x86_64"
+        if pa == "arm64":
+            return "aarch64"
+        if pa == "x86":
+            return "i686"
+        if pa != "":
+            return pa
+        return "x86_64"
     val arch = shell_output("uname -m")
     if arch == "x86_64" or arch == "amd64":
         return "x86_64"

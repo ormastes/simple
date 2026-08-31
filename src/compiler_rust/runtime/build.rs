@@ -343,6 +343,9 @@ fn compile_c_runtime_sources() {
     // Bootstrap-only compatibility: the seed cannot link the canonical Pure
     // Simple timestamp module. Stage4 never enables this provider.
     build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
+    // See the runtime_process.c comment above: the Rust runtime crate already
+    // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
+    build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if target_env == "msvc" {
         // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks

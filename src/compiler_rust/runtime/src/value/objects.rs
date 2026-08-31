@@ -350,6 +350,24 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// neither Option nor Result (an arbitrary user enum) falls back to the old
 /// "return self" behavior, unchanged from `rt_unwrap_or_self` — widening
 /// unwrap-trap semantics to arbitrary user enums is out of scope here.
+/// Formation probe for heap-typed enum/Option payloads at fail-closed
+/// handoffs (2026-08-22 stage-3 streaming-owner incident: a Some-tagged
+/// Option read back with payload word 0 passed every discriminant/nil guard
+/// and SIGSEGV'd on the first field load).
+/// Answers FORMATION ONLY -- a heap-tagged pointer outside the zero page --
+/// with no registry probe, so it can never false-reject a live object. Call
+/// sites own the payload-type contract: scalar payloads are not heap-tagged
+/// and report 0 by design. Mirrors `rt_heap_ref_wellformed` in
+/// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
+#[no_mangle]
+pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
+    if !value.is_heap() {
+        return 0;
+    }
+    let addr = value.as_heap_ptr() as usize;
+    if addr < 4096 { 0 } else { 1 }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {

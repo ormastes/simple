@@ -164,6 +164,48 @@ detect_cc() {
 }
 
 # ---------------------------------------------------------------------------
+# Objective-C translation units.
+#
+# `src/runtime/hosted_cocoa.c` is Objective-C wearing a `.c` extension (its own
+# build recipe says `cc -x objective-c`): the non-Apple half is plain C stubs,
+# and the `#else /* __APPLE__ */` half is `#import <Cocoa/Cocoa.h>` plus real
+# ObjC. On Linux the ObjC half is preprocessed away, which is why the gate has
+# always been green there. On macOS the ObjC half is live and clang -- driven
+# as a C compiler -- chokes inside Foundation's own headers ("expected
+# identifier or '('" at `@class NSString, Protocol;`).
+#
+# Three answers were considered and two rejected:
+#   * rename to `.m`      -- REJECTED. The scanner enumerates `*.c`, so the
+#                            rename would silently DROP the file from the gate,
+#                            and the name is referenced by
+#                            scripts/check/build-core-c-bootstrap-runtime-capsule.shs
+#                            and scripts/audit/cocoa-sffi-contract.shs.
+#   * add a SKIP class    -- REJECTED. SKIP means "an external SDK is not
+#                            installed here". On macOS the Cocoa SDK IS
+#                            installed; skipping would hide real ObjC breakage
+#                            on the only platform that can detect it. That is
+#                            precisely the fail-open this guard exists to close.
+#   * compile it AS ObjC  -- ADOPTED. Nothing is skipped and nothing is
+#                            weakened: the file is still fully parsed and
+#                            semantically analysed, just in the language it is
+#                            actually written in. This is STRICTER than today
+#                            on macOS (the ObjC half is now checked at all) and
+#                            byte-identical to today on every other host.
+#
+# The language switch is applied only on Darwin. On Linux/FreeBSD the ObjC half
+# is `#ifdef`-ed out and `-x objective-c` would merely demand an ObjC frontend
+# (gcc without gobjc cannot supply one), so the existing C route is kept there.
+# ---------------------------------------------------------------------------
+HOST_IS_DARWIN=0
+[ "$(uname -s 2>/dev/null)" = "Darwin" ] && HOST_IS_DARWIN=1
+
+# is_objc_source <file> -- 0 when the TU is Objective-C.
+is_objc_source() {
+    grep -qE '^[[:space:]]*#import[[:space:]]*[<"]|^[[:space:]]*@(interface|implementation|protocol|class)[[:space:]]' \
+        "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # compile_one <cc> <root> <file> <diagfile>
 # Returns: 0 = OK, 1 = FAIL, 2 = SKIP (external dependency unavailable)
 #
@@ -173,7 +215,15 @@ detect_cc() {
 compile_one() {
     _cc="$1"; _root="$2"; _file="$3"; _diag="$4"
 
-    "$_cc" -fsyntax-only \
+    # Compile each TU in the language it is written in. See the Objective-C
+    # note above: this is a language selection, never a skip.
+    _lang=''
+    if [ "$HOST_IS_DARWIN" -eq 1 ] && is_objc_source "$_file"; then
+        _lang='-x objective-c'
+    fi
+
+    # shellcheck disable=SC2086  # $_lang is a deliberate 0-or-1 word expansion.
+    "$_cc" -fsyntax-only $_lang \
         -I "$_root/$CFG_SCAN_DIR" \
         -I "$_root/$CFG_SCAN_DIR/include" \
         -Wno-deprecated-pragma \
@@ -329,6 +379,32 @@ selftest() {
     else
         _bad="$_bad fixture8_vendor_excluded(got=$_vout)"
     fi
+
+    # 9  classifier: an Objective-C TU carrying a .c extension is recognised.
+    #    Asserted directly (not via the compiler) so it pins on every host.
+    _total=$((_total + 1))
+    printf '#ifdef __APPLE__\n#import <Foundation/Foundation.h>\n@class SplFxThing;\n#endif\nint spl_fx6(void){return 0;}\n' \
+        >"$_fx/src/runtime/fx_objc.c"
+    if is_objc_source "$_fx/src/runtime/fx_objc.c"; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture9_objc_classifier_missed"
+    fi
+
+    # 10 negative control: ordinary C must NOT be classified Objective-C, or
+    #    every file would silently change language.
+    _total=$((_total + 1))
+    if is_objc_source "$_fx/src/runtime/fx_ok.c"; then
+        _bad="$_bad fixture10_objc_classifier_false_positive"
+    else
+        _pass=$((_pass + 1))
+    fi
+
+    # 11 the ObjC fixture must COMPILE through the real compile_one. On Darwin
+    #    this exercises the -x objective-c route (as plain C it fails inside
+    #    Foundation's headers, exactly like hosted_cocoa.c); elsewhere the
+    #    __APPLE__ half is preprocessed away and it is ordinary C.
+    _expect fixture11_objc_compiles 0 "$_fx/src/runtime/fx_objc.c"
 
     printf '%s: selftest %s/%s fixtures correct\n' "$SELF_NAME" "$_pass" "$_total"
     if [ "$_pass" -ne "$_total" ]; then

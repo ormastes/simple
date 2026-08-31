@@ -78,3 +78,39 @@ Tension noted for the record: `.claude/rules/testing.md` says a correct spec
 that fails should be left RED. That rule was applied here at the level of the
 BUG RECORD (which stays open) rather than the spec, on the explicit instruction
 that the committed suite must not carry a known-red spec.
+
+## Re-measured 2026-08-31 (Windows Rust seed) — scope is NARROWER than recorded
+
+Status stays **OPEN**, but the defect is no longer general. It is now scope
+dependent, measured on `bin/simple.exe` ("Simple Language v1.0.0-RC", which
+self-identifies as a bootstrap seed) in the Windows checkout:
+
+| scope of the `match` | binding `color` | verdict |
+|---|---|---|
+| plain top-level `fn` | carries the payload (`7`) | **FIXED** |
+| BDD `describe`/`it` closure body | the `color` module namespace dict | **STILL BROKEN** |
+
+Evidence:
+
+- Standalone probe (`match` inside `fn main()`) printed `color_is_7=true` under
+  **both** engines — `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`. So this is
+  not a run-vs-test engine divergence; it is a function-scope vs closure-scope
+  difference.
+- Under the test runner, `_binds_payload()` (a plain top-level `fn`) returns
+  `true`, while a `match` written directly in an `it` block body still fails as:
+
+  ```
+  expected {_byte_to_hex: <fn:_byte_to_hex>, ..., rgb: <fn:rgb>, rgba: <fn:rgba>} to equal 7
+  ```
+
+Consequence for the spec: `test/01_unit/language/match_binding_module_name_shadow_spec.spl`
+previously asserted `_binds_payload() == false` and had gone RED, because the
+plain-function half is fixed. It now pins **each scope separately** — the fixed
+scope asserted fixed, the broken scope asserted broken — so the file is GREEN
+(3/3) without hiding the residual defect. When the closure scope is fixed, the
+third example goes RED; that is the signal to replace its body with
+`expect(color).to_equal(7)` and close this record.
+
+Related closure-scope defects worth checking together, since the shape matches:
+`interp_member_path_store_lost_in_bdd_closure_2026-07-03.md` and
+`interp_crossmodule_array_writeback_lost_in_bdd_closure_2026-06-29.md`.

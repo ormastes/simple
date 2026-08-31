@@ -30,6 +30,14 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        // PAREN-FORM STRUCT SPREAD: `S(..base, field: v)`.
+        // `Expr::StructSpread` is produced ONLY by `parse_arguments`, so an
+        // argument list carrying one is a struct-update construction and never
+        // an ordinary call. Split it out here rather than threading an
+        // `Option<&Expr>` through every builtin branch below.
+        if args.iter().any(|a| matches!(a.value, Expr::StructSpread(_))) {
+            return self.lower_ctor_with_spread(callee, args, ctx);
+        }
         // Check for special builtins: generator, future, spawn, await, print, etc.
         if let Expr::Identifier(name) = callee {
             if let Some((type_name, "new")) = name.rsplit_once('.') {
@@ -76,29 +84,7 @@ impl Lowerer {
             // bogus one-field struct typed STRING which rt_string_concat
             // rejected (len=-1 → NIL), dropping `"x=" + str(5)` to empty (#66).
             // Skip primitives here so lower_utility_builtin lowers them as Cast.
-            let bare_ctor_ty = self.module.types.lookup(name);
-            let bare_is_primitive = bare_ctor_ty.is_some_and(|ty_id| {
-                matches!(
-                    self.module.types.get(ty_id),
-                    Some(
-                        HirType::Void
-                            | HirType::Bool
-                            | HirType::Any
-                            | HirType::Char
-                            | HirType::Int { .. }
-                            | HirType::Float { .. }
-                            | HirType::String
-                            | HirType::Nil
-                    )
-                )
-            });
-            let canonical_ctor_ty = if bare_is_primitive {
-                None
-            } else {
-                self.global_struct_key_for_name(name)
-                    .and_then(|key| self.module.types.lookup(&key))
-            };
-            let ctor_ty = canonical_ctor_ty.or(if bare_is_primitive { None } else { bare_ctor_ty });
+            let ctor_ty = self.resolve_constructor_type(name);
             if let Some(struct_ty) = ctor_ty {
                 if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
                     return self.lower_bitfield_constructor(struct_ty, args, ctx);
@@ -114,14 +100,8 @@ impl Lowerer {
                 // field the call site omits (relying on a class-level
                 // default) with `nil` instead of leaving it unset.
                 let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
-                let fields_hir = self.lower_struct_init_fields(name, struct_ty, &provided, ctx)?;
-                return Ok(HirExpr {
-                    kind: HirExprKind::StructInit {
-                        ty: struct_ty,
-                        fields: fields_hir,
-                    },
-                    ty: struct_ty,
-                });
+                let (fields_hir, binding) = self.lower_struct_init_fields(name, struct_ty, &provided, None, ctx)?;
+                return Ok(Self::finish_struct_init(struct_ty, fields_hir, binding));
             } else if self.lenient_types
                 && name.starts_with(|c: char| c.is_ascii_uppercase())
                 && args.iter().any(|a| a.name.is_some())
@@ -134,14 +114,8 @@ impl Lowerer {
                 // (its "unresolvable struct" branch) — same effective
                 // behavior as before, just centralized through one helper.
                 let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
-                let fields_hir = self.lower_struct_init_fields(name, TypeId::ANY, &provided, ctx)?;
-                return Ok(HirExpr {
-                    kind: HirExprKind::StructInit {
-                        ty: TypeId::ANY,
-                        fields: fields_hir,
-                    },
-                    ty: TypeId::ANY,
-                });
+                let (fields_hir, binding) = self.lower_struct_init_fields(name, TypeId::ANY, &provided, None, ctx)?;
+                return Ok(Self::finish_struct_init(TypeId::ANY, fields_hir, binding));
             }
 
             // Handle special async/generator builtins
@@ -304,6 +278,100 @@ impl Lowerer {
             Expr::Binary { left, right, .. } => Self::is_constant_default(left) && Self::is_constant_default(right),
             _ => false,
         }
+    }
+
+    /// Resolve `name` to the struct/class TypeId a paren-call constructor
+    /// would build, or `None` when `name` is not a constructor.
+    ///
+    /// Primitive type names (`str`, `text`, `int`, `bool`, ...) are registered
+    /// in the type registry too, but a call on them is a CAST, not a
+    /// constructor. Building a StructInit for e.g. `str(5)` produced a bogus
+    /// one-field struct typed STRING which rt_string_concat rejected
+    /// (len=-1 -> NIL), dropping `"x=" + str(5)` to empty (#66). They are
+    /// excluded here so `lower_utility_builtin` lowers them as Cast.
+    pub(super) fn resolve_constructor_type(&self, name: &str) -> Option<TypeId> {
+        let bare_ctor_ty = self.module.types.lookup(name);
+        let bare_is_primitive = bare_ctor_ty.is_some_and(|ty_id| {
+            matches!(
+                self.module.types.get(ty_id),
+                Some(
+                    HirType::Void
+                        | HirType::Bool
+                        | HirType::Any
+                        | HirType::Char
+                        | HirType::Int { .. }
+                        | HirType::Float { .. }
+                        | HirType::String
+                        | HirType::Nil
+                )
+            )
+        });
+        if bare_is_primitive {
+            return None;
+        }
+        self.global_struct_key_for_name(name)
+            .and_then(|key| self.module.types.lookup(&key))
+            .or(bare_ctor_ty)
+    }
+
+    /// Lower a PAREN-form struct-update construction `S(..base, field: v)`.
+    ///
+    /// Reached only when `lower_call` saw an `Expr::StructSpread` argument.
+    /// Every failure path here is a HARD ERROR: `..base` in a position that is
+    /// not a struct construction used to parse as `Expr::Range { start: None,
+    /// end: base }`, lower to `rt_range(0, <tagged object pointer>)` and HANG
+    /// the compiler materialising billions of elements
+    /// (`doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md`).
+    /// A loud diagnostic is the whole point; nothing here may fall through to
+    /// a generic call.
+    fn lower_ctor_with_spread(
+        &mut self,
+        callee: &Expr,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let spreads: Vec<&Expr> = args
+            .iter()
+            .filter_map(|a| match &a.value {
+                Expr::StructSpread(base) => Some(base.as_ref()),
+                _ => None,
+            })
+            .collect();
+        if spreads.len() > 1 {
+            return Err(LowerError::Unsupported(format!(
+                "{} struct spreads (`..base`) in one construction: at most one is allowed",
+                spreads.len()
+            )));
+        }
+        let base = spreads[0];
+
+        let Expr::Identifier(name) = callee else {
+            return Err(LowerError::Unsupported(
+                "struct spread `..base` is only valid in a struct/class construction such as \
+                 `S(..base, field: value)`"
+                    .to_string(),
+            ));
+        };
+
+        let Some(struct_ty) = self.resolve_constructor_type(name) else {
+            return Err(LowerError::Unsupported(format!(
+                "struct spread `..base` in a call to `{name}`, which does not name a struct or \
+                 class constructor"
+            )));
+        };
+        if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
+            return Err(LowerError::Unsupported(format!(
+                "struct spread `..base` is not supported for bitfield `{name}`"
+            )));
+        }
+
+        let provided: Vec<(Option<&str>, &Expr)> = args
+            .iter()
+            .filter(|a| !matches!(a.value, Expr::StructSpread(_)))
+            .map(|a| (a.name.as_deref(), &a.value))
+            .collect();
+        let (fields_hir, binding) = self.lower_struct_init_fields(name, struct_ty, &provided, Some(base), ctx)?;
+        Ok(Self::finish_struct_init(struct_ty, fields_hir, binding))
     }
 
     pub(super) fn lower_bitfield_constructor(

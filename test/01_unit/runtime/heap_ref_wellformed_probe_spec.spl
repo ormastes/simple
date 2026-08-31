@@ -1,0 +1,110 @@
+# Reproduce + neighbour fence for the ZEROED-ENUM-PAYLOAD defect class.
+#
+# Defect: a `Some`/`Ok`-tagged enum whose PAYLOAD WORD is 0 passes every
+# discriminant check and every `!= nil` guard, then SIGSEGVs on the first
+# field load from address 0. Located by lldb on the aarch64-darwin stage-3
+# lane at `hir_cache_closure_digest+36` (`ldr x11, [x11]`, x11 == 0), where
+# the argument was `self.streaming_module_surfaces_owner.unwrap()`.
+# See doc/08_tracking/bug/stage3_streaming_hir_owner_crash_after_origin_fix_2026-08-22.md
+#
+# Why no existing guard catches it (each assertion below fences one of these):
+#   * `rt_enum_payload` returns `e ? e->payload : rt_core_nil()` -- a payload
+#     word of 0 is returned verbatim, never validated.
+#   * `rt_is_some` tests only `enum_id == 1 && discriminant == 1`; a Some with
+#     payload 0 reports present.
+#   * `rt_unwrap_or_trap` gates on the DISCRIMINANT, not the payload.
+#   * a `== nil` guard cannot fire: a zeroed payload is not the nil/None
+#     representation.
+#
+# The fix is `rt_heap_ref_wellformed`, a FORMATION probe: 1 only for a
+# heap-tagged pointer outside the zero page. It performs NO registry probe,
+# so it can never false-reject a live object -- that is the property that
+# makes it safe to call at a fail-closed handoff.
+#
+# THIS SPEC FAILS ON origin/main AS OF f16c2a4736a: `rt_heap_ref_wellformed`
+# is defined in no runtime, declared in no header, and called at no site.
+use std.spec
+use std.io.{file_read}
+
+val RUNTIME_C = "src/runtime/runtime_native.c"
+val RUNTIME_H = "src/runtime/runtime.h"
+val CORE_ENUM = "src/runtime/simple_core/core_enum.spl"
+val RUST_OBJECTS = "src/compiler_rust/runtime/src/value/objects.rs"
+val RUST_SYMBOLS = "src/compiler_rust/common/src/runtime_symbols.rs"
+val SELFCHECK_C = "src/runtime/test/rt_heap_ref_wellformed_selfcheck.c"
+
+describe "the zeroed-payload formation probe exists in every runtime lane":
+    it "defines rt_heap_ref_wellformed in the C runtime the native lane links":
+        # Definition text, not a declaration: a declared-but-undefined symbol
+        # is still a zero GOT slot at link time -- the exact shape of the
+        # separate 2026-08-18 rt_unwrap_or_trap incident.
+        val runtime = file_read(RUNTIME_C)
+        expect(runtime).to_contain("int8_t rt_heap_ref_wellformed(int64_t value) {")
+
+    it "declares rt_heap_ref_wellformed in the runtime header":
+        val header = file_read(RUNTIME_H)
+        expect(header).to_contain("rt_heap_ref_wellformed(int64_t value);")
+
+    it "mirrors the probe in the pure-Simple core runtime":
+        val core = file_read(CORE_ENUM)
+        expect(core).to_contain("pub fn rt_heap_ref_wellformed(value: i64) -> i8:")
+
+    it "mirrors the probe in the Rust runtime":
+        val objects = file_read(RUST_OBJECTS)
+        expect(objects).to_contain("pub extern \"C\" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {")
+
+    it "registers the symbol so the linker resolves it":
+        val symbols = file_read(RUST_SYMBOLS)
+        expect(symbols).to_contain("\"rt_heap_ref_wellformed\",")
+
+describe "the probe answers FORMATION, never liveness":
+    it "rejects exactly the incident value and the zero page":
+        # The C self-check is the behavioural half of this fence; it is
+        # compiled and RUN by the core-C bootstrap runtime capsule, so these
+        # cases are executed, not merely asserted as text.
+        val check = file_read(SELFCHECK_C)
+        expect(check).to_contain("rt_heap_ref_wellformed(0) == 0")
+        expect(check).to_contain("rt_heap_ref_wellformed(2048 | 1) == 0")
+
+    it "accepts a real heap address with no registry probe":
+        # This is the anti-false-reject property. If the probe ever consults
+        # the immortal-pointer registry it can reject a live object and turn
+        # a hardening guard into an outage; this case pins that it does not.
+        val check = file_read(SELFCHECK_C)
+        expect(check).to_contain("rt_heap_ref_wellformed(heap_tagged) == 1")
+        expect(check).to_contain("wellformed without a registry probe")
+
+    it "treats a scalar (tagged-integer) payload as malformed by design":
+        # Call sites own the payload-type contract: the probe is only valid
+        # at a handoff whose payload is heap/aggregate.
+        val check = file_read(SELFCHECK_C)
+        expect(check).to_contain("rt_heap_ref_wellformed(24) == 0")
+
+    it "is two masked comparisons, with no registry call in its body":
+        # A registry probe here would break the never-false-reject property
+        # above, so the body is pinned verbatim rather than by name only.
+        val runtime = file_read(RUNTIME_C)
+        expect(runtime).to_contain("if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;")
+        expect(runtime).to_contain("return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;")
+
+describe "the bootstrap capsule executes the probe self-check":
+    it "compiles and runs rt_heap_ref_wellformed_selfcheck.c":
+        val capsule = file_read("scripts/check/build-core-c-bootstrap-runtime-capsule.shs")
+        expect(capsule).to_contain("rt_heap_ref_wellformed_selfcheck.c")
+        expect(capsule).to_contain("rt-heap-ref-wellformed-selfcheck-failed")
+
+    it "requires the self-check receipt, so a silent skip cannot pass":
+        val capsule = file_read("scripts/check/build-core-c-bootstrap-runtime-capsule.shs")
+        expect(capsule).to_contain("rt-heap-ref-wellformed-selfcheck-receipt-missing")
+
+describe "neighbours in the same defect class remain payload-blind":
+    # These are NOT fixed by this change; they are recorded so a later claim
+    # that the class is closed can be checked against them. Each returns or
+    # reports success for a Some/Ok whose payload word is 0.
+    it "rt_enum_payload still returns a zero payload verbatim":
+        val runtime = file_read(RUNTIME_C)
+        expect(runtime).to_contain("return e ? e->payload : rt_core_nil();")
+
+    it "rt_unwrap_or_trap gates on the discriminant, not the payload":
+        val core = file_read("src/runtime/simple_core/core_values.spl")
+        expect(core).to_contain("rt_unwrap_or_trap")

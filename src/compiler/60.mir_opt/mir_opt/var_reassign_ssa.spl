@@ -1196,19 +1196,33 @@ fn _ssa_written_local_id(inst: MirInst) -> i64:
             var_reassign_local_id_value(dest)
         case Call(dest, _, _):
             if dest.?:
-                val call_dest = dest
+            # UNWRAP, don't alias. `dest` is `LocalId?`; passing the optional
+            # itself into var_reassign_local_id_value made its
+            # `case LocalId(raw_id)` read the staged optional-payload word
+            # WHOLE, yielding (enclosing_kind_tag << 32) | real_id. Measured:
+            # emitted local ids of exactly (24<<32)+n, and 24 is MirInstKind's
+            # Call variant index. That mis-key both seeded next_temp from a
+            # corrupted max (every later temp came out (24<<32)+n) and split
+            # def-vs-use keying, so a Call-defined local was renamed on the def
+            # side while its uses kept the real id -> "use of undefined value
+            # '%lN'" and llc rejected the module.
+            # `??` NOT `.unwrap()`: a bare `unwrap` published by another module
+            # (Poll, FailSafeResult) steals every Option.unwrap binding on this
+            # lane and returns raw 0. The `dest.?` test above already
+            # established presence, so the fallback is unreachable.
+                val call_dest = dest ?? LocalId(id: -1)
                 var_reassign_local_id_value(call_dest)
             else:
                 -1
         case CallIndirect(dest, _, _, _):
             if dest.?:
-                val indirect_dest = dest
+                val indirect_dest = dest ?? LocalId(id: -1)
                 var_reassign_local_id_value(indirect_dest)
             else:
                 -1
         case Intrinsic(dest, _, _):
             if dest.?:
-                val intrinsic_dest = dest
+                val intrinsic_dest = dest ?? LocalId(id: -1)
                 var_reassign_local_id_value(intrinsic_dest)
             else:
                 -1

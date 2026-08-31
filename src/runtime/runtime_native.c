@@ -2300,6 +2300,44 @@ int64_t stdin_read_char(void) {
     return rt_string_new(&byte, 1);
 }
 
+#if defined(_WIN32)
+/*
+ * Windows CRT stdio defaults to TEXT mode, which rewrites every '
+' written to
+ * stdout into "
+" (and strips '' on read). That silently corrupts any
+ * byte-counted protocol carried over stdio: a JSON-RPC / MCP "Content-Length"
+ * frame terminated by CRLFCRLF leaves the process as CR CR LF CR CR LF, so the
+ * header separator no longer matches and the announced byte count no longer
+ * describes the bytes on the wire. Measured 2026-08-31 on the deployed native
+ * bin/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe: it emitted
+ * "Content-Length: 381
+
+{...}". The Rust seed does not have this
+ * defect because Rust's std never translates, which is exactly why the same
+ * server answers correctly when run from source and corruptly when built native.
+ *
+ * The guard is _WIN32 rather than _MSC_VER on purpose: text-mode translation is
+ * a property of the Windows C RUNTIME, not of the compiler, so a MinGW/UCRT
+ * build is affected identically. Only the constructor-registration mechanism
+ * below differs per compiler.
+ */
+static void rt_win_set_binary_stdio(void) {
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((constructor))
+static void rt_win_set_binary_stdio_ctor(void) { rt_win_set_binary_stdio(); }
+#elif defined(_MSC_VER)
+#pragma section(".CRT$XCU", read)
+static void __cdecl rt_win_set_binary_stdio_ctor(void) { rt_win_set_binary_stdio(); }
+__declspec(allocate(".CRT$XCU"))
+void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor;
+#endif
+#endif /* _WIN32 */
+
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
@@ -5344,11 +5382,26 @@ int64_t rt_string_trim_end(int64_t value) {
 int64_t rt_string_to_int(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
-    char buf[64];
-    uint64_t n = s->len < sizeof(buf) - 1 ? s->len : sizeof(buf) - 1;
-    if (n > 0) memcpy(buf, s->data, (size_t)n);
-    buf[n] = '\0';
-    return (int64_t)strtoll(buf, NULL, 10);
+    /* Copy into a NUL-terminated buffer sized from s->len -- the old fixed
+     * char buf[64] silently TRUNCATED any input longer than 63 bytes, so a
+     * 64-byte numeric string parsed as its first 63 bytes (a wrong number,
+     * no diagnostic). Stack for the common short case, heap for the rest.
+     * strtoll keeps the documented lenient semantics (whitespace/sign skip,
+     * longest digit prefix, INT64_MAX/MIN clamp on overflow), matching the
+     * Rust crate's uncapped rt_string_to_int_lenient and
+     * simple_core/core_string.spl. */
+    char stack_buf[64];
+    char* buf = stack_buf;
+    if (s->len >= sizeof(stack_buf)) {
+        if (s->len > SIZE_MAX - 1) return 0;
+        buf = (char*)malloc((size_t)s->len + 1);
+        if (!buf) return 0;
+    }
+    if (s->len > 0) memcpy(buf, s->data, (size_t)s->len);
+    buf[s->len] = '\0';
+    int64_t result = (int64_t)strtoll(buf, NULL, 10);
+    if (buf != stack_buf) free(buf);
+    return result;
 }
 
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
@@ -7035,10 +7088,44 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
 
 /* Canonical half-open integer range `[start, end)`, matching the RuntimeValue
  * array contract used by MIR range lowering. */
+/* Upper bound on elements rt_range will materialise; see the rationale at the
+ * check inside rt_range below. */
+#define RT_RANGE_MAX_LEN ((uint64_t)1 << 28)
+
 int64_t rt_range(int64_t start, int64_t end) {
     if (end <= start) return (int64_t)(uintptr_t)rt_array_new(0);
     uint64_t len = (uint64_t)end - (uint64_t)start;
     if (len > (uint64_t)INT64_MAX) return rt_core_nil();
+    /* FAIL FAST on an absurd bound. rt_range MATERIALISES its range -- one
+     * rt_array_push per element -- so a bogus `end` does not error, it spins
+     * for hours while allocating, which reads as a compiler HANG with no
+     * diagnostic. That is exactly how a mis-parsed paren-form struct spread
+     * (`T(..base, f: v)`, which parses as `Range{start: None, end: base}` --
+     * see the bug doc below) cost a full profiling session to localise.
+     *
+     * RT_RANGE_MAX_LEN = 1<<28 (268,435,456). Chosen for a wide separation,
+     * not a tight fit: materialising that many elements already costs >2 GB,
+     * so no legitimate range reaches it through this path, while any heap
+     * object value -- the actual failure mode -- is >= 0x100000000
+     * (4,294,967,296), a 16x margin above the cap.
+     *
+     * Deliberately a LOUD ABORT naming the operands, never a clamp: clamping
+     * would convert a hang into a silently wrong answer, which is worse.
+     * doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md */
+    if (len > RT_RANGE_MAX_LEN) {
+        fprintf(stderr,
+                "simple runtime: rt_range(%lld, %lld) would materialise %llu elements, "
+                "over the %llu limit.\n"
+                "  A bound this large is a bogus operand, not a real range -- an object "
+                "value used where an integer was expected.\n"
+                "  Common cause: paren-form struct spread `T(..base, f: v)`, which parses "
+                "as a range, not a spread. See\n"
+                "  doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md\n",
+                (long long)start, (long long)end,
+                (unsigned long long)len, (unsigned long long)RT_RANGE_MAX_LEN);
+        fflush(stderr);
+        abort();
+    }
     SplArray* result = rt_array_new((int64_t)len);
     if (!result) return rt_core_nil();
     for (int64_t value = start; value < end; value++) {
@@ -7876,6 +7963,20 @@ int64_t rt_enum_payload(int64_t value) {
     return e ? e->payload : rt_core_nil();
 }
 
+/* Formation probe for heap-typed enum/Option payloads at fail-closed
+ * handoffs. The 2026-08-22 stage-3 streaming-owner incident read back a
+ * Some-tagged Option whose payload word was 0: every discriminant/nil guard
+ * passed and the first field load SIGSEGV'd at 0x0. A heap payload must be a
+ * tagged pointer outside the zero page; this answers exactly that, with no
+ * registry probe -- a FORMATION check, not a liveness proof, so it can never
+ * false-reject a live object. Call sites own the payload-type contract
+ * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
+ * design and report 0 here). */
+int8_t rt_heap_ref_wellformed(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
+}
+
 /* Array `at`: bounds-checked element access with an Option (`T?`) result.
  *
  * The native lane previously had NO array `at` at all -- the LLVM codegen
@@ -8351,7 +8452,7 @@ void rt_bdd_clear_state(void) {
 int64_t rt_hash_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     for (uint64_t i = 0; i < s->len; i++) {
         hash ^= (uint8_t)s->data[i];
         hash *= 1099511628211ULL;

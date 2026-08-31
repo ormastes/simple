@@ -215,7 +215,11 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
 
     // Only attempt numbered dir resolution if base is within a project source tree.
     // Scanning arbitrary dirs like /tmp or / for numbered subdirs wastes ~90 syscalls.
-    let base_str = base.to_string_lossy();
+    // Normalize separators so the gate also matches Windows backslash paths.
+    // Measured 2026-08-31 on win32: every `compiler.core.*` import failed with
+    // "Cannot resolve module" under `bin/simple test` because this gate never
+    // matched `C:\...\src\compiler` and numbered-dir resolution was skipped.
+    let base_str = base.to_string_lossy().replace('\\', "/");
     let in_src =
         base_str.contains("/src/") || base_str.ends_with("/src") || base_str.starts_with("src/") || base_str == "src";
     if !in_src {
@@ -241,8 +245,11 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
 /// Only blocks package-level imports (__init__.spl) which could trigger loading entire
 /// subtrees. Individual module file imports are allowed.
 fn is_blocked_compiler_resolution(base: &Path, resolved: &Path) -> bool {
-    let base_str = base.to_string_lossy();
-    let resolved_str = resolved.to_string_lossy();
+    // Separator-normalized for Windows (see resolve_with_numbered_dirs): with
+    // backslash paths none of the substring tests below ever matched, so the
+    // OOM blocklist silently failed open on win32.
+    let base_str = base.to_string_lossy().replace('\\', "/");
+    let resolved_str = resolved.to_string_lossy().replace('\\', "/");
     if resolved_str.contains("src/compiler/80.driver/__init__.spl") {
         return false;
     }

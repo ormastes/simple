@@ -93,3 +93,106 @@ times (it is `lea` + indirect); use symbol-aware disassembly.
 sh scripts/check/check-stage2-option-unwrap-not-stolen.shs --stage2 <stage2-binary>
 # expect: FAIL -- ... 4 Simple '*_dot_unwrap' call site(s) inside lower_and_check_impl ...
 ```
+
+---
+
+## 2026-08-31 — independent re-derivation, plus a 7-second reproducer and a candidate mechanism
+
+Re-found from scratch while chasing
+`stage2_positional_entry_segv_module_surfaces_null_2026-08-31.md`, which is the
+same defect surfacing at the positional-entry gate. Recorded here because two
+of the three items below are new.
+
+### 1. Direct dynamic confirmation (lldb, not disassembly)
+
+Binary: `build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`, 32010840
+bytes, sha256 `3db6a922e3d856ef62d25e4e5f494a8afd4e4ad32e7a7b2541809b711809cdd0`.
+
+- Breakpoint at `lower_and_check_impl+1048` (the `if self.ctx.module_surfaces
+  != nil:` branch) **hits**; the branch body is
+  `ldr x0, [x5, #0x80]` / `blr` -> `lib__nogc_async_mut__async__poll__Poll_dot_unwrap`
+  / `str x0, [sp, #0x448]`.
+- Breakpoint on `hirlowering_for_module_with_diagnostics` then hits with
+  **`x1 == 0`** (`x1` is the `module_surfaces` argument). The field store into
+  `HirLowering` is faithful (`str x1, [x7, #0x58]`, offset 0x58 = field index
+  11 = `module_surfaces`); the VALUE is what is 0.
+- Three frames later `module_surface_registry_index` faults at
+  `ldr x0, [x6, #0x8]` with `x6 == 0`.
+
+### 2. A 7-second reproducer (new — no bootstrap, no stage binary)
+
+Built with the Rust seed using Stage 2's own flags (`--backend cranelift
+--runtime-bundle core-c-bootstrap --entry-closure --mode one-binary`), 57 files,
+6.6s wall:
+
+```simple
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use std.nogc_async_mut.async.poll.{Poll}        # <- the whole experiment
+
+class Ctx:
+    module_surfaces: ModuleSurfacesByName?
+
+fn drive(ctx: Ctx) -> ModuleSurfacesByName:
+    if ctx.module_surfaces != nil:
+        return ctx.module_surfaces.unwrap()      # returns raw 0
+    ModuleSurfacesByName.empty()
+```
+
+Per-variant verdicts (each variant separately built and RUN; counts, not a
+sequence):
+
+| variant | rc |
+|---|---|
+| `.unwrap()` on an `Option<Class>` field, `Poll` imported | **139** |
+| identical file with the `Poll` import deleted | 0 |
+| `use std.nogc_sync_mut.failsafe.core.*` instead of `Poll` | **139** |
+| `.unwrap()` via a typed local `val o: T? = ctx.f` | **139** |
+| `ctx.f ?? T.empty()` | 0 |
+| `if val x = ctx.f:` | 0 |
+| `match ctx.f: case Some(v) / case None` | 0 |
+
+Two consequences:
+
+- **Renaming `Poll.unwrap` is not a fix, and this is measured, not argued.**
+  `FailSafeResult.unwrap` (`src/lib/nogc_sync_mut/failsafe/core.spl:140`) steals
+  it identically; `src/` holds 13 `fn unwrap` definitions. Any one of them can
+  be the thief.
+- The trigger is **the presence of a bare-`unwrap` provider in the module's
+  import surface**, not the receiver expression: a typed local fails too.
+
+### 3. Candidate mechanism — INDICATED BY CODE READING, NOT YET INSTRUMENTED
+
+`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`,
+`resolve_method_call_static` (:724).
+
+That function already carries a guard for exactly this
+(`unwrap | unwrap_or | unwrap_err | is_some | is_none | is_ok | is_err`), and its
+comment even names `FailSafeResult.unwrap` as the hazard — **but the guard sits
+in the `else` branch, i.e. it only runs when `resolve_name_variants` FAILS**:
+
+```rust
+if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
+    *func_name = resolved;              // <- bare `unwrap` rebound here, guard never reached
+} else {
+    ... if matches!(method, "unwrap" | ...) { return; }   // the guard
+}
+```
+
+When any closure module publishes a bare `unwrap` into the use/import map,
+`resolve_name_variants` **succeeds** and the guard is bypassed. This is the same
+fail-open shape the string-builtin guard was hoisted ABOVE `resolve_name_variants`
+to close on 2026-07-25 (see that guard's comment in the same function), and it is
+consistent with every row of the table above — including the refutation in the
+section above, since this path is neither the `closures_structs.rs` suffix
+binder nor the `calls.rs` import ladder.
+
+**Not instrumented.** No probe was added to mangle.rs to observe the rebind
+directly, so treat this as the strongest available hypothesis rather than a
+located mechanism. The cheap next step is a one-line eprintln in that `if let
+Some(resolved)` arm, gated on `method == "unwrap"`, replayed against the 7s
+reproducer above — seconds per iteration.
+
+**Do not simply hoist the enum-helper list.** The in-file comment records that
+hoisting it was tried and reverted: it "broke legitimate resolution-success
+rebinds (the compiled interpreter's own Option helpers printed `<unknown>` for
+every text-option `??`, 2026-07-25)". A narrower predicate is required.

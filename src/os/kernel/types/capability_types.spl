@@ -19,6 +19,18 @@ val SIMPLEOS_NVME_ADMIN_QUEUE_ID: u16 = 0
 val SIMPLEOS_NVME_SYSTEM_QUEUE_ID: u16 = 1
 val SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID: u16 = 2
 
+fn capability_ipv4_address(a: u8, b: u8, c: u8, d: u8) -> u32:
+    """Pack IPv4 octets in the repository's canonical SockaddrIn layout.
+
+    SockaddrIn.addr stores the first dotted-decimal octet in the low byte:
+    `a | b<<8 | c<<16 | d<<24`.  NetBindIpv4 uses exactly that representation,
+    so callers can compare a copied sockaddr address without byte swapping.
+    """
+    (a as u32) |
+        ((b as u32) << 8) |
+        ((c as u32) << 16) |
+        ((d as u32) << 24)
+
 struct CapabilityToken:
     """Typed capability token with generation counter for revocation.
 
@@ -87,6 +99,12 @@ enum CapabilityKind:
     SystemMount
     SystemTime
     SystemPrivilege         # Gate for sys_privctl — only SYSTEM tasks may call
+
+    # Append-only network authority foundation. Keep these after all existing
+    # variants so established enum ordering remains stable. They deliberately
+    # do not imply NetConnect, NetListen, or each other.
+    NetSocketCreate
+    NetBindIpv4(address: u32, port: u16)
 
 struct CapabilitySet:
     """Set of capabilities held by a task.
@@ -246,9 +264,15 @@ fn _path_prefix_allows(held_prefix: text, required_path: text) -> bool:
         return true
     if required_path == "":
         return false
+    if required_path == held_prefix:
+        return true
     if required_path.len() < held_prefix.len():
         return false
-    required_path[0:held_prefix.len()] == held_prefix
+    if required_path[0:held_prefix.len()] != held_prefix:
+        return false
+    if required_path.len() == held_prefix.len():
+        return true
+    required_path[held_prefix.len()] == "/"
 
 fn _rights_allow(held_rights: u32, required_rights: u32) -> bool:
     # Deny zero-zero wildcard: a request with no rights specified is always denied.

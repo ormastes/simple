@@ -424,6 +424,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
+        Expr::StructSpread(expr) => Expr::StructSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::StructInit { name, fields, spread } => Expr::StructInit {
             name: name.clone(),
             fields: fields

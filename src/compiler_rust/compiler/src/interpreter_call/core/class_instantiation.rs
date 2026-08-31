@@ -324,23 +324,25 @@ pub(crate) fn instantiate_class(
     // `Foo(..base, field: x)` copies every field of `base` before explicit
     // fields override them (identical semantics to the brace-form
     // `Expr::StructInit` spread handled in interpreter/expr/collections.rs).
-    // The parser encodes the `..base` spread argument as an unnamed positional
-    // prefix range `Expr::Range { start: None, end: Some(base) }` (the `..`
-    // token is shared with range syntax), so recognize that shape here. Without
-    // this the spread argument was evaluated as a real range and coerced via
-    // `as_int()`, which failed with "type mismatch: cannot convert object to
-    // int" whenever the base was a struct (e.g. `MirFunction(..func, blocks:
-    // ...)` throughout the MIR optimization passes).
+    // The parser encodes the `..base` spread argument as
+    // `Expr::StructSpread(base)` (see `parse_arguments` in
+    // parser/src/expressions/helpers.rs).
+    //
+    // It used to encode it as an unnamed positional prefix range
+    // `Expr::Range { start: None, end: Some(base) }`, because `..` is shared
+    // with range syntax and the paren form had no spread rule at all. This
+    // loop matched THAT shape as a workaround. The parser now produces a real
+    // spread node, so the range shape is matched no more — a genuine
+    // `f(..n)` prefix range is a range again, and the compiled/native path
+    // (which lowered the old shape to `rt_range(0, <tagged object pointer>)`
+    // and HUNG materialising billions of elements) is fixed at the source:
+    // `doc/08_tracking/bug/struct_spread_paren_form_parses_as_range_2026-08-30.md`.
     for arg in args {
         if arg.name.is_some() {
             continue;
         }
         let base_expr = match &arg.value {
-            simple_parser::ast::Expr::Range {
-                start: None,
-                end: Some(base),
-                ..
-            } => base,
+            simple_parser::ast::Expr::StructSpread(base) => base,
             _ => continue,
         };
         let base_val = evaluate_expr(base_expr, env, functions, classes, enums, impl_methods)?;
@@ -388,16 +390,7 @@ pub(crate) fn instantiate_class(
     let mut positional_idx = 0;
     for arg in args {
         // Struct-spread arguments were consumed in the first pass above.
-        if arg.name.is_none()
-            && matches!(
-                &arg.value,
-                simple_parser::ast::Expr::Range {
-                    start: None,
-                    end: Some(_),
-                    ..
-                }
-            )
-        {
+        if arg.name.is_none() && matches!(&arg.value, simple_parser::ast::Expr::StructSpread(_)) {
             continue;
         }
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
