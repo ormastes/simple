@@ -60,11 +60,23 @@ done
 [ -n "$CROSS" ] || err "no riscv64 cross-gcc"
 [ -d "$OPENSBI_SRC" ] || err "no OpenSBI checkout at $OPENSBI_SRC"
 
+# FW_PAYLOAD_PATH is a make VARIABLE, invisible to make's dependency graph
+# (OpenSBI .incbin's the payload into fw_payload.o). Without deleting the
+# payload objects, make says "Nothing to be done for 'all'" and this probe
+# boots a PREVIOUS run's firmware — a silently stale measurement.
+rm -f "$OPENSBI_SRC"/build/platform/generic/firmware/fw_payload.* \
+      "$OPENSBI_SRC"/build/platform/generic/firmware/payload*.o
+
 make -C "$OPENSBI_SRC" PLATFORM=generic CROSS_COMPILE="$CROSS" \
     FW_PAYLOAD=y FW_PAYLOAD_PATH="$IMG" FW_PAYLOAD_OFFSET=0x200000 -j4 \
     >"$OUT/opensbi.log" 2>&1 || { tail -20 "$OUT/opensbi.log" >&2; err "OpenSBI build failed"; }
 FW=$OPENSBI_SRC/build/platform/generic/firmware/fw_payload.bin
 [ -s "$FW" ] || err "fw_payload.bin missing"
+
+# Positive evidence that THIS Image is what got embedded.
+tail -c +2097153 "$FW" | head -c "$(wc -c <"$IMG")" >"$OUT/embedded.bin"
+cmp -s "$OUT/embedded.bin" "$IMG" \
+    || err "fw_payload.bin does not embed $IMG at offset 0x200000 — stale firmware"
 
 command -v qemu-system-riscv64 >/dev/null 2>&1 || err "qemu-system-riscv64 not installed"
 

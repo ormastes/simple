@@ -451,12 +451,33 @@ boot_row() {
     why=$(elf_free_of_weak_nil_stubs "$elf") \
         || fail "$rd kernel ELF is not safely linked: $why (a clean link is not evidence; see the WEAK-NIL STUB CHECK header)"
 
+    # FW_PAYLOAD_PATH is a make VARIABLE, not a dependency: OpenSBI embeds the
+    # payload with `.incbin` inside fw_payload.o, and make cannot see that the
+    # file the variable names has changed. Building row 2 straight after row 1
+    # therefore printed `Nothing to be done for 'all'` and left the PREVIOUS
+    # row's fw_payload.bin in place — both rows booted byte-identical firmware
+    # (md5 b214f3f2652786909e113b915521aff1), so the build-and-run guest ran the
+    # INTERPRETER payload and the gate reported "never reached its entry".
+    # Deleting the payload objects forces the re-embed.
+    rm -f "$OPENSBI_SRC"/build/platform/generic/firmware/fw_payload.* \
+          "$OPENSBI_SRC"/build/platform/generic/firmware/payload*.o
+
     make -C "$OPENSBI_SRC" PLATFORM=generic CROSS_COMPILE="$OPENSBI_CROSS" \
         FW_PAYLOAD=y FW_PAYLOAD_PATH="$img" FW_PAYLOAD_OFFSET=0x200000 -j4 \
         >"$WORK/$rd-opensbi-build.log" 2>&1 \
         || { tail -20 "$WORK/$rd-opensbi-build.log" >&2; nothing "OpenSBI fw_payload build failed for $rd"; }
     fw=$OPENSBI_SRC/build/platform/generic/firmware/fw_payload.bin
     [ -s "$fw" ] || nothing "fw_payload.bin missing after build for $rd"
+
+    # POSITIVE evidence that THIS row's Image is what got embedded. A row
+    # symbol being present in the ELF is not evidence about the booted image;
+    # only the payload bytes are. Compare the Image against the firmware at
+    # FW_PAYLOAD_OFFSET (0x200000 = 2097152).
+    isz=$(wc -c <"$img")
+    tail -c +2097153 "$fw" | head -c "$isz" >"$WORK/$rd-embedded.bin"
+    cmp -s "$WORK/$rd-embedded.bin" "$img" \
+        || fail "$rd fw_payload.bin does not embed $rd/kernel.Image at offset 0x200000 — the OpenSBI wrap did not pick this row up (script bug, not an environment gap)"
+
     cp "$fw" "$WORK/$rd-fw_payload.bin"
 
     rm -f "$ROW_LOG"
