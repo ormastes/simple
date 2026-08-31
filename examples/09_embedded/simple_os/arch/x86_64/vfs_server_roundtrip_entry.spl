@@ -45,8 +45,10 @@
 # correct response is to not pull the shim in.
 #
 # WHAT MAKES THE ROUND-TRIP HONEST:
-#   * The NVMe volume starts EMPTY (bare mkfs.vfat FAT32, no partition table).
-#     Every byte the guest reads back is a byte the guest itself wrote.
+#   * The NVMe volume is a raw SimpleOS SYSTEM FAT32 volume (no partition
+#     table) carrying exactly the payloads vfs_boot_init_production() requires
+#     — and asserted, before boot, to contain neither this run's nonce nor any
+#     /VFSRT.TXT entry. Every nonce byte read back is a byte this guest wrote.
 #   * The payload is a PER-RUN NONCE generated into
 #     build/os/generated/vfs_roundtrip_nonce.spl at build time. A stale kernel
 #     or a stale disk image carries a stale nonce and CANNOT satisfy the gate,
@@ -99,7 +101,13 @@ fn _start():
     # --- bring the filesystem SERVER up ------------------------------------
     serial_println("[vfsrt] initializing storage stack (VFS/NVMe/FAT32)")
     val storage_ok = vfs_boot_init_production()
-    serial_println("[vfsrt] vfs_boot_init_production ok={storage_ok}")
+    # Render the bool EXPLICITLY. `"{storage_ok}"` renders a Simple bool as
+    # `1`/`0`, not `true`/`false`, so the interpolated form silently missed the
+    # gate's L3 needle even on a fully successful production bring-up (measured
+    # 2026-08-31: the transcript said `ok=1` while every prerequisite passed).
+    # Do NOT "fix" that by relaxing the needle — the gate's own selftest
+    # fixtures are written in true/false and must stay that way.
+    serial_println("[vfsrt] vfs_boot_init_production ok=" + (if storage_ok: "true" else: "false"))
     if not storage_ok:
         serial_println("[vfsrt] PROBE FAILED: storage stack did not come up")
         return
@@ -116,14 +124,15 @@ fn _start():
 
     # --- the round-trip: DATA through the server ---------------------------
     val payload = "vfsrt-nonce:{nonce}"
+    serial_println("[vfsrt] server write begin path={VFSRT_PATH} bytes={payload.len()}")
     val wrote = g_vfs_write_file_text(VFSRT_PATH, payload)
-    serial_println("[vfsrt] server write path={VFSRT_PATH} ok={wrote}")
+    serial_println("[vfsrt] server write path=" + VFSRT_PATH + " ok=" + (if wrote: "true" else: "false"))
     if not wrote:
         serial_println("[vfsrt] PROBE FAILED: server refused the write")
         return
 
     val exists = g_vfs_file_exists(VFSRT_PATH)
-    serial_println("[vfsrt] server stat exists={exists}")
+    serial_println("[vfsrt] server stat exists=" + (if exists: "true" else: "false"))
 
     val got = g_vfs_read_file_text(VFSRT_PATH)
     serial_println("[vfsrt] server read-back={got}")

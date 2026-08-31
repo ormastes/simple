@@ -19,8 +19,12 @@
 # The gate greps for that exact nonce, in the serial transcript AND in the raw
 # NVMe image on the host. A stale kernel, a stale disk image, or a probe that
 # printed a banner without moving data all carry the wrong nonce (or none) and
-# FAIL. The NVMe volume is a bare mkfs.vfat FAT32 with no partition table and
-# starts EMPTY, so every byte read back is a byte the guest itself wrote.
+# FAIL. The NVMe volume is a raw FAT32 SimpleOS SYSTEM volume with no partition
+# table. It is NOT blank: vfs_boot_init_production() fails closed on a blank
+# disk, and that production check is deliberately NOT relaxed to make this gate
+# pass (see step 2 and scripts/os/build_vfsrt_system_volume.shs). What makes the
+# read-back honest is the nonce, not emptiness — the freshly minted volume is
+# asserted to contain neither the nonce nor a /VFSRT.TXT entry before boot.
 #
 # REQUIRED RUNGS (serial log) — all must be present:
 #   L1  "[grub-uefi] multiboot loading"        OVMF -> GRUB-EFI app ran
@@ -219,7 +223,7 @@ selftest
 # ---------------------------------------------------------------------------
 command -v qemu-system-x86_64 >/dev/null 2>&1 || nothing "qemu-system-x86_64 missing"
 command -v grub-mkstandalone  >/dev/null 2>&1 || nothing "grub-mkstandalone missing"
-command -v mkfs.vfat          >/dev/null 2>&1 || nothing "mkfs.vfat missing"
+command -v cc                >/dev/null 2>&1 || nothing "cc missing (needed to build the FAT32 system-volume writer)"
 [ -f "$OVMF_CODE" ]     || nothing "OVMF_CODE missing at $OVMF_CODE"
 [ -f "$OVMF_VARS_SRC" ] || nothing "OVMF_VARS missing at $OVMF_VARS_SRC"
 [ -f "$SEED" ]          || nothing "seed missing at $SEED (build it: cargo build --release --bin simple)"
@@ -230,12 +234,25 @@ NONCE="${VFSRT_NONCE:-$(date -u +%Y%m%d%H%M%S)$$}"
 printf 'pub fn vfs_roundtrip_nonce() -> text:\n    "%s"\n' "$NONCE" > "$NONCE_SPL"
 echo "[vfsrt] nonce=$NONCE -> $NONCE_SPL"
 
-# ---- 2. Empty FAT32 NVMe volume (raw, no partition table) -----------------
+# ---- 2. SimpleOS system FAT32 NVMe volume (raw, no partition table) -------
 # Recreated EVERY run: a previous run's file must never satisfy this one.
+#
+# This volume is NOT blank. `vfs_boot_init_production()` fails closed unless the
+# disk carries the system payloads a production SimpleOS boot requires (version
+# probe + the BROWSMF/HELLOSMF/CLANGSMF app slots, the first of which must carry
+# ELF magic). That refusal is correct and is NOT relaxed to make this gate pass;
+# the ARTIFACT was brought up to the production contract instead. See
+# scripts/os/build_vfsrt_system_volume.shs for the full justification.
+#
+# The gate's honesty never rested on emptiness — it rests on the PER-RUN NONCE.
+# Both anchors below are asserted on the FRESH volume, before anything boots:
+# the nonce must be absent, and /VFSRT.TXT must not already exist. So every
+# nonce byte read back afterwards is still a byte this run's guest wrote.
 rm -f "$IMG"
-dd if=/dev/zero of="$IMG" bs=1M count=64 status=none
-mkfs.vfat -F 32 -n VFSRT "$IMG" >/dev/null 2>&1 || nothing "mkfs.vfat failed on $IMG"
+sh scripts/os/build_vfsrt_system_volume.shs "$IMG" "${VFSRT_VOLUME_MIB:-512}" \
+    || nothing "system volume staging failed for $IMG"
 scan_image "$IMG" "$NONCE" && nothing "fresh image already contains the nonce (impossible; refusing)"
+grep -qa 'VFSRT   TXT' "$IMG" && nothing "fresh image already carries a /VFSRT.TXT directory entry (refusing)"
 
 # ---- 3. Kernel (RUST SEED; --timeout 1200 deliberate) ----------------------
 if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
