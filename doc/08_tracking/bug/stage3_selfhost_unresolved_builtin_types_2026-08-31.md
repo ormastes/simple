@@ -1,3 +1,76 @@
+# CORRECTION 2026-08-31 — this record's original framing was WRONG
+
+Three claims in the original text below are refuted by a follow-up trace. They are
+left in place, struck here rather than silently edited, because the wrong framing
+is instructive:
+
+1. **"Option, Dict and Result are builtins failing to resolve" — FALSE, and it was
+   called "the load-bearing observation".** Those 225 counts are
+   `[hir-*-origin-unresolved]` ADVISORY eprints, not fatals. There are ZERO fatals
+   for Option/Dict/Result. `lower_type` has explicit arms for them
+   (`20.hir/hir_lowering/types.spl:840` Result, `:857` Dict; argless Option takes
+   the soft `recovered` path at `:985`), so builtins never reach `self.error`. The
+   advisory walk simply has no builtin table. A non-problem.
+2. **"1,088 unresolved-type fatals" — inflated.** 1,088 is the total `[hir-fatal]`
+   count; only **796** are `unresolved type:`. The rest are `unresolved name:` and
+   `missing importing module surface`.
+3. **"across 538 files" — wrong denominator.** 538 is the number of files LOADED.
+   Distinct files carrying a fatal is **200**.
+
+Lesson worth keeping: the counts came from `grep -c` over mixed diagnostic
+severities. Advisory eprints and hard fatals were tallied together, and the most
+alarming-looking group turned out to be the advisory one.
+
+# ACTUAL ROOTS — two, not one
+
+**Root A — truncated entry closure: 543 fatals (68%).** The declaring file is never
+loaded at all. Phase 1 reports `closure:done scanned=538` out of ~1500 files, and
+replaying the closure's own import extractor over those 538 finds **117 dotted
+import targets never loaded** (92 with a real file on disk) — including
+`compiler.frontend.core.parser_stmts`, `.parser_decls_use`, `._Ast.decl_nodes`,
+`compiler.backend.c_backend_translate`, and `feature_caps_types`.
+`src/compiler/20.hir/hir_operators.spl` has **zero mentions in the entire Stage-3
+log**, which is why HirBinOp 159 + HirUnaryOp 145 + HirAssignOp 125 = 429 fatals
+appear, plus TargetCapsKind 30 + X86Caps 29.
+
+This also explains why the first attempted fix was INERT: adding an import of
+`hir_operators` to `hir_definitions.spl` cannot help when `hir_operators.spl` is
+never loaded. That attempt was measured (counts identical, 1088 -> 1088) and
+reverted.
+
+Ruled out for Root A: extractor logic (a Python replay emits every missing
+target), `export use` specificity (192 dropped edges are plain `use`), list
+truncation, substring misroute, and Dict array-read corruption.
+
+**Root B — glob-only visibility: 253 fatals (32%).** The class already documented
+at `hir_definitions.spl:10-45` (CompileError 20, ConcreteType 19, MirModule 18, …),
+same shape as the previously fixed `MethodResolution` and
+`AsmConstraintKind`/`AsmLocation`.
+
+# Emitters
+
+- Fatal: `20.hir/hir_lowering/types.spl:994` — `self.error("unresolved type: {name}", span)`,
+  reached only from `case _` after `self.symbols.lookup` fails.
+- Advisory: `20.hir/hir_lowering/_Items/module_reexport_materialization.spl:492` and `:766`.
+  That walk resolves a dependency to its physical origin using only declarations,
+  `export use` hops, and explicit named imports — globs excluded by design.
+
+# Open question gating the Root A fix
+
+The fix lives in `driver_source_pipeline_loading.spl:313-333`. Its shape depends on
+whether `_driver_resolve_entry_import` returned `""` (in which case the loud
+`add_error` at `:330` fired 117 times but is absent from this stderr log, which
+carries only eprint/log_phase output), or whether one of the two silent
+`contains_key` `continue`s at `:314-320` swallowed them.
+
+# Attribution — still cannot tell
+
+No baseline exists; Stage 3 had never been reachable. One datum: `hir_operators.spl`
+was split out of `hir_definitions.spl` on 2026-08-21 (`4b88aebf00b`) and is reachable
+only via that `export use`, so the largest single family is 10 days old. But
+`parser_stmts` and `_Ast` are long-standing, so the closure defect itself is
+probably not new.
+
 # Stage 3 self-host: 1,088 HIR `unresolved type` fatals across 538 files, including builtins
 
 - **Filed:** 2026-08-31
