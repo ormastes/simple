@@ -61,7 +61,7 @@ use std::collections::HashMap;
 // Import parent interpreter types and functions
 use super::{
     await_value, captured_env_with_live_globals, evaluate_expr, exec_block, exec_block_fn, execute_function_body,
-    publish_and_repoint, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
+    publish_and_repoint, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_AFTER_ALL, BDD_CONTEXT_DEFS, BDD_INDENT,
     BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, IMMUTABLE_VARS,
 };
 
@@ -3075,6 +3075,11 @@ pub(super) fn exec_context(
             // Increase indent for nested blocks
             BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() += 1);
 
+            // Open this group's `after_all` scope; drained below when the
+            // group's body ends. See the same push/drain pair in
+            // interpreter_call/bdd.rs and interpreter_call/block_execution.rs.
+            BDD_AFTER_ALL.with(|cell: &RefCell<Vec<Vec<Value>>>| cell.borrow_mut().push(vec![]));
+
             // If this is a context_def reference, execute its givens first
             if let Some(ctx_blocks) = ctx_def_blocks {
                 for ctx_block in ctx_blocks {
@@ -3084,6 +3089,27 @@ pub(super) fn exec_context(
 
             // Execute the block
             let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+
+            // Drain this group's `after_all` hooks in registration order now
+            // that its body -- and therefore every example in it, which this
+            // runner executes eagerly -- has finished. A hook error only
+            // surfaces when the body itself succeeded, so it cannot mask a
+            // real example failure.
+            let after_all_hooks =
+                BDD_AFTER_ALL.with(|cell: &RefCell<Vec<Vec<Value>>>| cell.borrow_mut().pop().unwrap_or_default());
+            let mut hook_err = None;
+            for hook in after_all_hooks {
+                if let Err(e) = exec_block_value(hook, env, functions, classes, enums, impl_methods) {
+                    if hook_err.is_none() {
+                        hook_err = Some(e);
+                    }
+                }
+            }
+            let result = match (result, hook_err) {
+                (Ok(v), None) => Ok(v),
+                (Ok(_), Some(e)) => Err(e),
+                (other, _) => other,
+            };
 
             // Clear lazy values after context exits
             BDD_LAZY_VALUES.with(|cell: &RefCell<HashMap<String, (Value, Option<Value>)>>| cell.borrow_mut().clear());

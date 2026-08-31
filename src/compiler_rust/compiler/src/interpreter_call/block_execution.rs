@@ -4,7 +4,7 @@ use super::super::interpreter_control::{assert_stmt_failure, is_condition_presen
 use super::super::interpreter_helpers::{
     bind_pattern_value, handle_method_call_with_self_update, restore_pattern_scope, save_pattern_scope,
 };
-use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
+use super::bdd::{BDD_AFTER_ALL, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
@@ -484,6 +484,7 @@ pub(super) fn exec_block_closure_into(
 
                         BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
                         BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+                        BDD_AFTER_ALL.with(|cell| cell.borrow_mut().push(vec![]));
 
                         if let Some(ctx_blocks) = ctx_def_blocks {
                             for ctx_block in ctx_blocks {
@@ -499,6 +500,16 @@ pub(super) fn exec_block_closure_into(
                             enums,
                             impl_methods,
                         )?;
+
+                        // Drain this group's `after_all` hooks now that its body
+                        // (and every example in it) has finished, in
+                        // registration order. Mirrors the same drain in the
+                        // call-form `describe`/`context` handler in bdd.rs.
+                        let after_all_hooks =
+                            BDD_AFTER_ALL.with(|cell| cell.borrow_mut().pop().unwrap_or_default());
+                        for hook in after_all_hooks {
+                            exec_block_value(hook, &mut local_env, functions, classes, enums, impl_methods)?;
+                        }
 
                         BDD_BEFORE_EACH.with(|cell| {
                             cell.borrow_mut().pop();
