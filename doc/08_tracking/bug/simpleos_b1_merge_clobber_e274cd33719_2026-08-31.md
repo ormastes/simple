@@ -271,7 +271,7 @@ done here.
 under `src/os`, `src/app`. All 42 are now repaired; the guard reports
 `PASS — 0 _partN re-export(s) present across 8982 module(s)`.
 
-Repair used `scripts/check/repair-dangling-reexport-facades.shs`, which is
+Repair used `scripts/tool/repair-dangling-reexport-facades.shs`, which is
 dry-run by default and refuses to overwrite a facade unless **every** HEAD-only
 insertion is itself one of the dangling `_partN` lines — i.e. HEAD added only the
 defect. That condition was true for 13 facades outright. The pattern is
@@ -319,16 +319,16 @@ verified rather than taken on trust:
 
 ## Repro / tooling added
 
-- `scripts/check/enumerate-os-lowering-failures.shs` — builds the entstore kernel
+- `scripts/tool/enumerate-os-lowering-failures.shs` — builds the entstore kernel
   and prints the failing-module list grouped by error class; full log stays in
   `build/os/entstore/lowering.log`.
-- `scripts/check/sweep-os-parse-errors.shs` + `summarize-os-parse-errors.shs` —
+- `scripts/tool/sweep-os-parse-errors.shs` + `summarize-os-parse-errors.shs` —
   parse-sweep all 2024 `src/os` `.spl` files in parallel and reduce to the set of
   distinct OFFENDING files (discovery aborts on the first bad file, so a build
   can never enumerate them).
-- `scripts/check/trace-symbol-across-revs.shs` — the clobber-vs-never-existed
+- `scripts/tool/trace-symbol-across-revs.shs` — the clobber-vs-never-existed
   discriminator used throughout this record.
-- `scripts/check/check-os-modules-compile.shs` — per-module compile check.
+- `scripts/tool/compile-os-modules.shs` — per-module compile check.
   **Known limit:** standalone `simple compile <file>` reports OK for modules the
   real whole-project build rejects, so it is not a substitute for the build.
 
