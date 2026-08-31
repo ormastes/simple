@@ -56,6 +56,82 @@ fn _rect_valid(rect: WmDamageRectV1) -> bool:
         return false
     true
 
+fn _clip_rect(rect: WmDamageRectV1, clip_width: i32, clip_height: i32) -> WmDamageRectV1?:
+    var left = rect.x
+    var top = rect.y
+    var right = rect.x.to_i64() + rect.width.to_i64()
+    var bottom = rect.y.to_i64() + rect.height.to_i64()
+    if left < 0:
+        left = 0
+    if top < 0:
+        top = 0
+    if right > clip_width.to_i64():
+        right = clip_width.to_i64()
+    if bottom > clip_height.to_i64():
+        bottom = clip_height.to_i64()
+    if right <= left.to_i64() or bottom <= top.to_i64():
+        return nil
+    Some(WmDamageRectV1(
+        x: left, y: top,
+        width: (right - left.to_i64()).to_i32(),
+        height: (bottom - top.to_i64()).to_i32()
+    ))
+
+fn _touches(first: WmDamageRectV1, second: WmDamageRectV1) -> bool:
+    val first_right = first.x.to_i64() + first.width.to_i64()
+    val first_bottom = first.y.to_i64() + first.height.to_i64()
+    val second_right = second.x.to_i64() + second.width.to_i64()
+    val second_bottom = second.y.to_i64() + second.height.to_i64()
+    first.x.to_i64() <= second_right and second.x.to_i64() <= first_right and
+        first.y.to_i64() <= second_bottom and second.y.to_i64() <= first_bottom
+
+fn _union(first: WmDamageRectV1, second: WmDamageRectV1) -> WmDamageRectV1:
+    val left = if first.x < second.x: first.x else: second.x
+    val top = if first.y < second.y: first.y else: second.y
+    val first_right = first.x.to_i64() + first.width.to_i64()
+    val second_right = second.x.to_i64() + second.width.to_i64()
+    val right = if first_right > second_right: first_right else: second_right
+    val first_bottom = first.y.to_i64() + first.height.to_i64()
+    val second_bottom = second.y.to_i64() + second.height.to_i64()
+    val bottom = if first_bottom > second_bottom: first_bottom else: second_bottom
+    WmDamageRectV1(
+        x: left, y: top,
+        width: (right - left.to_i64()).to_i32(),
+        height: (bottom - top.to_i64()).to_i32()
+    )
+
+pub fn wm_damage_merge_rects_v1(
+    first: [WmDamageRectV1],
+    second: [WmDamageRectV1],
+    clip_width: i32,
+    clip_height: i32
+) -> [WmDamageRectV1]:
+    """Clip and transitively coalesce two already-bounded region batches."""
+    if clip_width <= 0 or clip_height <= 0:
+        return []
+    var result: [WmDamageRectV1] = []
+    var source: [WmDamageRectV1] = []
+    for rect in first:
+        source = source.push(rect)
+    for rect in second:
+        source = source.push(rect)
+    for raw in source:
+        if val Some(clipped) = _clip_rect(raw, clip_width, clip_height):
+            var candidate = clipped
+            var changed = true
+            while changed:
+                changed = false
+                var kept: [WmDamageRectV1] = []
+                for existing in result:
+                    if _touches(candidate, existing):
+                        candidate = _union(candidate, existing)
+                        changed = true
+                    else:
+                        kept = kept.push(existing)
+                result = kept
+            result = result.push(candidate)
+    result
+
 pub fn wm_damage_admit_v1(
     candidate: WmDamageRegionV1,
     current_generation: u64,
@@ -74,13 +150,14 @@ pub fn wm_damage_admit_v1(
     for rect in candidate.rects:
         if not _rect_valid(rect):
             return _rejected("invalid-damage-geometry", candidate.generation, candidate.scene_revision)
+    val normalized = wm_damage_merge_rects_v1([], candidate.rects, WM_DAMAGE_MAX_DIMENSION, WM_DAMAGE_MAX_DIMENSION)
     WmRedrawDecisionV1(
         accepted: true,
         generation: candidate.generation,
         scene_revision: candidate.scene_revision,
         full_redraw: candidate.full_redraw,
         reason: candidate.reason,
-        rects: candidate.rects
+        rects: normalized
     )
 
-export WmDamageRectV1, WmDamageRegionV1, WmRedrawDecisionV1, wm_damage_admit_v1
+export WmDamageRectV1, WmDamageRegionV1, WmRedrawDecisionV1, wm_damage_admit_v1, wm_damage_merge_rects_v1

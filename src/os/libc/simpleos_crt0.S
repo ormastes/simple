@@ -4,7 +4,7 @@
  * Called by the kernel's process loader after mapping the ELF.
  * Stack is already set up by the kernel. BSS must be zeroed.
  *
- * Calls main(argc=0, argv=NULL) then exit(retval).
+ * Calls main(argc, argv, envp) then exit(retval).
  */
 
 .intel_syntax noprefix
@@ -16,9 +16,55 @@ _start:
     /* Clear direction flag (ABI requirement) */
     cld
 
+    /*
+     * Admit the conventional process entry stack before touching runtime
+     * state:
+     *   rsp[0] = argc, rsp[1...] = argv, then envp.
+     * argv is capped at 64 entries and envp at 128.  Every declared argv
+     * entry must be non-NULL, argv[argc] must be NULL, and envp must terminate
+     * within its bound.  Malformed loader input cannot reach constructors or
+     * user code.
+     */
+    test    rsp, 15
+    jnz     .Lmalformed_initial_stack
+    mov     r12, qword ptr [rsp]        /* argc */
+    lea     r13, [rsp + 8]              /* argv */
+    cmp     r12, 64
+    ja      .Lmalformed_initial_stack
+
+    xor     ecx, ecx                    /* argv index */
+.Lscan_argv:
+    cmp     rcx, r12
+    jae     .Largv_terminated
+    cmp     qword ptr [r13 + rcx*8], 0
+    je      .Lmalformed_initial_stack
+    inc     rcx
+    jmp     .Lscan_argv
+.Largv_terminated:
+    cmp     qword ptr [r13 + r12*8], 0
+    jne     .Lmalformed_initial_stack
+    lea     r14, [r13 + r12*8 + 8]
+
+    mov     rax, r14                    /* bounded envp cursor */
+    mov     ecx, 128
+.Lscan_envp:
+    cmp     qword ptr [rax], 0
+    je      .Linitial_stack_valid
+    add     rax, 8
+    dec     ecx
+    jnz     .Lscan_envp
+    /* Exactly 128 entries are valid only when the next slot terminates. */
+    cmp     qword ptr [rax], 0
+    jne     .Lmalformed_initial_stack
+.Linitial_stack_valid:
+
     /* Zero BSS segment */
     lea     rdi, [rip + __bss_start]
     lea     rcx, [rip + __bss_end]
+    test    rcx, rcx
+    jz      .Lbss_done          /* generic links may leave weak end undefined */
+    cmp     rdi, rcx
+    jae     .Lbss_done          /* reject missing/reversed linker boundaries */
     sub     rcx, rdi
     jz      .Lbss_done          /* skip if BSS is empty */
     xor     eax, eax
@@ -28,12 +74,9 @@ _start:
     /* Align stack to 16 bytes (ABI requirement) */
     and     rsp, -16
 
-    /* Initialize C++ constructors and libc (.init_array) */
-    call    __libc_init_array
-
-    /* Set environ to NULL (no initial environment from kernel yet) */
+    /* Publish environ before constructors; host smoke has envp, SimpleOS may not. */
     lea     rdi, [rip + environ]
-    mov     qword ptr [rdi], 0
+    mov     qword ptr [rdi], r14
 
     /* Publish argc/argv for SimpleCore's rt_cli_get_args when linked. */
     lea     rax, [rip + rt_set_args]
@@ -56,6 +99,8 @@ _start:
     mov     rdi, r12
     mov     rsi, r13
     call    rax
+    test    eax, eax
+    jnz     .Lstartup_rejected
 .Lstartup_before_main_done:
 
     /* Initialize C++ constructors and libc (.init_array) */

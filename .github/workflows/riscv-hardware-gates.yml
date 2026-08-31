@@ -14,6 +14,8 @@ on:
       - 'test/01_unit/lib/hardware/**'
       - 'scripts/fpga/**'
       - 'scripts/check/check-riscv-hardware-gates.shs'
+      - 'scripts/check/check-simpleos-riscv64-*.shs'
+      - 'scripts/check/fixtures/riscv64_boot_contract_probe.c'
       - '.github/workflows/riscv-hardware-gates.yml'
   pull_request:
     paths:
@@ -22,6 +24,8 @@ on:
       - 'test/01_unit/lib/hardware/**'
       - 'scripts/fpga/**'
       - 'scripts/check/check-riscv-hardware-gates.shs'
+      - 'scripts/check/check-simpleos-riscv64-*.shs'
+      - 'scripts/check/fixtures/riscv64_boot_contract_probe.c'
       - '.github/workflows/riscv-hardware-gates.yml'
   workflow_dispatch:
 
@@ -69,3 +73,44 @@ jobs:
         env:
           SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
         run: sh scripts/check/check-riscv-hardware-gates.shs
+
+  # ==========================================================================
+  # SimpleOS riscv64 boot-contract gates (.claude/rules/board-runnable.md)
+  #
+  # Separate job from the JTAG/soc lane above: these need a riscv64 cross
+  # toolchain + qemu-system-riscv64, not GHDL or a Simple binary, and they run
+  # in minutes. All three are fail-closed with fatal --selftests and treat a
+  # missing dependency as ERROR (exit 2), never a pass — so an incomplete
+  # runner turns the lane red rather than silently green.
+  # ==========================================================================
+  simpleos-riscv64-boot-contract:
+    name: SimpleOS riscv64 boot contract (OpenSBI real firmware)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install riscv64 cross toolchain + QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            qemu-system-misc opensbi build-essential
+          riscv64-linux-gnu-gcc --version | head -n 1
+          qemu-system-riscv64 --version | head -n 1
+
+      # Firmware-only proxy: proves OpenSBI itself boots on this runner.
+      - name: OpenSBI real-firmware boot gate
+        run: sh scripts/check/check-simpleos-riscv64-opensbi-real-firmware-boot.shs
+
+      # Kernel-side half: the flat Image built from the REAL riscv64 crt0.S +
+      # linker.ld must carry a valid RISC-V Linux boot-image header v0.2.
+      - name: riscv64 Image header contract gate
+        run: sh scripts/check/check-simpleos-riscv64-image-header-contract.shs
+
+      # Guest half: a crt0.S+linker.ld kernel must boot UNDER that firmware via
+      # `-bios` fw_payload only — no `-kernel` pass semantics, no
+      # isa-debug-exit. Clones the pinned OpenSBI v1.4 itself.
+      - name: riscv64 guest boot under OpenSBI gate
+        run: sh scripts/check/check-simpleos-riscv64-opensbi-guest-boot.shs
