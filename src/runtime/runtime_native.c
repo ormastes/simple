@@ -5503,7 +5503,24 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
 
-__attribute__((weak)) void rt_set_args(int argc, char** argv) {
+/* Not weak: on this repo's Windows GNU (MinGW/binutils) toolchain, a
+ * PE/COFF weak-external function symbol never resolves against a caller
+ * in a different translation unit -- verified directly (binutils 2.42,
+ * gcc 15.2.0): `__attribute__((weak)) void foo(void){}` in one .o/.a and
+ * `foo();` in another fails to link with "undefined reference to `foo'"
+ * even with the object linked directly (not through an archive), with
+ * `-Wl,-u,foo`, and with `-Wl,--whole-archive` -- unlike ELF, where a weak
+ * archive member is pulled normally. `rt_set_args` is the only rt_* weak
+ * function used as a retention root (see `runtime_retention_symbols` in
+ * compiler/src/pipeline/native_project/linker.rs); the other roots
+ * (`rt_function_not_found`, `rt_string_bytes`, `__simple_runtime_init`)
+ * are plain strong definitions and link fine. `rt_set_args` has exactly
+ * one C definition in this tree (here), so nothing needs the weak
+ * fallback; lanes that link a second runtime archive already pass
+ * `--allow-multiple-definition`/`/FORCE:MULTIPLE` for exactly this kind
+ * of overlap. See the Windows bootstrap rt_set_args unresolved-reference
+ * investigation, 2026-09-01. */
+void rt_set_args(int argc, char** argv) {
     spl_init_args(argc, argv);
 }
 
@@ -5515,7 +5532,9 @@ __attribute__((weak)) void rt_set_args(int argc, char** argv) {
  * entry point ran. Previously undeclared/undefined -- any native-build
  * output linking this MSVC main stub failed with LNK2019 for
  * rt_set_args_wide (unresolved external referenced by wmain). */
-__attribute__((weak)) void rt_set_args_wide(int argc, const wchar_t** argv) {
+/* Not weak: same reason as rt_set_args above -- weak function symbols
+ * don't resolve on this Windows GNU toolchain. Single definition here. */
+void rt_set_args_wide(int argc, const wchar_t** argv) {
     if (argc <= 0 || !argv) {
         spl_init_args(argc > 0 ? argc : 0, NULL);
         return;
