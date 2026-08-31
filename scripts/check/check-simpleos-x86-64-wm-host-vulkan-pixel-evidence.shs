@@ -63,16 +63,29 @@ READY_MARKER='\[desktop-gui\] desktop-ready'
 # frame has actually been presented through it.
 GUEST_VULKAN_MARKER='^\[wm-frame\] host-gpu-ready backend=vulkan generation=[1-9][0-9]*'
 GUEST_PRESENT_MARKER='^\[wm-frame\] host-gpu-presented'
-# Emitted by the HOST DAEMON when it has executed draw-IR work on a real GPU
-# device.  Previously this gate grepped the daemon log for
-# `HOST_GPU_PROCESS_OK`, which the daemon NEVER emits — that line comes from the
-# GUEST probe entry (examples/09_embedded/simple_os/arch/common/
-# host_gpu_ivshmem_probe_entry.spl:399).  The host side of the classifier was
-# therefore unsatisfiable and this gate could only ever report renderer=cpu.
-# The daemon's real device receipt is HOST_GPU_PROCESS_PERF, printed by
-# src/app/simpleos_gpu_host/daemon_runner.spl:350, which carries the run/frame
-# correlation AND device_us (nonzero only when the device actually executed).
-HOST_VULKAN_RECEIPT='^HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* cpu_us=[1-9][0-9]* device_us=[1-9][0-9]* preference='
+# Emitted by the HOST DAEMON when it has executed WM draw-IR work on a real GPU
+# device.
+#
+# This gate previously grepped the daemon log for `HOST_GPU_PROCESS_OK`, which
+# the daemon NEVER emits — that line comes from the GUEST probe entry
+# (examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl:399).
+# The host half of the dual-receipt classifier was therefore unsatisfiable and
+# this gate could only ever report renderer=cpu, whatever the GPU did.
+#
+# The correct daemon receipt is HOST_GPU_DAEMON_DRAWIR
+# (src/app/simpleos_gpu_host/daemon_runner.spl:413), printed from the
+# SIMPLEOS_HOST_GPU_KIND_DRAW_IR branch — the branch the WM frame executor
+# actually submits to — and ONLY when `device_backed` holds: GPU backend
+# selected, no fallback, zero skipped commands, readback_source=device_readback,
+# a real backend handle, a nonzero readback checksum and a real device identity.
+# A CPU fallback or a partial render cannot print it.
+#
+# NOT `HOST_GPU_PROCESS_PERF` (daemon_runner.spl:350): that lives in the
+# SIMPLEOS_HOST_GPU_KIND_PROCESSING branch — the compute fixture path, not the
+# WM path — and is additionally gated on `processing_verify_cpu`.  A WM smoke
+# run never prints it, so anchoring on it would have left this gate
+# unsatisfiable exactly as before, just behind a different banner.
+HOST_VULKAN_RECEIPT='^HOST_GPU_DAEMON_DRAWIR backend=vulkan frame=[1-9][0-9]* submit_id=[1-9][0-9]* fence_id=[1-9][0-9]* fence_completed=true '
 
 EV_CHECKED=0
 QEMU_PID=
@@ -149,12 +162,14 @@ classify_renderer() {
     grep -qaE "$GUEST_VULKAN_MARKER" "$_serial" || { printf 'cpu\n'; return 0; }
     grep -qaE "$GUEST_PRESENT_MARKER" "$_serial" || { printf 'cpu\n'; return 0; }
     grep -qaE "$HOST_VULKAN_RECEIPT" "$_daemonlog" || { printf 'cpu\n'; return 0; }
-    _run=$(guest_presented_field "$_serial" run)
     _frame=$(guest_presented_field "$_serial" frame)
-    case "$_run" in ''|*[!0-9]*|0) printf 'cpu\n'; return 0 ;; esac
+    _submit=$(guest_presented_field "$_serial" submit_id)
+    _fence=$(guest_presented_field "$_serial" fence_id)
     case "$_frame" in ''|*[!0-9]*|0) printf 'cpu\n'; return 0 ;; esac
-    # The daemon receipt must name this exact run AND this exact frame.
-    if grep -qaE "^HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=[1-9][0-9]* run=$_run frame=$_frame cpu_us=[1-9][0-9]* device_us=[1-9][0-9]* preference=" "$_daemonlog"; then
+    case "$_submit" in ''|*[!0-9]*|0) printf 'cpu\n'; return 0 ;; esac
+    case "$_fence" in ''|*[!0-9]*|0) printf 'cpu\n'; return 0 ;; esac
+    # The daemon receipt must name this exact frame AND this exact submission.
+    if grep -qaE "^HOST_GPU_DAEMON_DRAWIR backend=vulkan frame=$_frame submit_id=$_submit fence_id=$_fence fence_completed=true " "$_daemonlog"; then
         printf 'host-vulkan\n'
     else
         printf 'cpu\n'
@@ -247,7 +262,7 @@ EOF
     # (10) host receipt WITHOUT guest receipt must classify as cpu.
     cat > "$_t/daemon-ok.log" <<'EOF'
 HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan
-HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=48 run=770425 frame=49 cpu_us=8100 device_us=1900 preference=preferred
+HOST_GPU_DAEMON_DRAWIR backend=vulkan frame=49 submit_id=7 fence_id=7 fence_completed=true device_frame_id=49 rendered=214 skipped=0 readback=device_readback
 EOF
     if [ "$(classify_renderer "$_t/serial-nogpu.log" "$_t/daemon-ok.log")" != cpu ]; then
         echo "selftest: FAIL — host-only receipt classified as host-vulkan"
@@ -265,32 +280,32 @@ EOF
     fi
     # (13) NONCE MISMATCH — a daemon receipt from a DIFFERENT run must classify
     #      as cpu.  This is the stale-log cross-satisfaction hazard: without
-    #      run/frame anchoring, a leftover daemon log would green a fresh boot.
+    #      frame/submit anchoring, a leftover daemon log would green a fresh boot.
     cat > "$_t/daemon-otherrun.log" <<'EOF'
 HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan
-HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=48 run=990001 frame=49 cpu_us=8100 device_us=1900 preference=preferred
+HOST_GPU_DAEMON_DRAWIR backend=vulkan frame=49 submit_id=99 fence_id=99 fence_completed=true device_frame_id=49 rendered=214 skipped=0 readback=device_readback
 EOF
     if [ "$(classify_renderer "$_t/serial-guest.log" "$_t/daemon-otherrun.log")" != cpu ]; then
-        echo "selftest: FAIL — daemon receipt from a different run classified as host-vulkan"
+        echo "selftest: FAIL — daemon receipt from a different submission classified as host-vulkan"
         _fails=$((_fails + 1))
     fi
-    # (14) FRAME MISMATCH — right run, wrong frame, must classify as cpu.
+    # (14) FRAME MISMATCH — right submission ids, wrong frame, must be cpu.
     cat > "$_t/daemon-otherframe.log" <<'EOF'
 HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan
-HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=48 run=770425 frame=7 cpu_us=8100 device_us=1900 preference=preferred
+HOST_GPU_DAEMON_DRAWIR backend=vulkan frame=7 submit_id=7 fence_id=7 fence_completed=true device_frame_id=7 rendered=214 skipped=0 readback=device_readback
 EOF
     if [ "$(classify_renderer "$_t/serial-guest.log" "$_t/daemon-otherframe.log")" != cpu ]; then
         echo "selftest: FAIL — daemon receipt for a different frame classified as host-vulkan"
         _fails=$((_fails + 1))
     fi
-    # (15) ZERO DEVICE TIME — matching run/frame but device_us=0 means the CPU
-    #      fallback ran, not the GPU.  Must classify as cpu.
+    # (15) CPU BACKEND — matching frame/submit ids but backend=cpu with a
+    #      cpu_readback means the CPU fallback drew it.  Must classify as cpu.
     cat > "$_t/daemon-nodevice.log" <<'EOF'
 HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan
-HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=48 run=770425 frame=49 cpu_us=8100 device_us=0 preference=available-not-preferred
+HOST_GPU_DAEMON_DRAWIR backend=cpu frame=49 submit_id=7 fence_id=7 fence_completed=true device_frame_id=49 rendered=214 skipped=0 readback=cpu_readback
 EOF
     if [ "$(classify_renderer "$_t/serial-guest.log" "$_t/daemon-nodevice.log")" != cpu ]; then
-        echo "selftest: FAIL — device_us=0 receipt classified as host-vulkan"
+        echo "selftest: FAIL — cpu-backend receipt classified as host-vulkan"
         _fails=$((_fails + 1))
     fi
     # (16) the guest-side HOST_GPU_PROCESS_OK line must NOT satisfy the host
@@ -304,10 +319,22 @@ EOF
         echo "selftest: FAIL — guest-emitted PROCESS_OK accepted as a daemon receipt"
         _fails=$((_fails + 1))
     fi
+    # (17) a PROCESSING-path receipt must NOT satisfy the WM draw path.
+    #      HOST_GPU_PROCESS_PERF comes from the KIND_PROCESSING branch (the
+    #      compute fixture), never from KIND_DRAW_IR.  Accepting it would make
+    #      this gate green off a workload that is not the window manager.
+    cat > "$_t/daemon-processing.log" <<'EOF'
+HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan
+HOST_GPU_PROCESS_PERF isa=x86_64 backend=vulkan generation=48 run=770425 frame=49 cpu_us=8100 device_us=1900 preference=preferred
+EOF
+    if [ "$(classify_renderer "$_t/serial-guest.log" "$_t/daemon-processing.log")" != cpu ]; then
+        echo "selftest: FAIL — processing-path receipt accepted as a WM draw-IR receipt"
+        _fails=$((_fails + 1))
+    fi
 
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || return 1
-    echo "[wm-host-vulkan] selftest OK (16 fixtures)"
+    echo "[wm-host-vulkan] selftest OK (17 fixtures)"
     return 0
 }
 
@@ -332,7 +359,7 @@ resolve_simple_runner || error_verdict "no runnable simple binary for the PPM va
 run_selftest || error_verdict "selftest failed (fatal)"
 
 case "${1:-}" in
-    --selftest) pass_verdict "16 selftest fixture(s) checked, classifier and pixel bar behave (no boot attempted), renderer=n/a" ;;
+    --selftest) pass_verdict "17 selftest fixture(s) checked, classifier and pixel bar behave (no boot attempted), renderer=n/a" ;;
 esac
 
 # --------------------------------------------------------- preconditions ----
