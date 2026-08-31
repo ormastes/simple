@@ -1,0 +1,81 @@
+#!/bin/sh
+# run-riscv64-text-probe-opensbi.shs
+#
+# Build and boot examples/09_embedded/simple_os/arch/riscv64/text_primitive_probe_entry.spl
+# in-guest under REAL OpenSBI firmware (-bios fw_payload). Diagnostic harness for
+# the freestanding loop-variable-append defect; not a gate.
+#
+# NEVER QEMU -kernel, NEVER isa-debug-exit. Compiler is a FRESHLY BUILT Rust seed.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+
+OUT=${OUT:-$ROOT/build/os/riscv64_probe}
+SIMPLE_BIN=${SIMPLE_BIN:-/mnt/data/cargo-target-fsloopvar/release/simple}
+ENTRY=${ENTRY:-$ROOT/examples/09_embedded/simple_os/arch/riscv64/text_primitive_probe_entry.spl}
+LDS=$ROOT/examples/09_embedded/simple_os/arch/riscv64/linker.ld
+OPENSBI_SRC=${OPENSBI_SRC:-$ROOT/build/os/rv64_opensbi_guest/opensbi-src}
+NB_TIMEOUT=${NATIVE_BUILD_TIMEOUT:-1200}
+BOOT_SECONDS=${BOOT_SECONDS:-40}
+
+err() { printf 'probe: ERROR — %s\n' "$*" >&2; exit 2; }
+
+mkdir -p "$OUT"
+ELF=$OUT/probe.elf
+IMG=$OUT/probe.Image
+SERIAL=$OUT/probe.serial.log
+LOG=$OUT/probe.build.log
+
+[ -x "$SIMPLE_BIN" ] || err "no seed at $SIMPLE_BIN"
+rm -f "$ELF" "$IMG" "$SERIAL"
+
+"$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+    --timeout "$NB_TIMEOUT" --entry "$ENTRY" \
+    --target riscv64gc-unknown-none-elf \
+    --linker-script "$LDS" -o "$ELF" >"$LOG" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { tail -40 "$LOG" >&2; err "native-build failed rc=$rc (log $LOG)"; }
+[ -s "$ELF" ] || err "native-build reported success but $ELF is empty"
+
+# NOT-A-STUB: refuse to boot an image whose runtime entry points were satisfied
+# by a synthesized weak nil stub. A clean link is not evidence.
+if nm "$ELF" 2>/dev/null | grep -qE ' [wW] rt_(string_builder_push|string_concat|closure_new)$'; then
+    nm "$ELF" | grep -E ' [wW] rt_' >&2
+    err "a runtime entry point resolved to a WEAK symbol in $ELF"
+fi
+
+OBJCOPY=
+for c in riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy llvm-objcopy objcopy; do
+    command -v "$c" >/dev/null 2>&1 && { OBJCOPY=$c; break; }
+done
+[ -n "$OBJCOPY" ] || err "no objcopy"
+"$OBJCOPY" -O binary "$ELF" "$IMG" || err "objcopy failed"
+[ -s "$IMG" ] || err "flat Image empty"
+
+CROSS=
+for p in riscv64-linux-gnu- riscv64-unknown-elf-; do
+    command -v "${p}gcc" >/dev/null 2>&1 && { CROSS=$p; break; }
+done
+[ -n "$CROSS" ] || err "no riscv64 cross-gcc"
+[ -d "$OPENSBI_SRC" ] || err "no OpenSBI checkout at $OPENSBI_SRC"
+
+make -C "$OPENSBI_SRC" PLATFORM=generic CROSS_COMPILE="$CROSS" \
+    FW_PAYLOAD=y FW_PAYLOAD_PATH="$IMG" FW_PAYLOAD_OFFSET=0x200000 -j4 \
+    >"$OUT/opensbi.log" 2>&1 || { tail -20 "$OUT/opensbi.log" >&2; err "OpenSBI build failed"; }
+FW=$OPENSBI_SRC/build/platform/generic/firmware/fw_payload.bin
+[ -s "$FW" ] || err "fw_payload.bin missing"
+
+command -v qemu-system-riscv64 >/dev/null 2>&1 || err "qemu-system-riscv64 not installed"
+
+set -- qemu-system-riscv64 -no-user-config -machine virt -cpu rv64 -smp 1 -m 512M \
+    -bios "$FW" -serial "file:$SERIAL" -display none -monitor none -net none -no-reboot
+for a in "$@"; do
+    case "$a" in -kernel|*isa-debug-exit*) err "forbidden QEMU flag in argv: $a" ;; esac
+done
+timeout "$BOOT_SECONDS" "$@" >/dev/null 2>&1 || true
+
+[ -s "$SERIAL" ] || err "no serial output captured"
+printf '=== serial (probe lines) ===\n'
+grep '^\[probe\]\|^PROBE_' "$SERIAL" || true
+printf '=== end serial; full log: %s ===\n' "$SERIAL"
