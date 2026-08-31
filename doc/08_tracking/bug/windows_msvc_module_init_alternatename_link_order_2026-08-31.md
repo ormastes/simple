@@ -263,3 +263,117 @@ all, so no amount of link-order/`/INCLUDE` massaging can help — check via
 `llvm-nm` on the specific `driver_source_pipeline_parsing.spl` object file
 for a defined `__module_init_compiler__driver__source_pipeline_parsing`
 symbol).
+
+## Update 2026-09-01: ROOT CAUSE FOUND AND FIXED — verified end to end
+
+Working through the four questions from the handoff:
+
+1. **Does the module define an init?** Yes. `llvm-nm` on
+   `libspl_objects.a` (multiple independent Stage 2 build runs) shows
+   `T __module_init_compiler__driver__driver_source_pipeline_parsing`
+   consistently DEFINED, and the exact same name appears in the `/INCLUDE`
+   directive captured from a real link command
+   (`/INCLUDE:__module_init_compiler__driver__driver_source_pipeline_parsing`).
+   Both the "never emitted" and "name mismatch" alternate theories are
+   REFUTED by this.
+2. **Is `__simple_call_module_inits` actually called at startup?** NO —
+   and this is the root cause. `compile_main_stub`
+   (`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`,
+   the `is_msvc` branch, ~lines 761-782) generates a `wmain` that calls
+   `__simple_runtime_init()`, `rt_set_args_wide()`, `spl_main()`, and
+   `__simple_runtime_shutdown()` — but never declares or calls
+   `__simple_call_module_inits()` at all. Compare the non-MSVC `main()`
+   stub a few lines below (~802-809), which does call it (guarded by a
+   weak-symbol null check). This asymmetry between the two branches is the
+   entire bug: `generate_init_caller` always emits a real, callable
+   `__simple_call_module_inits` (even MSVC's own `/ALTERNATENAME` branch
+   emits a concrete non-weak definition), but nothing on the MSVC path
+   ever invoked it. Every module-level global needing a heap-boxed
+   initializer (`codegen/llvm/backend_core.rs`, `__module_init[_<prefix>]`)
+   silently never ran its initializer on Windows, leaving the global's
+   storage at its PE-loader-zeroed BSS default (null) — exactly the `cdb`
+   disassembly evidence recorded above.
+3. **Init order wrong?** Moot — see (2).
+4. **Is the crash really about this global?** Already established via
+   `cdb` disassembly earlier in this document; unchanged.
+
+**This also explains why the previous `/INCLUDE` experiment
+(commit `a5266266e3d`) was correctly measured as having no effect**: forcing
+every `__module_init_*` symbol to resolve strong ahead of `/ALTERNATENAME`
+cannot matter when the function that would call any of them (through
+`__simple_call_module_inits`) is never invoked in the first place. The
+`/ALTERNATENAME` link-order theory this document originally proposed was a
+plausible-looking red herring one level removed from the real bug.
+
+**Fix (commit `a833758eb18`):** add the missing declaration and call —
+`void __simple_call_module_inits(void);` declared extern and called
+right after `__simple_runtime_init()` in the MSVC `wmain`. No
+`/ALTERNATENAME` fallback needed for this declaration: `generate_init_caller`
+always emits a concrete (non-weak) definition of this specific symbol, even
+when `init_names` is empty, specifically to keep the hosted link contract
+identical across platforms (see the existing comment at linker.rs:887-891).
+Windows-only code path (`is_msvc` branch); the non-MSVC branch is
+byte-unchanged, so there is no Unix impact.
+
+**Follow-up fix (commit `88ec90eb472`):** while verifying, found a second,
+independent, pre-existing gap: the same MSVC `wmain` stub declares and calls
+`rt_set_args_wide(argc, wchar_t** argv)`, which the C runtime never defined
+(only the narrow-char `rt_set_args` existed in `runtime_native.c`). Any
+native-build output actually linking this MSVC main stub — e.g. the
+compiler's own admission smoke test, which builds fixtures with
+`--runtime-bundle core-c-bootstrap` — failed at link time with LNK2019
+"unresolved external symbol rt_set_args_wide referenced in function wmain".
+Added `rt_set_args_wide` to `src/runtime/runtime_native.c` (Windows-only,
+`__attribute__((weak))`, mirrors `rt_set_args`): converts each UTF-16 argv
+element to UTF-8 via `WideCharToMultiByte` and forwards to the same
+`spl_init_args` storage `rt_set_args` uses. Declared in `runtime.h` guarded
+by `#ifdef _WIN32`. Verified with `clang -fsyntax-only -target
+x86_64-pc-windows-msvc -fms-compatibility -fms-extensions` on
+`runtime_native.c`: 0 errors (37 pre-existing warnings, unrelated). Unix
+impact: none — entirely inside `#if defined(_WIN32)`.
+
+**End-to-end verification.** Rebuilt Stage 2 with both fixes
+(`bash run_s2final.sh`, full Rust seed + Stage 2 native-build, ~13 min).
+Result:
+
+- `build/w/stage2/x86_64-pc-windows-msvc/simple.exe` exists (NOT
+  `.rejected`) — 108,219,392 bytes. The pre-existing `.rejected` artifact
+  from the prior (module-init-fix-only) run was left untouched at its old
+  mtime, confirming the sanity/rename path was not triggered this time
+  (no rejection occurred).
+- `simple.exe --version` → `simple-bootstrap 1.0.0-rc.1`, rc=0.
+- `simple.exe compile` on a 2-line hello world (the exact repro that
+  previously SEGV'd at rc=139, `[build] parse 0/1 step 1/6` then crash) now
+  runs cleanly through `load_sources` → `source_closure` → `parse` →
+  `surface_build` → `surface_alias` → `hir`, failing only with a clean,
+  legitimate compiler diagnostic (`missing importing module surface for
+  ...h2.spl`, rc=1 — an ordinary "no source root configured" condition for
+  a bare `compile` invocation without `--entry-closure`/`SIMPLE_LIB`, not a
+  crash). **No SIGSEGV. The crash is gone.**
+- The Stage 2 native-build itself reported full success in its own log:
+  `Build complete: 818 compiled, 0 cached, 0 failed`,
+  `Linked: .../simple.exe (105683 KB) via clang-cl`.
+
+**Not fully clean end-to-end — a separate, unrelated infra issue remains**:
+the outer `bootstrap-from-scratch.sh` driver reported the stage2 step as
+"exit 1" and refused `--stop-after-stage2`'s admission requirement, citing
+572 `[native-incremental] cache write skipped ... create cache temp: The
+system cannot find the path specified (os error 3)` lines against
+`.../stage3/x86_64-pc-windows-msvc/stage2-native-cache/scope-.../objects/.tmpXXXXXX`.
+This looks like a directory-creation race in the native-incremental cache
+under 12-way parallel compilation (the target `stage2-native-cache/scope-*`
+subdirectory not yet existing when the first few workers try to write a
+temp file into it) — separate from, and unrelated to, the module-init SEGV
+this document tracks. It did not prevent the binary from compiling,
+linking, or running correctly, and did not trigger admission rejection
+(the `.rejected` rename path is gated on sanity failure specifically, which
+never ran here because the driver aborted earlier on this cache-write
+condition). Filing separately rather than fixing here to keep this change
+narrow; needs its own investigation into
+`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs` and
+whatever emits `[native-incremental] cache write skipped` (grep that
+literal string) plus whether the scope directory is created before or
+racing against the first parallel writer.
+
+**Status: module-init SEGV bug in this document is RESOLVED.** Both
+commits are on `work/windows-bootstrap-msvc-rebased`, not pushed.
