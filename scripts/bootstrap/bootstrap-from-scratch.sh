@@ -1246,6 +1246,43 @@ bootstrap_stage_sanity() (
   sanity_path=$5
   # Captured BEFORE the environment scrub below, which unsets everything.
   sanity_repo_root=${repo_root}
+  # Also captured before the scrub, same reasoning as sanity_repo_root: on
+  # Windows this function used to hand the candidate a Windows-ABI-less,
+  # toolchain-less environment, which silently changed WHICH compiler got
+  # invoked and whether it could find anything once invoked.
+  #
+  # SIMPLE_WINDOWS_ABI/SIMPLE_LINKER_FLAVOR: without these,
+  # Target::linker_flavor() (common/src/target.rs) falls back to an MSYSTEM
+  # heuristic, which is always set under Git Bash -- so a requested
+  # --target x86_64-pc-windows-msvc build silently ran GNU flavor and invoked
+  # g++ for the main stub. This is the exact "bootstrap_windows_abi_env" fix
+  # already applied to the stage2/stage3 native-build invocations (see that
+  # variable's own comment above) but never wired into this sanity check.
+  # INCLUDE/LIB/LIBPATH: required for cl.exe/clang-cl to find MSVC headers and
+  # import libraries at all.
+  # SystemRoot/SystemDrive/ProgramData: MSYS/Git Bash exports these in UPPER
+  # CASE (SYSTEMROOT/SYSTEMDRIVE/PROGRAMDATA); a native cmd shell's mixed-case
+  # spellings are absent, so falling back only to the mixed-case name captures
+  # empty. SystemDrive is required for link.exe to resolve drive-rooted LIB
+  # entries (bisected 2026-08-24: its absence alone produces
+  # LNK1181 'cannot open input file kernel32.lib' even with LIB correct).
+  # TEMP/TMP: native (non-MSYS) Windows toolchain binaries such as mingw64
+  # g++.exe resolve their own scratch directory via the Win32 TEMP/TMP
+  # environment variables, not the POSIX TMPDIR this function sets below. With
+  # both unset, GetTempPath falls back to the Windows install directory, which
+  # is not writable without elevation: "Cannot create temporary file in
+  # C:\WINDOWS\: Permission denied" -- measured 2026-08-31, the actual cause
+  # behind a frontend-smoke failure that used to report no diagnostic text at
+  # all (see the frontend_log preservation added just above this function).
+  sanity_windows_abi=${SIMPLE_WINDOWS_ABI:-}
+  sanity_linker_flavor=${SIMPLE_LINKER_FLAVOR:-}
+  sanity_include=${INCLUDE:-}
+  sanity_lib=${LIB:-}
+  sanity_libpath=${LIBPATH:-}
+  sanity_system_root=${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
+  sanity_system_drive=${SystemDrive:-${SYSTEMDRIVE:-}}
+  sanity_program_data=${ProgramData:-${PROGRAMDATA:-}}
+  sanity_win_temp=${TEMP:-${TMP:-}}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1258,6 +1295,25 @@ bootstrap_stage_sanity() (
   LC_ALL=C
   LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
+  if [ -n "${sanity_windows_abi}" ]; then
+    SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
+    export SIMPLE_WINDOWS_ABI
+  fi
+  if [ -n "${sanity_linker_flavor}" ]; then
+    SIMPLE_LINKER_FLAVOR=${sanity_linker_flavor}
+    export SIMPLE_LINKER_FLAVOR
+  fi
+  [ -n "${sanity_include}" ] && { INCLUDE=${sanity_include}; export INCLUDE; }
+  [ -n "${sanity_lib}" ] && { LIB=${sanity_lib}; export LIB; }
+  [ -n "${sanity_libpath}" ] && { LIBPATH=${sanity_libpath}; export LIBPATH; }
+  [ -n "${sanity_system_root}" ] && { SystemRoot=${sanity_system_root}; export SystemRoot; }
+  [ -n "${sanity_system_drive}" ] && { SystemDrive=${sanity_system_drive}; export SystemDrive; }
+  [ -n "${sanity_program_data}" ] && { ProgramData=${sanity_program_data}; export ProgramData; }
+  if [ -n "${sanity_win_temp}" ]; then
+    TEMP=${sanity_win_temp}
+    TMP=${sanity_win_temp}
+    export TEMP TMP
+  fi
   evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
   frontend_log="${evidence_tmp}.frontend"
   rm -f "${evidence_tmp}" "${frontend_log}"
