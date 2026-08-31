@@ -541,3 +541,98 @@ SimpleOS-specific. Both fail SILENTLY — B8 wrote 3 garbage bytes and returned
 true; B9 yielded nil and then 0. Any Simple program doing the same operations
 was equally affected. That is why they survived until something as demanding as
 booting an OS surfaced them.
+
+---
+
+## B11 RESOLVED, B12 OPEN — L1..L5 green, ring-3 handoff triple-faults
+
+### B11 — RESOLVED: the VMM impl that runs never published its kernel PML4
+The added diagnostic settled it in one build: `[spawn] clone-diag kpml4=0` —
+the FIRST refusal branch, not the page-table walk.
+
+THREE VMM implementations print byte-identical banners
+(`[VMM] PML4 at physical ...`): `vmm_core.spl:318`, `vmm.spl:259`, and
+`arch/x86_64/paging.spl:238`. The serial log cannot tell you which one ran.
+`vmm_core.spl:268` already documents this hazard and ships the remedy,
+`vmm_publish_kernel_pml4`, whose docstring predicts exactly this failure:
+"every FS-exec ring-3 spawn hit the guard and failed the spawn with rc=-1".
+
+`paging.spl:236` calls it. **`vmm.spl` did not** — and `vmm.spl:vmm_init` is
+what the hello entry calls (`use os.kernel.memory.vmm.{vmm_init}`). It wrote
+only the STRUCT global `g_vmm.pml4_phys`, while every address-space consumer
+(`create_user_address_space`, `vmm_clone_kernel_low_private`, `vmm_copy`) reads
+the SCALAR `_vmm_pml4_phys` via `vmm_core.vmm_kernel_pml4_phys()`. So the
+scalar stayed 0 after a fully successful init.
+
+Fix: call `vmm_publish_kernel_pml4(pml4_phys, hhdm_offset)` from
+`vmm.spl:vmm_init`, mirroring `paging.spl:236`, using the LOCAL `pml4_phys`
+(struct globals are the unreliable category under freestanding codegen).
+Confirmed by `[VMM] portable VMM published kernel PML4 0x335609856` on serial.
+
+**Diagnosability fixed permanently.** `vmm_clone_kernel_low_private` returned a
+bare bool, so every diagnosis needed a fresh kernel build to learn which of its
+three refusals fired. It now names the branch on the serial log — silent on the
+success path, explicit on failure. The lane-local probe was removed as
+superseded.
+
+Effect — the whole spawn path now works:
+```
+[spawn] user AS ready (private low) root=335634432
+[spawn] phoff=64 phentsize=56 phnum=4 use_stream=0
+[spawn] image span lo=0x4194304 hi=0x5320704
+[spawn] PT_LOAD segments mapped
+[spawn] frame argc readback=1 expected=1
+[spawn] user stack mapped top=0x549757911040 pages=2048 rsp=0x549757910912
+[spawn] entering user cs=0x2b iopl=3 rip=0x4194304 rsp=0x549757910912
+ABC
+```
+(Those span/rip values print DECIMAL despite the `0x` prefix: 4194304 = 0x400000.)
+
+### B12 — OPEN: `iretq` into CPL3 triple-faults; VM halts
+`ABC` is NOT program output. A/B/C are kernel-side progress markers inside
+`examples/.../boot/enter_user_first.s` (lines 60, 79, 102); `C` is emitted
+immediately before the `iretq` that performs the hardware CPL transition —
+its own comment says so. So the kernel reaches the final handoff and the user
+program produces nothing.
+
+Evidence that this is a triple fault rather than a hang or a truncated capture:
+- The serial log ends mid-stream at `ABC` with NO trailing newline, and no
+  further kernel output of any kind.
+- The gate passes `-no-reboot` (line 280), so a triple fault stops the VM
+  instead of resetting it — consistent with the abrupt end and with the ABSENCE
+  of a second OVMF banner.
+- The whole log contains exactly ONE `EXCEPTION FRAME`, from early boot. The
+  rich fault hook demonstrably works (it printed many frames during the B7
+  investigation), so nothing caught a fault after `C`: the fault escalated
+  rather than being handled.
+
+Prime suspects, in order:
+1. The user PT_LOAD pages or an intermediate level lack `US=1`, so the very
+   first instruction fetch at CPL3 faults; the handler then cannot run under
+   the user cr3 and it escalates. Note `vmm_clone_kernel_low_private` sets
+   `PTE_USER` on the cloned PML4[0] entry, but every level down to the leaf
+   must also carry it.
+2. TSS `rsp0` / IST stack not mapped in the user address space, so the CPU
+   cannot even push an exception frame -> double -> triple fault. `[tss] rsp0
+   installed sel=0x30` appears BEFORE the user AS is created.
+Neither is confirmed; both need a page-table dump under the user cr3 at the
+moment of handoff, which is another build cycle.
+
+The payload itself is exonerated: it is the current 13800-byte ELF (read size
+matches), carries the marker, has correct page-separated RX/R/RW segments, and
+its `_start` sets up its own `.bss` stack inside a mapped RW page.
+
+### Rung status (real OVMF pflash; never `-kernel`, never isa-debug-exit)
+| rung | | status |
+|---|---|---|
+| L1 | `[grub-uefi] multiboot loading` | **OK** |
+| L2 | `SimpleOS x86_64 hello-world in-guest` | **OK** |
+| L3 | `[hello] nvme online` | **OK** |
+| L4 | `[hello] /FSEXEC.ELF read size=` | **OK** |
+| L5 | `[hello] entering ring 3` | **OK** |
+| L6 | `HELLO_NATIVE_SIMPLEOS_X86_64_OK` | MISS — blocked by B12 |
+| L7 | `[hello] native program exited rc=0` | MISS |
+
+Gate verdict, honestly RED — the lane is landed RED, not weakened to green:
+`FAIL — 1 program(s) staged, 7 rung(s) checked, missing: L6 L7;`
+`interpreter row ADVISORY/RED: no in-guest Simple interpreter exists in this tree`

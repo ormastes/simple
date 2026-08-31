@@ -26,11 +26,6 @@ use os.kernel.memory.vmm_address_space.{
     vmm_map_user_low_page,
     vmm_clone_kernel_low_private, vmm_zero_phys_range
 }
-use os.kernel.memory.vmm.{
-    vmm_kernel_pml4_phys as _diag_kernel_pml4_phys,
-    _phys_to_virt as _diag_phys_to_virt,
-    _read_pte as _diag_read_pte
-}
 use os.kernel.memory.pmm.{pmm_free_page_raw}
 use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{TaskContext, AddressSpace}
@@ -491,15 +486,8 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
     # copy-on-map instead of corrupting the kernel's tables. Safe for the PML4[1]
     # fixture/stack VAs too (fresh tables, no privatization triggers).
     if not vmm_clone_kernel_low_private(space.phys_root):
-        # Which of the three refusal branches fired? kpml4==0 means the VMM
-        # never recorded its PML4; kentry not present means the kernel's
-        # PML4[0] is empty under this boot; both zero-ish with a live kpml4
-        # points at _clone_table's page allocation instead.
-        val kpml4 = _diag_kernel_pml4_phys()
-        var kentry0: u64 = 0
-        if kpml4 != 0:
-            kentry0 = _diag_read_pte(_diag_phys_to_virt(kpml4), 0)
-        serial_println("[spawn] clone-diag kpml4={kpml4} kentry0={kentry0} root={space.phys_root}")
+        # vmm_clone_kernel_low_private now names its own refusal branch on the
+        # serial log, so this lane no longer needs a local probe.
         serial_println("[spawn] FAIL clone kernel low private root={space.phys_root}")
         destroy_user_address_space(space)
         return -1
