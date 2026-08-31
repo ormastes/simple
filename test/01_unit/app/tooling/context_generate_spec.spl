@@ -1,5 +1,12 @@
+"""
+## Purpose and audience
+Purpose: Prove that simple context generator.
+Audience: compiler and tooling engineers who maintain this spec.
+"""
+
+# @req: REQ-APP-TOOLING-001 — stable requirement identity for this spec.
 use app.io.context_ops.{context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source, context_args_allow_sourceless_sql_query}
-use std.io_runtime.{file_write, dir_create_all}
+use std.io_runtime.{file_write, dir_create_all, file_read}
 
 fn _context_fixture_path() -> text:
     "build/test/context_generate_fixture.spl"
@@ -10,8 +17,62 @@ fn _write_context_fixture() -> text:
     file_write(path, "fn hello() -> text:\n    \"hello context\"\n")
     path
 
+fn _context_multi_fixture_path() -> text:
+    "build/test/context_generate_multi_fixture.spl"
+
+fn _write_context_multi_fixture() -> text:
+    # Several sizable declarations so a real pack (extract-one, signature the
+    # rest) is measurably smaller than the raw file, and so different targets
+    # produce genuinely different packs.
+    val path = _context_multi_fixture_path()
+    dir_create_all("build/test")
+    var body = "fn alpha_target(x: i64) -> i64:\n"
+    var line_idx = 0
+    while line_idx < 40:
+        body = body + "    x = x + " + str(line_idx) + "\n"
+        line_idx = line_idx + 1
+    body = body + "    x\n\n"
+    body = body + "fn beta_target(y: i64) -> i64:\n"
+    line_idx = 0
+    while line_idx < 40:
+        body = body + "    y = y + " + str(line_idx) + "\n"
+        line_idx = line_idx + 1
+    body = body + "    y\n\n"
+    body = body + "fn gamma_unused() -> bool:\n    true\n"
+    file_write(path, body)
+    path
+use std.spec.step
+
+
 describe "simple context generator":
+    it "produces a pack materially smaller than the source (size property)":
+        step("Verify: pack is materially smaller than the raw source, not merely re-labeled")
+        # @req: REQ-APP-TOOLING-001
+        val path = _write_context_multi_fixture()
+        val raw = file_read(path)
+        val output = context_generate(path, "no_such_symbol_matches", "text")
+        # A pack that merely echoes the file back (the regression this guards
+        # against) would be >= the raw byte count. A real extraction that
+        # drops non-target bodies to signatures must be well under it.
+        expect(output.len() < raw.len()).to_equal(true)
+        expect(output.len() * 2 < raw.len()).to_equal(true)  # more than 2x smaller
+
+    it "is target-sensitive: different targets produce different packs":
+        step("Verify: selecting a different target changes which body is expanded")
+        # @req: REQ-APP-TOOLING-001
+        val path = _write_context_multi_fixture()
+        val pack_alpha = context_generate(path, "alpha_target", "text")
+        val pack_beta = context_generate(path, "beta_target", "text")
+        expect(pack_alpha == pack_beta).to_equal(false)
+        # alpha's pack carries alpha's full body (the `x = x + N` lines) but
+        # only beta's signature; beta's pack is the mirror image.
+        expect(pack_alpha).to_contain("x = x + 39")
+        expect(pack_beta).to_contain("fn alpha_target(x: i64) -> i64:")
+        expect(pack_beta.split("x = x + 39").len()).to_equal(1)  # oracle: 1 — alpha body absent from beta's pack
+
     it "renders markdown context":
+        step("Verify: renders markdown context")
+        # @req: REQ-APP-TOOLING-001
         val path = _write_context_fixture()
         val output = context_generate(path, "hello", "markdown")
         expect(output).to_contain("# Simple Context Pack")
@@ -19,6 +80,7 @@ describe "simple context generator":
         expect(output).to_contain("fn hello")
 
     it "renders json context":
+        step("Verify: renders json context")
         val path = _write_context_fixture()
         val output = context_generate(path, "hello", "json")
         expect(output).to_contain("\"status\":\"ready\"")
@@ -26,12 +88,14 @@ describe "simple context generator":
         expect(output).to_contain("fn hello")
 
     it "renders text context":
+        step("Verify: renders text context")
         val path = _write_context_fixture()
         val output = context_generate(path, "hello", "text")
         expect(output).to_start_with("Simple context pack")
         expect(output).to_contain("status: ready")
 
     it "renders stats":
+        step("Verify: renders stats")
         val path = _write_context_fixture()
         val stats = context_stats(path, "hello")
         expect(stats).to_contain("status: ready")
@@ -39,6 +103,7 @@ describe "simple context generator":
         expect(stats).to_contain("token_estimate:")
 
     it "estimates tokens by context character budget":
+        step("Verify: estimates tokens by context character budget")
         val path = _write_context_fixture()
         val stats = context_stats(path, "hello")
         expect(stats).to_contain("token_estimate: 10")
@@ -46,19 +111,22 @@ describe "simple context generator":
         expect(output).to_contain("token_estimate: 10")
 
     it "uses option-like missing output":
+        step("Verify: uses option-like missing output")
         val absence_marker = "n" + "il"
         val output = context_generate("build/test/does_not_exist.spl", "", "text")
         expect(output).to_contain("status: missing")
         expect(output).to_contain("content: none")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "keeps json output absence-marker-free":
+        step("Verify: keeps json output absence-marker-free")
         val absence_marker = "n" + "il"
         val output = context_generate("build/test/does_not_exist.spl", "", "json")
         expect(output).to_contain("\"status\":\"missing\"")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "reads quoted paths and heredoc-like content without shell expansion":
+        step("Verify: reads quoted paths and heredoc-like content without shell expansion")
         val absence_marker = "n" + "il"
         dir_create_all("build/test/context quoted")
         val path = "build/test/context quoted/o'clock.spl"
@@ -66,9 +134,10 @@ describe "simple context generator":
         val output = context_generate(path, "marker", "text")
         expect(output).to_contain("status: ready")
         expect(output).to_contain("SIMPLE_WRITE_EOF")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "builds local pack index":
+        step("Verify: builds local pack index")
         val absence_marker = "n" + "il"
         val path = _write_context_fixture()
         val output = context_index_packs([path], "hello", "text")
@@ -76,9 +145,10 @@ describe "simple context generator":
         expect(output).to_contain("pack_count: 1")
         expect(output).to_contain("source: " + path)
         expect(output).to_contain("status: ready")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "queries local pack index":
+        step("Verify: queries local pack index")
         val absence_marker = "n" + "il"
         val path = _write_context_fixture()
         val index = context_index_packs([path], "hello", "text")
@@ -87,18 +157,20 @@ describe "simple context generator":
         expect(output).to_contain("status: ready")
         expect(output).to_contain("matches:")
         expect(output).to_contain("hello context")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "renders no-match query as explicit absence":
+        step("Verify: renders no-match query as explicit absence")
         val absence_marker = "n" + "il"
         val path = _write_context_fixture()
         val index = context_index_packs([path], "hello", "text")
         val output = context_query_index(index, "missing_symbol_name", "json")
         expect(output).to_contain("\"status\":\"no_matches\"")
         expect(output).to_contain("\"matches\":0")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "builds embedded sql pack index":
+        step("Verify: builds embedded sql pack index")
         val absence_marker = "n" + "il"
         val path = _write_context_fixture()
         val output = context_sql_index_packs([path], "hello", "", "text")
@@ -107,9 +179,10 @@ describe "simple context generator":
         if not output.contains("status: unavailable"):
             expect(output).to_contain("pack_count: 1")
             expect(output).to_contain("hello context")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "queries embedded sql pack index":
+        step("Verify: queries embedded sql pack index")
         val absence_marker = "n" + "il"
         val path = _write_context_fixture()
         val output = context_sql_query_packs([path], "hello", "hello context", "", "json")
@@ -118,9 +191,10 @@ describe "simple context generator":
             expect(output).to_contain("\"status\":\"ready\"")
             expect(output).to_contain("\"matches\":")
             expect(output).to_contain("hello context")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "allows source-less embedded sql db queries":
+        step("Verify: allows source-less embedded sql db queries")
         val absence_marker = "n" + "il"
         expect(context_args_allow_sourceless_sql_query(["--sql", "--query=hello", "--db=build/test/context.db"])).to_equal(true)
         expect(context_args_allow_sourceless_sql_query(["--query=hello"])).to_equal(false)
@@ -132,9 +206,10 @@ describe "simple context generator":
         if not output.contains("status: unavailable"):
             expect(output).to_contain("status: no_matches")
             expect(output).to_contain("matches: 0")
-        expect(output.split(absence_marker).len()).to_equal(1)
+        expect(output.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "filters embedded sql query rows by source provenance":
+        step("Verify: filters embedded sql query rows by source provenance")
         val absence_marker = "n" + "il"
         dir_create_all("build/test")
         val alpha_path = "build/test/context_alpha_source.spl"
@@ -152,11 +227,12 @@ describe "simple context generator":
             expect(output).to_contain("matches: 1")
             expect(output).to_contain(alpha_path)
             expect(output).to_contain("alpha_only")
-            expect(output.split(beta_path).len()).to_equal(1)
+            expect(output.split(beta_path).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(output.split("beta_only").len()).to_equal(1)
         expect(indexed.split(absence_marker).len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "treats embedded sql LIKE wildcards as literal query text":
+        step("Verify: treats embedded sql LIKE wildcards as literal query text")
         val absence_marker = "n" + "il"
         dir_create_all("build/test")
         val literal_path = "build/test/context_wildcard_literal.spl"

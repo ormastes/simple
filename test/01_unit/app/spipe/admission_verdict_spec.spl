@@ -1,0 +1,109 @@
+# Purpose and audience: executable specification evidence for the SPipe S1-D
+# admission verdict (§6.4/§13.4 of the refined plan).
+# @req REQ-SPKC-039
+# plan: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md (S1-D)
+
+"""SPipe admission verdict
+
+Proves `compute_admission_verdict` classifies a scored scope into
+Accept / AcceptWithDebt / Reject per the frozen thresholds (target 850,
+floor/deny 700 tenths), that a hard-diagnostic count always forces Reject
+regardless of score, and that a regression against a previous score is
+caught even when the raw score alone would pass.
+"""
+
+use std.spec.*
+use app.spipe.admission.verdict.{compute_admission_verdict, default_thresholds}
+use app.spipe.model.types.{ScoreReport, Verdict}
+
+fn _report(scope: text, score_tenths: i64) -> ScoreReport:
+    ScoreReport(
+        schema: "spipe-balance/1",
+        scope: scope,
+        score_tenths: score_tenths,
+        components: [],
+        deductions: [],
+        scopes: [],
+    )
+
+describe "SPipe admission verdict":
+    it "accepts a scope scoring at or above the 850-tenths target":
+        step("Score a scope at 900 tenths with no diagnostics or baseline")
+        val v = compute_admission_verdict(_report("", 900), 0, None, default_thresholds())
+        expect(v.verdict).to_equal(Verdict.Accept)
+        expect(v.reasons.len()).to_equal(0)
+        expect(v.hard_diagnostic_count).to_equal(0)
+
+    it "accepts with debt a scope between the deny floor and the target":
+        step("Score a scope at 750 tenths (between 700 deny and 850 target)")
+        val v = compute_admission_verdict(_report("", 750), 0, None, default_thresholds())
+        expect(v.verdict).to_equal(Verdict.AcceptWithDebt)
+        expect(v.reasons.len()).to_equal(1)
+        expect(v.reasons[0].code).to_equal("SPK531")
+
+    it "rejects a scope scoring below the 700-tenths deny floor":
+        step("Score a scope at 650 tenths")
+        val v = compute_admission_verdict(_report("", 650), 0, None, default_thresholds())
+        expect(v.verdict).to_equal(Verdict.Reject)
+        var has_deny_reason = false
+        for r in v.reasons:
+            if r.code == "SPK530":
+                has_deny_reason = true
+        expect(has_deny_reason).to_be(true)
+
+    it "rejects regardless of score when hard diagnostics are present":
+        step("Score a scope at 950 tenths but with 2 hard diagnostics")
+        val v = compute_admission_verdict(_report("", 950), 2, None, default_thresholds())
+        expect(v.verdict).to_equal(Verdict.Reject)
+        var has_hard_reason = false
+        for r in v.reasons:
+            if r.code == "SPK532":
+                has_hard_reason = true
+        expect(has_hard_reason).to_be(true)
+
+    it "rejects a global regression beyond the 5-tenths budget even with a passing score":
+        step("Score the global scope at 900 tenths after a 920-tenths baseline")
+        val v = compute_admission_verdict(_report("", 900), 0, Some(920), default_thresholds())
+        var has_regression_reason = false
+        for r in v.reasons:
+            if r.code == "SPK533":
+                has_regression_reason = true
+        expect(has_regression_reason).to_be(true)
+        expect(v.verdict).to_equal(Verdict.Reject)
+
+    it "tolerates a global regression within the 5-tenths budget":
+        step("Score the global scope at 900 tenths after a 903-tenths baseline")
+        val v = compute_admission_verdict(_report("", 900), 0, Some(903), default_thresholds())
+        var has_regression_reason = false
+        for r in v.reasons:
+            if r.code == "SPK533":
+                has_regression_reason = true
+        expect(has_regression_reason).to_be(false)
+
+    it "uses the wider 10-tenths regression budget for a non-global scope":
+        step("Score a named scope at 900 after an 908-tenths baseline (within budget)")
+        val ok = compute_admission_verdict(_report("doc/x", 900), 0, Some(908), default_thresholds())
+        var ok_has_reason = false
+        for r in ok.reasons:
+            if r.code == "SPK534":
+                ok_has_reason = true
+        expect(ok_has_reason).to_be(false)
+
+        step("Score the same scope at 900 after a 915-tenths baseline (exceeds budget)")
+        val bad = compute_admission_verdict(_report("doc/x", 900), 0, Some(915), default_thresholds())
+        var bad_has_reason = false
+        for r in bad.reasons:
+            if r.code == "SPK534":
+                bad_has_reason = true
+        expect(bad_has_reason).to_be(true)
+
+    it "carries the exact frozen thresholds through to the verdict":
+        step("Read back the thresholds attached to a computed verdict")
+        val v = compute_admission_verdict(_report("", 900), 0, None, default_thresholds())
+        expect(v.thresholds.target).to_equal(850)
+        expect(v.thresholds.floor).to_equal(800)
+        expect(v.thresholds.deny).to_equal(700)
+        expect(v.thresholds.max_global_regression_tenths).to_equal(5)
+        expect(v.thresholds.max_scope_regression_tenths).to_equal(10)
+        expect(v.thresholds.legacy_required_improvement_tenths).to_equal(20)
+        expect(v.schema).to_equal("spipe-admission/1")

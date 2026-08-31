@@ -9,6 +9,7 @@ use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
 use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
 use compiler.tools.duplicate_check.features.{build_feature_vector, cosine_similarity, FeatureVec, feature_signature, signatures_share_token}
+use compiler.tools.duplicate_check.lsh_prefilter.{lsh_candidate_pairs_for_streams, sorted_tokens}
 
 struct SemanticMatch:
     entry_a: DocEntry
@@ -309,39 +310,51 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         val sig = feature_signature(fv, 5)
         sigs.push(sig)
 
+    val matches = if config.use_lsh_prefilter:
+        lsh_prefiltered_matches(documented, fvecs, config.semantic_threshold)
+    else:
+        token_bucket_matches(documented, fvecs, sigs, config.semantic_threshold)
+
+    if matches.len() > 1:
+        quicksort_matches_by_sim(matches, 0, matches.len() - 1)
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: missing_docs,
+        total_items: all_entries.len(),
+        items_with_docs: documented.len(),
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: false
+    )
+
+fn token_bucket_matches(documented: [DocEntry], fvecs: [FeatureVec], sigs: [text], threshold: f64) -> [SemanticMatch]:
+    """Default (flag-off) candidate generation: shared top-5 signature token
+    buckets. Unchanged from the pre-prefilter implementation."""
     # Bucket by shared signature token (inverted index), NOT by directory —
     # semantic clones usually live in different directories. Comparing only
     # inside token buckets keeps this near-linear instead of global O(n²).
-    # Store bucket membership as integers. Encoding a growing bucket as comma-
-    # separated text recopied its entire prefix on every insertion, then split
-    # and parsed it again before comparison (quadratic copying for hot tokens).
-    var token_to_bucket: {text: i64} = {}
-    var buckets: [[i64]] = []
+    var token_to_indices: {text: text} = {}
     var gi = 0
     while gi < documented.len():
         if fvecs[gi].magnitude != 0.0:
             for tok in sigs[gi].split(","):
                 if tok.len() > 0:
-                    if token_to_bucket.has(tok):
-                        val bucket_index = token_to_bucket[tok]
-                        # 401 is an oversized sentinel. Once reached this
-                        # bucket is always skipped, so retaining later members
-                        # cannot affect matching and only wastes memory.
-                        if semantic_bucket_accepts_member(buckets[bucket_index].len()):
-                            buckets[bucket_index].push(gi)
+                    if token_to_indices.has(tok):
+                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
                     else:
-                        val bucket_index = buckets.len()
-                        token_to_bucket[tok] = bucket_index
-                        buckets.push([gi])
+                        token_to_indices[tok] = "{gi}"
         gi = gi + 1
 
     var matches: [SemanticMatch] = []
-    val threshold = config.semantic_threshold
     # Dedup: a pair sharing multiple signature tokens lands in multiple buckets.
     var seen_pairs: {text: bool} = {}
 
-    for tok in token_to_bucket.keys():
-        val indices = buckets[token_to_bucket[tok]]
+    for tok in token_to_indices.keys():
+        val idx_strs = token_to_indices[tok].split(",")
+        var indices: [i64] = []
+        for s in idx_strs:
+            indices.push(int(s))
 
         # ponytail: cap giant buckets (a common token like "value"); raise if it
         # ever drops a real clone — a genuine pair shares 5 tokens, so it also
@@ -367,27 +380,34 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
                     matches.push(make_semantic_match(documented[i], documented[j], sim, ""))
                 pj = pj + 1
             pi = pi + 1
+    matches
 
-    if matches.len() > 1:
-        quicksort_matches_by_sim(matches, 0, matches.len() - 1)
-
-    SemanticReport(
-        matches: matches,
-        missing_docs: missing_docs,
-        total_items: all_entries.len(),
-        items_with_docs: documented.len(),
-        cache_hits: 0,
-        cache_misses: 0,
-        used_fallback: false
-    )
-
-fn semantic_bucket_accepts_member(current_len: i64) -> bool:
-    """Return whether a signature bucket still needs one more member.
-
-    Length 401 is the retained oversized sentinel; later members are irrelevant
-    because comparison unconditionally skips this bucket.
-    """
-    current_len <= 400
+fn lsh_prefiltered_matches(documented: [DocEntry], fvecs: [FeatureVec], threshold: f64) -> [SemanticMatch]:
+    """Opt-in (use-lsh-prefilter) candidate generation: MinHash/LSH banding
+    from std.common.search narrows the comparison set; surviving pairs are
+    still scored with the existing feature-vector cosine, so match records are
+    produced exactly as on the default path."""
+    var streams: [[text]] = []
+    var i = 0
+    while i < fvecs.len():
+        if fvecs[i].magnitude != 0.0:
+            streams.push(sorted_tokens(fvecs[i].features.keys()))
+        else:
+            streams.push([])
+        i = i + 1
+    val candidates = lsh_candidate_pairs_for_streams(streams)
+    var matches: [SemanticMatch] = []
+    var c = 0
+    while c < candidates.len():
+        val a = candidates[c].left
+        val b = candidates[c].right
+        if a < documented.len() and b < documented.len():
+            if fvecs[a].magnitude != 0.0 and fvecs[b].magnitude != 0.0:
+                val sim = cosine_similarity(fvecs[a], fvecs[b])
+                if sim >= threshold:
+                    matches.push(make_semantic_match(documented[a], documented[b], sim, ""))
+        c = c + 1
+    matches
 
 fn empty_report() -> SemanticReport:
     SemanticReport(

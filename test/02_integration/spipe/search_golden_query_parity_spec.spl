@@ -1,0 +1,98 @@
+# P11 unblock — exact score/explanation parity against the JS oracle.
+#
+# Closes doc/08_tracking/bug/golden_query_scoring_pipeline_unassembled_2026-08-31.md:
+# `query_exec.spl`'s `run_query_v1` is the assembled analyze -> postings ->
+# bm25_fixed_v1_score_checked -> explain pipeline this spec exercises end to
+# end against every query in the checked-in
+# examples/05_stdlib/spipe/test/fixture/wave4_search/golden_results.json,
+# asserting EXACT score_milli / matched_fields / source_rank /
+# explanation_hash parity — not approximate, not skipped.
+use std.spec.{describe, it, expect}
+use std.fs.{read_file}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.search.document.{ScopedSearchDocumentV1, ScopedFieldV1, ScopedFacetV1}
+use std.common.search.index_engine.{IndexEngine}
+use std.common.search.query.{EqualityFilterV1}
+use std.common.search.query_exec.{run_query_v1, QueryHitV1}
+
+val FIXTURE_DIR: text = "examples/05_stdlib/spipe/test/fixture/wave4_search/"
+val SCOPE_DIGEST: text = "sha256:" + "0" * 64
+val GOLDEN_LOGICAL_ROOT: text = "sha256:8cd7ac31569e67b132a477ed1e5e66cc610a9119f0bf899b8fee26d5d27e90dd"
+
+# The golden corpus's three PUBLIC documents (fixture_id
+# spipe-wave4-search-golden-v1). `A-private` is excluded because the JS
+# oracle only indexes public documents for this fixture
+# (createJsProviderFixture: `corpus.documents.filter(visibility === "public")`)
+# — it is not a query-time filter, it never enters the corpus at all, which
+# is why golden_results.json's stats block reports document_count: 3.
+fn golden_public_documents() -> [ScopedSearchDocumentV1]:
+    [
+        ScopedSearchDocumentV1.of("A-ascii", "r1", [
+            ScopedFieldV1.of("identifier", "REQ-SPKC-011"),
+            ScopedFieldV1.of("title", "Alpha Search"),
+            ScopedFieldV1.of("heading", "Alpha combining é"),
+            ScopedFieldV1.of("classification", "search"),
+            ScopedFieldV1.of("body", "alpha alpha and beta"),
+        ], [ScopedFacetV1.of("visibility", "public")], "public", "sha256:a", SCOPE_DIGEST),
+        ScopedSearchDocumentV1.of("A-é", "r1", [
+            ScopedFieldV1.of("identifier", "REQ-SPKC-012"),
+            ScopedFieldV1.of("title", "Alpha Search"),
+            ScopedFieldV1.of("heading", "Alpha combining é"),
+            ScopedFieldV1.of("classification", "search"),
+            ScopedFieldV1.of("body", "beta alpha"),
+        ], [ScopedFacetV1.of("visibility", "public")], "public", "sha256:b", SCOPE_DIGEST),
+        ScopedSearchDocumentV1.of("A-empty", "r1", [
+            ScopedFieldV1.of("identifier", "ID-EMPTY"),
+            ScopedFieldV1.of("title", ""),
+            ScopedFieldV1.of("heading", ""),
+            ScopedFieldV1.of("classification", "empty"),
+            ScopedFieldV1.of("body", ""),
+        ], [ScopedFacetV1.of("visibility", "public")], "public", "sha256:c", SCOPE_DIGEST),
+    ]
+
+fn expect_hit(hit: QueryHitV1, document_id: text, score_milli: i64,
+              matched_fields: [text], source_rank: i64, explanation_hash: text):
+    expect(hit.document_id).to_equal(document_id)
+    expect(hit.score_milli).to_equal(score_milli)
+    expect(hit.matched_fields).to_equal(matched_fields)
+    expect(hit.source_rank).to_equal(source_rank)
+    expect(hit.explanation_hash).to_equal("sha256:" + explanation_hash)
+
+describe "Golden query -> score pipeline (analyze -> postings -> bm25_fixed_v1_score_checked -> explain)":
+    it "the checked-in golden_results.json fixture is still what these hardcoded expectations transcribe":
+        val results_text = read_file(FIXTURE_DIR + "golden_results.json")
+        val parsed = json_parse_with_error(results_text)
+        expect(parsed.1).to_equal("")
+        expect(results_text).to_contain("\"score_milli\":5564")
+        expect(results_text).to_contain("\"score_milli\":7407")
+        expect(results_text).to_contain("\"score_milli\":3063")
+        expect(results_text).to_contain("79a325595560360181d111119163260ab218ae630338542ed942e36f169f1040")
+
+    it "query 'alpha-search' ('alpha search', no filters) matches the oracle exactly":
+        val engine = IndexEngine.of_documents(golden_public_documents())
+        val hits = run_query_v1(engine, "alpha search", [], 10, SCOPE_DIGEST, GOLDEN_LOGICAL_ROOT).unwrap()
+        expect(hits.len()).to_equal(2)
+        expect_hit(hits[0], "A-ascii", 5564, ["title", "heading", "classification", "body"], 1,
+            "79a325595560360181d111119163260ab218ae630338542ed942e36f169f1040")
+        expect_hit(hits[1], "A-é", 5471, ["title", "heading", "classification", "body"], 2,
+            "8cd5535ac3cbd8631371e67e3e3d7c6bc5755f9c70fcfcc3a025e03a29055bf1")
+
+    it "query 'identifier' ('REQ-SPKC-011', no filters) matches the oracle exactly":
+        val engine = IndexEngine.of_documents(golden_public_documents())
+        val hits = run_query_v1(engine, "REQ-SPKC-011", [], 10, SCOPE_DIGEST, GOLDEN_LOGICAL_ROOT).unwrap()
+        expect(hits.len()).to_equal(2)
+        expect_hit(hits[0], "A-ascii", 7407, ["identifier"], 1,
+            "1b5afa594640af982c5074b32ed7ffc221f6a5740e3b78b21ddc2d602e6fe006")
+        expect_hit(hits[1], "A-é", 3625, ["identifier"], 2,
+            "b18882a0f2e0a3c38773819016c7a2096ad315d7878fea621eba1fe4319a1e5a")
+
+    it "query 'public-filter' ('alpha', visibility=public) matches the oracle exactly":
+        val engine = IndexEngine.of_documents(golden_public_documents())
+        val filters = [EqualityFilterV1.of("visibility", ["public"])]
+        val hits = run_query_v1(engine, "alpha", filters, 10, SCOPE_DIGEST, GOLDEN_LOGICAL_ROOT).unwrap()
+        expect(hits.len()).to_equal(2)
+        expect_hit(hits[0], "A-ascii", 3063, ["title", "heading", "body"], 1,
+            "ed38dc1020e16d4241ff0491e731a8526b59554ca28e2afed5e565f9b6a17e90")
+        expect_hit(hits[1], "A-é", 2970, ["title", "heading", "body"], 2,
+            "a228d6252082876516e6df4c51060114109d9b2f9ee38f47e92fd00242800b4b")
+    return ()

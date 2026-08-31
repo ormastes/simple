@@ -1,0 +1,106 @@
+# Out-of-process SearchProviderAdapter (P5). Wraps a wire transport (P6 owns
+# the actual byte-level protocol) behind the same `SearchProviderAdapter`
+# trait the in-process adapter implements, so KnowledgeCompiler cannot tell
+# which one it holds. Adds the one thing a transport boundary needs that an
+# in-process call does not: at most one outstanding request per correlation
+# ID (design §4.3) -- a second request reusing a still-open ID is rejected
+# before it ever reaches the transport.
+
+use app.spipe.search.adapter.{AdapterStateV1, SearchProviderAdapter, ProviderHandshakeV1, validate_handshake_v1, required_handshake_v1}
+use app.spipe.search.response_validation.{validate_search_page}
+use lib.common.search.provider.{ProviderErrorV1}
+use lib.common.search.query.{SearchQuery}
+use lib.common.search.top_k.{SearchPageV1}
+
+# Narrow seam P6 implements: given a correlation (request) ID and a query,
+# produce the (already-decoded) page or a transport-level error. Wire framing,
+# `TransportDiagnosticV1`, and the invalid_utf8/frame_too_large closed-silent
+# rule live entirely on P6's side of this trait.
+trait ProviderTransportV1:
+    fn send_search(self, request_id: text, snapshot_id: text, scope_digest: text, query: SearchQuery) -> Result<SearchPageV1, ProviderErrorV1>
+
+class ProcessSearchProviderAdapter:
+    transport: ProviderTransportV1
+    state: AdapterStateV1
+    logical_root: text
+    in_flight: [text]
+
+impl ProcessSearchProviderAdapter:
+    static fn new(transport: ProviderTransportV1) -> ProcessSearchProviderAdapter:
+        ProcessSearchProviderAdapter(transport: transport, state: AdapterStateV1.New, logical_root: "", in_flight: [])
+
+    fn is_in_flight(self, request_id: text) -> bool:
+        var i = 0
+        while i < self.in_flight.len():
+            if self.in_flight[i] == request_id:
+                return true
+            i = i + 1
+        false
+
+    fn mark_in_flight(self, request_id: text) -> ():
+        self.in_flight.push(request_id)
+
+    fn clear_in_flight(self, request_id: text) -> ():
+        var kept: [text] = []
+        var i = 0
+        while i < self.in_flight.len():
+            if self.in_flight[i] != request_id:
+                kept.push(self.in_flight[i])
+            i = i + 1
+        self.in_flight = kept
+
+impl SearchProviderAdapter for ProcessSearchProviderAdapter:
+    fn state(self) -> AdapterStateV1:
+        self.state
+
+    fn handshake(self, offered: ProviderHandshakeV1) -> Result<bool, ProviderErrorV1>:
+        self.state = AdapterStateV1.Initializing
+        val ok = validate_handshake_v1(offered, required_handshake_v1())
+        match ok:
+            Err(e):
+                self.state = AdapterStateV1.Unavailable
+                return Err(e)
+            Ok(_):
+                self.state = AdapterStateV1.Healthy
+                return Ok(true)
+
+    fn search(self, snapshot_id: text, scope_digest: text, query: SearchQuery) -> Result<SearchPageV1, ProviderErrorV1>:
+        self.search_correlated(snapshot_id + ":" + scope_digest + ":" + snapshot_id, snapshot_id, scope_digest, query)
+
+    fn quarantine(self, reason: text) -> Result<bool, ProviderErrorV1>:
+        if self.state == AdapterStateV1.Closed:
+            return Err(ProviderErrorV1(code: "invalid_state_transition", message: "closed", retryable: false))
+        self.state = AdapterStateV1.Quarantined
+        Ok(true)
+
+    fn close(self) -> Result<bool, ProviderErrorV1>:
+        self.state = AdapterStateV1.Closed
+        Ok(true)
+
+impl ProcessSearchProviderAdapter:
+    # The correlation-ID-aware entry point. `search()` above derives a
+    # deterministic ID from the query shape for callers that do not care;
+    # a caller that DOES care (retries, cancellation) should call this
+    # directly with its own ID.
+    fn search_correlated(self, request_id: text, snapshot_id: text, scope_digest: text, query: SearchQuery) -> Result<SearchPageV1, ProviderErrorV1>:
+        if self.state != AdapterStateV1.Healthy:
+            return Err(ProviderErrorV1(code: "adapter_not_healthy", message: self.state.name(), retryable: false))
+        if self.is_in_flight(request_id):
+            return Err(ProviderErrorV1(code: "correlation_id_reused", message: request_id, retryable: false))
+        self.mark_in_flight(request_id)
+        val result = self.transport.send_search(request_id, snapshot_id, scope_digest, query)
+        self.clear_in_flight(request_id)
+        match result:
+            Err(e):
+                return Err(e)
+            Ok(page):
+                val expected_root = self.logical_root
+                val root_to_check = if expected_root.len() == 0: page.logical_root else expected_root
+                val validated = validate_search_page(page, root_to_check)
+                match validated:
+                    Err(verr):
+                        self.state = AdapterStateV1.Quarantined
+                        return Err(verr)
+                    Ok(_):
+                        self.logical_root = page.logical_root
+                        return Ok(page)
