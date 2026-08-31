@@ -523,9 +523,15 @@ pub(super) fn exec_block_closure_into(
                         CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
                         CONTEXT_VAR_NAME.with(|cell| *cell.borrow_mut() = var_name.clone());
 
-                        last_value = exec_block_closure(
+                        // MUST run in the enclosing frame (mirror of the
+                        // `Node::If` arm below). `exec_block_closure` executes
+                        // in a COPY, so `res = double(21)` inside `context obj:`
+                        // was discarded and `res` stayed at its prior value —
+                        // test/feature/usage/classes_spec.spl "dispatches method
+                        // to context object".
+                        last_value = exec_block_closure_mut(
                             &ctx_stmt.body.statements,
-                            &local_env,
+                            &mut local_env,
                             functions,
                             classes,
                             enums,

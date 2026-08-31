@@ -210,6 +210,12 @@ pub(crate) fn bind_args_with_injected(
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
 
+    // Parameters claimed by a NAMED argument anywhere in this call. A positional
+    // argument must fill the next parameter that is not in this set, otherwise
+    // `f(x: 10, y)` rebinds `x` and leaves `y` unbound (struct-shorthand bug,
+    // test/feature/usage/struct_shorthand_spec.spl).
+    let named_params: std::collections::HashSet<&str> = args.iter().filter_map(|a| a.name.as_deref()).collect();
+
     let mut bound = HashMap::with_capacity(params_to_bind.len());
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
@@ -318,6 +324,11 @@ pub(crate) fn bind_args_with_injected(
                     }
                 } else {
                     // No variadic - bind to regular parameters
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
                     if positional_idx >= params_to_bind.len() {
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -401,6 +412,11 @@ pub(crate) fn bind_args_with_injected(
                     }
                 } else {
                     // No variadic parameter - normal positional binding
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
                     if positional_idx >= params_to_bind.len() {
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
@@ -510,6 +526,39 @@ pub(crate) fn bind_args_with_values(
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
+    bind_args_with_values_named(
+        params,
+        args,
+        &[],
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )
+}
+
+/// Map already-evaluated argument VALUES onto parameters, honouring the call's
+/// named arguments.
+///
+/// `arg_exprs` is the parallel un-evaluated argument list (same length as
+/// `args`) whose `name` fields carry `f(b = 1, a = 2)` labels. The
+/// pre-evaluated method-dispatch paths used to drop those labels and bind
+/// purely by position, so `m.subtract(subtrahend = 15, minuend = 50)` computed
+/// `15 - 50`. Pass an empty slice for a call with no labels.
+#[allow(clippy::too_many_arguments)] // reason: mirrors bind_args_with_values' locked signature
+pub(crate) fn bind_args_with_values_named(
+    params: &[Parameter],
+    args: &[Value],
+    arg_exprs: &[Argument],
+    outer_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: SelfMode,
+) -> Result<HashMap<String, Value>, CompileError> {
     let params_to_bind: Vec<_> = params
         .iter()
         .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
@@ -594,10 +643,60 @@ pub(crate) fn bind_args_with_values(
             params_to_bind.len()
         );
     }
+
+    // Route each supplied value to the parameter it actually names. A named
+    // argument binds by name; a positional one fills the next parameter no
+    // named argument claims.
+    let mut value_for_param: Vec<Option<Value>> = vec![None; params_to_bind.len()];
+    {
+        let named_params: std::collections::HashSet<&str> =
+            arg_exprs.iter().filter_map(|a| a.name.as_deref()).collect();
+        let mut positional_idx = 0usize;
+        for (idx, value) in args.iter().enumerate() {
+            let slot = match arg_exprs.get(idx).and_then(|a| a.name.as_deref()) {
+                Some(name) => match params_to_bind.iter().position(|p| p.name == name) {
+                    Some(pos) => pos,
+                    None => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::UNDEFINED_VARIABLE)
+                            .with_help("check the function signature for valid parameter names");
+                        return Err(CompileError::semantic_with_context(
+                            format!("unknown argument '{}'", name),
+                            ctx,
+                        ));
+                    }
+                },
+                None => {
+                    while positional_idx < params_to_bind.len()
+                        && named_params.contains(params_to_bind[positional_idx].name.as_str())
+                    {
+                        positional_idx += 1;
+                    }
+                    if positional_idx >= params_to_bind.len() {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("check the function signature and provide the correct number of arguments");
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "function expects {} argument(s), but more were provided",
+                                params_to_bind.len()
+                            ),
+                            ctx,
+                        ));
+                    }
+                    let slot = positional_idx;
+                    positional_idx += 1;
+                    slot
+                }
+            };
+            value_for_param[slot] = Some(value.clone());
+        }
+    }
+
     for (idx, param) in params_to_bind.iter().enumerate() {
-        let value = if idx < args.len() {
+        let value = if let Some(v) = value_for_param[idx].take() {
             // Automatically await Promise arguments
-            await_value(args[idx].clone())?
+            await_value(v)?
         } else if let Some(default_expr) = &param.default {
             evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {

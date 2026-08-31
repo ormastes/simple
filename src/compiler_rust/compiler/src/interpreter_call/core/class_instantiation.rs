@@ -378,6 +378,13 @@ pub(crate) fn instantiate_class(
     }
 
     // Second pass: explicit named/positional fields override any spread values.
+    //
+    // A positional argument fills the next field NOT already claimed by a named
+    // argument anywhere in the call. Without the skip, `Point(x: 10, y)` bound
+    // the trailing positional to field 0 (`x`, overwriting it) and left `y` at
+    // its default 0 — see test/feature/usage/struct_shorthand_spec.spl.
+    let named_fields: std::collections::HashSet<&str> =
+        args.iter().filter_map(|a| a.name.as_deref()).collect();
     let mut positional_idx = 0;
     for arg in args {
         // Struct-spread arguments were consumed in the first pass above.
@@ -437,11 +444,18 @@ pub(crate) fn instantiate_class(
                 ));
             }
             fields.insert(name.clone(), val);
-        } else if positional_idx < class_def.fields.len() {
-            let field_name = &class_def.fields[positional_idx].name;
-            fields.insert(field_name.clone(), val);
-            positional_idx += 1;
         } else {
+            while positional_idx < class_def.fields.len()
+                && named_fields.contains(class_def.fields[positional_idx].name.as_str())
+            {
+                positional_idx += 1;
+            }
+            if positional_idx < class_def.fields.len() {
+                let field_name = &class_def.fields[positional_idx].name;
+                fields.insert(field_name.clone(), val);
+                positional_idx += 1;
+                continue;
+            }
             // E1023 - Invalid Struct Literal
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_STRUCT_LITERAL)

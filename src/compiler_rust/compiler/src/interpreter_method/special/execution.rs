@@ -347,9 +347,10 @@ pub fn exec_function_with_self_return_values(
         },
     );
     let self_mode = simple_parser::ast::SelfMode::SkipSelf;
-    let bound = crate::interpreter::interpreter_call::bind_args_with_values(
+    let bound = crate::interpreter::interpreter_call::bind_args_with_values_named(
         &func.params,
         arg_vals,
+        arg_exprs,
         outer_env,
         functions,
         classes,
@@ -374,6 +375,15 @@ pub fn exec_function_with_self_return_values(
 
     let non_self_params: Vec<_> = func.params.iter().filter(|p| p.name != "self").collect();
     for (param, arg) in non_self_params.into_iter().zip(arg_exprs.iter()) {
+        // A labelled argument does not sit at its positional slot, so the zip
+        // above would write the container back into the wrong variable.
+        let param = match &arg.name {
+            Some(name) => match func.params.iter().find(|p| &p.name == name) {
+                Some(p) => p,
+                None => continue,
+            },
+            None => param,
+        };
         if let simple_parser::ast::Expr::Identifier(var_name) = &arg.value {
             if let Some(updated_arg) = local_env.get(&param.name).cloned() {
                 if matches!(
