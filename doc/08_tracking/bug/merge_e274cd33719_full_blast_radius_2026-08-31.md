@@ -379,3 +379,14 @@ generation. Each needs a both-directions diff by a human/owning lane.
 - `src/verification/riscv_product/src/RiscvProduct/Constraints.lean` (-31/+6)
 - `examples/09_embedded/simple_os/arch/common/linker_riscv_common.ld` (-30/+5)
 - `src/os/libc/simpleos_string_ext.c` (-30/+0)
+
+## Landing caveats
+
+- Staleness window: the ORIGIN_EQ_MERGE column was computed from one fetch
+  during this session; parallel lanes push continuously. Before landing the 15
+  restorations, re-fetch and re-verify `origin/main:<path>` still equals the
+  merge blob for each — otherwise a concurrent fix gets clobbered.
+- Coverage boundary: deep checks ran only on priority-area M files passing the
+  big-shrink heuristic (864 of 5,583). Not deep-checked: 4,719 small/balanced
+  priority M files, ~29k test/+doc/ paths, and the 10,189 A files (an added
+  file can also resurrect stale content).
