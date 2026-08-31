@@ -1,0 +1,43 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+"""
+# Linalg backend availability probes must not panic
+
+Regression guard for known-bug C16. `dyn_openblas_available()` /
+`dyn_cuda_available()` routed through the panicking legacy `DynLoader.call0`
+dispatch, so on a host without `build/libspl_scilib.so` every backend query
+died with `panic: E-SFFI-001: failed to load provider`. An availability probe
+must answer `false` for a missing provider and let the caller receive a typed
+`BackendError`, which is exactly what the scilib specs assert.
+"""
+
+use std.spec.step
+use std.linalg.*
+
+describe "linalg backend availability probe":
+    it "returns a typed unavailable error instead of panicking when the provider is missing":
+        # @req REQ-SSPEC-FEATURE
+        step("require_linalg_backend answers through the Result channel")
+        match require_linalg_backend("openblas"):
+            case Ok(status):
+                expect(status.selected).to_equal("openblas")
+                expect(status.real_native).to_equal(true)
+            case Err(BackendError.BackendUnavailable(name)):
+                expect(name).to_equal("openblas")
+            case _:
+                expect(false).to_equal(true)
+
+    it "answers the cuda probe without panicking":
+        # @req REQ-SSPEC-FEATURE
+        step("dyn_cuda_available returns a boolean rather than aborting")
+        val available = dyn_cuda_available()
+        expect(available == true or available == false).to_equal(true)
+
+    it "still reports unsupported backends as a typed unsupported error":
+        # @req REQ-SSPEC-FEATURE
+        step("unknown names stay distinguishable from unavailable ones")
+        match require_linalg_backend("not-a-backend"):
+            case Err(BackendError.UnsupportedBackend(name)):
+                expect(name).to_equal("not-a-backend")
+            case _:
+                expect(false).to_equal(true)
