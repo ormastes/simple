@@ -17,6 +17,20 @@ use app.cli.native_build_warm_receipt.{
 
 # Absolute path of the current bootstrap-stage compiler.
 fn self_exe() -> text:
+    # argv[0] first: it names the running compiler on EVERY platform and needs
+    # neither /proc (Linux-only) nor `ps -o comm=` (POSIX-only). Windows has
+    # neither, so before this probe self_exe() returned "" there and
+    # resolve_simple_binary() fell through to the literal "bin/simple" -- a
+    # name that does not exist on Windows (the binary is bin/simple.exe),
+    # producing "The filename, directory name, or volume label syntax is
+    # incorrect." from CreateProcess and a native-build worker spawn failure.
+    # Same shape as the existing probe in
+    # src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl:119.
+    val argv = get_args() ?? []
+    if argv.len() > 0:
+        val argv0 = argv[0]
+        if argv0 != "" and (argv0.ends_with("/simple") or argv0.ends_with("simple.exe")) and file_exists(argv0):
+            return argv0
     val pid = getpid()
     val (out, _err, code) = process_run_timeout("readlink", ["-f", "/proc/{pid}/exe"], 2000)
     if code == 0 and out != "":
@@ -36,8 +50,20 @@ fn abs_path(rel: text) -> text:
         return rel
     "{here}/{rel}"
 
+# A Windows drive-absolute path ("C:\..." or "C:/..."). Detected by the
+# drive-colon at index 1 so this needs no backslash literal.
+fn is_drive_absolute(p: text) -> bool:
+    if p.len() < 3:
+        return false
+    p.substring(1).starts_with(":")
+
 fn abs_if_needed(p: text) -> text:
-    if p.starts_with("/"):
+    # A leading "/" is the POSIX absolute form; a drive-colon is the Windows
+    # one. Testing only for "/" made abs_path() prepend the cwd to an ALREADY
+    # absolute Windows path, so an explicit SIMPLE_BINARY=C:/.../simple.exe was
+    # rewritten to "/c/Users/.../simple/C:/Users/.../simple.exe" and the worker
+    # spawn failed.
+    if p.starts_with("/") or is_drive_absolute(p):
         return p
     abs_path(p)
 
@@ -60,6 +86,10 @@ fn resolve_simple_binary() -> text:
     val se = self_exe()
     if se != "" and file_exists(se):
         return abs_if_needed(se)
+    # Windows deploys the compiler as bin/simple.exe; probe it before the
+    # extensionless POSIX name so the fallback names a file that exists.
+    if file_exists("bin/simple.exe"):
+        return abs_path("bin/simple.exe")
     if file_exists("bin/simple"):
         return abs_path("bin/simple")
     if file_exists("src/compiler_rust/target/bootstrap/simple"):
