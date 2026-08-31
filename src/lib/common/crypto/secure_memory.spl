@@ -6,6 +6,8 @@
 extern fn rt_array_set_len_known(collection: [u8], len: i64) -> i8
 @unsafe(reason: "raw i64-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
 extern fn rt_array_data_ptr(collection: [i64]) -> i64
+@unsafe(reason: "raw u8-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
+extern fn rt_array_data_ptr_text(collection: [u8]) -> i64
 @unsafe(reason: "volatile secret-memory byte read after bounds and pointer validation", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_read_u8(addr: i64) -> i64
 @unsafe(reason: "volatile secret-memory byte write after bounds and pointer validation", capabilities: [ffi, raw_ptr])
@@ -63,7 +65,14 @@ fn secure_zero_u8_range(bytes: [u8], start: u64, byte_count: u64) -> SecureZeroR
         return SecureZeroReport(
             slot_count: byte_count, overwritten_slots: 0u64,
             residual_nonzero_slots: byte_count)
-    val data_ptr = bytes.data_ptr().to_u64() as i64
+    # Native codegen has no `.data_ptr()` lowering at all (only the
+    # interpreter does); the Stage 2 link resolved this call to the
+    # nonexistent dynamic symbol `Array.data_ptr`. Use the canonical runtime
+    # ABI owner explicitly, same as the i64-slot path below;
+    # rt_array_data_ptr_text is the element-agnostic alias of
+    # rt_array_data_ptr (src/runtime/runtime_native.c).
+    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_array_data_ptr_text(bytes)
     if data_ptr == 0:
         return SecureZeroReport(
             slot_count: byte_count, overwritten_slots: 0u64,
@@ -90,9 +99,10 @@ fn secure_zero_u8_range(bytes: [u8], start: u64, byte_count: u64) -> SecureZeroR
         residual_nonzero_slots: residual)
 
 fn secure_zero_i64_slots(words: [i64]) -> SecureZeroReport:
-    # The staged compiler only treats byte-array `.data_ptr()` as an intrinsic;
-    # the generic i64-array form otherwise lowers to the nonexistent dynamic
-    # symbol `Array.data_ptr`. Use the canonical runtime ABI owner explicitly.
+    # `.data_ptr()` lowers to the nonexistent dynamic symbol `Array.data_ptr`
+    # under native codegen for every element type (the byte-array form too —
+    # proven by the 2026-08-31 Stage 2 link). Use the canonical runtime ABI
+    # owner explicitly.
     val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
         rt_array_data_ptr(words)
     _secure_zero_slots(data_ptr, words.len())
