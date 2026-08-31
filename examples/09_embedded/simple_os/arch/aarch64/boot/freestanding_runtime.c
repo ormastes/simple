@@ -1232,9 +1232,11 @@ spl_i64 rt_contains(spl_i64 collection, spl_i64 value) {
  * absent, which is the branch the lint rules actually take.
  *
  * DIVERGENCE, stated rather than papered over: the hosted array branch takes a
- * CLOSURE predicate and yields the matching ELEMENT. This runtime has neither
- * rt_closure_func_ptr nor rt_array_find — a freestanding image has no closure
- * support at all — so the array branch here answers the only question it can
+ * CLOSURE predicate and yields the matching ELEMENT. This runtime has no
+ * rt_array_find, and rt_find has no way to know the arity or calling convention
+ * of the predicate it was handed (rt_closure_* now exist at the bottom of this
+ * file, but they only allocate and read a closure — they do not CALL one), so
+ * the array branch here answers the only question it can
  * answer honestly: the INDEX of the first element equal to `value` under
  * rt_native_eq, mirroring rt_contains directly above, and -1 when absent. -1
  * for "absent" is load-bearing: callers branch on `< 0`, so returning 0 would
@@ -3670,4 +3672,114 @@ spl_i64 rt_aarch64_p10_keepalive(void) {
         }
     }
     return live;
+}
+
+/* ---------------------------------------------------------------------------
+ * Closures.
+ *
+ * PORT, not a new symbol: rt_closure_new / rt_closure_set_capture /
+ * rt_closure_get_capture / rt_closure_func_ptr are all declared in
+ * src/runtime/runtime.h:664-667 and defined for the hosted target in
+ * src/runtime/runtime_native.c (rt_closure_new at :8042). The riscv64
+ * freestanding sibling carries the same port in
+ * examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c.
+ *
+ * This file previously had NONE of them — the rt_find comment above says so
+ * outright ("a freestanding image has no closure support at all"), which is why
+ * the aarch64 mcp component kernel did not link at all:
+ *   ld.lld: error: undefined symbol: rt_closure_new
+ *   ld.lld: error: undefined symbol: rt_closure_func_ptr
+ * The MCP dispatcher needs exactly these: DispatchEntry.handler is a closure.
+ * Stubbing them would produce a dispatcher that silently handles nothing, so
+ * they are implemented rather than stubbed.
+ *
+ * PARAMETER WIDTHS ARE NOT FREE CHOICES — they are the codegen ABI, declared in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:678-681:
+ *   rt_closure_new         (I64, I32)      -> I64
+ *   rt_closure_set_capture (I64, I32, I64) -> I8
+ *   rt_closure_get_capture (I64, I32)      -> I64
+ *   rt_closure_func_ptr    (I64)           -> I64
+ * and matched by the Rust runtime (value/objects.rs:177,198,213,227), whose
+ * index/count parameters are `u32`. Declaring these 64-bit leaves the upper
+ * half of the register undefined, so the count/index read as garbage and the
+ * indirect call goes through a NULL func_ptr. That defect trapped the riscv64
+ * lane and is recorded in that file's port comment.
+ *
+ * Differences from the hosted definition, and why each is correct here:
+ *   * calloc -> rt_alloc (this file's bump heap) plus an EXPLICIT nil fill.
+ *     rt_alloc does not zero, and zeroing would be wrong anyway: nil here is
+ *     TAG_SPECIAL (0x3), not 0.
+ *   * rt_core_register_closure is dropped: no collector, nothing is ever freed,
+ *     so every closure is already immortal.
+ *   * func_ptr is stored RAW (untagged). Codegen passes and expects a bare code
+ *     address; tagging it would corrupt the indirect call.
+ * ------------------------------------------------------------------------- */
+
+#define RT_HEAP_CLOSURE 0x09U
+
+typedef struct RtClosure {
+    RtHeapHeader header;
+    spl_u64 func_ptr;
+    spl_u64 capture_count;
+    spl_i64 captures[];
+} RtClosure;
+
+/* Reject a handle that is not a closure rather than reading a foreign field. */
+static RtClosure *rt_as_closure(spl_i64 value) {
+    return (RtClosure *)rt_as_heap(value, RT_HEAP_CLOSURE);
+}
+
+spl_i64 rt_closure_new(spl_i64 func_ptr, spl_u32 capture_count) {
+    spl_i64 count = (spl_i64)capture_count;
+    RtClosure *closure;
+    spl_i64 i;
+    if (!func_ptr || count < 0) {
+        return rt_nil();
+    }
+    /* Bounded like every other allocation against this bump heap. */
+    if (count > 4096) {
+        return rt_nil();
+    }
+    closure = (RtClosure *)rt_alloc(
+        (spl_i64)(sizeof(RtClosure) + (spl_u64)count * sizeof(spl_i64)));
+    if (!closure) {
+        return rt_nil();
+    }
+    closure->header.object_type = (spl_u8)RT_HEAP_CLOSURE;
+    closure->header.gc_flags = 0;
+    closure->header.reserved = 0;
+    closure->header.size =
+        (spl_u32)(sizeof(RtClosure) + (spl_u64)count * sizeof(spl_i64));
+    closure->func_ptr = (spl_u64)func_ptr;
+    closure->capture_count = (spl_u64)count;
+    for (i = 0; i < count; i = i + 1) {
+        closure->captures[i] = rt_nil();
+    }
+    return rt_heap(closure);
+}
+
+/* Returns I8 per the codegen spec, not a tagged value. */
+signed char rt_closure_set_capture(spl_i64 closure_value, spl_u32 index, spl_i64 value) {
+    RtClosure *closure = rt_as_closure(closure_value);
+    if (!closure || (spl_u64)index >= closure->capture_count) {
+        return 0;
+    }
+    closure->captures[index] = value;
+    return 1;
+}
+
+spl_i64 rt_closure_get_capture(spl_i64 closure_value, spl_u32 index) {
+    RtClosure *closure = rt_as_closure(closure_value);
+    if (!closure || (spl_u64)index >= closure->capture_count) {
+        return rt_nil();
+    }
+    return closure->captures[index];
+}
+
+spl_i64 rt_closure_func_ptr(spl_i64 closure_value) {
+    RtClosure *closure = rt_as_closure(closure_value);
+    if (!closure) {
+        return 0;
+    }
+    return (spl_i64)closure->func_ptr;
 }
