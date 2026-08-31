@@ -231,6 +231,51 @@ fn runtime_family_rank(module_path: text) -> i64:
 fn is_known_runtime_family_path(module_path: text) -> bool:
     runtime_family_rank(module_path) >= 0
 
+fn family_relative_subpath(module_path: text, family: text) -> text:
+    """Return `module_path` with its leading runtime-family segment removed.
+
+    `nogc_async_mut.test_runner.test_db_core` with family `nogc_async_mut`
+    yields `test_runner.test_db_core`. A path that IS the bare family name
+    yields empty text.
+    """
+    val path = normalized_family_path(module_path)
+    if path == family:
+        return ""
+    if path.starts_with("{family}."):
+        return path[family.len() + 1:path.len()]
+    path
+
+fn is_family_mirror_facade(source_module: text, source_family: text, imported_module: text, imported_family: text) -> bool:
+    """Return true when two modules are the same module mirrored across families.
+
+    `src/lib/` carries whole mirrored directories of one-line
+    `export use <other_family>.<same.subpath>.*` re-export shims. They exist
+    because a bare `use std.X` import resolves through a fixed family search
+    order (`nogc_async_mut` first — see the resolver's documented "default app
+    mode" ordering), so a module reached by its preferred `std.X` spelling
+    lands on the shim, which forwards to the real implementation in the family
+    that actually owns it. All 49 files under
+    `src/lib/nogc_async_mut/test_runner/` are exactly this.
+
+    Such a shim declares no functions and executes no code: its runtime family
+    is an artifact of which directory the alias target had to live in, not a
+    claim that restricted-context code runs hosted-layer logic. Ranking it
+    against the module it forwards to reports the alias mechanism itself as a
+    layering violation, which is noise that buries the real crossings.
+
+    The signature is structural and narrow: the two paths must be identical
+    once each has its own leading family segment stripped, and the families
+    must differ. This exempts ONLY the layer-rank rule — a mirror that also
+    crosses the GC or no-alloc boundary is still a hard violation, because
+    those rules constrain what the forwarded-to code may do, not where it sits.
+    """
+    if source_family == imported_family:
+        return false
+    val source_subpath = family_relative_subpath(source_module, source_family)
+    if source_subpath == "":
+        return false
+    source_subpath == family_relative_subpath(imported_module, imported_family)
+
 fn import_violation_reason(source_module: text, imported_module: text) -> text:
     """Return a hard violation reason for a runtime-family import, or empty text.
 
@@ -259,6 +304,10 @@ fn import_violation_reason(source_module: text, imported_module: text) -> text:
         return "gc_imports_nogc_family"
 
     if imported.rank > source.rank:
+        # A family-mirror re-export shim is the alias mechanism, not a
+        # layering violation. See `is_family_mirror_facade`.
+        if is_family_mirror_facade(source_module, source.family, resolve_gc_alias(imported_module), imported.family):
+            return ""
         return "higher_layer_runtime_family"
 
     ""
@@ -299,6 +348,8 @@ fn check_gc_boundary_imports(source_module: text, imported_modules: [text]) -> [
         expect(check_gc_boundary_imports("nogc_sync_mut.fs", ["gc_async_mut.task"]).len()).to_equal(1)
         expect(check_gc_boundary_imports("nogc_sync_mut.fs", ["common.text"]).len()).to_equal(0)
         expect(check_gc_boundary_imports("gc_async_mut.task", ["nogc_sync_mut.fs"]).len()).to_equal(0)
+        expect(check_gc_boundary_imports("nogc_async_mut.test_runner.test_db_core", ["std.nogc_sync_mut.test_runner.test_db_core"]).len()).to_equal(0)
+        expect(check_gc_boundary_imports("nogc_async_mut.mcp.server", ["std.nogc_sync_mut.io.file_ops"]).len()).to_equal(1)
     """
     var warnings: [FamilyImportWarning] = []
 
